@@ -649,13 +649,13 @@ How should users authenticate?
 
 This gives the user context to make informed decisions without extra prompting. When `--analyze` is absent, present questions directly as before.
 - Accept `--batch`, `--batch=N`, or `--batch N`
-- Default to 4 questions per batch when no number is provided
-- Clamp explicit sizes to 2-5 so a batch stays answerable
+- Accept `--batch`, `--batch=N`, or `--batch N`
 - If `--batch` is absent, keep the existing one-question-at-a-time flow
 
-**Philosophy:** stay adaptive, but let the user choose the pacing.
-- Default mode: 4 single-question turns, then check whether to continue
-- `--batch` mode: 1 grouped turn with 2-5 numbered questions, then check whether to continue
+**Philosophy:** stay adaptive, but let the user choose the depth via `workflow.questions_per_area` config.
+- When set to `"all"` (default): be thorough — ask ALL questions useful for scoping and planning each area before moving on automatically
+- When set to a number (e.g., 4, 5, 8): ask that many questions, then prompt "More questions / Next area"
+- `--batch` mode: group questions into logical batches, keep asking until the area is done (per the config)
 
 Each answer (or answer set, in batch mode) should reveal the next question or next batch.
 
@@ -677,6 +677,11 @@ If you have already written and committed CONTEXT.md, the discuss step is comple
 
 **Interactive mode (no `--auto`):**
 
+Read the questions-per-area config:
+```bash
+QUESTIONS_PER_AREA=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.questions_per_area 2>/dev/null || echo "all")
+```
+
 **For each area:**
 
 1. **Announce the area:**
@@ -686,7 +691,7 @@ If you have already written and committed CONTEXT.md, the discuss step is comple
 
 2. **Ask questions using the selected pacing:**
 
-   **Default (no `--batch`): Ask 4 questions using AskUserQuestion**
+   **Default (no `--batch`): Ask questions using AskUserQuestion, one at a time**
    - header: "[Area]" (max 12 chars — abbreviate if needed)
    - question: Specific decision for this area
    - options: 2-3 concrete choices (AskUserQuestion adds "Other" automatically), with the recommended choice highlighted and brief explanation why
@@ -700,23 +705,28 @@ If you have already written and committed CONTEXT.md, the discuss step is comple
    - Include "You decide" as an option when reasonable — captures Claude discretion
    - **Context7 for library choices:** When a gray area involves library selection (e.g., "magic links" → query next-auth docs) or API approach decisions, use `mcp__context7__*` tools to fetch current documentation and inform the options. Don't use Context7 for every question — only when library-specific knowledge improves the options.
 
-   **Batch mode (`--batch`): Ask 2-5 numbered questions in one plain-text turn**
+   **Batch mode (`--batch`): Ask numbered questions in one plain-text turn**
    - Group closely related questions for the current area into a single message
    - Keep each question concrete and answerable in one reply
    - When options are helpful, include short inline choices per question rather than a separate AskUserQuestion for every item
    - After the user replies, reflect back the captured decisions, note any unanswered items, and ask only the minimum follow-up needed before moving on
    - Preserve adaptiveness between batches: use the full set of answers to decide the next batch or whether the area is sufficiently clear
 
-3. **After the current set of questions, check:**
+3. **Area completion — behavior depends on `QUESTIONS_PER_AREA`:**
+
+   **If `QUESTIONS_PER_AREA` is `"all"` (default):**
+   Ask every question Claude has about this area that would be useful for scoping and planning — do NOT limit to a fixed number. After exhausting all questions, move to the next area automatically. Do NOT ask the user whether to continue or move on — just announce you're moving to the next area.
+
+   **If `QUESTIONS_PER_AREA` is a number (e.g., 4, 5, 8):**
+   After asking that many questions, prompt:
    - header: "[Area]" (max 12 chars)
    - question: "More questions about [area], or move to next? (Remaining: [list other unvisited areas])"
    - options: "More questions" / "Next area"
-
-   When building the question text, list the remaining unvisited areas so the user knows what's ahead. For example: "More questions about Layout, or move to next? (Remaining: Loading behavior, Content ordering)"
-
-   If "More questions" → ask another 4 single questions, or another 2-5 question batch when `--batch` is active, then check again
-   If "Next area" → proceed to next selected area
+   If "More questions" → ask another N questions (or another batch when `--batch` is active), then check again.
+   If "Next area" → proceed to next selected area.
    If "Other" (free text) → interpret intent: continuation phrases ("chat more", "keep going", "yes", "more") map to "More questions"; advancement phrases ("done", "move on", "next", "skip") map to "Next area". If ambiguous, ask: "Continue with more questions about [area], or move to the next area?"
+
+   **In both modes:** if the user proactively says they want to move on (e.g., "next", "skip", "done with this area"), respect that and proceed to the next selected area immediately.
 
 4. **After all initially-selected areas complete:**
    - Summarize what was captured from the discussion so far
@@ -920,6 +930,37 @@ If no reviewed-but-deferred todos: omit this subsection entirely.]
 ```
 
 Write file.
+</step>
+
+<step name="propagate_key_decisions">
+**Key Decisions Propagation:**
+
+After writing CONTEXT.md, check if any decisions captured during discussion are architectural (affect project structure, technology choices, patterns, or conventions that future phases should follow).
+
+For each architectural decision:
+1. Check if CLAUDE.md exists in the project root
+2. If it exists, check if it has a `## Key Decisions` section
+3. If the section exists, append new decisions (avoid duplicates)
+4. If the section doesn't exist, create it at the end of the file
+5. If CLAUDE.md doesn't exist, skip this step
+
+Format for each decision:
+```markdown
+- **{Decision name}:** {Brief description of what was decided and why} (Phase {phase_num})
+```
+
+Only propagate decisions that are:
+- Technology/library choices (e.g., "Use jose over jsonwebtoken for Edge compatibility")
+- Architectural patterns (e.g., "Card-based layout with infinite scroll")
+- Convention choices (e.g., "All API routes return { data, error, meta } shape")
+- Constraint decisions (e.g., "No new dependencies for auth — use built-in crypto")
+
+Do NOT propagate:
+- UI-specific details that only affect one phase
+- Implementation choices the executor can decide
+- Temporary decisions (e.g., "skip dark mode for now")
+
+Commit the CLAUDE.md update together with the CONTEXT.md commit if changes were made.
 </step>
 
 <step name="confirm_creation">

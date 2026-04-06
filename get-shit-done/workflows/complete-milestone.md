@@ -454,7 +454,81 @@ ls .planning/RETROSPECTIVE.md 2>/dev/null || true
 
 **If doesn't exist:** Create from template at `~/.claude/get-shit-done/templates/retrospective.md`.
 
-**Gather retrospective data:**
+**Automated Retrospective Data:**
+
+Before asking the user for retrospective input, gather quantitative data from the milestone's phases:
+
+1. **Verification summary** — scan all VERIFICATION.md files in this milestone's phases:
+   ```bash
+   for dir in .planning/phases/*/; do
+     if ls "$dir"*-VERIFICATION.md 1>/dev/null 2>&1; then
+       echo "=== $(basename $dir) ==="
+       grep -E "^status:|^score:" "$dir"*-VERIFICATION.md | head -2
+     fi
+   done
+   ```
+   - Count: phases that passed first try vs needed re-verification
+   - Count: total gaps found across all phases
+   - Most common gap types (stubs, orphaned, missing, etc.)
+
+2. **Adversarial findings** — if adversarial validation was used:
+   ```bash
+   grep -l "Adversarial Validation" .planning/phases/*/VERIFICATION.md 2>/dev/null
+   ```
+   - Count: total findings confirmed vs dismissed
+   - Severity breakdown: CRITICAL / HIGH / MEDIUM / LOW
+
+3. **Ratchet violations** — scan for ratchet findings:
+   ```bash
+   grep -A 2 "Ratchet" .planning/phases/*/*-VERIFICATION.md 2>/dev/null
+   ```
+   - Count: how many ratchet violations were caught and fixed
+
+4. **Dead code caught** — scan for context pollution findings:
+   ```bash
+   grep -c "Dead Code\|Context Pollution\|ORPHANED" .planning/phases/*/*-VERIFICATION.md 2>/dev/null
+   ```
+
+5. **Definition of Done** — if DoD was enabled, check for patterns:
+   - How often was CLAUDE.md not updated (warn count)?
+   - How often were docs not updated?
+
+6. **Deviation analysis** — scan SUMMARY.md files for deviation patterns:
+   ```bash
+   grep -c "\[Rule" .planning/phases/*/*-SUMMARY.md 2>/dev/null
+   ```
+   - Total deviations across milestone
+   - Most common deviation type (Rule 1 bug fixes, Rule 2 missing features, Rule 3 blocking issues, Rule 4 architectural)
+
+**Present the data:**
+
+```markdown
+## Milestone Retrospective Data
+
+### Verification Health
+- Phases passed first try: {N}/{total}
+- Re-verification rounds needed: {N}
+- Total gaps found: {N} (stubs: {n}, orphaned: {n}, missing: {n})
+
+### Quality Gates
+- Adversarial findings: {confirmed}/{total} confirmed ({critical} critical, {high} high)
+- Ratchet violations caught: {N}
+- Dead code items flagged: {N}
+
+### Execution Patterns
+- Total deviations: {N} (Rule 1: {n}, Rule 2: {n}, Rule 3: {n}, Rule 4: {n})
+- DoD warnings: CLAUDE.md not updated {n}x, docs not updated {n}x
+
+### Trends
+{Auto-generated observations, e.g.:}
+- "Phases 3-5 had zero gaps on first verification — quality improved over the milestone"
+- "Rule 2 deviations (missing features) were most common — plans may need better scope definition"
+- "Adversarial validation caught 3 HIGH issues that standard verification missed"
+```
+
+Then proceed to the manual retrospective questions with this data as context.
+
+**Gather additional retrospective data (manual):**
 
 1. From SUMMARY.md files: Extract key deliverables, one-liners, tech decisions
 2. From VERIFICATION.md files: Extract verification scores, gaps found
@@ -462,7 +536,7 @@ ls .planning/RETROSPECTIVE.md 2>/dev/null || true
 4. From git log: Count commits, calculate timeline
 5. From the milestone work: Reflect on what worked and what didn't
 
-**Write the milestone section:**
+**Write the milestone section (includes both automated and manual data):**
 
 ```markdown
 ## Milestone: v{version} — {name}
@@ -472,6 +546,23 @@ ls .planning/RETROSPECTIVE.md 2>/dev/null || true
 
 ### What Was Built
 {Extract from SUMMARY.md one-liners}
+
+### Verification Health
+- Phases passed first try: {N}/{total}
+- Re-verification rounds needed: {N}
+- Total gaps found: {N} (stubs: {n}, orphaned: {n}, missing: {n})
+
+### Quality Gates
+- Adversarial findings: {confirmed}/{total} confirmed ({critical} critical, {high} high)
+- Ratchet violations caught: {N}
+- Dead code items flagged: {N}
+
+### Execution Patterns
+- Total deviations: {N} (Rule 1: {n}, Rule 2: {n}, Rule 3: {n}, Rule 4: {n})
+- DoD warnings: CLAUDE.md not updated {n}x, docs not updated {n}x
+
+### Trends
+{Auto-generated observations from the data above — include 2-4 specific observations}
 
 ### What Worked
 {Patterns that led to smooth execution}
@@ -483,7 +574,7 @@ ls .planning/RETROSPECTIVE.md 2>/dev/null || true
 {New conventions discovered during this milestone}
 
 ### Key Lessons
-{Specific, actionable takeaways}
+{Specific, actionable takeaways — informed by the automated data and trends}
 
 ### Cost Observations
 - Model mix: {X}% opus, {Y}% sonnet, {Z}% haiku
@@ -493,7 +584,7 @@ ls .planning/RETROSPECTIVE.md 2>/dev/null || true
 
 **Update cross-milestone trends:**
 
-If the "## Cross-Milestone Trends" section exists, update the tables with new data from this milestone.
+If the "## Cross-Milestone Trends" section exists, update the tables with new data from this milestone. Include the automated metrics (verification pass rates, gap counts, deviation totals) in the cross-milestone comparison tables so trends are visible across milestones.
 
 **Commit:**
 ```bash
@@ -769,8 +860,9 @@ Milestone completion is successful when:
 - [ ] Requirements completion checked against REQUIREMENTS.md traceability table
 - [ ] Incomplete requirements surfaced with proceed/audit/abort options
 - [ ] Known gaps recorded in MILESTONES.md if user proceeded with incomplete requirements
-- [ ] RETROSPECTIVE.md updated with milestone section
-- [ ] Cross-milestone trends updated
+- [ ] Automated retrospective data gathered (verification, adversarial, ratchet, dead code, deviations)
+- [ ] RETROSPECTIVE.md updated with milestone section (includes automated data and manual reflections)
+- [ ] Cross-milestone trends updated (includes automated metrics for cross-milestone comparison)
 - [ ] User knows next step (/gsd:new-milestone)
 
 </success_criteria>

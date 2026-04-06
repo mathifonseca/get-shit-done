@@ -604,7 +604,7 @@ Determine domain type from the phase goal:
 
 Check prior_decisions — skip grey areas already decided in prior phases.
 
-Generate **3-4 grey areas** with **~4 questions each**. For each question:
+Generate **3-4 grey areas** with **all questions needed for thorough scoping and planning** each. For each question:
 - **Pre-select a recommended answer** based on: prior decisions (consistency), codebase patterns (reuse), domain conventions (standard approaches), ROADMAP success criteria
 - Generate **1-2 alternatives** per question
 - **Annotate** with prior decision context ("You decided X in Phase N") and code context ("Component Y exists with Z variants") where relevant
@@ -642,12 +642,7 @@ Then prompt the user via **AskUserQuestion**:
 
 Record the user's choice. Re-display the updated table with the change reflected. Re-present the full acceptance prompt so the user can make additional changes or accept.
 
-**On "Discuss deeper":** Switch to interactive mode for this area only — ask questions one at a time using AskUserQuestion with 2-3 concrete options per question plus "You decide". After 4 questions, prompt:
-- **header:** "{Area Name}"
-- **question:** "More questions about {area name}, or move to next?"
-- **options:** "More questions" / "Next area"
-
-If "More questions", ask 4 more. If "Next area", display final summary table of captured answers for this area and move on.
+**On "Discuss deeper":** Switch to interactive mode for this area only — read `workflow.questions_per_area` from config (default: `"all"`). If `"all"`, ask all questions Claude has about this area that are useful for scoping and planning, one at a time using AskUserQuestion with 2-3 concrete options per question plus "You decide", then display final summary table and move to the next area automatically. If a number, ask that many questions then prompt "More questions / Next area" before continuing.
 
 **On "Other" (free text):** Interpret as either a specific change request or general feedback. Incorporate into the area's decisions, re-display updated table, re-present acceptance prompt.
 

@@ -7,7 +7,7 @@ GSD's discuss-phase has two modes for gathering implementation context before pl
 ### `discuss` (default)
 
 The original interview-style flow. Claude identifies gray areas in the phase, presents them
-for selection, then asks ~4 questions per area. Good for:
+for selection, then asks all relevant questions per area until fully explored. Good for:
 
 - Early phases where the codebase is new
 - Phases where the user has strong opinions they want to express proactively

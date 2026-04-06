@@ -319,6 +319,69 @@ Execute each selected wave in sequence. Within a wave: parallel if `PARALLELIZAT
 
    When worktrees are disabled, execute plans **one at a time within each wave** (sequential) regardless of the `PARALLELIZATION` setting — multiple agents writing to the same working tree concurrently would cause conflicts.
 
+<step name="edge_case_hunter">
+**Edge Case Hunter** (runs in parallel with execution when `workflow.adversarial_validation` is enabled)
+
+```bash
+ADVERSARIAL=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.adversarial_validation 2>/dev/null || echo "true")
+```
+
+Skip this step if `ADVERSARIAL` is `"false"`.
+
+When enabled, spawn a parallel review agent alongside each execution wave. The hunter reviews code AS IT'S BEING WRITTEN, not after the fact.
+
+**For each wave of execution**, after spawning executor agents, also spawn an Edge Case Hunter agent (general-purpose) with this prompt:
+
+```
+You are an Edge Case Hunter reviewing code changes in real-time for Phase {phase_num}, Wave {wave_num}.
+
+Your job is to find edge cases, boundary conditions, and failure modes that the executor might miss. You are NOT blocking execution — you run in parallel and report findings.
+
+Review these plan files to understand what's being built:
+{list of PLAN.md files for this wave}
+
+Then continuously monitor the files being modified (from the plan's files_modified list):
+{files_modified list}
+
+For each file, analyze:
+
+1. **Input boundaries:** What happens with null, empty, negative, very large, unicode, special characters?
+2. **State transitions:** What happens if operations are interrupted mid-way? Race conditions?
+3. **Error paths:** Are all error cases handled? What happens on network failure, timeout, permission denied?
+4. **Type edge cases:** Optional fields that could be undefined? Array that could be empty? Number that could be NaN?
+5. **Security boundaries:** User input that could be malicious? Auth checks that could be bypassed?
+6. **Integration seams:** What happens if the API returns unexpected shapes? If the database query returns no rows?
+
+Report format — for each finding:
+- File and line number (or function name)
+- The edge case scenario
+- Severity: CRITICAL (will crash/corrupt) / HIGH (wrong behavior) / MEDIUM (poor UX) / LOW (cosmetic)
+- Suggested fix (one line)
+
+Be thorough but pragmatic. Don't flag theoretical issues that can't happen given the constraints. Focus on things that WILL bite users in production.
+```
+
+**Process hunter results:**
+
+After the wave's executor agents complete, check the hunter's findings:
+
+1. **CRITICAL findings:** Add as tasks to a gap-closure plan. These MUST be fixed before proceeding to the next wave.
+2. **HIGH findings:** Present to user via AskUserQuestion — "Edge Case Hunter found {N} issues. Fix now or defer?"
+   - If "Fix now" → add to current wave as fix tasks
+   - If "Defer" → log to `deferred-items.md` in the phase directory
+3. **MEDIUM/LOW findings:** Log to `deferred-items.md` for future phases.
+
+**Integration with verification:**
+Include the hunter's findings summary in the phase's SUMMARY.md so the verifier and adversarial validation agents have context on what was already caught and addressed during execution.
+
+```markdown
+## Edge Case Hunter Findings (Wave {N})
+- Found: {total} ({critical} critical, {high} high, {medium} medium, {low} low)
+- Fixed during execution: {fixed_count}
+- Deferred: {deferred_count}
+```
+</step>
+
 3. **Wait for all agents in wave to complete.**
 
    **Completion signal fallback (Copilot and runtimes where Task() may not return):**
@@ -740,6 +803,58 @@ If `TEXT_MODE` is true, present as a plain-text numbered list. Otherwise use Ask
 **If user selects option 3:** Stop execution. Report partial completion.
 </step>
 
+<step name="playwright_verification">
+**Playwright Verification** (optional — runs when `workflow.playwright_verification` is enabled)
+
+```bash
+PLAYWRIGHT_VERIFY=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.playwright_verification 2>/dev/null || echo "false")
+```
+
+Skip this step if `PLAYWRIGHT_VERIFY` is `"false"`.
+
+When enabled, and the project has a Playwright configuration (`playwright.config.ts` or `playwright.config.js`):
+
+1. **Detect Playwright setup:**
+   ```bash
+   PLAYWRIGHT_CONFIG=$(ls playwright.config.{ts,js} 2>/dev/null | head -1)
+   ```
+   If no config found, skip with note: `[playwright] No playwright.config found, skipping visual verification.`
+
+2. **Run relevant Playwright tests:**
+   ```bash
+   # Run tests tagged for this phase, or all tests if no tagging
+   npx playwright test --reporter=list 2>&1 || true
+   ```
+
+3. **Capture screenshots:**
+   Playwright's default config captures screenshots on failure. Ensure screenshots are saved:
+   ```bash
+   SCREENSHOT_DIR=$(ls -d test-results/ playwright-report/ 2>/dev/null | head -1)
+   ```
+
+4. **Include in verification context:**
+   If screenshots or test results exist, include them as evidence in the verifier's context:
+   - List all captured screenshots with their test names
+   - Report pass/fail counts
+   - Any visual regression failures become verification gaps
+
+5. **Reduce manual UAT:**
+   For each test that passes with screenshots, mark the corresponding UAT item as `auto-verified (playwright)` — the user doesn't need to manually check what Playwright already validated.
+
+**Integration with VERIFICATION.md:**
+Add a section to the verification report:
+```markdown
+## Playwright Verification
+- Tests run: {N}
+- Passed: {P}
+- Failed: {F}
+- Screenshots: {screenshot_dir}
+
+### Auto-Verified Behaviors
+{List of UAT items verified by Playwright tests}
+```
+</step>
+
 <step name="verify_phase_goal">
 Verify phase achieved its GOAL, not just completed tasks.
 
@@ -872,6 +987,65 @@ Also: `/gsd:verify-work {X} ${GSD_WS}` — manual testing first
 Gap closure cycle: `/gsd:plan-phase {X} --gaps ${GSD_WS}` reads VERIFICATION.md → creates gap plans with `gap_closure: true` → user runs `/gsd:execute-phase {X} --gaps-only ${GSD_WS}` → verifier re-runs.
 </step>
 
+<step name="definition_of_done">
+**Definition of Done Checklist** (when `workflow.definition_of_done` is enabled)
+
+```bash
+DOD_ENABLED=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.definition_of_done 2>/dev/null || echo "true")
+```
+
+Skip this step if `DOD_ENABLED` is `"false"`.
+
+When enabled, present the Definition of Done checklist to the user before marking the phase as complete:
+
+```
+## Definition of Done — Phase {phase_num}
+
+Review this checklist before closing the phase:
+```
+
+Use AskUserQuestion for each unchecked item:
+
+1. **Tests written** — New functionality has corresponding test coverage
+   - Auto-check: Look for new/modified test files in the phase's SUMMARY.md
+   - If test files found: auto-PASS
+   - If no test files: WARN "No test files modified in this phase"
+
+2. **CI pre-check** — Changes won't fail CI
+   ```bash
+   CI_COMMANDS=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get project.ci_commands 2>/dev/null || echo "null")
+   ```
+   - If `CI_COMMANDS` configured: suggest running them
+   - If not: remind user to verify CI will pass
+
+3. **CLAUDE.md updated** — Project guide reflects new state
+   ```bash
+   UPDATE_CLAUDE=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.update_claude_md_on_complete 2>/dev/null || echo "true")
+   ```
+   - If enabled: check if CLAUDE.md was modified in this phase's commits
+   - If not modified: WARN "CLAUDE.md not updated — review if new patterns, commands, or conventions were introduced"
+
+4. **Documentation updated** — README, docs site, API collection current
+   - Auto-check: If API route files changed, check if doc files also changed
+   - If docs unchanged but API changed: WARN
+
+5. **Issue tracker** — Relevant issues updated
+   ```bash
+   ISSUE_TRACKER=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get project.issue_tracker 2>/dev/null || echo "null")
+   ```
+   - If configured: remind user to update issue status
+   - If not: skip
+
+Present summary:
+```
+DoD Summary: {PASS_COUNT} auto-verified | {WARN_COUNT} need attention | {SKIP_COUNT} skipped
+
+{list any WARN items}
+```
+
+DoD warnings do NOT block phase completion — they are reminders. The user can acknowledge and proceed.
+</step>
+
 <step name="update_roadmap">
 **Mark phase complete and update all tracking files:**
 
@@ -923,6 +1097,84 @@ node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit "docs(phase-{X}): ev
 ```
 
 **Skip this step if** `.planning/PROJECT.md` does not exist.
+</step>
+
+<step name="propagate_execution_decisions">
+**Key Decisions from Execution:**
+
+During execution, the executor may have made architectural decisions via deviation rules or implementation choices. Check the phase's SUMMARY.md files for:
+- Deviation entries that represent architectural choices
+- Technology decisions made during implementation
+- Pattern choices that should be documented
+
+If any new architectural decisions are found in SUMMARY.md that aren't already in CLAUDE.md's Key Decisions section, append them:
+```markdown
+- **{Decision name}:** {Brief description} (Phase {phase_num}, discovered during execution)
+```
+
+This ensures decisions made during execution (not just planning) are captured for future phases.
+
+**Steps:**
+1. Read all `*-SUMMARY.md` files in the phase directory
+2. Identify entries that qualify as architectural decisions (technology choices, pattern selections, convention establishments, constraint decisions)
+3. Check if CLAUDE.md exists in the project root
+4. If it exists, check for a `## Key Decisions` section
+5. If the section exists, append new decisions not already present (avoid duplicates)
+6. If the section doesn't exist, create it at the end of the file
+7. If CLAUDE.md doesn't exist, skip this step
+8. If changes were made, commit:
+
+```bash
+node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit "docs(phase-{X}): propagate execution decisions to CLAUDE.md" --files CLAUDE.md
+```
+
+**Skip this step if** CLAUDE.md does not exist in the project root.
+</step>
+
+<step name="pr_workflow">
+**PR Creation** (when issue tracker is configured)
+
+```bash
+ISSUE_TRACKER=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get project.issue_tracker 2>/dev/null || echo "null")
+ISSUE_PREFIX=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get project.issue_prefix 2>/dev/null || echo "null")
+PR_TITLE_TEMPLATE=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get project.pr_title_template 2>/dev/null || echo "null")
+PR_BODY_REQUIRES_ISSUE=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get project.pr_body_requires_issue 2>/dev/null || echo "false")
+BRANCHING=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get git.branching_strategy 2>/dev/null || echo "none")
+PREFLIGHT_ON_VERIFY=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.preflight_on_verify 2>/dev/null || echo "false")
+```
+
+Skip this step if `BRANCHING` is `"none"` (no feature branch to create PR from).
+
+**Step 1: Run preflight** (if configured)
+If `PREFLIGHT_ON_VERIFY` is `"true"`:
+- Suggest running `/preflight` before creating the PR
+- If preflight fails, present the failures and offer to fix before PR creation
+
+**Step 2: Offer PR creation**
+Use AskUserQuestion:
+- header: "Ship it"
+- question: "Phase {phase_num} is complete. Create a PR?"
+- options: "Create PR" / "I'll handle it" / "Run preflight first"
+
+If "Create PR":
+
+**Build PR title:**
+- If `PR_TITLE_TEMPLATE` is set, use it (replace `{PREFIX}` with `ISSUE_PREFIX`, `{ID}` with issue number from branch name, `{description}` with phase name)
+- Otherwise: use phase name as title
+
+**Build PR body:**
+- Include phase summary from SUMMARY.md files
+- If `PR_BODY_REQUIRES_ISSUE` is true, include `Closes {PREFIX}-{ID}` (extract ID from branch name)
+- Include verification status
+- Include test results summary
+
+**Create PR:**
+```bash
+gh pr create --title "$PR_TITLE" --body "$PR_BODY"
+```
+
+If "Run preflight first":
+- Suggest: "Run `/preflight` and I'll create the PR after"
 </step>
 
 <step name="offer_next">

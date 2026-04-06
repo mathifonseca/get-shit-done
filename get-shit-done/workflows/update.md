@@ -8,6 +8,37 @@ Read all files referenced by the invoking prompt's execution_context before star
 
 <process>
 
+<step name="fork_guard">
+**Fork Detection — check if this is a fork before attempting npm update.**
+
+Check if FORK.md exists at the GSD installation source:
+```bash
+FORK_MD=$(find "$HOME/.claude/get-shit-done" -maxdepth 2 -name "FORK.md" 2>/dev/null | head -1)
+# Also check the repo this was installed from
+GSD_REPO_FORK=$(ls "$HOME/code/get-shit-done/FORK.md" 2>/dev/null)
+```
+
+If FORK.md exists OR the installed VERSION file doesn't match any published npm version:
+
+```
+⚠️  This is a fork of GSD, not the upstream version.
+
+Running /gsd:update would overwrite your fork's changes with the official npm release.
+
+To update your fork:
+  1. cd ~/code/get-shit-done
+  2. git fetch upstream
+  3. git log upstream/main --oneline -20   # review changes
+  4. git cherry-pick <commit>              # apply specific fixes
+  5. node bin/install.js --claude --global # reinstall your fork
+
+To see what's different from upstream:
+  git diff fork-divergence-point...HEAD --stat
+```
+
+**STOP here. Do NOT proceed to the npm update steps.**
+</step>
+
 <step name="get_installed_version">
 Detect whether GSD is installed locally or globally by checking both locations and validating install integrity.
 

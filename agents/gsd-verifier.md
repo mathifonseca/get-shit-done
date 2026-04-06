@@ -381,6 +381,70 @@ grep -n -B 2 -A 2 "console\.log" "$file" 2>/dev/null | grep -E "^\s*(const|funct
 
 Categorize: 🛑 Blocker (prevents goal) | ⚠️ Warning (incomplete) | ℹ️ Info (notable)
 
+### Dead Code / Context Pollution Scan
+
+Dead code degrades agent comprehension — commented-out blocks, TODO/FIXME, orphaned files, parallel implementations, and dead feature flags all pollute context.
+
+Read the dead code scan config:
+
+```bash
+DEAD_CODE_SCAN=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.dead_code_scan 2>/dev/null || echo "true")
+```
+
+When enabled (`DEAD_CODE_SCAN` is `true`), scan modified files for context pollution patterns:
+
+1. **Commented-out code blocks** (not comments explaining WHY, but actual code that was commented out):
+   ```bash
+   grep -n -E "^\s*(//|#)\s*(function|class|const|let|var|import|export|if|for|while|return|async)" "$file"
+   ```
+
+2. **Dead feature flags** (flags that are always true/false with no conditional):
+   ```bash
+   grep -n -E "(FEATURE_|FLAG_|ENABLE_|DISABLE_).*=\s*(true|false|1|0)" "$file" | grep -v -E "(test|spec|mock)"
+   ```
+
+3. **Orphaned exports** (exports not imported anywhere in the project):
+   For each new file created in this phase, check if its exports are actually imported:
+   ```bash
+   # Get exported names
+   grep -E "^export (const|function|class|type|interface|enum)" "$file" | sed 's/export \(const\|function\|class\|type\|interface\|enum\) //' | cut -d'(' -f1 | cut -d' ' -f1 | cut -d':' -f1
+   # For each export, check if imported anywhere
+   grep -r "import.*$EXPORT_NAME" "${search_path:-src/}" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" | grep -v "$file"
+   ```
+
+4. **Parallel implementations** (multiple files implementing the same concern):
+   Flag if both old and new implementations exist for the same feature (e.g., `auth.ts` and `auth-new.ts`, or `auth-v2.ts`).
+
+**Dead code categorization:**
+- 🛑 Blocker: Orphaned exports from files created in this phase (created but never wired)
+- ⚠️ Warning: Commented-out code blocks, dead feature flags
+- ℹ️ Info: Potential parallel implementations (may be intentional during migration)
+
+### Migration Safety Check
+
+If the project has a database layer (detect: `prisma/`, `migrations/`, `alembic/`, `src/models/`, `src/db/`, `*.entity.ts`):
+
+1. **Schema change without migration:**
+   ```bash
+   # Check if model/schema files were modified
+   SCHEMA_FILES=$(git diff --name-only HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD | grep -E "(schema\.prisma|models/|entities/|\.entity\.(ts|py)|alembic/)")
+   
+   # Check if migration files were added
+   MIGRATION_FILES=$(git diff --name-only HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD | grep -E "(migrations/|prisma/migrations/|alembic/versions/)")
+   ```
+   - If schema files changed but no migration added: ⚠️ Warning — "Schema files modified but no migration found. Verify this is a non-schema change or add a migration."
+
+2. **Migration without downgrade path:**
+   For new migration files, check if they include a downgrade/revert function:
+   ```bash
+   grep -L "def downgrade\|exports.down\|async down\|revert" $MIGRATION_FILES
+   ```
+   - If no downgrade found: ℹ️ Info — "Migration has no downgrade path. Consider if rollback is needed for production."
+
+**Migration categorization:**
+- ⚠️ Warning: Schema change without migration
+- ℹ️ Info: Migration without downgrade path
+
 ## Step 7b: Behavioral Spot-Checks
 
 Anti-pattern scanning (Step 7) checks for code smells. Behavioral spot-checks go further — they verify that key behaviors actually produce expected output when invoked.
@@ -427,6 +491,52 @@ npm test -- --grep "$PHASE_TEST_PATTERN" 2>&1 | grep -q "passing"
 - Do not modify state (no writes, no mutations, no side effects)
 - If the project has no runnable entry points yet, skip with: "Step 7b: SKIPPED (no runnable entry points)"
 
+## Step 7c: Ratchet Effect Enforcement
+
+Quality gates must never regress. Check that this phase's changes did not loosen any existing quality standards.
+
+**Coverage ratchet:**
+If the project has coverage tracking configured:
+```bash
+# Check if coverage config exists in package.json, jest.config, vitest.config, pyproject.toml, etc.
+grep -r "coverageThreshold\|min_coverage\|fail_under\|coverage.*minimum" package.json jest.config.* vitest.config.* pyproject.toml .coveragerc 2>/dev/null
+```
+- If coverage thresholds exist, verify they were not lowered in this phase's changes
+- Check git diff for threshold changes: `git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- *coverage* *jest* *vitest* *pyproject*`
+- If thresholds decreased: 🛑 Blocker — "Coverage threshold reduced from X% to Y%. Ratchet violation."
+
+**Type strictness ratchet:**
+Check that TypeScript/Python strict mode settings were not loosened:
+```bash
+# TypeScript
+git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- tsconfig*.json | grep -E "^\+.*\"strict\":\s*false|^\+.*\"skipLibCheck\":\s*true|^\+.*\"any\""
+
+# Python
+git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- mypy.ini pyproject.toml setup.cfg | grep -E "^\+.*strict\s*=\s*false|^\+.*ignore_errors\s*=\s*true"
+```
+- If strict settings loosened: 🛑 Blocker — "Type strictness reduced. Ratchet violation."
+
+**Lint rule ratchet:**
+Check that lint configurations were not relaxed:
+```bash
+# Look for new rule disables added in this phase
+git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- .eslintrc* eslint.config.* .ruff.toml ruff.toml pyproject.toml biome.json | grep -E "^\+.*(\"off\"|\"0\"|rule.*disable|ignore|noqa|eslint-disable|@ts-ignore|@ts-expect-error|type:\s*ignore)"
+```
+- New rule disables without justifying comments: ⚠️ Warning — "Lint rule disabled: {rule}. Ratchet principle: rules should not be relaxed."
+- Bulk disables (e.g., entire file `eslint-disable`): 🛑 Blocker
+
+**CI gate ratchet:**
+Check that CI workflow files were not simplified:
+```bash
+git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- .github/workflows/ | grep -E "^\-.*run:|^\-.*- name:" | head -20
+```
+- If CI steps were removed without corresponding additions: ⚠️ Warning — "CI steps removed. Verify this was intentional."
+
+**Ratchet categorization:**
+- 🛑 Blocker: Coverage threshold decrease, type strictness loosened, bulk lint disables
+- ⚠️ Warning: Individual lint rule disables, CI step removal
+- ℹ️ Info: New suppressions with justifying comments (acceptable if commented)
+
 ## Step 8: Identify Human Verification Needs
 
 **Always needs human:** Visual appearance, user flow completion, real-time behavior, external service integration, performance feel, error message clarity.
@@ -447,7 +557,7 @@ npm test -- --grep "$PHASE_TEST_PATTERN" 2>&1 | grep -q "passing"
 
 Classify status using this decision tree IN ORDER (most restrictive first):
 
-1. IF any truth FAILED, artifact MISSING/STUB, key link NOT_WIRED, or blocker anti-pattern found:
+1. IF any truth FAILED, artifact MISSING/STUB, key link NOT_WIRED, blocker anti-pattern found, dead code blocker found (orphaned exports from this phase), or ratchet blocker found (Step 7c):
    → **status: gaps_found**
 
 2. IF Step 8 produced ANY human verification items (section is non-empty):
@@ -573,6 +683,24 @@ human_verification: # Only if status: human_needed
 
 | File | Line | Pattern | Severity | Impact |
 | ---- | ---- | ------- | -------- | ------ |
+
+### Dead Code / Context Pollution
+
+| File | Line | Type | Severity | Detail |
+| ---- | ---- | ---- | -------- | ------ |
+
+_Types: commented-out code, dead feature flag, orphaned export, parallel implementation_
+
+### Migration Safety
+
+| Check | Status | Detail |
+| ----- | ------ | ------ |
+
+_Checks: schema change without migration, migration without downgrade path_
+
+### Ratchet Effect
+| Check | Status | Detail |
+|-------|--------|--------|
 
 ### Human Verification Required
 
@@ -703,7 +831,9 @@ return <div>No messages</div>  // Always shows "no messages"
 - [ ] All key links verified
 - [ ] Requirements coverage assessed (if applicable)
 - [ ] Anti-patterns scanned and categorized
+- [ ] Migration safety checked (if database layer detected)
 - [ ] Behavioral spot-checks run on runnable code (or skipped with reason)
+- [ ] Ratchet effect enforcement checked (coverage, type strictness, lint rules, CI gates)
 - [ ] Human verification items identified
 - [ ] Overall status determined
 - [ ] Gaps structured in YAML frontmatter (if gaps_found)

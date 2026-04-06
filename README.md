@@ -45,6 +45,92 @@ npx get-shit-done-cc@latest
 
 </div>
 
+> **This is an opinionated fork** of [GET SHIT DONE](https://github.com/gsd-build/get-shit-done) by [TACHES](https://github.com/gsd-build). It integrates a comprehensive [SDLC methodology](FORK.md) that adds quality gates, testing discipline, issue tracking, and verification rigor as first-class defaults. See [FORK.md](FORK.md) for the full list of changes.
+
+## Why this fork?
+
+The upstream GSD is designed to work for everyone. This fork is designed for engineers who believe:
+
+- **Tests are contracts, not suggestions.** The agent fixes the implementation, never the tests. If a test is wrong, the agent stops and asks.
+- **Quality only moves forward.** Coverage thresholds, strict types, lint rules, and CI steps can never regress (the ratchet effect).
+- **Dead code is context pollution.** Commented-out blocks, orphaned exports, and parallel implementations are flagged automatically.
+- **Adversarial review at every stage.** A Devil's Advocate challenges plans before execution. An Edge Case Hunter reviews code in parallel during execution. Finder, critic, and referee agents cross-validate after execution. Three layers, three stages.
+- **Every change traces back to an issue.** Branch naming, PR titles, and PR bodies link to your issue tracker automatically.
+- **Spec the outcome, not the process.** Plans describe what success looks like. The executor figures out the how.
+- **Playwright tests are first-class.** Screenshots are verification evidence. Manual UAT is the fallback, not the default.
+- **Projects should be scaffolded right from day one.** Makefile, pre-commit hooks, preflight checks, and domain-scoped rules — all generated based on your stack.
+
+All of these are **on by default**. Every feature is configurable — turn anything off with `/gsd:settings` — but the defaults encode an engineering philosophy where quality is automated, not aspirational.
+
+## Getting Started with this Fork
+
+### What's different from upstream
+
+When you run `/gsd:new-project`, you'll be asked additional questions:
+
+1. **Issue tracker** — Where do you track issues? (GitHub Issues, Linear, Jira)
+2. **Branch naming** — What's your convention? (e.g., `prefix-NN/description`)
+3. **PR conventions** — Title pattern, body requirements, CI commands
+4. **Scaffolding** — Makefile, pre-commit hooks, preflight checks, domain rules
+
+These generate a fully configured project with quality gates from day one.
+
+### What happens during development
+
+The enriched pipeline looks like this:
+
+```
+/gsd:new-project
+  → Issue tracker, branch naming, PR conventions configured
+  → Makefile, preflight.yaml, .claude/rules/ scaffolded
+
+/gsd:discuss-phase
+  → All questions asked per area (no arbitrary cutoff)
+  → Architectural decisions auto-propagated to CLAUDE.md
+
+/gsd:plan-phase
+  → Outcome-focused task specs (what, not how)
+  → One-sentence objectives required
+  → Plan-checker validates goals
+  → Devil's Advocate challenges approach, surfaces risks
+
+/gsd:execute-phase
+  → Tests are read-only (completion contracts)
+  → Executor prefers Makefile targets
+  → Edge Case Hunter reviews code in parallel (boundary conditions, error paths, security)
+  → Playwright tests run automatically
+
+  After execution:
+  → Adversarial validation (finder + critic + referee)
+  → Dead code / context pollution scan
+  → Ratchet effect enforcement (quality can't regress)
+  → Migration safety checks
+  → Definition of Done checklist
+  → Preflight checks + auto PR creation
+```
+
+### Auditing your project
+
+Run `/gsd:sdlc-audit` to check how well your project follows the methodology:
+
+```
+$ /gsd:sdlc-audit
+
+## SDLC Audit Report
+
+### Tier 1: Foundation
+  PASS  Git repo with main branch
+  PASS  CLAUDE.md exists (278 lines)
+  MISS  Makefile — no Makefile found
+  PASS  Pre-commit hooks (husky)
+  ...
+
+Score: 14/20 | Current tier: Tier 2
+Next: Create a Makefile with standard targets
+```
+
+Use `--fix` to auto-scaffold missing items.
+
 ---
 
 ## Why I Built This
@@ -671,8 +757,24 @@ These spawn additional agents during planning/execution. They improve quality bu
 | `workflow.research_before_questions` | `false` | Run research before discussion questions instead of after |
 | `workflow.discuss_mode` | `'discuss'` | Discussion mode: `discuss` (interview), `assumptions` (codebase-first) |
 | `workflow.skip_discuss` | `false` | Skip discuss-phase in autonomous mode |
+| `workflow.questions_per_area` | `'all'` | Questions per area: `'all'` (exhaust then move on) or a number (e.g., `4`, `5`) |
 | `workflow.text_mode` | `false` | Text-only mode for remote sessions (no TUI menus) |
 | `workflow.use_worktrees` | `true` | Toggle worktree isolation for execution |
+| `workflow.test_contracts` | `true` | Tests are read-only — executor fixes implementation, not tests |
+| `workflow.adversarial_validation` | `true` | Three-layer adversarial review: Devil's Advocate (planning), Edge Case Hunter (execution), finder+critic+referee (verification) |
+| `workflow.dead_code_scan` | `true` | Scan for dead code / context pollution during verification |
+| `workflow.playwright_verification` | `true` | Use Playwright tests + screenshots as verification evidence |
+| `workflow.definition_of_done` | `true` | DoD checklist at phase completion (tests, CI, docs, CLAUDE.md) |
+| `workflow.preflight_on_verify` | `true` | Run preflight before PR creation |
+| `workflow.spec_outcome_enforcement` | `true` | Planner specs outcomes, not step-by-step instructions |
+| `workflow.update_claude_md_on_complete` | `true` | Warn if CLAUDE.md not updated after phase |
+| `workflow.scaffold_preflight` | `true` | Scaffold preflight.yaml during new-project |
+| `workflow.scaffold_rules` | `true` | Scaffold .claude/rules/ during new-project |
+| `project.issue_tracker` | `null` | Issue tracker: `github`, `linear`, `jira`, or `null` |
+| `project.issue_prefix` | `null` | Issue prefix (e.g., `AXN`) for branch/PR naming |
+| `project.pr_title_template` | `null` | PR title pattern (e.g., `{PREFIX}-{ID}: {description}`) |
+| `project.pr_body_requires_issue` | `true` | Require `Closes PREFIX-NN` in PR body |
+| `project.ci_commands` | `null` | CI commands to suggest before PR (e.g., `["make check"]`) |
 
 Use `/gsd:settings` to toggle these, or override per-invocation:
 - `/gsd:plan-phase --skip-research`

@@ -37,6 +37,34 @@ Before executing, discover project context:
 This ensures project-specific patterns, conventions, and best practices are applied during execution.
 
 **CLAUDE.md enforcement:** If `./CLAUDE.md` exists, treat its directives as hard constraints during execution. Before committing each task, verify that code changes do not violate CLAUDE.md rules (forbidden patterns, required conventions, mandated tools). If a task action would contradict a CLAUDE.md directive, apply the CLAUDE.md rule — it takes precedence over plan instructions. Document any CLAUDE.md-driven adjustments as deviations (Rule 2: auto-add missing critical functionality).
+
+<makefile_preference>
+**Makefile as Project Interface:**
+
+Before running any build, test, lint, or quality commands, check if a Makefile exists in the project root:
+```bash
+ls Makefile makefile GNUmakefile 2>/dev/null | head -1
+```
+
+When a Makefile exists, prefer Makefile targets over raw tool commands:
+
+| Instead of | Use |
+|-----------|-----|
+| `npm test` / `pytest` / `go test` | `make test` |
+| `npm run lint` / `ruff check` | `make lint` |
+| `npm run typecheck` / `mypy` | `make typecheck` |
+| `npm run lint && npm run typecheck && npm test` | `make check` |
+| `npm run build` / `cargo build` | `make build` |
+| `npm run dev` / `python manage.py runserver` | `make dev` |
+
+**Rules:**
+- Only use Makefile targets that actually exist (check with `grep -E "^target:" Makefile`)
+- If a specific Makefile target doesn't exist, fall back to the raw command
+- If the plan's `<verify>` section specifies a raw command, use it as-is (plan instructions take precedence)
+- If `.planning/config.json` has `project.ci_commands` configured, use those for quality gate checks
+
+This ensures consistent command usage across all agents and matches the project's intended interface.
+</makefile_preference>
 </project_context>
 
 <execution_flow>
@@ -107,6 +135,28 @@ For each task:
 
 </execution_flow>
 
+<test_contracts>
+Read the test contracts config:
+```bash
+TEST_CONTRACTS=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.test_contracts 2>/dev/null || echo "true")
+```
+
+**When `TEST_CONTRACTS` is `"true"` (default):**
+
+Test files are READ-ONLY during execution. The executor MUST NOT modify, delete, or rewrite existing test files unless the plan explicitly includes a task that creates or updates tests (e.g., TDD RED phase, or a task whose `<files>` list includes test files).
+
+**Rules:**
+- If a test fails, fix the implementation to make the test pass — never modify the test to match a broken implementation
+- If a test is genuinely wrong (tests an incorrect behavior), do NOT fix it. Instead: log it as a deviation with `[Rule 4 - Test Contract Violation] Test at {file}:{line} appears incorrect: {reason}` and STOP for user decision
+- Pre-existing test files not listed in the current task's `<files>` are always read-only, regardless of config
+- New test files created as part of TDD tasks are writable during that task only
+
+**When `TEST_CONTRACTS` is `"false"`:**
+Tests can be modified freely as part of normal execution. The executor still prefers fixing implementation over tests, but is not blocked from updating tests when the test itself is wrong.
+
+**Rationale:** Tests define "done" — if the agent can change the definition, the contract is worthless.
+</test_contracts>
+
 <deviation_rules>
 **While executing, you WILL discover work not in the plan.** Apply these rules automatically. Track all deviations for Summary.
 
@@ -121,6 +171,8 @@ No user permission needed for Rules 1-3.
 **Trigger:** Code doesn't work as intended (broken behavior, errors, incorrect output)
 
 **Examples:** Wrong queries, logic errors, type errors, null pointer exceptions, broken validation, security vulnerabilities, race conditions, memory leaks
+
+- **Test contract constraint:** When `TEST_CONTRACTS` is true, auto-fixes MUST NOT modify test files. Fix the source code, not the tests. If the bug is actually in the test, escalate to Rule 4 (STOP).
 
 ---
 
@@ -308,6 +360,8 @@ When executing task with `tdd="true"`:
 **4. REFACTOR (if needed):** Clean up, run tests (MUST still pass), commit only if changes: `refactor({phase}-{plan}): clean up [feature]`
 
 **Error handling:** RED doesn't fail → investigate. GREEN doesn't pass → debug/iterate. REFACTOR breaks → undo.
+
+- **Test contract note:** In RED phase, the executor creates new test files (writable). Once committed, these tests become the contract. In GREEN phase, only implementation files are modified — the tests from RED are now read-only.
 </tdd_execution>
 
 <task_commit_protocol>

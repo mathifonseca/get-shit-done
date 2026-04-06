@@ -109,8 +109,32 @@ All workflow toggles follow the **absent = enabled** pattern. If a key is missin
 | `workflow.research_before_questions` | boolean | `false` | Run research before discussion questions instead of after |
 | `workflow.discuss_mode` | string | `'discuss'` | Controls how `/gsd:discuss-phase` gathers context. `'discuss'` (default) asks questions one-by-one. `'assumptions'` reads the codebase first, generates structured assumptions with confidence levels, and only asks you to correct what's wrong. Added in v1.28 |
 | `workflow.skip_discuss` | boolean | `false` | When `true`, `/gsd:autonomous` bypasses the discuss-phase entirely, writing minimal CONTEXT.md from the ROADMAP phase goal. Useful for projects where developer preferences are fully captured in PROJECT.md/REQUIREMENTS.md. Added in v1.28 |
+| `workflow.questions_per_area` | string or number | `'all'` | Controls how many questions are asked per gray area before prompting to continue. `'all'` (default) asks every relevant question then moves on automatically. A number (e.g., `4`, `5`, `8`) asks that many then prompts "More questions / Next area" |
 | `workflow.text_mode` | boolean | `false` | Replaces AskUserQuestion TUI menus with plain-text numbered lists. Required for Claude Code remote sessions (`/rc` mode) where TUI menus don't render. Can also be set per-session with `--text` flag on discuss-phase. Added in v1.28 |
 | `workflow.use_worktrees` | boolean | `true` | When `false`, disables git worktree isolation for parallel execution. Users who prefer sequential execution or whose environment does not support worktrees can disable this. Added in v1.31 |
+| `workflow.test_contracts` | boolean | `true` | Treat test files as read-only during execution. The executor fixes the implementation, not the tests. If a test is genuinely wrong, escalates to user. Inspired by "tests as completion contracts" |
+| `workflow.adversarial_validation` | boolean | `true` | Three-layer adversarial review across the entire pipeline: (1) Devil's Advocate challenges plans before execution, (2) Edge Case Hunter reviews code in parallel during execution, (3) finder+critic+referee agents cross-validate after execution. Disable with `false` for lightweight phases |
+| `workflow.dead_code_scan` | boolean | `true` | Scan for dead code during verification: commented-out code blocks, dead feature flags, orphaned exports, parallel implementations. Treats dead code as context pollution |
+| `workflow.playwright_verification` | boolean | `true` | Use Playwright tests and screenshots as automated verification evidence. Reduces manual UAT by auto-verifying behaviors that Playwright covers. Gracefully skips if no `playwright.config` found |
+| `workflow.definition_of_done` | boolean | `true` | Present a Definition of Done checklist at phase completion: tests written, CI passing, CLAUDE.md updated, docs updated, issue tracker synced. Warnings don't block but remind |
+| `workflow.preflight_on_verify` | boolean | `true` | Run preflight checks as part of the PR creation workflow. Suggests `/preflight` before creating a PR |
+| `workflow.spec_outcome_enforcement` | boolean | `true` | Planner favors outcome-based task specs ("what success looks like") over step-by-step instructions ("how to implement"). Constraints and non-obvious decisions still included |
+| `workflow.scaffold_makefile` | boolean | `true` | Scaffold a standard Makefile with setup/dev/check/lint/test targets during `/gsd:new-project` |
+| `workflow.scaffold_precommit` | boolean | `true` | Scaffold pre-commit hook configuration during `/gsd:new-project` |
+| `workflow.scaffold_preflight` | boolean | `true` | Scaffold `.claude/preflight.yaml` with stack-detected checks during `/gsd:new-project` |
+| `workflow.scaffold_rules` | boolean | `true` | Scaffold `.claude/rules/` with domain-scoped rule files during `/gsd:new-project` |
+| `workflow.update_claude_md_on_complete` | boolean | `true` | Warn if CLAUDE.md was not updated during phase completion. Ensures project guide stays current |
+
+### Project Integration
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `project.issue_tracker` | string | `null` | Issue tracker: `'github'`, `'linear'`, `'jira'`, or `null` (none) |
+| `project.issue_prefix` | string | `null` | Issue prefix for branch/PR naming (e.g., `'AXN'`, `'PROJ'`) |
+| `project.pr_title_template` | string | `null` | PR title template (e.g., `'{PREFIX}-{ID}: {description}'`) |
+| `project.pr_body_requires_issue` | boolean | `true` | Require `Closes PREFIX-NN` in PR body |
+| `project.ci_commands` | array | `null` | CI commands to suggest before PR (e.g., `['make check', 'make check-frontend']`) |
+| `git.branch_pattern` | string | `null` | Regex for branch naming validation (e.g., `'^[a-z]+-\\d+/'`) |
 
 ### Recommended Presets
 

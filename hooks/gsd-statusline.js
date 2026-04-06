@@ -102,9 +102,13 @@ process.stdin.on('end', () => {
       try {
         const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
         if (cache.update_available) {
-          gsdUpdate = '\x1b[33m⬆ /gsd:update\x1b[0m │ ';
+          if (cache.is_fork) {
+            gsdUpdate = '\x1b[36m⬆ upstream ' + (cache.latest || '') + ' available — cherry-pick from upstream\x1b[0m │ ';
+          } else {
+            gsdUpdate = '\x1b[33m⬆ /gsd:update\x1b[0m │ ';
+          }
         }
-        if (cache.stale_hooks && cache.stale_hooks.length > 0) {
+        if (cache.stale_hooks && cache.stale_hooks.length > 0 && !cache.is_fork) {
           gsdUpdate += '\x1b[31m⚠ stale hooks — run /gsd:update\x1b[0m │ ';
         }
       } catch (e) {}

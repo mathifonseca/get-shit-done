@@ -223,6 +223,27 @@ Every task has four required fields:
 - Good: "Valid credentials return 200 + JWT cookie, invalid credentials return 401"
 - Bad: "Authentication is complete"
 
+**Outcome-focused guidance** (when `workflow.spec_outcome_enforcement` is enabled):
+
+Read the config:
+```bash
+SPEC_OUTCOME=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.spec_outcome_enforcement 2>/dev/null || echo "true")
+```
+
+When enabled, task `<action>` fields should describe WHAT the code should accomplish, not step-by-step HOW to write it. The executor agent is better at figuring out implementation details than a prescriptive plan.
+
+**Good (outcome-focused):**
+- "Create a POST endpoint that authenticates users via email/password, returns a JWT in an httpOnly cookie, and rejects invalid credentials with 401."
+- "Build a message list component that fetches from /api/messages, displays sender + timestamp + content, and auto-scrolls to newest."
+
+**Bad (overly prescriptive):**
+- "First create a file at src/api/auth.ts. Import bcrypt from 'bcrypt'. Create an async function called authenticate. Call bcrypt.compare()..."
+- "Step 1: Create useState for messages. Step 2: Add useEffect with fetch. Step 3: Map over messages array..."
+
+The `<done>` and `<verify>` fields are where specificity belongs — they define the contract. The `<action>` field should give the executor enough context to make good decisions without dictating every line.
+
+Constraints and non-obvious decisions still belong in `<action>` (e.g., "Use jose library, not jsonwebtoken — CommonJS issues with Edge runtime"). The goal is to eliminate mechanical step-by-step instructions, not useful context.
+
 ## Task Types
 
 | Type | Use For | Autonomy |
@@ -467,6 +488,8 @@ Purpose: [Why this matters]
 Output: [Artifacts created]
 </objective>
 
+**One-sentence objective rule:** Every plan MUST have an objective that can be stated in one sentence. If you can't state the goal in one sentence, you don't understand the problem well enough. The objective should be outcome-shaped ("Working chat interface with real-time message display") not task-shaped ("Build chat components and wire up API").
+
 <execution_context>
 @~/.claude/get-shit-done/workflows/execute-plan.md
 @~/.claude/get-shit-done/templates/summary.md
@@ -514,6 +537,12 @@ Output: [Artifacts created]
 
 <success_criteria>
 [Measurable completion]
+
+**Success criteria must be observable outcomes, not process steps.**
+- Good: "Users can log in with email/password and receive a session cookie"
+- Bad: "bcrypt is installed and auth middleware is created"
+- Good: "Coverage ≥ 80% on auth module"
+- Bad: "Tests are written for auth module"
 </success_criteria>
 
 <output>

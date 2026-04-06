@@ -11,7 +11,27 @@
     "security_asvs_level": 1,
     "security_block_on": "high",
     "discuss_mode": "discuss",
-    "research_before_questions": false
+    "questions_per_area": "all",
+    "research_before_questions": false,
+    "test_contracts": true,
+    "adversarial_validation": true,
+    "dead_code_scan": true,
+    "playwright_verification": true,
+    "definition_of_done": true,
+    "preflight_on_verify": true,
+    "spec_outcome_enforcement": true,
+    "scaffold_makefile": true,
+    "scaffold_precommit": true,
+    "scaffold_preflight": true,
+    "scaffold_rules": true,
+    "update_claude_md_on_complete": true
+  },
+  "project": {
+    "issue_tracker": null,
+    "issue_prefix": null,
+    "pr_title_template": null,
+    "pr_body_requires_issue": true,
+    "ci_commands": null
   },
   "planning": {
     "commit_docs": true,

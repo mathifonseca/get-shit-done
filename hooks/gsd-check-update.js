@@ -94,6 +94,14 @@ const child = spawn(process.execPath, ['-e', `
     } catch (e) {}
   }
 
+  // Fork detection: if FORK.md exists, this is a fork.
+  // Still check npm for upstream updates (user wants to know), but flag as fork.
+  let isFork = false;
+  try {
+    const homeCode = path.join(require('os').homedir(), 'code', 'get-shit-done', 'FORK.md');
+    isFork = fs.existsSync(homeCode);
+  } catch (e) {}
+
   let latest = null;
   try {
     latest = execSync('npm view get-shit-done-cc version', { encoding: 'utf8', timeout: 10000, windowsHide: true }).trim();
@@ -101,6 +109,7 @@ const child = spawn(process.execPath, ['-e', `
 
   const result = {
     update_available: latest && installed !== latest,
+    is_fork: isFork,
     installed,
     latest: latest || 'unknown',
     checked: Math.floor(Date.now() / 1000),
