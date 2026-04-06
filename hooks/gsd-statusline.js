@@ -35,7 +35,10 @@ process.stdin.on('end', () => {
 
       // Write context metrics to bridge file for the context-monitor PostToolUse hook.
       // The monitor reads this file to inject agent-facing warnings when context is low.
-      if (session) {
+      // Reject session IDs with path separators or traversal sequences to prevent
+      // a malicious session_id from writing files outside the temp directory.
+      const sessionSafe = session && !/[/\\]|\.\./.test(session);
+      if (sessionSafe) {
         try {
           const bridgePath = path.join(os.tmpdir(), `claude-ctx-${session}.json`);
           const bridgeData = JSON.stringify({
@@ -105,11 +108,11 @@ process.stdin.on('end', () => {
           if (cache.is_fork) {
             gsdUpdate = '\x1b[36m⬆ upstream ' + (cache.latest || '') + ' available — cherry-pick from upstream\x1b[0m │ ';
           } else {
-            gsdUpdate = '\x1b[33m⬆ /gsd:update\x1b[0m │ ';
+            gsdUpdate = '\x1b[33m⬆ /gsd-update\x1b[0m │ ';
           }
         }
         if (cache.stale_hooks && cache.stale_hooks.length > 0 && !cache.is_fork) {
-          gsdUpdate += '\x1b[31m⚠ stale hooks — run /gsd:update\x1b[0m │ ';
+          gsdUpdate += '\x1b[31m⚠ stale hooks — run /gsd-update\x1b[0m │ ';
         }
       } catch (e) {}
     }

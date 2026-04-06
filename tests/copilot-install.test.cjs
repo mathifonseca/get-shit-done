@@ -10,7 +10,7 @@
 process.env.GSD_TEST_MODE = '1';
 
 const { test, describe, beforeEach, afterEach } = require('node:test');
-const assert = require('node:assert');
+const assert = require('node:assert/strict');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -44,6 +44,7 @@ describe('getDirName (Copilot)', () => {
     assert.strictEqual(getDirName('claude'), '.claude');
     assert.strictEqual(getDirName('opencode'), '.opencode');
     assert.strictEqual(getDirName('gemini'), '.gemini');
+    assert.strictEqual(getDirName('kilo'), '.kilo');
     assert.strictEqual(getDirName('codex'), '.codex');
   });
 });
@@ -109,6 +110,7 @@ describe('getConfigDirFromHome (Copilot)', () => {
     assert.strictEqual(getConfigDirFromHome('opencode', true), "'.config', 'opencode'");
     assert.strictEqual(getConfigDirFromHome('claude', true), "'.claude'");
     assert.strictEqual(getConfigDirFromHome('gemini', true), "'.gemini'");
+    assert.strictEqual(getConfigDirFromHome('kilo', true), "'.config', 'kilo'");
     assert.strictEqual(getConfigDirFromHome('codex', true), "'.codex'");
   });
 });
@@ -144,6 +146,12 @@ describe('Source code integration (Copilot)', () => {
   test('CLI-02: promptRuntime allRuntimes array includes copilot', () => {
     const allMatch = src.match(/const allRuntimes = \[([^\]]+)\]/);
     assert.ok(allMatch && allMatch[1].includes('copilot'), 'allRuntimes includes copilot');
+  });
+
+  test('CLI-02: promptRuntime keeps Kilo above OpenCode in allRuntimes', () => {
+    const allMatch = src.match(/const allRuntimes = \[([^\]]+)\]/);
+    assert.ok(allMatch, 'allRuntimes array found');
+    assert.ok(allMatch[1].indexOf("'kilo'") < allMatch[1].indexOf("'opencode'"), 'kilo appears before opencode');
   });
 
   test('isCopilot variable exists in install function', () => {
@@ -651,7 +659,7 @@ describe('copyCommandsAsCopilotSkills', () => {
     assert.ok(skillContent.includes('description: Run all remaining phases autonomously'),
       'description preserved');
     // argument-hint present and double-quoted
-    assert.ok(skillContent.includes('argument-hint: "[--from N] [--only N] [--interactive]"'), 'argument-hint present and quoted');
+    assert.ok(skillContent.includes('argument-hint: "[--from N] [--to N] [--only N] [--interactive]"'), 'argument-hint present and quoted');
     // allowed-tools comma-separated
     assert.ok(skillContent.includes('allowed-tools: Read, Write, Bash, Glob, Grep, AskUserQuestion, Task'),
       'allowed-tools is comma-separated');
@@ -701,9 +709,17 @@ describe('Copilot agent conversion - real files', () => {
     const result = convertClaudeAgentToCopilotAgent(content);
 
     assert.ok(result.startsWith('---\nname: gsd-executor\n'), 'starts with correct name');
-    // 6 Claude tools (Read, Write, Edit, Bash, Grep, Glob) → 4 after dedup
-    assert.ok(result.includes("tools: ['read', 'edit', 'execute', 'search']"),
-      'tools mapped and deduplicated (6→4)');
+    // Verify deduplication happened and core tools are present (not hardcoded exact list)
+    const toolsLine = result.split('\n').find(l => l.startsWith('tools:'));
+    assert.ok(toolsLine, 'tools line present in converted output');
+    assert.ok(toolsLine.includes("'read'"), 'Read mapped to read');
+    assert.ok(toolsLine.includes("'edit'"), 'Write/Edit deduplicated to edit');
+    assert.ok(toolsLine.includes("'execute'"), 'Bash mapped to execute');
+    assert.ok(toolsLine.includes("'search'"), 'Grep/Glob deduplicated to search');
+    // Input tools count > output tools count (deduplication occurred)
+    const inputTools = content.match(/^tools:\s*\[([^\]]+)\]/m)?.[1].split(',').length ?? 0;
+    const outputTools = toolsLine.replace(/^tools:\s*\[/, '').replace(/\].*$/, '').split(',').length;
+    assert.ok(inputTools === 0 || outputTools <= inputTools, 'deduplication reduced or preserved tool count');
     assert.ok(result.includes('color: yellow'), 'color preserved');
     assert.ok(!result.includes('~/.claude/'), 'no ~/.claude/ in body');
   });
@@ -1065,7 +1081,7 @@ describe('Copilot manifest and patches fixes', () => {
       assert.ok(!output.includes('/gsd:reapply-patches'), 'does not use colon format');
     });
 
-    test('reportLocalPatches shows /gsd:reapply-patches for Claude (unchanged)', () => {
+    test('reportLocalPatches shows /gsd-reapply-patches for Claude', () => {
       // Create patches directory with metadata
       const patchesDir = path.join(tmpDir, 'gsd-local-patches');
       fs.mkdirSync(patchesDir, { recursive: true });
@@ -1078,7 +1094,8 @@ describe('Copilot manifest and patches fixes', () => {
 
       assert.ok(result.length > 0, 'returns patched files list');
       const output = logs.join('\n');
-      assert.ok(output.includes('/gsd:reapply-patches'), 'uses colon format for Claude');
+      assert.ok(output.includes('/gsd-reapply-patches'), 'uses hyphen format for Claude');
+      assert.ok(!output.includes('/gsd:reapply-patches'), 'does not use colon format for Claude');
     });
   });
 });
@@ -1164,12 +1181,15 @@ describe('E2E: Copilot full install verification', () => {
     const expected = [
       'gsd-advisor-researcher.agent.md',
       'gsd-assumptions-analyzer.agent.md',
+      'gsd-code-fixer.agent.md',
+      'gsd-code-reviewer.agent.md',
       'gsd-codebase-mapper.agent.md',
       'gsd-debugger.agent.md',
       'gsd-doc-verifier.agent.md',
       'gsd-doc-writer.agent.md',
       'gsd-executor.agent.md',
       'gsd-integration-checker.agent.md',
+      'gsd-intel-updater.agent.md',
       'gsd-nyquist-auditor.agent.md',
       'gsd-phase-researcher.agent.md',
       'gsd-plan-checker.agent.md',

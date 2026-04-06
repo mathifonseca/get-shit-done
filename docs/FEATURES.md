@@ -86,6 +86,27 @@
   - [Worktree Toggle](#66-worktree-toggle)
   - [Project Code Prefixing](#67-project-code-prefixing)
   - [Claude Code Skills Migration](#68-claude-code-skills-migration)
+- [v1.32 Features](#v132-features)
+  - [STATE.md Consistency Gates](#69-statemd-consistency-gates)
+  - [Autonomous `--to N` Flag](#70-autonomous---to-n-flag)
+  - [Research Gate](#71-research-gate)
+  - [Verifier Milestone Scope Filtering](#72-verifier-milestone-scope-filtering)
+  - [Read-Before-Edit Guard Hook](#73-read-before-edit-guard-hook)
+  - [Context Reduction](#74-context-reduction)
+  - [Discuss-Phase `--power` Flag](#75-discuss-phase---power-flag)
+  - [Debug `--diagnose` Flag](#76-debug---diagnose-flag)
+  - [Phase Dependency Analysis](#77-phase-dependency-analysis)
+  - [Anti-Pattern Severity Levels](#78-anti-pattern-severity-levels)
+  - [Methodology Artifact Type](#79-methodology-artifact-type)
+  - [Planner Reachability Check](#80-planner-reachability-check)
+  - [Playwright-MCP UI Verification](#81-playwright-mcp-ui-verification)
+  - [Pause-Work Expansion](#82-pause-work-expansion)
+  - [Response Language Config](#83-response-language-config)
+  - [Manual Update Procedure](#84-manual-update-procedure)
+  - [New Runtime Support (Trae, Cline, Augment Code)](#85-new-runtime-support-trae-cline-augment-code)
+  - [Autonomous `--interactive` Flag](#86-autonomous---interactive-flag)
+  - [Commit-Docs Guard Hook](#87-commit-docs-guard-hook)
+  - [Community Hooks Opt-In](#88-community-hooks-opt-in)
 
 ---
 
@@ -93,7 +114,7 @@
 
 ### 1. Project Initialization
 
-**Command:** `/gsd:new-project [--auto @file.md]`
+**Command:** `/gsd-new-project [--auto @file.md]`
 
 **Purpose:** Transform a user's idea into a fully structured project with research, scoped requirements, and a phased roadmap.
 
@@ -132,13 +153,13 @@
 - Research agents have web search capability for current ecosystem information
 - Granularity setting controls phase count: `coarse` (3-5), `standard` (5-8), `fine` (8-12)
 - `--auto` mode extracts all information from the provided document without interactive questioning
-- Existing codebase context (from `/gsd:map-codebase`) is loaded if present
+- Existing codebase context (from `/gsd-map-codebase`) is loaded if present
 
 ---
 
 ### 2. Phase Discussion
 
-**Command:** `/gsd:discuss-phase [N] [--auto] [--batch]`
+**Command:** `/gsd-discuss-phase [N] [--auto] [--batch]`
 
 **Purpose:** Capture user's implementation preferences and decisions before research and planning begin. Eliminates the gray areas that cause AI to guess.
 
@@ -165,7 +186,7 @@
 
 ### 3. UI Design Contract
 
-**Command:** `/gsd:ui-phase [N]`
+**Command:** `/gsd-ui-phase [N]`
 
 **Purpose:** Lock design decisions before planning so that all components in a phase share consistent visual standards.
 
@@ -197,7 +218,7 @@
 
 ### 4. Phase Planning
 
-**Command:** `/gsd:plan-phase [N] [--auto] [--skip-research] [--skip-verify]`
+**Command:** `/gsd-plan-phase [N] [--auto] [--skip-research] [--skip-verify]`
 
 **Purpose:** Research the implementation domain and produce verified, atomic execution plans.
 
@@ -208,7 +229,7 @@
 - REQ-PLAN-04: System MUST include `read_first` and `acceptance_criteria` sections in every plan
 - REQ-PLAN-05: System MUST run plan checker verification loop (up to 3 iterations) unless `--skip-verify` is set
 - REQ-PLAN-06: System MUST support `--skip-research` flag to bypass research phase
-- REQ-PLAN-07: System MUST prompt user to run `/gsd:ui-phase` if frontend phase detected and no UI-SPEC.md exists (UI safety gate)
+- REQ-PLAN-07: System MUST prompt user to run `/gsd-ui-phase` if frontend phase detected and no UI-SPEC.md exists (UI safety gate)
 - REQ-PLAN-08: System MUST include Nyquist validation mapping when `workflow.nyquist_validation` is enabled
 - REQ-PLAN-09: System MUST verify all phase requirements are covered by at least one plan before planning completes (requirements coverage gate)
 
@@ -247,7 +268,7 @@
 
 ### 5. Phase Execution
 
-**Command:** `/gsd:execute-phase <N>`
+**Command:** `/gsd-execute-phase <N>`
 
 **Purpose:** Execute all plans in a phase using wave-based parallelization with fresh context windows per executor.
 
@@ -291,7 +312,7 @@
 
 ### 6. Work Verification
 
-**Command:** `/gsd:verify-work [N]`
+**Command:** `/gsd-verify-work [N]`
 
 **Purpose:** User acceptance testing — walk the user through testing each deliverable and auto-diagnose failures.
 
@@ -309,7 +330,7 @@
 
 ### 6.5. Ship
 
-**Command:** `/gsd:ship [N] [--draft]`
+**Command:** `/gsd-ship [N] [--draft]`
 
 **Purpose:** Bridge local completion → merged PR. After verification passes, push branch, create PR with auto-generated body from planning artifacts, optionally trigger review, and track in STATE.md.
 
@@ -328,7 +349,7 @@
 
 ### 7. UI Review
 
-**Command:** `/gsd:ui-review [N]`
+**Command:** `/gsd-ui-review [N]`
 
 **Purpose:** Retroactive 6-pillar visual audit of implemented frontend code. Works standalone on any project.
 
@@ -353,7 +374,7 @@
 
 ### 8. Milestone Management
 
-**Commands:** `/gsd:audit-milestone`, `/gsd:complete-milestone`, `/gsd:new-milestone [name]`
+**Commands:** `/gsd-audit-milestone`, `/gsd-complete-milestone`, `/gsd-new-milestone [name]`
 
 **Purpose:** Verify milestone completion, archive, tag release, and start the next development cycle.
 
@@ -368,7 +389,7 @@
 - REQ-MILE-08: New milestone MUST follow same flow as new-project (questions → research → requirements → roadmap)
 - REQ-MILE-09: New milestone MUST NOT reset existing workflow configuration
 
-**Gap Closure:** `/gsd:plan-milestone-gaps` creates phases to close gaps identified by audit.
+**Gap Closure:** `/gsd-plan-milestone-gaps` creates phases to close gaps identified by audit.
 
 ---
 
@@ -376,7 +397,7 @@
 
 ### 9. Phase Management
 
-**Commands:** `/gsd:add-phase`, `/gsd:insert-phase [N]`, `/gsd:remove-phase [N]`
+**Commands:** `/gsd-add-phase`, `/gsd-insert-phase [N]`, `/gsd-remove-phase [N]`
 
 **Purpose:** Dynamic roadmap modification during development.
 
@@ -391,7 +412,7 @@
 
 ### 10. Quick Mode
 
-**Command:** `/gsd:quick [--full] [--discuss] [--research]`
+**Command:** `/gsd-quick [--full] [--discuss] [--research]`
 
 **Purpose:** Ad-hoc task execution with GSD guarantees but a faster path.
 
@@ -410,7 +431,7 @@
 
 ### 11. Autonomous Mode
 
-**Command:** `/gsd:autonomous [--from N]`
+**Command:** `/gsd-autonomous [--from N]`
 
 **Purpose:** Run all remaining phases autonomously — discuss → plan → execute per phase.
 
@@ -425,7 +446,7 @@
 
 ### 12. Freeform Routing
 
-**Command:** `/gsd:do`
+**Command:** `/gsd-do`
 
 **Purpose:** Analyze freeform text and route to the appropriate GSD command.
 
@@ -439,7 +460,7 @@
 
 ### 13. Note Capture
 
-**Command:** `/gsd:note`
+**Command:** `/gsd-note`
 
 **Purpose:** Zero-friction idea capture without interrupting workflow. Append timestamped notes, list all notes, or promote notes to structured todos.
 
@@ -454,7 +475,7 @@
 
 ### 14. Auto-Advance (Next)
 
-**Command:** `/gsd:next`
+**Command:** `/gsd-next`
 
 **Purpose:** Automatically detect current project state and advance to the next logical workflow step, eliminating the need to remember which phase/step you're on.
 
@@ -462,18 +483,18 @@
 - REQ-NEXT-01: System MUST read STATE.md, ROADMAP.md, and phase directories to determine current position
 - REQ-NEXT-02: System MUST detect whether discuss, plan, execute, or verify is needed
 - REQ-NEXT-03: System MUST invoke the correct command automatically
-- REQ-NEXT-04: System MUST suggest `/gsd:new-project` if no project exists
-- REQ-NEXT-05: System MUST suggest `/gsd:complete-milestone` when all phases are complete
+- REQ-NEXT-04: System MUST suggest `/gsd-new-project` if no project exists
+- REQ-NEXT-05: System MUST suggest `/gsd-complete-milestone` when all phases are complete
 
 **State Detection Logic:**
 | State | Action |
 |-------|--------|
-| No `.planning/` directory | Suggest `/gsd:new-project` |
-| Phase has no CONTEXT.md | Run `/gsd:discuss-phase` |
-| Phase has no PLAN.md files | Run `/gsd:plan-phase` |
-| Phase has plans but no SUMMARY.md | Run `/gsd:execute-phase` |
-| Phase executed but no VERIFICATION.md | Run `/gsd:verify-work` |
-| All phases complete | Suggest `/gsd:complete-milestone` |
+| No `.planning/` directory | Suggest `/gsd-new-project` |
+| Phase has no CONTEXT.md | Run `/gsd-discuss-phase` |
+| Phase has no PLAN.md files | Run `/gsd-plan-phase` |
+| Phase has plans but no SUMMARY.md | Run `/gsd-execute-phase` |
+| Phase executed but no VERIFICATION.md | Run `/gsd-verify-work` |
+| All phases complete | Suggest `/gsd-complete-milestone` |
 
 ---
 
@@ -488,12 +509,12 @@
 - REQ-NYQ-02: System MUST map each requirement to a specific test command
 - REQ-NYQ-03: System MUST identify Wave 0 tasks (test scaffolding needed before implementation)
 - REQ-NYQ-04: Plan checker MUST enforce Nyquist compliance as 8th verification dimension
-- REQ-NYQ-05: System MUST support retroactive validation via `/gsd:validate-phase`
+- REQ-NYQ-05: System MUST support retroactive validation via `/gsd-validate-phase`
 - REQ-NYQ-06: System MUST be disableable via `workflow.nyquist_validation: false`
 
 **Produces:** `{phase}-VALIDATION.md` — Test coverage contract
 
-**Retroactive Validation (`/gsd:validate-phase [N]`):**
+**Retroactive Validation (`/gsd-validate-phase [N]`):**
 - Scans implementation and maps requirements to tests
 - Identifies gaps where requirements lack automated verification
 - Spawns auditor to generate tests (max 3 attempts)
@@ -521,7 +542,7 @@
 **Requirements:**
 - REQ-POSTVER-01: System MUST check against phase goals, not just task completion
 - REQ-POSTVER-02: System MUST produce VERIFICATION.md with pass/fail analysis
-- REQ-POSTVER-03: System MUST log issues for `/gsd:verify-work` to address
+- REQ-POSTVER-03: System MUST log issues for `/gsd-verify-work` to address
 - REQ-POSTVER-04: System MUST be disableable via `workflow.verifier: false`
 
 ---
@@ -542,7 +563,7 @@
 
 ### 19. Health Validation
 
-**Command:** `/gsd:health [--repair]`
+**Command:** `/gsd-health [--repair]`
 
 **Purpose:** Validate `.planning/` directory integrity and auto-repair issues.
 
@@ -565,7 +586,7 @@
 - REQ-REGR-03: Regressions MUST be surfaced before post-execution verification
 - REQ-REGR-04: System MUST identify which prior phase's tests were broken
 
-**When:** Runs automatically during `/gsd:execute-phase` before the verifier step.
+**When:** Runs automatically during `/gsd-execute-phase` before the verifier step.
 
 ---
 
@@ -579,7 +600,7 @@
 - REQ-COVGATE-03: Uncovered requirements MUST block planning completion
 - REQ-COVGATE-04: System MUST report which specific requirements lack plan coverage
 
-**When:** Runs automatically at the end of `/gsd:plan-phase` after the plan checker loop.
+**When:** Runs automatically at the end of `/gsd-plan-phase` after the plan checker loop.
 
 ---
 
@@ -607,7 +628,7 @@
 
 ### 23. Session Management
 
-**Commands:** `/gsd:pause-work`, `/gsd:resume-work`, `/gsd:progress`
+**Commands:** `/gsd-pause-work`, `/gsd-resume-work`, `/gsd-progress`
 
 **Purpose:** Maintain project continuity across context resets and sessions.
 
@@ -624,7 +645,7 @@
 
 ### 24. Session Reporting
 
-**Command:** `/gsd:session-report`
+**Command:** `/gsd-session-report`
 
 **Purpose:** Generate a structured post-session summary document capturing work performed, outcomes achieved, and estimated resource usage.
 
@@ -663,7 +684,7 @@
 
 ### 26. Model Profiles
 
-**Command:** `/gsd:set-profile <quality|balanced|budget|inherit>`
+**Command:** `/gsd-set-profile <quality|balanced|budget|inherit>`
 
 **Purpose:** Control which AI model each agent uses, balancing quality vs cost.
 
@@ -699,7 +720,7 @@
 
 ### 27. Codebase Mapping
 
-**Command:** `/gsd:map-codebase [area]`
+**Command:** `/gsd-map-codebase [area]`
 
 **Purpose:** Analyze an existing codebase before starting a new project, so GSD understands what exists.
 
@@ -707,7 +728,7 @@
 - REQ-MAP-01: System MUST spawn parallel mapper agents for each analysis area
 - REQ-MAP-02: System MUST produce structured documents in `.planning/codebase/`
 - REQ-MAP-03: System MUST detect: tech stack, architecture patterns, coding conventions, concerns
-- REQ-MAP-04: Subsequent `/gsd:new-project` MUST load codebase mapping and focus questions on what's being added
+- REQ-MAP-04: Subsequent `/gsd-new-project` MUST load codebase mapping and focus questions on what's being added
 - REQ-MAP-05: Optional `[area]` argument MUST scope mapping to a specific area
 
 **Produces:**
@@ -727,7 +748,7 @@
 
 ### 28. Debug System
 
-**Command:** `/gsd:debug [description]`
+**Command:** `/gsd-debug [description]`
 
 **Purpose:** Systematic debugging with persistent state across context resets.
 
@@ -745,7 +766,7 @@
 
 ### 29. Todo Management
 
-**Commands:** `/gsd:add-todo [desc]`, `/gsd:check-todos`
+**Commands:** `/gsd-add-todo [desc]`, `/gsd-check-todos`
 
 **Purpose:** Capture ideas and tasks during sessions for later work.
 
@@ -759,7 +780,7 @@
 
 ### 30. Statistics Dashboard
 
-**Command:** `/gsd:stats`
+**Command:** `/gsd-stats`
 
 **Purpose:** Display project metrics — phases, plans, requirements, git history, and timeline.
 
@@ -773,7 +794,7 @@
 
 ### 31. Update System
 
-**Command:** `/gsd:update`
+**Command:** `/gsd-update`
 
 **Purpose:** Update GSD to the latest version with changelog preview.
 
@@ -782,13 +803,13 @@
 - REQ-UPDATE-02: System MUST display changelog for new version before updating
 - REQ-UPDATE-03: System MUST be runtime-aware and target the correct directory
 - REQ-UPDATE-04: System MUST back up locally modified files to `gsd-local-patches/`
-- REQ-UPDATE-05: `/gsd:reapply-patches` MUST restore local modifications after update
+- REQ-UPDATE-05: `/gsd-reapply-patches` MUST restore local modifications after update
 
 ---
 
 ### 32. Settings Management
 
-**Command:** `/gsd:settings`
+**Command:** `/gsd-settings`
 
 **Purpose:** Interactive configuration of workflow toggles and model profile.
 
@@ -821,7 +842,7 @@
 
 ### 33. Test Generation
 
-**Command:** `/gsd:add-tests [N]`
+**Command:** `/gsd-add-tests [N]`
 
 **Purpose:** Generate tests for a completed phase based on UAT criteria and implementation.
 
@@ -877,10 +898,10 @@ fix(03-01): correct auth token expiry
 
 ### 36. Multi-Runtime Support
 
-**Purpose:** Run GSD across 6 different AI coding agent runtimes.
+**Purpose:** Run GSD across multiple AI coding agent runtimes.
 
 **Requirements:**
-- REQ-RUNTIME-01: System MUST support Claude Code, OpenCode, Gemini CLI, Codex, Copilot, Antigravity
+- REQ-RUNTIME-01: System MUST support Claude Code, OpenCode, Gemini CLI, Kilo, Codex, Copilot, Antigravity, Trae, Cline, Augment Code
 - REQ-RUNTIME-02: Installer MUST transform content per runtime (tool names, paths, frontmatter)
 - REQ-RUNTIME-03: Installer MUST support interactive and non-interactive (`--claude --global`) modes
 - REQ-RUNTIME-04: Installer MUST support both global and local installation
@@ -889,12 +910,12 @@ fix(03-01): correct auth token expiry
 
 **Runtime Transformations:**
 
-| Aspect | Claude Code | OpenCode | Gemini | Codex | Copilot | Antigravity |
-|--------|------------|----------|--------|-------|---------|-------------|
-| Commands | Slash commands | Slash commands | Slash commands | Skills (TOML) | Slash commands | Skills |
-| Agent format | Claude native | `mode: subagent` | Claude native | Skills | Tool mapping | Skills |
-| Hook events | `PostToolUse` | N/A | `AfterTool` | N/A | N/A | N/A |
-| Config | `settings.json` | `opencode.json(c)` | `settings.json` | TOML | Instructions | Config |
+| Aspect | Claude Code | OpenCode | Gemini | Kilo | Codex | Copilot | Antigravity | Trae | Cline | Augment |
+|--------|------------|----------|--------|-------|-------|---------|-------------|------|-------|---------|
+| Commands | Slash commands | Slash commands | Slash commands | Slash commands | Skills (TOML) | Slash commands | Skills | Skills | Rules | Skills |
+| Agent format | Claude native | `mode: subagent` | Claude native | `mode: subagent` | Skills | Tool mapping | Skills | Skills | Rules | Skills |
+| Hook events | `PostToolUse` | N/A | `AfterTool` | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| Config | `settings.json` | `opencode.json(c)` | `settings.json` | `kilo.json(c)` | TOML | Instructions | Config | Config | Config | Config |
 
 ---
 
@@ -913,14 +934,14 @@ fix(03-01): correct auth token expiry
 
 **Statusline Display:**
 ```
-[⬆ /gsd:update │] model │ [current task │] directory [█████░░░░░ 50%]
+[⬆ /gsd-update │] model │ [current task │] directory [█████░░░░░ 50%]
 ```
 
 Color coding: <50% green, <65% yellow, <80% orange, ≥80% red with skull emoji
 
 ### 38. Developer Profiling
 
-**Command:** `/gsd:profile-user [--questionnaire] [--refresh]`
+**Command:** `/gsd-profile-user [--questionnaire] [--refresh]`
 
 **Purpose:** Analyze Claude Code session history to build behavioral profiles across 8 dimensions, generating artifacts that personalize Claude's responses to the developer's style.
 
@@ -936,7 +957,7 @@ Color coding: <50% green, <65% yellow, <80% orange, ≥80% red with skull emoji
 
 **Generated Artifacts:**
 - `USER-PROFILE.md` — Full behavioral profile with evidence citations
-- `/gsd:dev-preferences` command — Load preferences in any session
+- `/gsd-dev-preferences` command — Load preferences in any session
 - `CLAUDE.md` profile section — Auto-discovered by Claude Code
 
 **Flags:**
@@ -978,14 +999,14 @@ After Level 3 wiring verification passes, spot-check individual exports for actu
 
 ### 40. Verification Debt Tracking
 
-**Command:** `/gsd:audit-uat`
+**Command:** `/gsd-audit-uat`
 
 **Purpose:** Prevent silent loss of UAT/verification items when projects advance past phases with outstanding tests. Surfaces verification debt across all prior phases so items are never forgotten.
 
 **Components:**
 
 **1. Cross-Phase Health Check** (progress.md Step 1.6)
-Every `/gsd:progress` call scans ALL phases in the current milestone for outstanding items (pending, skipped, blocked, human_needed). Displays a non-blocking warning section with actionable links.
+Every `/gsd-progress` call scans ALL phases in the current milestone for outstanding items (pending, skipped, blocked, human_needed). Displays a non-blocking warning section with actionable links.
 
 **2. `status: partial`** (verify-work.md, UAT.md)
 New UAT status that distinguishes between "session ended" and "all tests resolved". Prevents `status: complete` when tests are still pending, blocked, or skipped without reason.
@@ -1000,12 +1021,12 @@ When verification returns `human_needed`, items are persisted as a trackable HUM
 `phase complete` CLI returns verification debt warnings in its JSON output. Transition workflow surfaces outstanding items before confirmation.
 
 **Requirements:**
-- REQ-DEBT-01: System MUST surface outstanding UAT/verification items from ALL prior phases in `/gsd:progress`
+- REQ-DEBT-01: System MUST surface outstanding UAT/verification items from ALL prior phases in `/gsd-progress`
 - REQ-DEBT-02: System MUST distinguish incomplete testing (partial) from completed testing (complete)
 - REQ-DEBT-03: System MUST categorize blocked tests with `blocked_by` tags
 - REQ-DEBT-04: System MUST persist human_needed verification items as trackable UAT files
 - REQ-DEBT-05: System MUST warn (non-blocking) during phase completion and transition when verification debt exists
-- REQ-DEBT-06: `/gsd:audit-uat` MUST scan all phases, categorize items by testability, and produce a human test plan
+- REQ-DEBT-06: `/gsd-audit-uat` MUST scan all phases, categorize items by testability, and produce a human test plan
 
 ---
 
@@ -1013,7 +1034,7 @@ When verification returns `human_needed`, items are persisted as a trackable HUM
 
 ### 41. Fast Mode
 
-**Command:** `/gsd:fast [task description]`
+**Command:** `/gsd-fast [task description]`
 
 **Purpose:** Execute trivial tasks inline without spawning subagents or generating PLAN.md files. For tasks too small to justify planning overhead: typo fixes, config changes, small refactors, forgotten commits, simple additions.
 
@@ -1023,15 +1044,15 @@ When verification returns `human_needed`, items are persisted as a trackable HUM
 - REQ-FAST-03: System MUST track the task in `.planning/quick/` for state consistency
 - REQ-FAST-04: System MUST NOT be used for tasks requiring research, multi-step planning, or verification
 
-**When to use vs `/gsd:quick`:**
-- `/gsd:fast` — One-sentence tasks executable in under 2 minutes (typo, config change, small addition)
-- `/gsd:quick` — Anything needing research, multi-step planning, or verification
+**When to use vs `/gsd-quick`:**
+- `/gsd-fast` — One-sentence tasks executable in under 2 minutes (typo, config change, small addition)
+- `/gsd-quick` — Anything needing research, multi-step planning, or verification
 
 ---
 
 ### 42. Cross-AI Peer Review
 
-**Command:** `/gsd:review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--all]`
+**Command:** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--all]`
 
 **Purpose:** Invoke external AI CLIs (Gemini, Claude, Codex, CodeRabbit) to independently review phase plans. Produces structured REVIEWS.md with per-reviewer feedback.
 
@@ -1040,7 +1061,7 @@ When verification returns `human_needed`, items are persisted as a trackable HUM
 - REQ-REVIEW-02: System MUST build a structured review prompt from phase plans
 - REQ-REVIEW-03: System MUST invoke each selected CLI independently
 - REQ-REVIEW-04: System MUST collect responses and produce `REVIEWS.md`
-- REQ-REVIEW-05: Reviews MUST be consumable by `/gsd:plan-phase --reviews`
+- REQ-REVIEW-05: Reviews MUST be consumable by `/gsd-plan-phase --reviews`
 
 **Produces:** `{phase}-REVIEWS.md` — Per-reviewer structured feedback
 
@@ -1048,17 +1069,17 @@ When verification returns `human_needed`, items are persisted as a trackable HUM
 
 ### 43. Backlog Parking Lot
 
-**Commands:** `/gsd:add-backlog <description>`, `/gsd:review-backlog`, `/gsd:plant-seed <idea>`
+**Commands:** `/gsd-add-backlog <description>`, `/gsd-review-backlog`, `/gsd-plant-seed <idea>`
 
 **Purpose:** Capture ideas that aren't ready for active planning. Backlog items use 999.x numbering to stay outside the active phase sequence. Seeds are forward-looking ideas with trigger conditions that surface automatically at the right milestone.
 
 **Requirements:**
 - REQ-BACKLOG-01: Backlog items MUST use 999.x numbering to stay outside active phase sequence
-- REQ-BACKLOG-02: Phase directories MUST be created immediately so `/gsd:discuss-phase` and `/gsd:plan-phase` work on them
-- REQ-BACKLOG-03: `/gsd:review-backlog` MUST support promote, keep, and remove actions per item
+- REQ-BACKLOG-02: Phase directories MUST be created immediately so `/gsd-discuss-phase` and `/gsd-plan-phase` work on them
+- REQ-BACKLOG-03: `/gsd-review-backlog` MUST support promote, keep, and remove actions per item
 - REQ-BACKLOG-04: Promoted items MUST be renumbered into the active milestone sequence
 - REQ-SEED-01: Seeds MUST capture the full WHY and WHEN to surface conditions
-- REQ-SEED-02: `/gsd:new-milestone` MUST scan seeds and present matches
+- REQ-SEED-02: `/gsd-new-milestone` MUST scan seeds and present matches
 
 **Produces:**
 | Artifact | Description |
@@ -1070,9 +1091,9 @@ When verification returns `human_needed`, items are persisted as a trackable HUM
 
 ### 44. Persistent Context Threads
 
-**Command:** `/gsd:thread [name | description]`
+**Command:** `/gsd-thread [name | description]`
 
-**Purpose:** Lightweight cross-session knowledge stores for work that spans multiple sessions but doesn't belong to any specific phase. Lighter weight than `/gsd:pause-work` — no phase state, no plan context.
+**Purpose:** Lightweight cross-session knowledge stores for work that spans multiple sessions but doesn't belong to any specific phase. Lighter weight than `/gsd-pause-work` — no phase state, no plan context.
 
 **Requirements:**
 - REQ-THREAD-01: System MUST support create, list, and resume modes
@@ -1087,7 +1108,7 @@ When verification returns `human_needed`, items are persisted as a trackable HUM
 
 ### 45. PR Branch Filtering
 
-**Command:** `/gsd:pr-branch [target branch]`
+**Command:** `/gsd-pr-branch [target branch]`
 
 **Purpose:** Create a clean branch suitable for pull requests by filtering out `.planning/` commits. Reviewers see only code changes, not GSD planning artifacts.
 
@@ -1115,7 +1136,7 @@ When verification returns `human_needed`, items are persisted as a trackable HUM
 PreToolUse hook that scans Write/Edit calls targeting `.planning/` for injection patterns. Advisory-only — logs detection for awareness without blocking legitimate operations.
 
 **3. Workflow Guard Hook** (`gsd-workflow-guard.js`)
-PreToolUse hook that detects when Claude attempts file edits outside a GSD workflow context. Advises using `/gsd:quick` or `/gsd:fast` instead of direct edits. Configurable via `hooks.workflow_guard` (default: false).
+PreToolUse hook that detects when Claude attempts file edits outside a GSD workflow context. Advises using `/gsd-quick` or `/gsd-fast` instead of direct edits. Configurable via `hooks.workflow_guard` (default: false).
 
 **4. CI-Ready Injection Scanner** (`prompt-injection-scan.test.cjs`)
 Test suite that scans all agent, workflow, and command files for embedded injection vectors.
@@ -1142,7 +1163,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 48. Discussion Audit Trail
 
-**Purpose:** Auto-generate `DISCUSSION-LOG.md` during `/gsd:discuss-phase` for full audit trail of decisions made during discussion.
+**Purpose:** Auto-generate `DISCUSSION-LOG.md` during `/gsd-discuss-phase` for full audit trail of decisions made during discussion.
 
 **Requirements:**
 - REQ-DISCLOG-01: System MUST auto-generate DISCUSSION-LOG.md during discuss-phase
@@ -1155,7 +1176,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 49. Forensics
 
-**Command:** `/gsd:forensics [description]`
+**Command:** `/gsd-forensics [description]`
 
 **Purpose:** Post-mortem investigation of failed or stuck GSD workflows.
 
@@ -1181,7 +1202,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 50. Milestone Summary
 
-**Command:** `/gsd:milestone-summary [version]`
+**Command:** `/gsd-milestone-summary [version]`
 
 **Purpose:** Generate comprehensive project summary from milestone artifacts for team onboarding.
 
@@ -1204,7 +1225,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 51. Workstream Namespacing
 
-**Command:** `/gsd:workstreams`
+**Command:** `/gsd-workstreams`
 
 **Purpose:** Parallel workstreams for concurrent work on different milestone areas.
 
@@ -1227,7 +1248,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 52. Manager Dashboard
 
-**Command:** `/gsd:manager`
+**Command:** `/gsd-manager`
 
 **Purpose:** Interactive command center for managing multiple phases from one terminal.
 
@@ -1247,7 +1268,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 53. Assumptions Discussion Mode
 
-**Command:** `/gsd:discuss-phase` with `workflow.discuss_mode: 'assumptions'`
+**Command:** `/gsd-discuss-phase` with `workflow.discuss_mode: 'assumptions'`
 
 **Purpose:** Replace interview-style questioning with codebase-first assumption analysis.
 
@@ -1273,20 +1294,20 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 54. UI Phase Auto-Detection
 
-**Part of:** `/gsd:new-project` and `/gsd:progress`
+**Part of:** `/gsd-new-project` and `/gsd-progress`
 
-**Purpose:** Automatically detect UI-heavy projects and surface `/gsd:ui-phase` recommendation.
+**Purpose:** Automatically detect UI-heavy projects and surface `/gsd-ui-phase` recommendation.
 
 **Requirements:**
 - REQ-UI-DETECT-01: System MUST detect UI signals in project description (keywords, framework references)
 - REQ-UI-DETECT-02: System MUST annotate ROADMAP.md phases with `ui_hint` when applicable
-- REQ-UI-DETECT-03: System MUST suggest `/gsd:ui-phase` in next steps for UI-heavy phases
-- REQ-UI-DETECT-04: System MUST NOT make `/gsd:ui-phase` mandatory
+- REQ-UI-DETECT-03: System MUST suggest `/gsd-ui-phase` in next steps for UI-heavy phases
+- REQ-UI-DETECT-04: System MUST NOT make `/gsd-ui-phase` mandatory
 
 **Process:**
 1. **Detect** — Scan project description and tech stack for UI signals (keywords, framework references)
 2. **Annotate** — Add `ui_hint` markers to applicable phases in ROADMAP.md
-3. **Surface** — Include `/gsd:ui-phase` recommendation in next steps for UI-heavy phases
+3. **Surface** — Include `/gsd-ui-phase` recommendation in next steps for UI-heavy phases
 
 ---
 
@@ -1365,7 +1386,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 59. Schema Drift Detection
 
-**Command:** Automatic during `/gsd:execute-phase`
+**Command:** Automatic during `/gsd-execute-phase`
 
 **Purpose:** Detect when ORM schema files are modified without corresponding migration or push commands, preventing false-positive verification.
 
@@ -1388,7 +1409,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 60. Security Enforcement
 
-**Command:** `/gsd:secure-phase <N>`
+**Command:** `/gsd-secure-phase <N>`
 
 **Purpose:** Threat-model-anchored security verification for phase implementations.
 
@@ -1419,7 +1440,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 61. Documentation Generation
 
-**Command:** `/gsd:docs-update`
+**Command:** `/gsd-docs-update`
 
 **Purpose:** Generate and verify project documentation with accuracy checks.
 
@@ -1442,7 +1463,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 62. Discuss Chain Mode
 
-**Flag:** `/gsd:discuss-phase <N> --chain`
+**Flag:** `/gsd-discuss-phase <N> --chain`
 
 **Purpose:** Auto-chain discuss, plan, and execute phases in one flow to reduce manual command sequencing.
 
@@ -1460,7 +1481,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 63. Single-Phase Autonomous
 
-**Flag:** `/gsd:autonomous --only N`
+**Flag:** `/gsd-autonomous --only N`
 
 **Purpose:** Execute just one phase autonomously instead of all remaining phases.
 
@@ -1478,7 +1499,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 64. Scope Reduction Detection
 
-**Part of:** `/gsd:plan-phase`
+**Part of:** `/gsd-plan-phase`
 
 **Purpose:** Prevent silent requirement dropping during plan generation with three-layer defense.
 
@@ -1497,7 +1518,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 65. Claim Provenance Tagging
 
-**Part of:** `/gsd:research-phase`
+**Part of:** `/gsd-research-phase`
 
 **Purpose:** Ensure research claims are tagged with source evidence and assumptions are logged separately.
 
@@ -1565,3 +1586,311 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 2. **Migrate** — Write `skills/gsd-*/SKILL.md` files for each GSD command
 3. **Clean** — Remove legacy `commands/gsd/` directory if skills are installed
 4. **Fallback** — Maintain Gemini path compatibility for older Claude Code versions
+
+---
+
+## v1.32 Features
+
+### 69. STATE.md Consistency Gates
+
+**Commands:** `state validate`, `state sync [--verify]`, `state planned-phase --phase N --plans N`
+
+**Purpose:** Detect and repair drift between STATE.md and the actual filesystem, preventing cascading errors from stale state.
+
+**Requirements:**
+- REQ-STATE-01: `state validate` MUST detect drift between STATE.md fields and filesystem reality
+- REQ-STATE-02: `state sync` MUST reconstruct STATE.md from actual project state on disk
+- REQ-STATE-03: `state sync --verify` MUST perform a dry-run showing proposed changes without writing
+- REQ-STATE-04: `state planned-phase` MUST record the state transition after plan-phase completes (Planned/Ready to execute)
+
+**Produces:**
+| Artifact | Description |
+|----------|-------------|
+| Updated `STATE.md` | Corrected state reflecting filesystem reality |
+
+**Process:**
+1. **Validate** — Compare STATE.md fields against filesystem (phase directories, plan files, summaries)
+2. **Sync** — Reconstruct STATE.md from disk when drift is detected
+3. **Transition** — Record post-planning state with plan count for execute-phase readiness
+
+---
+
+### 70. Autonomous `--to N` Flag
+
+**Flag:** `/gsd-autonomous --to N`
+
+**Purpose:** Stop autonomous execution after completing a specific phase, allowing partial autonomous runs.
+
+**Requirements:**
+- REQ-TO-01: System MUST stop execution after the specified phase number completes
+- REQ-TO-02: System MUST follow the same discuss -> plan -> execute flow for each phase up to N
+- REQ-TO-03: `--to N` MUST be combinable with `--from N` for bounded autonomous ranges
+
+**Process:**
+1. **Bound** — Set the upper phase limit from `--to N` argument
+2. **Execute** — Run autonomous flow for each phase up to and including phase N
+3. **Stop** — Halt after phase N completes
+
+---
+
+### 71. Research Gate
+
+**Part of:** `/gsd-plan-phase`
+
+**Purpose:** Block planning when RESEARCH.md has unresolved open questions, preventing plans built on incomplete information.
+
+**Requirements:**
+- REQ-RESGATE-01: System MUST scan RESEARCH.md for unresolved open questions before planning begins
+- REQ-RESGATE-02: System MUST block plan-phase entry when open questions exist
+- REQ-RESGATE-03: System MUST surface the specific unresolved questions to the user
+
+**Process:**
+1. **Scan** — Check RESEARCH.md for open questions section with unresolved items
+2. **Gate** — Block planning if unresolved questions are found
+3. **Surface** — Display the specific open questions requiring resolution
+
+---
+
+### 72. Verifier Milestone Scope Filtering
+
+**Part of:** `/gsd-execute-phase` (verifier step)
+
+**Purpose:** Distinguish between genuine gaps and items deferred to later phases, reducing false negatives in verification.
+
+**Requirements:**
+- REQ-VSCOPE-01: Verifier MUST check whether a gap is addressed in a later milestone phase
+- REQ-VSCOPE-02: Gaps addressed in later phases MUST be marked as "deferred", not "gap"
+- REQ-VSCOPE-03: Only genuine gaps (not covered by any future phase) MUST be reported as failures
+
+**Process:**
+1. **Verify** — Run standard goal-backward verification
+2. **Filter** — Cross-reference detected gaps against later milestone phases
+3. **Classify** — Mark deferred items separately from genuine gaps
+
+---
+
+### 73. Read-Before-Edit Guard Hook
+
+**Part of:** Hooks (`PreToolUse`)
+
+**Purpose:** Prevent infinite retry loops in non-Claude runtimes by ensuring files are read before editing.
+
+**Requirements:**
+- REQ-RBE-01: Hook MUST detect Edit/Write tool calls that target files not previously read in the session
+- REQ-RBE-02: Hook MUST advise reading the file first (advisory, non-blocking)
+- REQ-RBE-03: Hook MUST prevent infinite retry loops common in runtimes without built-in read-before-edit enforcement
+
+---
+
+### 74. Context Reduction
+
+**Part of:** GSD SDK prompt assembly
+
+**Purpose:** Reduce context prompt sizes through markdown truncation and cache-friendly prompt ordering.
+
+**Requirements:**
+- REQ-CTXRED-01: System MUST truncate oversized markdown artifacts to fit within context budgets
+- REQ-CTXRED-02: System MUST order prompts for cache-friendly assembly (stable prefixes first)
+- REQ-CTXRED-03: Reduction MUST preserve essential information (headings, requirements, task structure)
+
+**Process:**
+1. **Measure** — Calculate total prompt size for the workflow
+2. **Truncate** — Apply markdown-aware truncation to oversized artifacts
+3. **Order** — Arrange prompt sections for optimal KV-cache reuse
+
+---
+
+### 75. Discuss-Phase `--power` Flag
+
+**Flag:** `/gsd-discuss-phase --power`
+
+**Purpose:** File-based bulk question answering for discuss-phase, enabling batch input from a prepared answers file.
+
+**Requirements:**
+- REQ-POWER-01: System MUST accept a file containing pre-written answers to discussion questions
+- REQ-POWER-02: System MUST map answers to the corresponding gray area questions
+- REQ-POWER-03: System MUST produce CONTEXT.md identical to interactive discuss-phase
+
+---
+
+### 76. Debug `--diagnose` Flag
+
+**Flag:** `/gsd-debug --diagnose`
+
+**Purpose:** Diagnosis-only mode that investigates without attempting fixes.
+
+**Requirements:**
+- REQ-DIAG-01: System MUST perform full debug investigation (hypotheses, evidence, root cause)
+- REQ-DIAG-02: System MUST NOT attempt any code modifications
+- REQ-DIAG-03: System MUST produce a diagnostic report with findings and recommended fixes
+
+---
+
+### 77. Phase Dependency Analysis
+
+**Command:** `/gsd-analyze-dependencies`
+
+**Purpose:** Detect phase dependencies and suggest `Depends on` entries for ROADMAP.md before running `/gsd-manager`.
+
+**Requirements:**
+- REQ-DEP-01: System MUST detect file overlap between phases
+- REQ-DEP-02: System MUST detect semantic dependencies (API/schema producers and consumers)
+- REQ-DEP-03: System MUST detect data flow dependencies (output producers and readers)
+- REQ-DEP-04: System MUST suggest dependency entries with user confirmation before writing
+
+**Produces:** Dependency suggestion table; optionally updates ROADMAP.md `Depends on` fields
+
+---
+
+### 78. Anti-Pattern Severity Levels
+
+**Part of:** `/gsd-resume-work`
+
+**Purpose:** Mandatory understanding checks at resume with severity-based anti-pattern enforcement.
+
+**Requirements:**
+- REQ-ANTI-01: System MUST classify anti-patterns by severity level
+- REQ-ANTI-02: System MUST enforce mandatory understanding checks at session resume
+- REQ-ANTI-03: Higher severity anti-patterns MUST block workflow progression until acknowledged
+
+---
+
+### 79. Methodology Artifact Type
+
+**Part of:** Planning artifacts
+
+**Purpose:** Define consumption mechanisms for methodology documents, ensuring they are consumed correctly by agents.
+
+**Requirements:**
+- REQ-METHOD-01: System MUST support methodology as a distinct artifact type
+- REQ-METHOD-02: Methodology artifacts MUST have defined consumption mechanisms for agents
+
+---
+
+### 80. Planner Reachability Check
+
+**Part of:** `/gsd-plan-phase`
+
+**Purpose:** Validate that plan steps are achievable before committing to execution.
+
+**Requirements:**
+- REQ-REACH-01: Planner MUST validate that each plan step references reachable files and APIs
+- REQ-REACH-02: Unreachable steps MUST be flagged during planning, not discovered during execution
+
+---
+
+### 81. Playwright-MCP UI Verification
+
+**Part of:** `/gsd-verify-work` (optional)
+
+**Purpose:** Automated visual verification using Playwright-MCP during verify-phase.
+
+**Requirements:**
+- REQ-PLAY-01: System MUST support optional Playwright-MCP visual verification during verify-phase
+- REQ-PLAY-02: Visual verification MUST be opt-in, not mandatory
+- REQ-PLAY-03: System MUST capture and compare visual state against UI-SPEC.md expectations
+
+---
+
+### 82. Pause-Work Expansion
+
+**Part of:** `/gsd-pause-work`
+
+**Purpose:** Support non-phase contexts with richer handoff data for broader pause-work applicability.
+
+**Requirements:**
+- REQ-PAUSE-01: System MUST support pausing in non-phase contexts (quick tasks, debug sessions, threads)
+- REQ-PAUSE-02: Handoff data MUST include richer context appropriate to the current work type
+
+---
+
+### 83. Response Language Config
+
+**Config:** `response_language`
+
+**Purpose:** Cross-phase language consistency for non-English users.
+
+**Requirements:**
+- REQ-LANG-01: System MUST respect `response_language` setting across all phases and agents
+- REQ-LANG-02: Setting MUST propagate to all spawned agents for consistent language output
+
+**Config:**
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `response_language` | string | (none) | Language code for agent responses (e.g., `"pt"`, `"ko"`, `"ja"`) |
+
+---
+
+### 84. Manual Update Procedure
+
+**Part of:** `docs/manual-update.md`
+
+**Purpose:** Document a manual update path for environments where `npx` is unavailable or npm publish is experiencing outages.
+
+**Requirements:**
+- REQ-MANUAL-01: Documentation MUST describe step-by-step manual update procedure
+- REQ-MANUAL-02: Procedure MUST work without npm access
+
+---
+
+### 85. New Runtime Support (Trae, Cline, Augment Code)
+
+**Part of:** `npx get-shit-done-cc`
+
+**Purpose:** Extend GSD installation to Trae IDE, Cline, and Augment Code runtimes.
+
+**Requirements:**
+- REQ-TRAE-01: Installer MUST support `--trae` flag for Trae IDE installation
+- REQ-CLINE-01: Installer MUST support Cline via `.clinerules` configuration
+- REQ-AUGMENT-01: Installer MUST support Augment Code with skill conversion and config management
+
+---
+
+### 86. Autonomous `--interactive` Flag
+
+**Flag:** `/gsd-autonomous --interactive`
+
+**Purpose:** Lean-context autonomous mode that keeps discuss-phase interactive (user answers questions) while dispatching plan and execute as background agents.
+
+**Requirements:**
+- REQ-INTERACT-01: `--interactive` MUST run discuss-phase inline with interactive questions (not auto-answered)
+- REQ-INTERACT-02: `--interactive` MUST dispatch plan-phase and execute-phase as background agents for context isolation
+- REQ-INTERACT-03: `--interactive` MUST enable pipeline parallelism — discuss Phase N+1 while Phase N builds
+- REQ-INTERACT-04: Main context MUST only accumulate discuss conversations (lean context)
+
+**Process:**
+1. **Discuss inline** — Run discuss-phase in the main context with user interaction
+2. **Dispatch** — Send plan and execute to background agents with fresh context windows
+3. **Pipeline** — While background agents build Phase N, begin discussing Phase N+1
+
+---
+
+### 87. Commit-Docs Guard Hook
+
+**Hook:** `gsd-commit-docs.js`
+
+**Purpose:** PreToolUse hook that enforces the `commit_docs` configuration, preventing `.planning/` files from being committed when `planning.commit_docs` is `false`.
+
+**Requirements:**
+- REQ-COMMITDOCS-01: Hook MUST intercept git commit commands that stage `.planning/` files
+- REQ-COMMITDOCS-02: Hook MUST block commits containing `.planning/` files when `commit_docs` is `false`
+- REQ-COMMITDOCS-03: Hook MUST be advisory — does not block when `commit_docs` is `true` or absent
+
+---
+
+### 88. Community Hooks Opt-In
+
+**Hooks:** `gsd-validate-commit.sh`, `gsd-session-state.sh`, `gsd-phase-boundary.sh`
+
+**Purpose:** Optional git and session hooks for GSD projects, gated behind `hooks.community: true` in config.
+
+**Requirements:**
+- REQ-COMMUNITY-01: All community hooks MUST be no-ops unless `hooks.community` is `true` in `.planning/config.json`
+- REQ-COMMUNITY-02: `gsd-validate-commit.sh` MUST enforce Conventional Commits format on git commit messages
+- REQ-COMMUNITY-03: `gsd-session-state.sh` MUST track session state transitions
+- REQ-COMMUNITY-04: `gsd-phase-boundary.sh` MUST enforce phase boundary checks
+
+**Config:**
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `hooks.community` | boolean | `false` | Enable optional community hooks for commit validation, session state, and phase boundaries |

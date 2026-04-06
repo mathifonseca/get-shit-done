@@ -3,7 +3,7 @@
  */
 
 const { test, describe, beforeEach, afterEach } = require('node:test');
-const assert = require('node:assert');
+const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
@@ -36,9 +36,9 @@ describe('generate-claude-md', () => {
     const claudePath = path.join(tmpDir, 'CLAUDE.md');
     const content = fs.readFileSync(claudePath, 'utf-8');
     assert.ok(content.includes('## GSD Workflow Enforcement'));
-    assert.ok(content.includes('/gsd:quick'));
-    assert.ok(content.includes('/gsd:debug'));
-    assert.ok(content.includes('/gsd:execute-phase'));
+    assert.ok(content.includes('/gsd-quick'));
+    assert.ok(content.includes('/gsd-debug'));
+    assert.ok(content.includes('/gsd-execute-phase'));
     assert.ok(content.includes('Do not make direct repo edits outside a GSD workflow'));
   });
 
@@ -65,18 +65,20 @@ describe('new-project workflow includes CLAUDE.md generation', () => {
   const workflowPath = path.join(__dirname, '..', 'get-shit-done', 'workflows', 'new-project.md');
   const commandsPath = path.join(__dirname, '..', 'docs', 'COMMANDS.md');
 
-  test('new-project workflow generates CLAUDE.md before final commit', () => {
+  test('new-project workflow generates instruction file before final commit', () => {
     const content = fs.readFileSync(workflowPath, 'utf-8');
     assert.ok(content.includes('generate-claude-md'));
-    assert.ok(content.includes('--files .planning/ROADMAP.md .planning/STATE.md .planning/REQUIREMENTS.md CLAUDE.md'));
+    // Codex fix: workflow now uses $INSTRUCTION_FILE (AGENTS.md for Codex, CLAUDE.md otherwise)
+    assert.ok(content.includes('--files .planning/ROADMAP.md .planning/STATE.md .planning/REQUIREMENTS.md "$INSTRUCTION_FILE"'));
   });
 
-  test('new-project artifacts mention CLAUDE.md', () => {
+  test('new-project artifacts reference instruction file variable', () => {
     const workflowContent = fs.readFileSync(workflowPath, 'utf-8');
     const commandsContent = fs.readFileSync(commandsPath, 'utf-8');
 
-    assert.ok(workflowContent.includes('| Project guide  | `CLAUDE.md`'));
-    assert.ok(workflowContent.includes('- `CLAUDE.md`'));
+    // Codex fix: hardcoded CLAUDE.md replaced with $INSTRUCTION_FILE variable
+    assert.ok(workflowContent.includes('| Project guide  | `$INSTRUCTION_FILE`'));
+    assert.ok(workflowContent.includes('- `$INSTRUCTION_FILE`'));
     assert.ok(commandsContent.includes('`CLAUDE.md`'));
   });
 });

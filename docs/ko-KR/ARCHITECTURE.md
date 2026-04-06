@@ -21,7 +21,7 @@
 
 ## 시스템 개요
 
-GSD는 사용자와 AI 코딩 에이전트(Claude Code, Gemini CLI, OpenCode, Codex, Copilot, Antigravity) 사이에 위치하는 **메타 프롬프팅 프레임워크**입니다. 다음을 제공합니다.
+GSD는 사용자와 AI 코딩 에이전트(Claude Code, Gemini CLI, OpenCode, Kilo, Codex, Copilot, Antigravity, Trae, Cline, Augment Code) 사이에 위치하는 **메타 프롬프팅 프레임워크**입니다. 다음을 제공합니다.
 
 1. **컨텍스트 엔지니어링** — 작업별로 AI에게 필요한 모든 것을 제공하는 구조화된 아티팩트
 2. **멀티 에이전트 오케스트레이션** — 새로운 컨텍스트 윈도우로 전문화된 에이전트를 생성하는 가벼운 오케스트레이터
@@ -31,7 +31,7 @@ GSD는 사용자와 AI 코딩 에이전트(Claude Code, Gemini CLI, OpenCode, Co
 ```
 ┌──────────────────────────────────────────────────────┐
 │                      USER                            │
-│            /gsd:command [args]                        │
+│            /gsd-command [args]                        │
 └─────────────────────┬────────────────────────────────┘
                       │
 ┌─────────────────────▼────────────────────────────────┐
@@ -107,10 +107,10 @@ GSD는 사용자와 AI 코딩 에이전트(Claude Code, Gemini CLI, OpenCode, Co
 ### Commands (`commands/gsd/*.md`)
 
 사용자 대면 진입점입니다. 각 파일은 YAML 전문(name, description, allowed-tools)과 워크플로우를 부트스트랩하는 프롬프트 본문을 포함합니다. 명령어는 다음과 같이 설치됩니다.
-- **Claude Code:** 커스텀 슬래시 명령어 (`/gsd:command-name`)
-- **OpenCode:** 슬래시 명령어 (`/gsd-command-name`)
+- **Claude Code:** 커스텀 슬래시 명령어 (`/gsd-command-name`)
+- **OpenCode / Kilo:** 슬래시 명령어 (`/gsd-command-name`)
 - **Codex:** Skills (`$gsd-command-name`)
-- **Copilot:** 슬래시 명령어 (`/gsd:command-name`)
+- **Copilot:** 슬래시 명령어 (`/gsd-command-name`)
 - **Antigravity:** Skills
 
 **전체 명령어 수:** 44개
@@ -362,6 +362,7 @@ UI-SPEC.md (per phase) ───────────────────
 
 다른 런타임의 동등한 경로입니다.
 - **OpenCode:** `~/.config/opencode/` 또는 `~/.opencode/`
+- **Kilo:** `~/.config/kilo/` 또는 `~/.kilo/`
 - **Gemini CLI:** `~/.gemini/`
 - **Codex:** `~/.codex/` (명령어 대신 skills 사용)
 - **Copilot:** `~/.github/`
@@ -377,13 +378,13 @@ UI-SPEC.md (per phase) ───────────────────
 ├── STATE.md                # 살아있는 메모리: 위치, 결정, 차단, 메트릭
 ├── config.json             # 워크플로우 설정
 ├── MILESTONES.md           # 완료된 마일스톤 보관
-├── research/               # /gsd:new-project의 도메인 조사
+├── research/               # /gsd-new-project의 도메인 조사
 │   ├── SUMMARY.md
 │   ├── STACK.md
 │   ├── FEATURES.md
 │   ├── ARCHITECTURE.md
 │   └── PITFALLS.md
-├── codebase/               # 브라운필드 매핑 (/gsd:map-codebase에서)
+├── codebase/               # 브라운필드 매핑 (/gsd-map-codebase에서)
 │   ├── STACK.md
 │   ├── ARCHITECTURE.md
 │   ├── CONVENTIONS.md
@@ -409,13 +410,13 @@ UI-SPEC.md (per phase) ───────────────────
 ├── todos/
 │   ├── pending/            # 캡처된 아이디어
 │   └── done/               # 완료된 할 일
-├── threads/               # 영구 컨텍스트 스레드 (/gsd:thread에서)
-├── seeds/                 # 미래 지향적 아이디어 (/gsd:plant-seed에서)
+├── threads/               # 영구 컨텍스트 스레드 (/gsd-thread에서)
+├── seeds/                 # 미래 지향적 아이디어 (/gsd-plant-seed에서)
 ├── debug/                  # 활성 디버그 세션
 │   ├── *.md                # 활성 세션
 │   ├── resolved/           # 보관된 세션
 │   └── knowledge-base.md   # 영구 디버그 학습 내용
-├── ui-reviews/             # /gsd:ui-review의 스크린샷 (gitignored)
+├── ui-reviews/             # /gsd-ui-review의 스크린샷 (gitignored)
 └── continue-here.md        # 컨텍스트 핸드오프 (pause-work에서)
 ```
 
@@ -425,19 +426,20 @@ UI-SPEC.md (per phase) ───────────────────
 
 인스톨러(`bin/install.js`, ~3,000줄)는 다음을 처리합니다.
 
-1. **런타임 감지** — 대화형 프롬프트 또는 CLI 플래그 (`--claude`, `--opencode`, `--gemini`, `--codex`, `--copilot`, `--antigravity`, `--all`)
+1. **런타임 감지** — 대화형 프롬프트 또는 CLI 플래그 (`--claude`, `--opencode`, `--gemini`, `--kilo`, `--codex`, `--copilot`, `--antigravity`, `--all`)
 2. **위치 선택** — 전역(`--global`) 또는 로컬(`--local`)
 3. **파일 배포** — commands, workflows, references, templates, agents, hooks 복사
 4. **런타임 적응** — 런타임별 파일 내용 변환.
    - Claude Code: 그대로 사용
-   - OpenCode: 에이전트 전문을 `name:`, `model: inherit`, `mode: subagent`로 변환
+   - OpenCode: 명령어/에이전트를 OpenCode 호환 플랫 명령어 + 서브에이전트 형식으로 변환
+   - Kilo: Kilo 설정 경로로 OpenCode 변환 파이프라인을 재사용
    - Codex: commands에서 TOML config + skills 생성
    - Copilot: 도구 이름 매핑 (Read→read, Bash→execute 등)
    - Gemini: 훅 이벤트 이름 조정 (`PostToolUse` 대신 `AfterTool`)
    - Antigravity: Google 모델 등가물을 사용한 skills-first 방식
 5. **경로 정규화** — `~/.claude/` 경로를 런타임별 경로로 교체
 6. **설정 통합** — 런타임의 `settings.json`에 훅 등록
-7. **패치 백업** — v1.17부터 로컬 수정 파일을 `gsd-local-patches/`에 백업하여 `/gsd:reapply-patches`에 사용
+7. **패치 백업** — v1.17부터 로컬 수정 파일을 `gsd-local-patches/`에 백업하여 `/gsd-reapply-patches`에 사용
 8. **매니페스트 추적** — 깔끔한 제거를 위해 `gsd-file-manifest.json` 작성
 9. **제거 모드** — `--uninstall`로 모든 GSD 파일, 훅, 설정 제거
 
@@ -497,23 +499,24 @@ Runtime Engine (Claude Code / Gemini CLI)
 
 **Workflow Guard** (`gsd-workflow-guard.js`).
 - `.planning/` 외부 파일에 Write/Edit 시 트리거됩니다
-- GSD 워크플로우 컨텍스트 외부의 편집을 감지합니다 (활성 `/gsd:` 명령어 또는 Task 서브에이전트 없음)
-- 상태 추적 변경을 위해 `/gsd:quick` 또는 `/gsd:fast` 사용을 권고합니다
+- GSD 워크플로우 컨텍스트 외부의 편집을 감지합니다 (활성 `/gsd-` 명령어 또는 Task 서브에이전트 없음)
+- 상태 추적 변경을 위해 `/gsd-quick` 또는 `/gsd-fast` 사용을 권고합니다
 - `hooks.workflow_guard: true`로 활성화 (기본값: false)
 
 ---
 
 ## 런타임 추상화
 
-GSD는 통합된 명령어/워크플로우 아키텍처를 통해 6개의 AI 코딩 런타임을 지원합니다.
+GSD는 통합된 명령어/워크플로우 아키텍처를 통해 여러 AI 코딩 런타임을 지원합니다.
 
 | 런타임 | 명령어 형식 | 에이전트 시스템 | 설정 위치 |
 |---------|---------------|--------------|-----------------|
-| Claude Code | `/gsd:command` | Task 생성 | `~/.claude/` |
+| Claude Code | `/gsd-command` | Task 생성 | `~/.claude/` |
 | OpenCode | `/gsd-command` | Subagent 모드 | `~/.config/opencode/` |
-| Gemini CLI | `/gsd:command` | Task 생성 | `~/.gemini/` |
+| Kilo | `/gsd-command` | Subagent 모드 | `~/.config/kilo/` |
+| Gemini CLI | `/gsd-command` | Task 생성 | `~/.gemini/` |
 | Codex | `$gsd-command` | Skills | `~/.codex/` |
-| Copilot | `/gsd:command` | 에이전트 위임 | `~/.github/` |
+| Copilot | `/gsd-command` | 에이전트 위임 | `~/.github/` |
 | Antigravity | Skills | Skills | `~/.gemini/antigravity/` |
 
 ### 추상화 포인트

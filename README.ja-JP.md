@@ -4,16 +4,14 @@
 
 [English](README.md) · [Português](README.pt-BR.md) · [简体中文](README.zh-CN.md) · **日本語**
 
-**Claude Code、OpenCode、Gemini CLI、Codex、Copilot、Cursor、Windsurf、Antigravity、Augment向けの軽量かつ強力なメタプロンプティング、コンテキストエンジニアリング、仕様駆動開発システム。**
+**Claude Code、OpenCode、Gemini CLI、Kilo、Codex、Copilot、Cursor、Windsurf、Antigravity、Augment、Trae、Cline向けの軽量かつ強力なメタプロンプティング、コンテキストエンジニアリング、仕様駆動開発システム。**
 
 **コンテキストロット（Claudeがコンテキストウィンドウを消費するにつれ品質が劣化する現象）を解決します。**
-
-[**English**](README.md) | [**Português**](README.pt-BR.md) | [**简体中文**](docs/zh-CN/README.md) | [**日本語**](docs/ja-JP/README.md)
 
 [![npm version](https://img.shields.io/npm/v/get-shit-done-cc?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/get-shit-done-cc)
 [![npm downloads](https://img.shields.io/npm/dm/get-shit-done-cc?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/get-shit-done-cc)
 [![Tests](https://img.shields.io/github/actions/workflow/status/gsd-build/get-shit-done/test.yml?branch=main&style=for-the-badge&logo=github&label=Tests)](https://github.com/gsd-build/get-shit-done/actions/workflows/test.yml)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/gsd)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/mYgfVNfA2r)
 [![X (Twitter)](https://img.shields.io/badge/X-@gsd__foundation-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/gsd_foundation)
 [![$GSD Token](https://img.shields.io/badge/$GSD-Dexscreener-1C1C1C?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIgZmlsbD0iIzAwRkYwMCIvPjwvc3ZnPg==&logoColor=00FF00)](https://dexscreener.com/solana/dwudwjvan7bzkw9zwlbyv6kspdlvhwzrqy6ebk8xzxkv)
 [![GitHub stars](https://img.shields.io/github/stars/gsd-build/get-shit-done?style=for-the-badge&logo=github&color=181717)](https://github.com/gsd-build/get-shit-done)
@@ -77,6 +75,16 @@ GSDはそれを解決します。Claude Codeを信頼性の高いものにする
 
 ビルトインの品質ゲートが本当の問題を検出します：スキーマドリフト検出はマイグレーション漏れのORM変更をフラグし、セキュリティ強制は検証を脅威モデルに紐付け、スコープ削減検出はプランナーが要件を暗黙的に落とすのを防止します。
 
+### v1.32.0 ハイライト
+
+- **STATE.md整合性ゲート** — `state validate`がSTATE.mdとファイルシステムの差分を検出、`state sync`が実際のプロジェクト状態から再構築
+- **`--to N`フラグ** — 自律実行を特定のフェーズ完了後に停止
+- **リサーチゲート** — RESEARCH.mdに未解決の質問がある場合、計画をブロック
+- **検証マイルストーンスコープフィルタリング** — 後のフェーズで対処されるギャップは「ギャップ」ではなく「延期」としてマーク
+- **読み取り後編集ガード** — 非Claudeランタイムでの無限リトライループを防止するアドバイザリーフック
+- **コンテキスト削減** — Markdownのトランケーションとキャッシュフレンドリーなプロンプト順序でトークン使用量を削減
+- **4つの新ランタイム** — Trae、Kilo、Augment、Cline（合計12ランタイム）
+
 ---
 
 ## はじめに
@@ -86,18 +94,20 @@ npx get-shit-done-cc@latest
 ```
 
 インストーラーが以下の選択を求めます：
-1. **ランタイム** — Claude Code、OpenCode、Gemini、Codex、Copilot、Cursor、Antigravity、またはすべて（インタラクティブ複数選択 — 1回のインストールセッションで複数のランタイムを選択可能）
+1. **ランタイム** — Claude Code、OpenCode、Gemini、Kilo、Codex、Copilot、Cursor、Windsurf、Antigravity、Augment、Trae、Cline、またはすべて（インタラクティブ複数選択 — 1回のインストールセッションで複数のランタイムを選択可能）
 2. **インストール先** — グローバル（全プロジェクト）またはローカル（現在のプロジェクトのみ）
 
 確認方法：
-- Claude Code / Gemini: `/gsd:help`
-- OpenCode: `/gsd-help`
+- Claude Code / Gemini / Copilot / Antigravity: `/gsd-help`
+- OpenCode / Kilo / Augment / Trae: `/gsd-help`
 - Codex: `$gsd-help`
-- Copilot: `/gsd:help`
-- Antigravity: `/gsd:help`
+- Cline: GSDは`.clinerules`経由でインストール — `.clinerules`の存在を確認
 
 > [!NOTE]
-> Codexのインストールでは、カスタムプロンプトではなくスキル（`skills/gsd-*/SKILL.md`）を使用します。
+> Claude Code 2.1.88+とCodexはスキル（`skills/gsd-*/SKILL.md`）としてインストールされます。Clineは`.clinerules`を使用します。インストーラーがすべての形式を自動的に処理します。
+
+> [!TIP]
+> ソースベースのインストールやnpmが利用できない環境については、**[docs/manual-update.md](docs/manual-update.md)**を参照してください。
 
 ### 最新の状態を保つ
 
@@ -115,17 +125,21 @@ npx get-shit-done-cc@latest
 npx get-shit-done-cc --claude --global   # ~/.claude/ にインストール
 npx get-shit-done-cc --claude --local    # ./.claude/ にインストール
 
-# OpenCode（オープンソース、無料モデル）
+# OpenCode
 npx get-shit-done-cc --opencode --global # ~/.config/opencode/ にインストール
 
 # Gemini CLI
 npx get-shit-done-cc --gemini --global   # ~/.gemini/ にインストール
 
-# Codex（スキルファースト）
+# Kilo
+npx get-shit-done-cc --kilo --global     # ~/.config/kilo/ にインストール
+npx get-shit-done-cc --kilo --local      # ./.kilo/ にインストール
+
+# Codex
 npx get-shit-done-cc --codex --global    # ~/.codex/ にインストール
 npx get-shit-done-cc --codex --local     # ./.codex/ にインストール
 
-# Copilot（GitHub Copilot CLI）
+# Copilot
 npx get-shit-done-cc --copilot --global  # ~/.github/ にインストール
 npx get-shit-done-cc --copilot --local   # ./.github/ にインストール
 
@@ -133,16 +147,28 @@ npx get-shit-done-cc --copilot --local   # ./.github/ にインストール
 npx get-shit-done-cc --cursor --global      # ~/.cursor/ にインストール
 npx get-shit-done-cc --cursor --local       # ./.cursor/ にインストール
 
-# Antigravity（Google、スキルファースト、Geminiベース）
+# Antigravity
 npx get-shit-done-cc --antigravity --global # ~/.gemini/antigravity/ にインストール
 npx get-shit-done-cc --antigravity --local  # ./.agent/ にインストール
+
+# Augment
+npx get-shit-done-cc --augment --global     # ~/.augment/ にインストール
+npx get-shit-done-cc --augment --local      # ./.augment/ にインストール
+
+# Trae
+npx get-shit-done-cc --trae --global        # ~/.trae/ にインストール
+npx get-shit-done-cc --trae --local         # ./.trae/ にインストール
+
+# Cline
+npx get-shit-done-cc --cline --global       # ~/.cline/ にインストール
+npx get-shit-done-cc --cline --local        # ./.clinerules にインストール
 
 # 全ランタイム
 npx get-shit-done-cc --all --global      # すべてのディレクトリにインストール
 ```
 
 `--global`（`-g`）または `--local`（`-l`）でインストール先の質問をスキップできます。
-`--claude`、`--opencode`、`--gemini`、`--codex`、`--copilot`、`--cursor`、`--antigravity`、または `--all` でランタイムの質問をスキップできます。
+`--claude`、`--opencode`、`--gemini`、`--kilo`、`--codex`、`--copilot`、`--cursor`、`--windsurf`、`--antigravity`、`--augment`、`--trae`、`--cline`、または `--all` でランタイムの質問をスキップできます。
 
 </details>
 
@@ -209,12 +235,12 @@ claude --dangerously-skip-permissions
 
 ## 仕組み
 
-> **既存のコードがある場合は？** まず `/gsd:map-codebase` を実行してください。並列エージェントが起動し、スタック、アーキテクチャ、規約、懸念点を分析します。その後 `/gsd:new-project` がコードベースを把握した状態で動作し、質問は追加する内容に焦点を当て、計画時にはパターンが自動的に読み込まれます。
+> **既存のコードがある場合は？** まず `/gsd-map-codebase` を実行してください。並列エージェントが起動し、スタック、アーキテクチャ、規約、懸念点を分析します。その後 `/gsd-new-project` がコードベースを把握した状態で動作し、質問は追加する内容に焦点を当て、計画時にはパターンが自動的に読み込まれます。
 
 ### 1. プロジェクトの初期化
 
 ```
-/gsd:new-project
+/gsd-new-project
 ```
 
 1つのコマンド、1つのフロー。システムが以下を行います：
@@ -233,7 +259,7 @@ claude --dangerously-skip-permissions
 ### 2. フェーズの議論
 
 ```
-/gsd:discuss-phase 1
+/gsd-discuss-phase 1
 ```
 
 **ここで実装の方向性を決めます。**
@@ -256,14 +282,14 @@ claude --dangerously-skip-permissions
 
 **作成されるファイル：** `{phase_num}-CONTEXT.md`
 
-> **前提モード：** 質問よりもコードベース分析を優先したい場合は、`/gsd:settings` で `workflow.discuss_mode` を `assumptions` に設定してください。システムがコードを読み、何をなぜそうするかを提示し、間違っている部分だけ修正を求めます。詳しくは[ディスカスモード](docs/ja-JP/workflow-discuss-mode.md)をご覧ください。
+> **前提モード：** 質問よりもコードベース分析を優先したい場合は、`/gsd-settings` で `workflow.discuss_mode` を `assumptions` に設定してください。システムがコードを読み、何をなぜそうするかを提示し、間違っている部分だけ修正を求めます。詳しくは[ディスカスモード](docs/ja-JP/workflow-discuss-mode.md)をご覧ください。
 
 ---
 
 ### 3. フェーズの計画
 
 ```
-/gsd:plan-phase 1
+/gsd-plan-phase 1
 ```
 
 システムが以下を行います：
@@ -281,7 +307,7 @@ claude --dangerously-skip-permissions
 ### 4. フェーズの実行
 
 ```
-/gsd:execute-phase 1
+/gsd-execute-phase 1
 ```
 
 システムが以下を行います：
@@ -332,7 +358,7 @@ claude --dangerously-skip-permissions
 ### 5. 作業の検証
 
 ```
-/gsd:verify-work 1
+/gsd-verify-work 1
 ```
 
 **ここで実際に動作するか確認します。**
@@ -346,7 +372,7 @@ claude --dangerously-skip-permissions
 3. **障害を自動診断** — デバッグエージェントが起動し根本原因を特定
 4. **検証済みの修正プランを作成** — 即座に再実行可能
 
-すべてパスすれば次に進みます。何か壊れていれば、手動でデバッグする必要はありません — 作成された修正プランで `/gsd:execute-phase` を再度実行するだけです。
+すべてパスすれば次に進みます。何か壊れていれば、手動でデバッグする必要はありません — 作成された修正プランで `/gsd-execute-phase` を再度実行するだけです。
 
 **作成されるファイル：** `{phase_num}-UAT.md`、問題が見つかった場合は修正プラン
 
@@ -355,38 +381,38 @@ claude --dangerously-skip-permissions
 ### 6. 繰り返し → シップ → 完了 → 次のマイルストーン
 
 ```
-/gsd:discuss-phase 2
-/gsd:plan-phase 2
-/gsd:execute-phase 2
-/gsd:verify-work 2
-/gsd:ship 2                  # 検証済みの作業からPRを作成
+/gsd-discuss-phase 2
+/gsd-plan-phase 2
+/gsd-execute-phase 2
+/gsd-verify-work 2
+/gsd-ship 2                  # 検証済みの作業からPRを作成
 ...
-/gsd:complete-milestone
-/gsd:new-milestone
+/gsd-complete-milestone
+/gsd-new-milestone
 ```
 
 またはGSDに次のステップを自動判定させます：
 
 ```
-/gsd:next                    # 次のステップを自動検出して実行
+/gsd-next                    # 次のステップを自動検出して実行
 ```
 
 **discuss → plan → execute → verify → ship** のループをマイルストーン完了まで繰り返します。
 
-ディスカッション中のインプットを速くしたい場合は、`/gsd:discuss-phase <n> --batch` で1つずつではなく小さなグループにまとめた質問に一括で回答できます。`--chain` を使うと、ディスカッションからプラン+実行まで途中で止まらずに自動チェインできます。
+ディスカッション中のインプットを速くしたい場合は、`/gsd-discuss-phase <n> --batch` で1つずつではなく小さなグループにまとめた質問に一括で回答できます。`--chain` を使うと、ディスカッションからプラン+実行まで途中で止まらずに自動チェインできます。
 
 各フェーズであなたのインプット（discuss）、適切なリサーチ（plan）、クリーンな実行（execute）、人間による検証（verify）が行われます。コンテキストは常にフレッシュ。品質は常に高い。
 
-すべてのフェーズが完了したら、`/gsd:complete-milestone` でマイルストーンをアーカイブしリリースをタグ付けします。
+すべてのフェーズが完了したら、`/gsd-complete-milestone` でマイルストーンをアーカイブしリリースをタグ付けします。
 
-次に `/gsd:new-milestone` で次のバージョンを開始します — `new-project` と同じフローですが既存のコードベース向けです。次に構築したいものを説明し、システムがドメインを調査し、要件をスコーピングし、新しいロードマップを作成します。各マイルストーンはクリーンなサイクルです：定義 → 構築 → シップ。
+次に `/gsd-new-milestone` で次のバージョンを開始します — `new-project` と同じフローですが既存のコードベース向けです。次に構築したいものを説明し、システムがドメインを調査し、要件をスコーピングし、新しいロードマップを作成します。各マイルストーンはクリーンなサイクルです：定義 → 構築 → シップ。
 
 ---
 
 ### クイックモード
 
 ```
-/gsd:quick
+/gsd-quick
 ```
 
 **フル計画が不要なアドホックタスク向け。**
@@ -408,7 +434,7 @@ claude --dangerously-skip-permissions
 フラグは組み合わせ可能：`--discuss --research --validate` でディスカッション + リサーチ + プランチェック + 検証が行われます。
 
 ```
-/gsd:quick
+/gsd-quick
 > What do you want to do? "Add dark mode toggle to settings"
 ```
 
@@ -510,117 +536,117 @@ lmn012o feat(08-02): create registration endpoint
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:new-project [--auto]` | フル初期化：質問 → リサーチ → 要件定義 → ロードマップ |
-| `/gsd:discuss-phase [N] [--auto] [--analyze] [--chain]` | 計画前に実装の決定事項をキャプチャ（`--analyze` でトレードオフ分析を追加、`--chain` でプラン+実行へ自動チェイン） |
-| `/gsd:plan-phase [N] [--auto] [--reviews]` | フェーズのリサーチ + プラン + 検証（`--reviews` でコードベースレビューの発見事項を読み込み） |
-| `/gsd:execute-phase <N>` | 全プランを並列ウェーブで実行し、完了時に検証 |
-| `/gsd:verify-work [N]` | 手動ユーザー受入テスト ¹ |
-| `/gsd:ship [N] [--draft]` | 検証済みのフェーズ作業から自動生成された本文付きのPRを作成 |
-| `/gsd:next` | 次の論理的なワークフローステップに自動的に進む |
-| `/gsd:fast <text>` | インラインの軽微タスク — 計画を完全にスキップし即座に実行 |
-| `/gsd:audit-milestone` | マイルストーンが完了の定義を達成したか検証 |
-| `/gsd:complete-milestone` | マイルストーンをアーカイブし、リリースをタグ付け |
-| `/gsd:new-milestone [name]` | 次のバージョンを開始：質問 → リサーチ → 要件定義 → ロードマップ |
-| `/gsd:forensics [desc]` | 失敗したワークフロー実行の事後分析（停止ループ、欠落成果物、git異常の診断） |
-| `/gsd:milestone-summary [version]` | チームオンボーディングとレビュー向けの包括的なプロジェクトサマリーを生成 |
+| `/gsd-new-project [--auto]` | フル初期化：質問 → リサーチ → 要件定義 → ロードマップ |
+| `/gsd-discuss-phase [N] [--auto] [--analyze] [--chain]` | 計画前に実装の決定事項をキャプチャ（`--analyze` でトレードオフ分析を追加、`--chain` でプラン+実行へ自動チェイン） |
+| `/gsd-plan-phase [N] [--auto] [--reviews]` | フェーズのリサーチ + プラン + 検証（`--reviews` でコードベースレビューの発見事項を読み込み） |
+| `/gsd-execute-phase <N>` | 全プランを並列ウェーブで実行し、完了時に検証 |
+| `/gsd-verify-work [N]` | 手動ユーザー受入テスト ¹ |
+| `/gsd-ship [N] [--draft]` | 検証済みのフェーズ作業から自動生成された本文付きのPRを作成 |
+| `/gsd-next` | 次の論理的なワークフローステップに自動的に進む |
+| `/gsd-fast <text>` | インラインの軽微タスク — 計画を完全にスキップし即座に実行 |
+| `/gsd-audit-milestone` | マイルストーンが完了の定義を達成したか検証 |
+| `/gsd-complete-milestone` | マイルストーンをアーカイブし、リリースをタグ付け |
+| `/gsd-new-milestone [name]` | 次のバージョンを開始：質問 → リサーチ → 要件定義 → ロードマップ |
+| `/gsd-forensics [desc]` | 失敗したワークフロー実行の事後分析（停止ループ、欠落成果物、git異常の診断） |
+| `/gsd-milestone-summary [version]` | チームオンボーディングとレビュー向けの包括的なプロジェクトサマリーを生成 |
 
 ### ワークストリーム
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:workstreams list` | 全ワークストリームとそのステータスを表示 |
-| `/gsd:workstreams create <name>` | 並列マイルストーン作業用の名前空間付きワークストリームを作成 |
-| `/gsd:workstreams switch <name>` | アクティブなワークストリームを切り替え |
-| `/gsd:workstreams complete <name>` | ワークストリームを完了しマージ |
+| `/gsd-workstreams list` | 全ワークストリームとそのステータスを表示 |
+| `/gsd-workstreams create <name>` | 並列マイルストーン作業用の名前空間付きワークストリームを作成 |
+| `/gsd-workstreams switch <name>` | アクティブなワークストリームを切り替え |
+| `/gsd-workstreams complete <name>` | ワークストリームを完了しマージ |
 
 ### マルチプロジェクトワークスペース
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:new-workspace` | リポジトリのコピー（worktreeまたはクローン）で隔離されたワークスペースを作成 |
-| `/gsd:list-workspaces` | すべてのGSDワークスペースとそのステータスを表示 |
-| `/gsd:remove-workspace` | ワークスペースを削除しworktreeをクリーンアップ |
+| `/gsd-new-workspace` | リポジトリのコピー（worktreeまたはクローン）で隔離されたワークスペースを作成 |
+| `/gsd-list-workspaces` | すべてのGSDワークスペースとそのステータスを表示 |
+| `/gsd-remove-workspace` | ワークスペースを削除しworktreeをクリーンアップ |
 
 ### UIデザイン
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:ui-phase [N]` | フロントエンドフェーズ用のUIデザイン契約（UI-SPEC.md）を生成 |
-| `/gsd:ui-review [N]` | 実装済みフロントエンドコードの6つの柱によるビジュアル監査（遡及的） |
+| `/gsd-ui-phase [N]` | フロントエンドフェーズ用のUIデザイン契約（UI-SPEC.md）を生成 |
+| `/gsd-ui-review [N]` | 実装済みフロントエンドコードの6つの柱によるビジュアル監査（遡及的） |
 
 ### ナビゲーション
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:progress` | 今どこにいる？次は何？ |
-| `/gsd:next` | 状態を自動検出し次のステップを実行 |
-| `/gsd:help` | 全コマンドと使い方ガイドを表示 |
-| `/gsd:update` | チェンジログプレビュー付きでGSDをアップデート |
-| `/gsd:join-discord` | GSD Discordコミュニティに参加 |
-| `/gsd:manager` | 複数フェーズ管理用のインタラクティブコマンドセンター |
+| `/gsd-progress` | 今どこにいる？次は何？ |
+| `/gsd-next` | 状態を自動検出し次のステップを実行 |
+| `/gsd-help` | 全コマンドと使い方ガイドを表示 |
+| `/gsd-update` | チェンジログプレビュー付きでGSDをアップデート |
+| `/gsd-join-discord` | GSD Discordコミュニティに参加 |
+| `/gsd-manager` | 複数フェーズ管理用のインタラクティブコマンドセンター |
 
 ### ブラウンフィールド
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:map-codebase [area]` | new-project前に既存のコードベースを分析 |
+| `/gsd-map-codebase [area]` | new-project前に既存のコードベースを分析 |
 
 ### フェーズ管理
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:add-phase` | ロードマップにフェーズを追加 |
-| `/gsd:insert-phase [N]` | フェーズ間に緊急作業を挿入 |
-| `/gsd:remove-phase [N]` | 将来のフェーズを削除し番号を振り直し |
-| `/gsd:list-phase-assumptions [N]` | 計画前にClaudeの意図するアプローチを確認 |
-| `/gsd:plan-milestone-gaps` | 監査で見つかったギャップを埋めるフェーズを作成 |
+| `/gsd-add-phase` | ロードマップにフェーズを追加 |
+| `/gsd-insert-phase [N]` | フェーズ間に緊急作業を挿入 |
+| `/gsd-remove-phase [N]` | 将来のフェーズを削除し番号を振り直し |
+| `/gsd-list-phase-assumptions [N]` | 計画前にClaudeの意図するアプローチを確認 |
+| `/gsd-plan-milestone-gaps` | 監査で見つかったギャップを埋めるフェーズを作成 |
 
 ### セッション
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:pause-work` | フェーズ途中で停止する際の引き継ぎを作成（HANDOFF.jsonを書き込み） |
-| `/gsd:resume-work` | 前回のセッションから復元 |
-| `/gsd:session-report` | 実行した作業と結果のセッションサマリーを生成 |
+| `/gsd-pause-work` | フェーズ途中で停止する際の引き継ぎを作成（HANDOFF.jsonを書き込み） |
+| `/gsd-resume-work` | 前回のセッションから復元 |
+| `/gsd-session-report` | 実行した作業と結果のセッションサマリーを生成 |
 
 ### ワークストリーム
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:workstreams` | 並列ワークストリームを管理（list、create、switch、status、progress、complete） |
+| `/gsd-workstreams` | 並列ワークストリームを管理（list、create、switch、status、progress、complete） |
 
 ### コード品質
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:review` | 現在のフェーズまたはブランチのクロスAIピアレビュー |
-| `/gsd:pr-branch` | `.planning/` コミットをフィルタリングしたクリーンなPRブランチを作成 |
-| `/gsd:audit-uat` | 検証負債を監査 — UATが未実施のフェーズを検出 |
+| `/gsd-review` | 現在のフェーズまたはブランチのクロスAIピアレビュー |
+| `/gsd-pr-branch` | `.planning/` コミットをフィルタリングしたクリーンなPRブランチを作成 |
+| `/gsd-audit-uat` | 検証負債を監査 — UATが未実施のフェーズを検出 |
 
 ### バックログ & スレッド
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:plant-seed <idea>` | トリガー条件付きの将来志向のアイデアをキャプチャ — 適切なマイルストーンで浮上 |
-| `/gsd:add-backlog <desc>` | バックログのパーキングロットにアイデアを追加（999.xナンバリング、アクティブシーケンス外） |
-| `/gsd:review-backlog` | バックログ項目をレビューし、アクティブマイルストーンに昇格またはstaleエントリを削除 |
-| `/gsd:thread [name]` | 永続コンテキストスレッド — 複数セッションにまたがる作業用の軽量クロスセッション知識 |
+| `/gsd-plant-seed <idea>` | トリガー条件付きの将来志向のアイデアをキャプチャ — 適切なマイルストーンで浮上 |
+| `/gsd-add-backlog <desc>` | バックログのパーキングロットにアイデアを追加（999.xナンバリング、アクティブシーケンス外） |
+| `/gsd-review-backlog` | バックログ項目をレビューし、アクティブマイルストーンに昇格またはstaleエントリを削除 |
+| `/gsd-thread [name]` | 永続コンテキストスレッド — 複数セッションにまたがる作業用の軽量クロスセッション知識 |
 
 ### ユーティリティ
 
 | コマンド | 説明 |
 |---------|--------------|
-| `/gsd:settings` | モデルプロファイルとワークフローエージェントを設定 |
-| `/gsd:set-profile <profile>` | モデルプロファイルを切り替え（quality/balanced/budget/inherit） |
-| `/gsd:add-todo [desc]` | 後で取り組むアイデアをキャプチャ |
-| `/gsd:check-todos` | 保留中のtodoを一覧表示 |
-| `/gsd:debug [desc]` | 永続状態を持つ体系的デバッグ |
-| `/gsd:do <text>` | フリーフォームテキストを適切なGSDコマンドに自動ルーティング |
-| `/gsd:note <text>` | ゼロフリクションのアイデアキャプチャ — ノートの追加、一覧、todoへの昇格 |
-| `/gsd:quick [--full] [--discuss] [--research]` | GSDの保証付きでアドホックタスクを実行（`--full` で全フェーズを有効化、`--discuss` で事前にコンテキストを収集、`--research` で計画前にアプローチを調査） |
-| `/gsd:health [--repair]` | `.planning/` ディレクトリの整合性を検証、`--repair` で自動修復 |
-| `/gsd:stats` | プロジェクト統計を表示 — フェーズ、プラン、要件、gitメトリクス |
-| `/gsd:profile-user [--questionnaire] [--refresh]` | セッション分析から開発者行動プロファイルを生成し、パーソナライズされた応答を提供 |
+| `/gsd-settings` | モデルプロファイルとワークフローエージェントを設定 |
+| `/gsd-set-profile <profile>` | モデルプロファイルを切り替え（quality/balanced/budget/inherit） |
+| `/gsd-add-todo [desc]` | 後で取り組むアイデアをキャプチャ |
+| `/gsd-check-todos` | 保留中のtodoを一覧表示 |
+| `/gsd-debug [desc]` | 永続状態を持つ体系的デバッグ |
+| `/gsd-do <text>` | フリーフォームテキストを適切なGSDコマンドに自動ルーティング |
+| `/gsd-note <text>` | ゼロフリクションのアイデアキャプチャ — ノートの追加、一覧、todoへの昇格 |
+| `/gsd-quick [--full] [--discuss] [--research]` | GSDの保証付きでアドホックタスクを実行（`--full` で全フェーズを有効化、`--discuss` で事前にコンテキストを収集、`--research` で計画前にアプローチを調査） |
+| `/gsd-health [--repair]` | `.planning/` ディレクトリの整合性を検証、`--repair` で自動修復 |
+| `/gsd-stats` | プロジェクト統計を表示 — フェーズ、プラン、要件、gitメトリクス |
+| `/gsd-profile-user [--questionnaire] [--refresh]` | セッション分析から開発者行動プロファイルを生成し、パーソナライズされた応答を提供 |
 
 <sup>¹ Redditユーザー OracleGreyBeard による貢献</sup>
 
@@ -628,7 +654,7 @@ lmn012o feat(08-02): create registration endpoint
 
 ## 設定
 
-GSDはプロジェクト設定を `.planning/config.json` に保存します。`/gsd:new-project` 実行時に設定するか、後から `/gsd:settings` で更新できます。完全な設定スキーマ、ワークフロートグル、gitブランチオプション、エージェントごとのモデル内訳については、[ユーザーガイド](docs/ja-JP/USER-GUIDE.md#configuration-reference)をご覧ください。
+GSDはプロジェクト設定を `.planning/config.json` に保存します。`/gsd-new-project` 実行時に設定するか、後から `/gsd-settings` で更新できます。完全な設定スキーマ、ワークフロートグル、gitブランチオプション、エージェントごとのモデル内訳については、[ユーザーガイド](docs/ja-JP/USER-GUIDE.md#configuration-reference)をご覧ください。
 
 ### コア設定
 
@@ -650,12 +676,12 @@ GSDはプロジェクト設定を `.planning/config.json` に保存します。`
 
 プロファイルの切り替え：
 ```
-/gsd:set-profile budget
+/gsd-set-profile budget
 ```
 
 非Anthropicプロバイダー（OpenRouter、ローカルモデル）を使用する場合や、現在のランタイムのモデル選択に従う場合（例：OpenCode `/model`）は `inherit` を使用してください。
 
-または `/gsd:settings` で設定できます。
+または `/gsd-settings` で設定できます。
 
 ### ワークフローエージェント
 
@@ -672,9 +698,9 @@ GSDはプロジェクト設定を `.planning/config.json` に保存します。`
 | `workflow.skip_discuss` | `false` | 自律モードでdiscuss-phaseをスキップ |
 | `workflow.text_mode` | `false` | リモートセッション用のテキスト専用モード（TUIメニューなし） |
 
-これらのトグルには `/gsd:settings` を使用するか、呼び出し時にオーバーライドできます：
-- `/gsd:plan-phase --skip-research`
-- `/gsd:plan-phase --skip-verify`
+これらのトグルには `/gsd-settings` を使用するか、呼び出し時にオーバーライドできます：
+- `/gsd-plan-phase --skip-research`
+- `/gsd-plan-phase --skip-verify`
 
 ### 実行
 
@@ -756,7 +782,7 @@ GSDのコードベースマッピングおよび分析コマンドは、プロ�
 - Codexの場合、`~/.codex/skills/gsd-*/SKILL.md`（グローバル）または `./.codex/skills/gsd-*/SKILL.md`（ローカル）にスキルが存在するか確認してください
 
 **コマンドが期待通りに動作しない？**
-- `/gsd:help` を実行してインストールを確認してください
+- `/gsd-help` を実行してインストールを確認してください
 - `npx get-shit-done-cc` を再実行して再インストールしてください
 
 **最新バージョンへのアップデート？**
@@ -781,19 +807,23 @@ GSDを完全に削除するには：
 npx get-shit-done-cc --claude --global --uninstall
 npx get-shit-done-cc --opencode --global --uninstall
 npx get-shit-done-cc --gemini --global --uninstall
+npx get-shit-done-cc --kilo --global --uninstall
 npx get-shit-done-cc --codex --global --uninstall
 npx get-shit-done-cc --copilot --global --uninstall
 npx get-shit-done-cc --cursor --global --uninstall
 npx get-shit-done-cc --antigravity --global --uninstall
+npx get-shit-done-cc --trae --global --uninstall
 
 # ローカルインストール（現在のプロジェクト）
 npx get-shit-done-cc --claude --local --uninstall
 npx get-shit-done-cc --opencode --local --uninstall
 npx get-shit-done-cc --gemini --local --uninstall
+npx get-shit-done-cc --kilo --local --uninstall
 npx get-shit-done-cc --codex --local --uninstall
 npx get-shit-done-cc --copilot --local --uninstall
 npx get-shit-done-cc --cursor --local --uninstall
 npx get-shit-done-cc --antigravity --local --uninstall
+npx get-shit-done-cc --trae --local --uninstall
 ```
 
 これにより、他の設定を保持しながら、すべてのGSDコマンド、エージェント、フック、設定が削除されます。
@@ -802,7 +832,7 @@ npx get-shit-done-cc --antigravity --local --uninstall
 
 ## コミュニティポート
 
-OpenCode、Gemini CLI、Codexは `npx get-shit-done-cc` でネイティブサポートされています。
+OpenCode、Gemini CLI、Kilo、Codexは `npx get-shit-done-cc` でネイティブサポートされています。
 
 以下のコミュニティポートがマルチランタイムサポートの先駆けとなりました：
 
