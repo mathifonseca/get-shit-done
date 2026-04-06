@@ -95,18 +95,38 @@ All default to `true` (opinionated — the upstream would likely default most to
 
 ## Upstream tracking
 
-This fork tracks the upstream repo at `gsd-build/get-shit-done`. The strategy is **cherry-pick, not merge** — upstream releases are reviewed for bug fixes and new features, and useful changes are selectively applied. This avoids conflicts with the opinionated defaults and workflow changes in this fork.
+This fork tracks the upstream repo at `gsd-build/get-shit-done`. The `upstream` remote is configured and the strategy is **merge with conflict resolution** — upstream releases are merged, conflicts are resolved by keeping both sides (upstream's new features plus fork additions).
 
-To sync:
+### How to sync
+
 ```bash
+cd ~/code/get-shit-done
 git fetch upstream
 git log upstream/main --oneline -20    # Review what's new
-git cherry-pick <commit>               # Apply specific fixes
+git merge upstream/main                # Merge (or cherry-pick specific commits)
+# Resolve conflicts: keep BOTH sides — upstream features + fork additions
+npm run build:hooks                    # Rebuild hooks to dist/
+node bin/install.js --claude --global  # Reinstall
+rm -f ~/.cache/gsd/gsd-update-check.json  # Clear update cache
 ```
+
+### Important: build before install
+
+The installer copies hooks from `hooks/dist/`, not `hooks/`. Always run `npm run build:hooks` before `node bin/install.js` — otherwise edited hooks won't be deployed.
+
+### Update notifications
+
+The fork-aware statusline shows `⬆ upstream X.Y.Z available — cherry-pick from upstream` (cyan) instead of the standard `/gsd-update` prompt. Running `/gsd-update` is blocked — it would overwrite fork changes with the upstream npm package.
+
+### Sync history
+
+| Date | Upstream Version | Commit | Notes |
+|------|-----------------|--------|-------|
+| 2026-04-06 | v1.32.0 | `06fd18d` | 8 conflicts resolved. Added: code review, global learnings, execution context profiles, /gsd-explore, /gsd-import, /gsd-undo, stall detection, prompt injection improvements, Node 24 minimum, /gsd: → /gsd- rename |
 
 ## Divergence point
 
-This fork diverged from upstream at commit `2f7f317` (2026-04-03). To see the full delta:
+This fork diverged from upstream at commit `2f7f317` (2026-04-03), tagged as `fork-divergence-point`. To see the full delta:
 ```bash
-git diff upstream/main...main
+git diff fork-divergence-point...HEAD
 ```
