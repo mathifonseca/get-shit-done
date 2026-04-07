@@ -89,22 +89,22 @@ Each change lives in its own `openspec/changes/<name>/` directory with standardi
 
 | Source | Idea | How it could fit this fork |
 |--------|------|---------------------------|
-| **Spec Kit** | Constitution file (`/speckit.constitution`) — project principles as a spec artifact | Our SDLC already serves this purpose, but a `/gsd:constitution` that generates a project-specific principles file from SDLC + project context could be interesting |
+| **Spec Kit** | Constitution file (`/speckit.constitution`) — project principles as a spec artifact | Our SDLC already serves this purpose, but a `/gsd-constitution` that generates a project-specific principles file from SDLC + project context could be interesting |
 | **Spec Kit** | Community extensions ecosystem | This fork could support user-defined verification plugins or custom DoD checklist items |
-| **OpenSpec** | Per-change artifact directories (`openspec/changes/`) | GSD already has per-phase directories — but quick tasks don't get this structure. Could add lightweight change tracking to `/gsd:quick` |
-| **OpenSpec** | `/opsx:verify` as a lightweight per-change verification | We have `/gsd:verify-work` — but a lighter-weight per-commit or per-change verification could be useful during development, not just at phase boundaries |
+| **OpenSpec** | Per-change artifact directories (`openspec/changes/`) | GSD already has per-phase directories — but quick tasks don't get this structure. Could add lightweight change tracking to `/gsd-quick` |
+| **OpenSpec** | `/opsx:verify` as a lightweight per-change verification | We have `/gsd-verify-work` — but a lighter-weight per-commit or per-change verification could be useful during development, not just at phase boundaries |
 | **BMAD** | Named agent roles (Analyst, PM, Architect) beyond generic "planner/executor" | Our adversarial validation already does this for verification. Could extend to planning with a "Devil's Advocate" agent that challenges the plan before execution |
 | **BMAD** | Context sharding for large documents | For large projects, auto-splitting CONTEXT.md or REQUIREMENTS.md into shards that agents load selectively. Reduces context window pressure |
 | **BMAD** | Checkpoint preview as a distinct phase | Our Playwright verification is similar, but a dedicated "checkpoint" command that screenshots + summarizes current state could be useful mid-phase, not just post-phase |
 | **BMAD** | Edge Case Hunter as parallel review | Similar to our adversarial finder agent — but run *during* execution as a parallel review layer, not just post-execution during verification |
-| **BMAD** | Codebase flattener for AI consumption | GSD's `/gsd:map-codebase` serves a similar purpose but produces structured analysis docs. A flattener that produces a single context-optimized file could complement it |
+| **BMAD** | Codebase flattener for AI consumption | GSD's `/gsd-map-codebase` serves a similar purpose but produces structured analysis docs. A flattener that produces a single context-optimized file could complement it |
 
 ## Prioritized Recommendations
 
 **High value, low effort:**
 1. Edge Case Hunter during execution (extend adversarial validation to run in parallel with executor)
 2. Context sharding for large CONTEXT.md / REQUIREMENTS.md files
-3. Lightweight change tracking for `/gsd:quick` tasks
+3. Lightweight change tracking for `/gsd-quick` tasks
 
 **High value, high effort:**
 4. Devil's Advocate agent that challenges plans before execution

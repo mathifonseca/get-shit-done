@@ -74,7 +74,7 @@ All default to `true` (opinionated — the upstream would likely default most to
 - `workflows/settings.md` — all new config keys in schema
 
 **New files:**
-- `commands/gsd/sdlc-audit.md` — `/gsd:sdlc-audit` command registration
+- `commands/gsd/sdlc-audit.md` — `/gsd-sdlc-audit` command registration
 - `workflows/sdlc-audit.md` — 20-check, 4-tier project audit workflow
 - `FORK.md` — this file
 - `RESEARCH.md` — competitive landscape analysis (Spec Kit, OpenSpec, BMAD)

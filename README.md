@@ -60,13 +60,13 @@ The upstream GSD is designed to work for everyone. This fork is designed for eng
 - **Playwright tests are first-class.** Screenshots are verification evidence. Manual UAT is the fallback, not the default.
 - **Projects should be scaffolded right from day one.** Makefile, pre-commit hooks, preflight checks, and domain-scoped rules — all generated based on your stack.
 
-All of these are **on by default**. Every feature is configurable — turn anything off with `/gsd:settings` — but the defaults encode an engineering philosophy where quality is automated, not aspirational.
+All of these are **on by default**. Every feature is configurable — turn anything off with `/gsd-settings` — but the defaults encode an engineering philosophy where quality is automated, not aspirational.
 
 ## Getting Started with this Fork
 
 ### What's different from upstream
 
-When you run `/gsd:new-project`, you'll be asked additional questions:
+When you run `/gsd-new-project`, you'll be asked additional questions:
 
 1. **Issue tracker** — Where do you track issues? (GitHub Issues, Linear, Jira)
 2. **Branch naming** — What's your convention? (e.g., `prefix-NN/description`)
@@ -80,21 +80,21 @@ These generate a fully configured project with quality gates from day one.
 The enriched pipeline looks like this:
 
 ```
-/gsd:new-project
+/gsd-new-project
   → Issue tracker, branch naming, PR conventions configured
   → Makefile, preflight.yaml, .claude/rules/ scaffolded
 
-/gsd:discuss-phase
+/gsd-discuss-phase
   → All questions asked per area (no arbitrary cutoff)
   → Architectural decisions auto-propagated to CLAUDE.md
 
-/gsd:plan-phase
+/gsd-plan-phase
   → Outcome-focused task specs (what, not how)
   → One-sentence objectives required
   → Plan-checker validates goals
   → Devil's Advocate challenges approach, surfaces risks
 
-/gsd:execute-phase
+/gsd-execute-phase
   → Tests are read-only (completion contracts)
   → Executor prefers Makefile targets
   → Edge Case Hunter reviews code in parallel (boundary conditions, error paths, security)
@@ -111,10 +111,10 @@ The enriched pipeline looks like this:
 
 ### Auditing your project
 
-Run `/gsd:sdlc-audit` to check how well your project follows the methodology:
+Run `/gsd-sdlc-audit` to check how well your project follows the methodology:
 
 ```
-$ /gsd:sdlc-audit
+$ /gsd-sdlc-audit
 
 ## SDLC Audit Report
 
@@ -175,13 +175,13 @@ People who want to describe what they want and have it built correctly — witho
 
 Built-in quality gates catch real problems: schema drift detection flags ORM changes missing migrations, security enforcement anchors verification to threat models, and scope reduction detection prevents the planner from silently dropping your requirements.
 
-### v1.33.0 Highlights
+### v1.34.0 Highlights
 
-- **9 bug fixes** — Frontmatter parser, cross-platform planning lock, model alias updates, prompt guard, Kilo/skill path replacement, and more
-- **Shared behavioral references** — Consistent agent behavior via questioning, domain-probes, and UI-brand reference docs
-- **CONFIG_DEFAULTS refactor** — Single source of truth for all config defaults, eliminating scattered hardcoded values
-- **Test standardization** — Full migration to `node:assert/strict` and `t.after()` cleanup patterns
-- **Typed contribution templates** — Separate Bug, Enhancement, and Feature workflows with approval gates
+- **Gates taxonomy** — 4 canonical gate types (pre-flight, revision, escalation, abort) wired into plan-checker and verifier agents
+- **Shell hooks fix** — `hooks/*.sh` files are now correctly included in the npm package, eliminating startup hook errors on fresh installs
+- **Post-merge hunk verification** — `reapply-patches` detects silently dropped hunks after three-way merge
+- **detectConfigDir fix** — Claude Code users no longer see false "update available" warnings when multiple runtimes are installed
+- **3 bug fixes** — Milestone backlog preservation, detectConfigDir priority, and npm package manifest
 
 ---
 
@@ -246,7 +246,7 @@ npx get-shit-done-cc --cursor --global      # Install to ~/.cursor/
 npx get-shit-done-cc --cursor --local       # Install to ./.cursor/
 
 # Windsurf
-npx get-shit-done-cc --windsurf --global    # Install to ~/.windsurf/
+npx get-shit-done-cc --windsurf --global    # Install to ~/.codeium/windsurf/
 npx get-shit-done-cc --windsurf --local     # Install to ./.windsurf/
 
 # Antigravity

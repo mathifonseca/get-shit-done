@@ -253,7 +253,7 @@ function cmdPhasesClear(cwd, raw, args) {
 
   if (fs.existsSync(phasesDir)) {
     const entries = fs.readdirSync(phasesDir, { withFileTypes: true });
-    const dirs = entries.filter(e => e.isDirectory());
+    const dirs = entries.filter(e => e.isDirectory() && !/^999(?:\.|$)/.test(e.name));
 
     if (dirs.length > 0 && !confirm) {
       error(

@@ -23,7 +23,7 @@ If FORK.md exists OR the installed VERSION file doesn't match any published npm 
 ```
 ⚠️  This is a fork of GSD, not the upstream version.
 
-Running /gsd:update would overwrite your fork's changes with the official npm release.
+Running /gsd-update would overwrite your fork's changes with the official npm release.
 
 To update your fork:
   1. cd ~/code/get-shit-done
