@@ -123,6 +123,7 @@ The fork-aware statusline shows `⬆ upstream X.Y.Z available — cherry-pick fr
 | Date | Upstream Version | Commit | Notes |
 |------|-----------------|--------|-------|
 | 2026-04-06 | v1.32.0 | `06fd18d` | 8 conflicts resolved. Added: code review, global learnings, execution context profiles, /gsd-explore, /gsd-import, /gsd-undo, stall detection, prompt injection improvements, Node 24 minimum, /gsd: → /gsd- rename |
+| 2026-04-07 | v1.34.2 | `8bee55a` | 1 conflict resolved (CONFIGURATION.md). Added: gates taxonomy, reapply-patches verification, Node 22 restored, detectConfigDir fix, hooks packaging fix, backlog preserve fix, Windsurf config dir. Migrated remaining /gsd: refs to /gsd- in fork files |
 
 ## Divergence point
 
