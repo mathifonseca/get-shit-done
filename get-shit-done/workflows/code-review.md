@@ -336,6 +336,22 @@ for file in "${REVIEW_FILES[@]}"; do
 done
 ```
 
+Check two-stage review config and collect PLAN.md files if enabled:
+```bash
+TWO_STAGE=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.two_stage_review 2>/dev/null || echo "true")
+PLAN_FILES_CONFIG=""
+PLAN_FILES_TO_READ=""
+if [ "$TWO_STAGE" = "true" ]; then
+  PLAN_FILES=$(ls "${PHASE_DIR}"/*-PLAN.md 2>/dev/null)
+  if [ -n "$PLAN_FILES" ]; then
+    for plan_file in $PLAN_FILES; do
+      PLAN_FILES_TO_READ+="- ${plan_file}\n"
+      PLAN_FILES_CONFIG+="  - ${plan_file}\n"
+    done
+  fi
+fi
+```
+
 Build config block for agent:
 ```bash
 CONFIG_FILES=""
@@ -350,15 +366,18 @@ Spawn the gsd-code-reviewer agent:
 Task(subagent_type="gsd-code-reviewer", prompt="
 <files_to_read>
 ${FILES_TO_READ}
+${PLAN_FILES_TO_READ}
 </files_to_read>
 
 <config>
 depth: ${REVIEW_DEPTH}
 phase_dir: ${PHASE_DIR}
 review_path: ${REVIEW_PATH}
+two_stage_review: ${TWO_STAGE}
 ${DIFF_BASE:+diff_base: ${DIFF_BASE}}
 files:
 ${CONFIG_FILES}
+${PLAN_FILES_CONFIG:+plan_files:\n${PLAN_FILES_CONFIG}}
 </config>
 
 Review the listed source files at ${REVIEW_DEPTH} depth. Write findings to ${REVIEW_PATH}.

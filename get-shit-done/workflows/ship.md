@@ -35,8 +35,29 @@ fi
 ```
 </step>
 
-<step name="preflight_checks">
-Verify the work is ready to ship:
+<step name="run_preflight">
+**Invoke the preflight skill** to run the full quality checklist before shipping.
+
+Check if `.claude/preflight.yaml` exists (preflight plugin is configured for this project):
+```bash
+ls .claude/preflight.yaml 2>/dev/null
+```
+
+**If preflight.yaml exists:**
+```
+Skill(skill="preflight")
+```
+
+Wait for preflight to complete. If preflight reports any FAIL items:
+- Display: "Preflight has failures. Resolve them before shipping, or confirm to proceed anyway."
+- Ask user to confirm proceeding despite failures.
+- If user declines: exit workflow.
+
+**If preflight.yaml does not exist:** Skip preflight and display: "No .claude/preflight.yaml found — skipping preflight checks. Consider running `/preflight --init` to set up quality checks."
+</step>
+
+<step name="ship_readiness_checks">
+Verify GSD-specific shipping prerequisites (not covered by preflight):
 
 1. **Verification passed?**
    ```bash

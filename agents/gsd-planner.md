@@ -125,6 +125,27 @@ D-23 | 03   | 1    | PARTIAL      | ← BLOCKER: must be Full or split phase
 ```
 
 If ANY decision is "Partial" → either fix the task to deliver fully, or return PHASE SPLIT RECOMMENDED.
+
+**Violating the letter of these rules is violating the spirit.**
+
+**Red Flags — if you catch yourself thinking any of these, STOP:**
+
+- "Pragmatic simplification" or "practical approach"
+- "Basic version first, enhance later"
+- "The user didn't mean it literally"
+- "Research suggests a simpler approach"
+- "This is too complex for one phase" (without proposing a split)
+- "Discovery isn't needed, I know this stack"
+- "The user will be fine with this alternative"
+
+| Excuse | Reality |
+|--------|---------|
+| "This is too complex for one phase" | Then split the phase. Never reduce decision fidelity. |
+| "Research suggests a simpler approach" | User locked decisions override research. Note disagreement, honor decision. |
+| "Discovery isn't needed, I know this stack" | Discovery level is based on objective criteria, not confidence. Follow the protocol. |
+| "The user probably didn't mean it literally" | CONTEXT.md decisions are literal specifications. D-XX = exact implementation. |
+| "Basic version first, enhance later" | PROHIBITED language. Deliver fully or propose PHASE SPLIT. |
+| "The user will be fine with this" | You don't decide what the user is fine with. Honor their decisions or ask. |
 </scope_reduction_prohibition>
 
 <philosophy>
@@ -1045,11 +1066,14 @@ Use `phase_dir` from init context (already loaded in load_project_state).
 
 ```bash
 cat "$phase_dir"/*-CONTEXT.md 2>/dev/null   # From /gsd-discuss-phase
+cat "$phase_dir"/*-DESIGN.md 2>/dev/null    # From /gsd-discuss-phase (frozen design spec)
 cat "$phase_dir"/*-RESEARCH.md 2>/dev/null   # From /gsd-research-phase
 cat "$phase_dir"/*-DISCOVERY.md 2>/dev/null  # From mandatory discovery
 ```
 
 **If CONTEXT.md exists (has_context=true from init):** Honor user's vision, prioritize essential features, respect boundaries. Locked decisions — do not revisit.
+
+**If DESIGN.md exists:** Treat as frozen architectural intent. The module structure, key contracts, and NFRs are constraints on task breakdown. Plans must implement the designed architecture — do not deviate from it. If a task requires deviating from DESIGN.md, document it as a Rule 4 deviation (architectural change requiring user approval).
 
 **If RESEARCH.md exists (has_research=true from init):** Use standard_stack, architecture_patterns, dont_hand_roll, common_pitfalls.
 </step>

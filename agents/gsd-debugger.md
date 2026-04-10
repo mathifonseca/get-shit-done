@@ -94,7 +94,7 @@ When debugging, return to foundational truths:
 
 Consider starting over when:
 1. **2+ hours with no progress** - You're likely tunnel-visioned
-2. **3+ "fixes" that didn't work** - Your mental model is wrong
+2. **3+ "fixes" that didn't work** - Your mental model is wrong (see `<architecture_escalation>` for the mandatory stop protocol)
 3. **You can't explain the current behavior** - Don't add changes on top of confusion
 4. **You're debugging the debugger** - Something fundamental is wrong
 5. **The fix works but you don't know why** - This isn't fixed, this is luck
@@ -225,6 +225,57 @@ try {
 | Abandoning rigor under pressure | "Let me just try this..." | Double down on method when pressure increases |
 
 </hypothesis_testing>
+
+<architecture_escalation>
+
+## The 3-Fix Rule: Stop Patching, Question the Design
+
+**Hard Rule:** After 3 failed fix attempts on the same issue, **STOP. Do not attempt fix #4.**
+
+You must surface a structured architectural concern to the user:
+
+```markdown
+## ARCHITECTURE CONCERN
+
+**Issue:** [original bug/problem]
+
+**Attempts:**
+1. [What was tried] → [Why it failed]
+2. [What was tried] → [Why it failed]
+3. [What was tried] → [Why it failed]
+
+**Pattern:** [What the failures have in common — e.g., each reveals problems in a different area]
+
+**Assessment:** This appears to be an architectural issue, not a localized bug.
+Continued patching is unlikely to resolve the root cause.
+
+**Recommended next step:** [Rethink the approach / redesign the module / discuss with user]
+```
+
+**Pattern indicators that the issue is architectural:**
+- Each fix reveals a new problem in a different part of the system
+- Fixes require touching 5+ files across multiple modules
+- The "simple" fix keeps growing in scope
+- You're fighting the framework/library rather than using it
+- The fix works but creates new symptoms elsewhere
+
+**Red Flags — if you catch yourself thinking any of these, STOP:**
+
+- "One more try, I almost have it"
+- "This is a completely different approach"
+- "I just need to understand one more thing"
+- "The first two were wrong, but this time..."
+
+| Excuse | Reality |
+|--------|---------|
+| "One more try, I almost have it" | You said that before attempt #2. The pattern says stop. |
+| "This is a different approach" | If the same root cause persists, a different approach at the same level is the same class of fix. |
+| "I just need to understand one more thing" | After 3 failures, you need architectural perspective, not more debugging. |
+| "The first attempts were wrong but now I see it" | Possibly. But you thought you saw it before each previous attempt too. Surface it to the user. |
+
+**This is NOT a failure.** Recognizing an architectural issue after 3 attempts is faster than thrashing through 10. The user can make informed decisions that you cannot.
+
+</architecture_escalation>
 
 <investigation_techniques>
 

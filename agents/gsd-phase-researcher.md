@@ -61,6 +61,16 @@ This ensures research aligns with project-specific conventions and libraries.
 | `## Deferred Ideas` | Out of scope — ignore completely |
 
 If CONTEXT.md exists, it constrains your research scope. Don't explore alternatives to locked decisions.
+
+**DESIGN.md** (if exists) — Frozen design spec from `/gsd-discuss-phase`
+
+| Section | How You Use It |
+|---------|----------------|
+| `## Architecture Overview` | Research scope is constrained to this architecture |
+| `## Key Contracts` | Validate these contracts against library capabilities |
+| `## Non-Functional Requirements` | Research NFR feasibility with chosen stack |
+
+If DESIGN.md exists, it further constrains scope alongside CONTEXT.md. Don't research alternative architectures.
 </upstream_input>
 
 <downstream_consumer>
@@ -479,9 +489,10 @@ Extract from init JSON: `phase_dir`, `padded_phase`, `phase_number`, `commit_doc
 
 Also read `.planning/config.json` — include Validation Architecture section in RESEARCH.md unless `workflow.nyquist_validation` is explicitly `false`. If the key is absent or `true`, include the section.
 
-Then read CONTEXT.md if exists:
+Then read CONTEXT.md and DESIGN.md if they exist:
 ```bash
 cat "$phase_dir"/*-CONTEXT.md 2>/dev/null
+cat "$phase_dir"/*-DESIGN.md 2>/dev/null    # From /gsd-discuss-phase (frozen design spec)
 ```
 
 **If CONTEXT.md exists**, it constrains research:
@@ -491,6 +502,14 @@ cat "$phase_dir"/*-CONTEXT.md 2>/dev/null
 | **Decisions** | Locked — research THESE deeply, no alternatives |
 | **Claude's Discretion** | Research options, make recommendations |
 | **Deferred Ideas** | Out of scope — ignore completely |
+
+**If DESIGN.md exists**, it further constrains research:
+
+| Section | Constraint |
+|---------|------------|
+| **Architecture Overview** | Research scope is constrained to this architecture — do not explore alternative architectures |
+| **Key Contracts** | Validate these contracts against library capabilities — research should confirm feasibility |
+| **Non-Functional Requirements** | Research NFR feasibility with the chosen stack |
 
 **Examples:**
 - User decided "use library X" → research X deeply, don't explore alternatives

@@ -78,6 +78,45 @@ Additional checks:
 
 </depth_levels>
 
+<review_stages>
+
+## Two-Stage Review (Spec Compliance → Code Quality)
+
+Read the two-stage config:
+```bash
+TWO_STAGE=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.two_stage_review 2>/dev/null || echo "true")
+```
+
+**When `TWO_STAGE` is `"true"` (default) AND `plan_files` is provided in `<config>`:**
+
+Execute review in two sequential passes. Stage 1 must complete before Stage 2 begins.
+
+### Stage 1: Spec Compliance
+
+For each PLAN.md file provided:
+
+1. **Parse tasks:** Extract each task's `<done>` criteria, `<files>` list, and `<verify>` commands
+2. **Verify done criteria:** For each task, check that the `<done>` criteria are met in the actual codebase:
+   - Files listed in `<files>` exist and contain the described functionality
+   - Behaviors described in `<done>` are observable in the code (function signatures, routes, components, etc.)
+   - No stubs or placeholders where real implementation was specified
+3. **Classify deviations:**
+   - **MISSING:** Task output not found in codebase at all
+   - **INCOMPLETE:** Partial implementation — some `<done>` criteria met, others not
+   - **DIVERGENT:** Implementation contradicts the spec (different behavior than specified)
+
+Record each deviation with: plan reference, task number, expected behavior (from `<done>`), actual state (from code), classification.
+
+### Stage 2: Code Quality
+
+Proceed with the standard review behavior defined in `<execution_flow>` below. This is the existing review — bugs, security, code quality checks at the specified depth level.
+
+**When `TWO_STAGE` is `"false"` OR no `plan_files` provided:**
+
+Skip Stage 1 entirely. Execute only Stage 2 (standard code quality review).
+
+</review_stages>
+
 <execution_flow>
 
 <step name="load_context">
@@ -244,6 +283,10 @@ files_reviewed: N
 files_reviewed_list:
   - path/to/file1.ext
   - path/to/file2.ext
+spec_compliance:          # Only present when two_stage_review is true
+  plans_checked: N
+  tasks_verified: N
+  deviations: N
 findings:
   critical: N
   warning: N
@@ -269,7 +312,24 @@ The `files_reviewed_list` field is REQUIRED — it preserves the exact file scop
 
 {Brief narrative: what was reviewed, high-level assessment, key concerns if any}
 
-{If status=clean: "All reviewed files meet quality standards. No issues found."}
+{If status=clean AND no spec deviations: "All reviewed files meet quality standards. No issues found."}
+
+{If two_stage_review was active AND deviations found, include this section:}
+
+## Spec Compliance
+
+**Plans Checked:** {count}
+**Tasks Verified:** {total}
+**Deviations Found:** {count}
+
+### SC-01: {Deviation Title}
+
+**Plan:** {phase}-{plan}, Task {N}: {task name}
+**Expected:** {done criteria from plan}
+**Actual:** {what was found in code}
+**Classification:** MISSING | INCOMPLETE | DIVERGENT
+
+{If two_stage_review was active AND no deviations: "All plan tasks verified — implementation matches spec."}
 
 {If issues_found, include sections below}
 

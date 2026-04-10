@@ -250,7 +250,15 @@ If "Run discuss-phase first":
 **If RESEARCH.md missing OR `--research` flag:**
 
 **If no explicit flag (`--research` or `--skip-research`) and not `--auto`:**
-Ask the user whether to research, with a contextual recommendation based on the phase:
+
+Check config to determine if research should auto-select:
+```bash
+RESEARCH_CFG=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.research 2>/dev/null || echo "true")
+```
+
+**If `RESEARCH_CFG` is `"true"` (default):** Skip the question — auto-select "Research first" and proceed to research. Display: `Research enabled (workflow.research=true) — researching before planning.`
+
+**If `RESEARCH_CFG` is `"false"`:** Ask the user whether to research, with a contextual recommendation based on the phase:
 
 If `TEXT_MODE` is true, present as a plain-text numbered list:
 ```
@@ -443,7 +451,21 @@ UI_SPEC_PATH="${UI_SPEC_FILE}"
 ```
 Continue to step 6.
 
-**If `AUTO_CHAIN` is `false` (manual invocation):**
+**If `AUTO_CHAIN` is `false` (manual invocation) AND `UI_PHASE_CFG` is `true` (default):**
+
+Auto-generate UI-SPEC without prompting (same as auto-chain behavior):
+```
+Skill(skill="gsd-ui-phase", args="${PHASE} --auto ${GSD_WS}")
+```
+Display: `UI design contract enabled (workflow.ui_phase=true) — generating UI-SPEC.md.`
+After `gsd-ui-phase` returns, re-read:
+```bash
+UI_SPEC_FILE=$(ls "${PHASE_DIR}"/*-UI-SPEC.md 2>/dev/null | head -1)
+UI_SPEC_PATH="${UI_SPEC_FILE}"
+```
+Continue to step 6.
+
+**If `AUTO_CHAIN` is `false` AND `UI_PHASE_CFG` is NOT `true`:**
 
 If `TEXT_MODE` is true, present as a plain-text numbered list:
 ```

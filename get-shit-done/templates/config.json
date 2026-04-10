@@ -24,7 +24,10 @@
     "scaffold_precommit": true,
     "scaffold_preflight": true,
     "scaffold_rules": true,
-    "update_claude_md_on_complete": true
+    "update_claude_md_on_complete": true,
+    "two_stage_review": true,
+    "verification_discipline": true,
+    "design_spec": true
   },
   "project": {
     "issue_tracker": null,

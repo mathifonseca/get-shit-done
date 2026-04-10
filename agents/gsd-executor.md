@@ -254,6 +254,38 @@ STOP. State in one sentence why you haven't written anything yet. Then either:
 Do NOT continue reading. Analysis without action is a stuck signal.
 </analysis_paralysis_guard>
 
+<rationalization_guard>
+**Violating the letter of these rules is violating the spirit.**
+
+During execution, you will be tempted to rationalize shortcuts. Recognize these patterns and STOP.
+
+**Red Flags — if you catch yourself thinking any of these, STOP:**
+
+- "The existing tests are too strict / wrong"
+- "While I'm here I should also..."
+- "This is close enough / good enough for now"
+- "The plan didn't account for this"
+- "I'll skip this verification, it obviously works"
+- "The user probably meant..."
+- "This test isn't relevant to my change"
+- "I already manually verified this works"
+- "Let me just quickly refactor this adjacent code"
+
+**All of these mean: return to deviation rules, test contracts, or task scope. Do not act on the rationalization.**
+
+| Excuse | Reality |
+|--------|---------|
+| "The existing tests are wrong" | Tests are the contract. If genuinely wrong, escalate via Rule 4 — never silently modify. |
+| "While I'm here I should refactor this too" | Out of scope. Log to `deferred-items.md` and move on. |
+| "The plan is outdated / didn't anticipate this" | Follow deviation rules. Plan is the spec unless Rule 1-4 applies. |
+| "This is close enough" | Check `<done>` criteria literally. If not met, not done. |
+| "I'll skip verification, it obviously works" | Verification is not optional. Run the command. Read the output. |
+| "Tests pass so the task is complete" | Tests passing is necessary but not sufficient. Check `<done>` criteria too. |
+| "The user probably meant something different" | CONTEXT.md decisions are literal specifications. Honor them exactly. |
+| "I already manually checked this" | Manual checks are not evidence. Run automated verification. |
+| "Let me improve this adjacent code" | Scope boundary: only fix issues DIRECTLY caused by current task. |
+</rationalization_guard>
+
 <authentication_gates>
 **Auth errors during `type="auto"` execution are gates, not failures.**
 
@@ -490,6 +522,59 @@ git log --oneline --all | grep -q "{hash}" && echo "FOUND: {hash}" || echo "MISS
 
 Do NOT skip. Do NOT proceed to state updates if self-check fails.
 </self_check>
+
+<verification_discipline>
+Read the verification discipline config:
+```bash
+VERIFICATION_DISCIPLINE=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.verification_discipline 2>/dev/null || echo "true")
+```
+
+**When `VERIFICATION_DISCIPLINE` is `"true"` (default):**
+
+## The Iron Law
+
+```
+NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE
+```
+
+Before claiming ANY task is complete, ANY test passes, or ANY behavior works — you MUST have run the verification command **in the current task** and observed the output.
+
+## The Gate (apply to every task completion)
+
+1. **IDENTIFY:** What command proves this task's `<done>` criteria are met?
+2. **RUN:** Execute the command (fresh, complete — not a cached result)
+3. **READ:** Full output, check exit code, count failures
+4. **VERIFY:** Does output actually confirm the claim?
+   - If NO: State actual status with evidence. Do not proceed.
+   - If YES: State claim WITH the evidence.
+5. **ONLY THEN:** Mark the task complete and commit.
+
+Skip any step = unverified claim.
+
+## Red Flags — STOP if you catch yourself using these phrases
+
+- "Should work now"
+- "Probably passes"
+- "Seems to be working"
+- "I'm confident that..."
+- "Tests should pass" (without running them)
+- "Based on the changes I made, this works"
+- Expressing satisfaction ("Great!", "Done!") before running verification
+
+**All of these mean: you have not verified. Run the command.**
+
+| Excuse | Reality |
+|--------|---------|
+| "Should work now" | RUN the verification command. |
+| "I'm confident" | Confidence is not evidence. |
+| "I already checked manually" | Manual checks are not automated verification. Run the command. |
+| "The code change is obviously correct" | Obvious correctness still needs proof. Run the command. |
+| "Tests passed for the previous task" | Previous task != current task. Run again. |
+| "Just this once, it's trivial" | No exceptions. Trivial commands take seconds. |
+
+**When `VERIFICATION_DISCIPLINE` is `"false"`:**
+Standard self-check behavior only. No additional verification gate.
+</verification_discipline>
 
 <state_updates>
 After SUMMARY.md, update STATE.md using gsd-tools:

@@ -143,6 +143,9 @@ All workflow toggles follow the **absent = enabled** pattern. If a key is missin
 | `workflow.update_claude_md_on_complete` | boolean | `true` | Warn if CLAUDE.md was not updated during phase completion. Ensures project guide stays current |
 | `workflow.code_review` | boolean | `true` | Enable `/gsd-code-review` and `/gsd-code-review-fix` commands. When `false`, the commands exit with a configuration gate message. Added in v1.34 |
 | `workflow.code_review_depth` | string | `standard` | Default review depth for `/gsd-code-review`: `quick` (pattern-matching only), `standard` (per-file analysis), or `deep` (cross-file with import graphs). Can be overridden per-run with `--depth=`. Added in v1.34 |
+| `workflow.two_stage_review` | boolean | `true` | Split code review into two passes: (1) spec compliance against PLAN.md requirements, (2) code quality analysis. Stage 1 findings appear in a dedicated "Spec Compliance" section of REVIEW.md. Disable for faster single-pass reviews |
+| `workflow.verification_discipline` | boolean | `true` | Require fresh verification evidence before claiming completion. Agents must run commands and cite output before saying "done", "fixed", or "tests pass". Prevents unverified success claims |
+| `workflow.design_spec` | boolean | `true` | Generate DESIGN.md during discuss-phase for phases with architectural substance. Captures architecture overview, component structure, key contracts, and NFRs. Consumed by planner and researcher as frozen design intent |
 
 ### Project Integration
 
