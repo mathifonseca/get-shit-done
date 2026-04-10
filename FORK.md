@@ -26,6 +26,14 @@ The upstream project is designed to work for everyone. This fork is designed to 
 | **During execution** | Single executor | **Edge Case Hunter** — parallel review agent catches boundary conditions and failure modes in real-time alongside executors |
 | **Before execution** | Plan-checker only | **Devil's Advocate** — challenges architectural choices, surfaces risks, forces plan improvement before execution begins |
 | **Quality gates** | No regression checks | **Ratchet effect** — coverage, type strictness, lint rules, and CI steps can never regress |
+| **Agent discipline** | Trust agents to follow instructions | **Anti-rationalization engineering** — red flags lists and excuse/reality tables prevent agents from rationalizing shortcuts |
+| **Completion claims** | Self-check after SUMMARY | **Verification discipline** — agents must run commands and cite output before saying "done" or "tests pass" |
+| **Code review** | Single-pass review | **Two-stage review** — spec compliance (does it match PLAN.md?) then code quality (bugs, security, patterns) |
+| **Debugging** | General restart guidance | **3-fix architecture escalation** — after 3 failed fixes, agents must stop and surface an architectural concern |
+| **Design capture** | Decisions in CONTEXT.md only | **DESIGN.md artifact** — frozen design spec (architecture, components, contracts, NFRs) consumed by planner and researcher |
+| **Research** | Asks whether to research | **Auto-research** — skips the question when enabled, goes straight to researching |
+| **UI design** | Asks whether to generate UI-SPEC | **Auto-UI-SPEC** — generates design contract automatically for frontend phases |
+| **Shipping** | Separate preflight and ship | **Unified pipeline** — ship invokes preflight first; preflight gains `--ship` flag for full push+PR |
 | **Key decisions** | Stay in CONTEXT.md | **Auto-propagated to CLAUDE.md** — architectural decisions captured from discussion and execution |
 | **Project scaffolding** | Config only | **Full scaffolding** — preflight.yaml, .claude/rules/, Makefile, pre-commit hooks |
 | **Migrations** | Not checked | **Migration safety** — warns if schema changed without migration, checks for downgrade paths |
@@ -54,20 +62,29 @@ All default to `true` (opinionated — the upstream would likely default most to
 | `project.pr_title_template` | PR title convention |
 | `project.pr_body_requires_issue` | Require `Closes PREFIX-NN` in PR body |
 | `project.ci_commands` | CI commands to run before PR (auto-detected) |
+| `workflow.two_stage_review` | Split code review into spec compliance + code quality passes |
+| `workflow.verification_discipline` | Require fresh evidence before completion claims |
+| `workflow.design_spec` | Generate DESIGN.md during discuss-phase for architectural phases |
 
 ### Files modified from upstream
 
 **Agents:**
-- `agents/gsd-executor.md` — test contracts, deviation rule constraints, Makefile preference
-- `agents/gsd-verifier.md` — dead code scanning, ratchet effect enforcement, migration safety checks
-- `agents/gsd-planner.md` — outcome-focused task specs, one-sentence objectives
+- `agents/gsd-executor.md` — test contracts, deviation rule constraints, Makefile preference, anti-rationalization guard, verification discipline
+- `agents/gsd-verifier.md` — dead code scanning, ratchet effect enforcement, migration safety checks, verification discipline
+- `agents/gsd-planner.md` — outcome-focused task specs, one-sentence objectives, anti-rationalization in scope reduction
+- `agents/gsd-debugger.md` — 3-fix architecture escalation rule
+- `agents/gsd-code-reviewer.md` — two-stage review (spec compliance + code quality)
+- `agents/gsd-phase-researcher.md` — DESIGN.md consumption as upstream constraint
 
 **Workflows:**
 - `workflows/discuss-phase.md` — questions_per_area config, exhaust-then-move-on behavior, key decisions propagation to CLAUDE.md
 - `workflows/autonomous.md` — same discuss changes
 - `workflows/verify-work.md` — adversarial validation step
 - `workflows/execute-phase.md` — Playwright verification, Definition of Done, PR workflow, key decisions from execution, Edge Case Hunter
-- `workflows/plan-phase.md` — Devil's Advocate review after plan-checker passes
+- `workflows/discuss-phase.md` — DESIGN.md generation step, commit includes DESIGN.md
+- `workflows/code-review.md` — passes PLAN.md to reviewer for two-stage review
+- `workflows/ship.md` — invokes preflight before shipping
+- `workflows/plan-phase.md` — Devil's Advocate review after plan-checker passes, auto-select research and UI-SPEC when config enables them
 - `workflows/new-project.md` — project integration questions (issue tracker, branches, CI), scaffolding (Makefile, pre-commit, preflight.yaml, .claude/rules/)
 - `workflows/complete-milestone.md` — automated retrospective data (verification health, quality gates, deviation trends)
 - `workflows/update.md` — fork guard prevents accidental npm overwrite
