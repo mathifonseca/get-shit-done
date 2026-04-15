@@ -73,6 +73,7 @@ describe('config-field-docs', () => {
       plan_checker: 'workflow.plan_check',
       verifier: 'workflow.verifier',
       nyquist_validation: 'workflow.nyquist_validation',
+      ai_integration_phase: 'workflow.ai_integration_phase',
       text_mode: 'workflow.text_mode',
       subagent_timeout: 'workflow.subagent_timeout',
       branching_strategy: 'git.branching_strategy',
@@ -161,6 +162,28 @@ describe('config-field-docs', () => {
     assert.ok(
       content.includes('`features.thinking_partner`'),
       'planning-config.md must document the features.thinking_partner field'
+    );
+  });
+
+  test('mode field documents correct allowed values', () => {
+    // mode values are "interactive" and "yolo" per templates/config.json
+    // and workflows/new-project.md — NOT "code-first"/"plan-first"/"hybrid"
+    assert.ok(
+      content.includes('"interactive"') && content.includes('"yolo"'),
+      'mode field must document "interactive" and "yolo" as allowed values'
+    );
+    assert.ok(
+      !content.includes('"code-first"'),
+      'mode field must NOT document non-existent "code-first" value'
+    );
+  });
+
+  test('discuss_mode field documents correct allowed values', () => {
+    // discuss_mode values are "discuss" and "assumptions" per workflows/settings.md
+    // NOT "auto" or "analyze" (those are CLI flags, not config values)
+    assert.ok(
+      content.includes('"assumptions"'),
+      'discuss_mode must document "assumptions" as an allowed value'
     );
   });
 

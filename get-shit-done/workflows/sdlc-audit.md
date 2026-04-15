@@ -21,6 +21,8 @@ if arguments contain "--fix"; then
   FIX_MODE=true
 fi
 ```
+
+Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `workflow.text_mode` from the init JSON is `true`. When `TEXT_MODE` is active, replace every `AskUserQuestion` call in this workflow with a plain-text numbered list and ask the user to type their choice number. This keeps the audit usable on non-Claude runtimes (OpenAI Codex, Gemini, etc.) that render `AskUserQuestion` as an inert code block.
 </step>
 
 <step name="detect_project_root">

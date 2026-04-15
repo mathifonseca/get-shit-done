@@ -151,6 +151,8 @@ Research, plan, and verify a phase.
 | `--prd <file>` | Use a PRD file instead of discuss-phase for context |
 | `--reviews` | Replan with cross-AI review feedback from REVIEWS.md |
 | `--validate` | Run state validation before planning begins |
+| `--bounce` | Run external plan bounce validation after planning (uses `workflow.plan_bounce_script`) |
+| `--skip-bounce` | Skip plan bounce even if enabled in config |
 
 **Prerequisites:** `.planning/ROADMAP.md` exists
 **Produces:** `{phase}-RESEARCH.md`, `{phase}-{N}-PLAN.md`, `{phase}-VALIDATION.md`
@@ -160,6 +162,7 @@ Research, plan, and verify a phase.
 /gsd-plan-phase 3 --skip-research   # Plan without research (familiar domain)
 /gsd-plan-phase --auto              # Non-interactive planning
 /gsd-plan-phase 2 --validate        # Validate state before planning
+/gsd-plan-phase 1 --bounce          # Plan + external bounce validation
 ```
 
 ---
@@ -173,6 +176,8 @@ Execute all plans in a phase with wave-based parallelization, or run a specific 
 | `N` | **Yes** | Phase number to execute |
 | `--wave N` | No | Execute only Wave `N` in the phase |
 | `--validate` | No | Run state validation before execution begins |
+| `--cross-ai` | No | Delegate execution to an external AI CLI (uses `workflow.cross_ai_command`) |
+| `--no-cross-ai` | No | Force local execution even if cross-AI is enabled in config |
 
 **Prerequisites:** Phase has PLAN.md files
 **Produces:** per-plan `{phase}-{N}-SUMMARY.md`, git commits, and `{phase}-VERIFICATION.md` when the phase is fully complete
@@ -181,6 +186,7 @@ Execute all plans in a phase with wave-based parallelization, or run a specific 
 /gsd-execute-phase 1                # Execute phase 1
 /gsd-execute-phase 1 --wave 2       # Execute only Wave 2
 /gsd-execute-phase 1 --validate     # Validate state before execution
+/gsd-execute-phase 2 --cross-ai     # Delegate phase 2 to external AI CLI
 ```
 
 ---
@@ -593,6 +599,31 @@ Ingest an external plan file into the GSD planning system with conflict detectio
 
 ---
 
+### `/gsd-from-gsd2`
+
+Reverse migration from GSD-2 format (`.gsd/` with Milestone→Slice→Task hierarchy) back to v1 `.planning/` format.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--dry-run` | No | Preview what would be migrated without writing anything |
+| `--force` | No | Overwrite existing `.planning/` directory |
+| `--path <dir>` | No | Specify GSD-2 root directory (defaults to current directory) |
+
+**Flattening:** Milestone→Slice hierarchy is flattened to sequential phase numbers (M001/S01→phase 01, M001/S02→phase 02, M002/S01→phase 03, etc.).
+
+**Produces:** `PROJECT.md`, `REQUIREMENTS.md`, `ROADMAP.md`, `STATE.md`, and sequential phase directories in `.planning/`.
+
+**Safety:** Guards against overwriting an existing `.planning/` directory without `--force`.
+
+```bash
+/gsd-from-gsd2                          # Migrate .gsd/ in current directory
+/gsd-from-gsd2 --dry-run                # Preview migration without writing
+/gsd-from-gsd2 --force                  # Overwrite existing .planning/
+/gsd-from-gsd2 --path /path/to/gsd2-project  # Specify GSD-2 root
+```
+
+---
+
 ### `/gsd-quick`
 
 Execute ad-hoc task with GSD guarantees.
@@ -669,9 +700,20 @@ Systematic debugging with persistent state.
 |------|-------------|
 | `--diagnose` | Diagnosis-only mode — investigate without attempting fixes |
 
+**Subcommands:**
+- `/gsd-debug list` — List all active debug sessions with status, hypothesis, and next action
+- `/gsd-debug status <slug>` — Print full summary of a session (Evidence count, Eliminated count, Resolution, TDD checkpoint) without spawning an agent
+- `/gsd-debug continue <slug>` — Resume a specific session by slug (surfaces Current Focus then spawns continuation agent)
+- `/gsd-debug [--diagnose] <description>` — Start new debug session (existing behavior; `--diagnose` stops at root cause without applying fix)
+
+**TDD mode:** When `tdd_mode: true` in `.planning/config.json`, debug sessions require a failing test to be written and verified before any fix is applied (red → green → done).
+
 ```bash
 /gsd-debug "Login button not responding on mobile Safari"
 /gsd-debug --diagnose "Intermittent 500 errors on /api/users"
+/gsd-debug list
+/gsd-debug status auth-token-null
+/gsd-debug continue form-submit-500
 ```
 
 ### `/gsd-add-todo`
@@ -781,6 +823,36 @@ Post-mortem investigation of failed or stuck GSD workflows.
 ```bash
 /gsd-forensics                              # Interactive — prompted for problem
 /gsd-forensics "Phase 3 execution stalled"  # With problem description
+```
+
+---
+
+### `/gsd-extract-learnings`
+
+Extract reusable patterns, anti-patterns, and architectural decisions from completed phase work.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `N` | **Yes** | Phase number to extract learnings from |
+
+| Flag | Description |
+|------|-------------|
+| `--all` | Extract learnings from all completed phases |
+| `--format` | Output format: `markdown` (default), `json` |
+
+**Prerequisites:** Phase has been executed (SUMMARY.md files exist)
+**Produces:** `.planning/learnings/{phase}-LEARNINGS.md`
+
+**Extracts:**
+- Architectural decisions and their rationale
+- Patterns that worked well (reusable in future phases)
+- Anti-patterns encountered and how they were resolved
+- Technology-specific insights
+- Performance and testing observations
+
+```bash
+/gsd-extract-learnings 3                    # Extract learnings from phase 3
+/gsd-extract-learnings --all                # Extract from all completed phases
 ```
 
 ---
@@ -896,6 +968,37 @@ Query, inspect, or refresh queryable codebase intelligence files stored in `.pla
 /gsd-intel query authentication     # Search intel for a term
 /gsd-intel diff                     # What changed since last snapshot
 /gsd-intel refresh                  # Rebuild intel index
+```
+
+---
+
+## AI Integration Commands
+
+### `/gsd-ai-integration-phase`
+
+AI framework selection wizard for integrating AI/LLM capabilities into a project phase. Presents an interactive decision matrix, surfaces domain-specific failure modes and eval criteria, and produces `AI-SPEC.md` with a framework recommendation, implementation guidance, and evaluation strategy.
+
+**Produces:** `{phase}-AI-SPEC.md` in the phase directory
+
+**Spawns:** 3 parallel specialist agents: domain-researcher, framework-selector, ai-researcher, and eval-planner
+
+```bash
+/gsd-ai-integration-phase              # Wizard for the current phase
+/gsd-ai-integration-phase 3           # Wizard for a specific phase
+```
+
+---
+
+### `/gsd-eval-review`
+
+Retroactive audit of an implemented AI phase's evaluation coverage. Checks implementation against the `AI-SPEC.md` evaluation plan produced by `/gsd-ai-integration-phase`. Scores each eval dimension as COVERED/PARTIAL/MISSING.
+
+**Prerequisites:** Phase has been executed and has an `AI-SPEC.md`
+**Produces:** `{phase}-EVAL-REVIEW.md` with findings, gaps, and remediation guidance
+
+```bash
+/gsd-eval-review                       # Audit current phase
+/gsd-eval-review 3                     # Audit a specific phase
 ```
 
 ---
@@ -1023,6 +1126,8 @@ Cross-AI peer review of phase plans from external AI CLIs.
 | `--codex` | Include Codex CLI review |
 | `--coderabbit` | Include CodeRabbit review |
 | `--opencode` | Include OpenCode review (via GitHub Copilot) |
+| `--qwen` | Include Qwen Code review (Alibaba Qwen models) |
+| `--cursor` | Include Cursor agent review |
 | `--all` | Include all available CLIs |
 
 **Produces:** `{phase}-REVIEWS.md` — consumable by `/gsd-plan-phase --reviews`

@@ -17,6 +17,7 @@ const os = require('os');
 const {
   getCodexSkillAdapterHeader,
   convertClaudeAgentToCodexAgent,
+  convertClaudeCommandToCodexSkill,
   generateCodexAgentToml,
   generateCodexConfigBlock,
   stripGsdFromCodexConfig,
@@ -183,6 +184,86 @@ node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit "docs: resolve"`;
     const result = convertClaudeAgentToCodexAgent(input);
     assert.ok(result.includes('$HOME/.codex/get-shit-done/bin/gsd-tools.cjs'), 'replaces $HOME/.claude/ with $HOME/.codex/');
     assert.ok(!result.includes('$HOME/.claude/'), 'no .claude paths remain');
+  });
+});
+
+// ─── Codex command prefix conversion ────────────────────────────────────────────
+
+describe('Codex hyphen-style command prefix conversion', () => {
+  test('converts /gsd-command in workflow output to $gsd-command', () => {
+    const input = `---
+name: gsd-test
+description: Test
+tools: Read
+---
+
+/gsd-discuss-phase 1 — gather context
+/gsd-plan-phase 2 — create plan
+/gsd-execute-phase 3 — run it`;
+
+    const result = convertClaudeCommandToCodexSkill(input, 'gsd-test');
+    assert.ok(result.includes('$gsd-discuss-phase'), 'converts /gsd-discuss-phase');
+    assert.ok(result.includes('$gsd-plan-phase'), 'converts /gsd-plan-phase');
+    assert.ok(result.includes('$gsd-execute-phase'), 'converts /gsd-execute-phase');
+    assert.ok(!result.includes('/gsd-discuss-phase'), 'no /gsd-discuss-phase remains');
+  });
+
+  test('converts backtick-wrapped /gsd- commands', () => {
+    const input = `---
+name: gsd-test
+description: Test
+tools: Read
+---
+
+Run \`/gsd-plan-phase 1\` to plan.`;
+
+    const result = convertClaudeCommandToCodexSkill(input, 'gsd-test');
+    assert.ok(result.includes('$gsd-plan-phase'), 'converts backtick-wrapped command');
+  });
+
+  test('does not convert /gsd- in file paths', () => {
+    const input = `---
+name: gsd-test
+description: Test
+tools: Read
+---
+
+node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" init`;
+
+    const result = convertClaudeCommandToCodexSkill(input, 'gsd-test');
+    assert.ok(result.includes('gsd-tools.cjs'), 'gsd-tools.cjs preserved in path');
+    assert.ok(!result.includes('$gsd-tools'), 'no $gsd-tools in file path');
+  });
+
+  test('removes /clear then: for Codex', () => {
+    const input = `---
+name: gsd-test
+description: Test
+tools: Read
+---
+
+\`/clear\` then:
+
+\`$gsd-plan-phase 1\``;
+
+    const result = convertClaudeCommandToCodexSkill(input, 'gsd-test');
+    assert.ok(!result.includes('/clear'), 'no /clear remains');
+    assert.ok(result.includes('$gsd-plan-phase'), 'command preserved after /clear removal');
+  });
+
+  test('removes bare /clear then: for Codex', () => {
+    const input = `---
+name: gsd-test
+description: Test
+tools: Read
+---
+
+/clear then:
+/gsd-execute-phase 2`;
+
+    const result = convertClaudeCommandToCodexSkill(input, 'gsd-test');
+    assert.ok(!result.includes('/clear'), 'no /clear remains');
+    assert.ok(result.includes('$gsd-execute-phase'), 'command converted');
   });
 });
 
@@ -747,6 +828,22 @@ describe('Codex install hook configuration (e2e)', () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test('Codex install copies hook file that is referenced in config.toml (#2153)', () => {
+    // Regression test: Codex install writes gsd-check-update hook reference into
+    // config.toml but must also copy the hook file to ~/$CODEX_HOME/hooks/
+    runCodexInstall(codexHome);
+
+    const configContent = readCodexConfig(codexHome);
+    // config.toml must reference the hook
+    assert.ok(configContent.includes('gsd-check-update.js'), 'config.toml references gsd-check-update.js');
+    // The hook file must physically exist at the referenced path
+    const hookFile = path.join(codexHome, 'hooks', 'gsd-check-update.js');
+    assert.ok(
+      fs.existsSync(hookFile),
+      `gsd-check-update.js must exist at ${hookFile} — config.toml references it but file was not installed`
+    );
   });
 
   test('fresh CODEX_HOME enables codex_hooks without draft root defaults', () => {

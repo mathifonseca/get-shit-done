@@ -831,6 +831,12 @@ Clear your context window between major commands: `/clear` in Claude Code. GSD i
 
 Run `/gsd-discuss-phase [N]` before planning. Most plan quality issues come from Claude making assumptions that `CONTEXT.md` would have prevented. You can also run `/gsd-list-phase-assumptions [N]` to see what Claude intends to do before committing to a plan.
 
+### Discuss-Phase Uses Technical Jargon I Don't Understand
+
+`/gsd-discuss-phase` adapts its language based on your `USER-PROFILE.md`. If the profile indicates a non-technical owner — `learning_style: guided`, `jargon` listed as a frustration trigger, or `explanation_depth: high-level` — gray area questions are automatically reframed in product-outcome language instead of implementation terminology.
+
+To enable this: run `/gsd-profile-user` to generate your profile. The profile is stored at `~/.claude/get-shit-done/USER-PROFILE.md` and is read automatically on every `/gsd-discuss-phase` invocation. No other configuration is required.
+
 ### Execution Fails or Produces Stubs
 
 Check that the plan was not too ambitious. Plans should have 2-3 tasks maximum. If tasks are too large, they exceed what a single context window can produce reliably. Re-plan with smaller scope.
@@ -867,6 +873,40 @@ To assign different models to different agents on a non-Claude runtime, add `mod
 The installer auto-configures `resolve_model_ids: "omit"` for Gemini CLI, OpenCode, Kilo, and Codex. If you're manually setting up a non-Claude runtime, add it to `.planning/config.json` yourself.
 
 See the [Configuration Reference](CONFIGURATION.md#non-claude-runtimes-codex-opencode-gemini-cli-kilo) for the full explanation.
+
+### Installing for Cline
+
+Cline uses a rules-based integration — GSD installs as `.clinerules` rather than slash commands.
+
+```bash
+# Global install (applies to all projects)
+npx get-shit-done-cc --cline --global
+
+# Local install (this project only)
+npx get-shit-done-cc --cline --local
+```
+
+Global installs write to `~/.cline/`. Local installs write to `./.cline/`. No custom slash commands are registered — GSD rules are loaded automatically by Cline from the rules file.
+
+### Installing for CodeBuddy
+
+CodeBuddy uses a skills-based integration.
+
+```bash
+npx get-shit-done-cc --codebuddy --global
+```
+
+Skills are installed to `~/.codebuddy/skills/gsd-*/SKILL.md`.
+
+### Installing for Qwen Code
+
+Qwen Code uses the same open skills standard as Claude Code 2.1.88+.
+
+```bash
+npx get-shit-done-cc --qwen --global
+```
+
+Skills are installed to `~/.qwen/skills/gsd-*/SKILL.md`. Use the `QWEN_CONFIG_DIR` environment variable to override the default install path.
 
 ### Using Claude Code with Non-Anthropic Providers (OpenRouter, Local)
 
