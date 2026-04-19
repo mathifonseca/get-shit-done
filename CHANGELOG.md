@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.38.0] - 2026-04-18
+
+### Added
+- **`/gsd-ingest-docs` command** — Scan a repo containing mixed ADRs, PRDs, SPECs, and DOCs and bootstrap or merge the full `.planning/` setup from them in a single pass. Parallel classification (`gsd-doc-classifier`), synthesis with precedence rules and cycle detection (`gsd-doc-synthesizer`), three-bucket conflicts report (`INGEST-CONFLICTS.md`: auto-resolved, competing-variants, unresolved-blockers), and hard-block on LOCKED-vs-LOCKED ADR contradictions in both new and merge modes. Supports directory-convention discovery and `--manifest <file>` YAML override with per-doc precedence. v1 caps at 50 docs per invocation; `--resolve interactive` is reserved. Extracts shared conflict-detection contract into `references/doc-conflict-engine.md` which `/gsd-import` now also consumes (#2387)
+- **`/gsd-ultraplan-phase` command [BETA]** — Offload plan phase to Claude Code's ultraplan cloud. Drafts remotely while the terminal stays free; review in browser with inline comments; import the result back via `/gsd-import`. Claude Code only (#2378)
+
+### Fixed
+- **Installer now builds `@gsd-build/sdk` from the in-repo `sdk/` source tree** so `gsd-sdk` lands on PATH with the query handlers that match the installed GSD version. Resolves `command not found: gsd-sdk` errors that affected every `/gsd-*` command after a fresh install or `/gsd-update` to 1.36+. Adds `--no-sdk` to opt out and `--sdk` to force rebuild. Implements the `--sdk` flag that was previously documented in README but never wired up. Replaces the initial PR #2386 design that installed the stale npm `@gsd-build/sdk` (published 2026-03-27) — the installer now runs `npm install && npm run build && npm install -g .` inside `sdk/` so users always get an SDK in lockstep with the rest of the repo. Root `package.json` `files` ships the sdk source tree for npm-registry installs (#2385)
+
 ## [1.37.1] - 2026-04-17
 
 ### Fixed
