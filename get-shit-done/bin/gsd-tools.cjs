@@ -639,6 +639,11 @@ async function runCommand(command, args, cwd, raw, defaultValue) {
       break;
     }
 
+    case 'config-path': {
+      config.cmdConfigPath(cwd, raw);
+      break;
+    }
+
     case 'agent-skills': {
       init.cmdAgentSkills(cwd, args[1], raw);
       break;
@@ -781,9 +786,9 @@ async function runCommand(command, args, cwd, raw, defaultValue) {
       const includeRaw = args.includes('--json');
       const result = auditOpenArtifacts(cwd);
       if (includeRaw) {
-        output(JSON.stringify(result, null, 2), raw);
+        core.output(result, raw);
       } else {
-        output(formatAuditReport(result), raw);
+        core.output(formatAuditReport(result), raw);
       }
       break;
     }

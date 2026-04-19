@@ -203,7 +203,9 @@ Verify with:
 - Cline: GSD installs via `.clinerules` — verify by checking `.clinerules` exists
 
 > [!NOTE]
-> Claude Code 2.1.88+, Qwen Code, and Codex install as skills (`skills/gsd-*/SKILL.md`). Older Claude Code versions use `commands/gsd/`. Cline uses `.clinerules` for configuration. The installer handles all formats automatically.
+> Claude Code 2.1.88+, Qwen Code, and Codex install as skills (`.claude/skills/`, `./.codex/skills/`, or the matching global `~/.claude/skills/` / `~/.codex/skills/` roots). Older Claude Code versions use `commands/gsd/`. `~/.claude/get-shit-done/skills/` is import-only for legacy migration. The installer handles all formats automatically.
+
+The canonical discovery contract is documented in [docs/skills/discovery-contract.md](docs/skills/discovery-contract.md).
 
 > [!TIP]
 > For source-based installs or environments where npm is unavailable, see **[docs/manual-update.md](docs/manual-update.md)**.
@@ -679,6 +681,15 @@ You're never locked in. The system adapts.
 | `/gsd-list-workspaces` | Show all GSD workspaces and their status |
 | `/gsd-remove-workspace` | Remove workspace and clean up worktrees |
 
+### Spiking & Sketching
+
+| Command | What it does |
+|---------|--------------|
+| `/gsd-spike [idea] [--quick]` | Throwaway experiments to validate feasibility before planning — no project init required |
+| `/gsd-sketch [idea] [--quick]` | Throwaway HTML mockups with multi-variant exploration — no project init required |
+| `/gsd-spike-wrap-up` | Package spike findings into a project-local skill for future build conversations |
+| `/gsd-sketch-wrap-up` | Package sketch design findings into a project-local skill for future builds |
+
 ### UI Design
 
 | Command | What it does |
@@ -920,8 +931,9 @@ This prevents Claude from reading these files entirely, regardless of what comma
 
 **Commands not found after install?**
 - Restart your runtime to reload commands/skills
-- Verify files exist in `~/.claude/skills/gsd-*/SKILL.md` (Claude Code 2.1.88+) or `~/.claude/commands/gsd/` (legacy)
-- For Codex, verify skills exist in `~/.codex/skills/gsd-*/SKILL.md` (global) or `./.codex/skills/gsd-*/SKILL.md` (local)
+- Verify files exist in `~/.claude/skills/gsd-*/SKILL.md` or `~/.codex/skills/gsd-*/SKILL.md` for managed global installs
+- For local installs, verify `.claude/skills/gsd-*/SKILL.md` or `./.codex/skills/gsd-*/SKILL.md`
+- Legacy Claude Code installs still use `~/.claude/commands/gsd/`
 
 **Commands not working as expected?**
 - Run `/gsd-help` to verify installation

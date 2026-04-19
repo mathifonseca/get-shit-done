@@ -76,6 +76,7 @@ const hasCline = args.includes('--cline');
 const hasBoth = args.includes('--both'); // Legacy flag, keeps working
 const hasAll = args.includes('--all');
 const hasUninstall = args.includes('--uninstall') || args.includes('-u');
+const hasPortableHooks = args.includes('--portable-hooks') || process.env.GSD_PORTABLE_HOOKS === '1';
 
 // Runtime selection - can be set by flags or interactive prompt
 let selectedRuntimes = [];
@@ -436,7 +437,7 @@ if (hasUninstall) {
 
 // Show help if requested
 if (hasHelp) {
-  console.log(`  ${yellow}Usage:${reset} npx get-shit-done-cc [options]\n\n  ${yellow}Options:${reset}\n    ${cyan}-g, --global${reset}              Install globally (to config directory)\n    ${cyan}-l, --local${reset}               Install locally (to current directory)\n    ${cyan}--claude${reset}                  Install for Claude Code only\n    ${cyan}--opencode${reset}                Install for OpenCode only\n    ${cyan}--gemini${reset}                  Install for Gemini only\n    ${cyan}--kilo${reset}                    Install for Kilo only\n    ${cyan}--codex${reset}                   Install for Codex only\n    ${cyan}--copilot${reset}                 Install for Copilot only\n    ${cyan}--antigravity${reset}             Install for Antigravity only\n    ${cyan}--cursor${reset}                  Install for Cursor only\n    ${cyan}--windsurf${reset}                Install for Windsurf only\n    ${cyan}--augment${reset}                 Install for Augment only\n    ${cyan}--trae${reset}                    Install for Trae only\n    ${cyan}--qwen${reset}                    Install for Qwen Code only\n    ${cyan}--cline${reset}                   Install for Cline only\n    ${cyan}--codebuddy${reset}              Install for CodeBuddy only\n    ${cyan}--all${reset}                     Install for all runtimes\n    ${cyan}-u, --uninstall${reset}           Uninstall GSD (remove all GSD files)\n    ${cyan}-c, --config-dir <path>${reset}   Specify custom config directory\n    ${cyan}-h, --help${reset}                Show this help message\n    ${cyan}--force-statusline${reset}        Replace existing statusline config\n\n  ${yellow}Examples:${reset}\n    ${dim}# Interactive install (prompts for runtime and location)${reset}\n    npx get-shit-done-cc\n\n    ${dim}# Install for Claude Code globally${reset}\n    npx get-shit-done-cc --claude --global\n\n    ${dim}# Install for Gemini globally${reset}\n    npx get-shit-done-cc --gemini --global\n\n    ${dim}# Install for Kilo globally${reset}\n    npx get-shit-done-cc --kilo --global\n\n    ${dim}# Install for Codex globally${reset}\n    npx get-shit-done-cc --codex --global\n\n    ${dim}# Install for Copilot globally${reset}\n    npx get-shit-done-cc --copilot --global\n\n    ${dim}# Install for Copilot locally${reset}\n    npx get-shit-done-cc --copilot --local\n\n    ${dim}# Install for Antigravity globally${reset}\n    npx get-shit-done-cc --antigravity --global\n\n    ${dim}# Install for Antigravity locally${reset}\n    npx get-shit-done-cc --antigravity --local\n\n    ${dim}# Install for Cursor globally${reset}\n    npx get-shit-done-cc --cursor --global\n\n    ${dim}# Install for Cursor locally${reset}\n    npx get-shit-done-cc --cursor --local\n\n    ${dim}# Install for Windsurf globally${reset}\n    npx get-shit-done-cc --windsurf --global\n\n    ${dim}# Install for Windsurf locally${reset}\n    npx get-shit-done-cc --windsurf --local\n\n    ${dim}# Install for Augment globally${reset}\n    npx get-shit-done-cc --augment --global\n\n    ${dim}# Install for Augment locally${reset}\n    npx get-shit-done-cc --augment --local\n\n    ${dim}# Install for Trae globally${reset}\n    npx get-shit-done-cc --trae --global\n\n    ${dim}# Install for Trae locally${reset}\n    npx get-shit-done-cc --trae --local\n\n    ${dim}# Install for Cline locally${reset}\n    npx get-shit-done-cc --cline --local\n\n    ${dim}# Install for CodeBuddy globally${reset}\n    npx get-shit-done-cc --codebuddy --global\n\n    ${dim}# Install for CodeBuddy locally${reset}\n    npx get-shit-done-cc --codebuddy --local\n\n    ${dim}# Install for all runtimes globally${reset}\n    npx get-shit-done-cc --all --global\n\n    ${dim}# Install to custom config directory${reset}\n    npx get-shit-done-cc --kilo --global --config-dir ~/.kilo-work\n\n    ${dim}# Install to current project only${reset}\n    npx get-shit-done-cc --claude --local\n\n    ${dim}# Uninstall GSD from Cursor globally${reset}\n    npx get-shit-done-cc --cursor --global --uninstall\n\n  ${yellow}Notes:${reset}\n    The --config-dir option is useful when you have multiple configurations.\n    It takes priority over CLAUDE_CONFIG_DIR / OPENCODE_CONFIG_DIR / GEMINI_CONFIG_DIR / KILO_CONFIG_DIR / CODEX_HOME / COPILOT_CONFIG_DIR / ANTIGRAVITY_CONFIG_DIR / CURSOR_CONFIG_DIR / WINDSURF_CONFIG_DIR / AUGMENT_CONFIG_DIR / TRAE_CONFIG_DIR / QWEN_CONFIG_DIR / CLINE_CONFIG_DIR / CODEBUDDY_CONFIG_DIR environment variables.\n`);
+  console.log(`  ${yellow}Usage:${reset} npx get-shit-done-cc [options]\n\n  ${yellow}Options:${reset}\n    ${cyan}-g, --global${reset}              Install globally (to config directory)\n    ${cyan}-l, --local${reset}               Install locally (to current directory)\n    ${cyan}--claude${reset}                  Install for Claude Code only\n    ${cyan}--opencode${reset}                Install for OpenCode only\n    ${cyan}--gemini${reset}                  Install for Gemini only\n    ${cyan}--kilo${reset}                    Install for Kilo only\n    ${cyan}--codex${reset}                   Install for Codex only\n    ${cyan}--copilot${reset}                 Install for Copilot only\n    ${cyan}--antigravity${reset}             Install for Antigravity only\n    ${cyan}--cursor${reset}                  Install for Cursor only\n    ${cyan}--windsurf${reset}                Install for Windsurf only\n    ${cyan}--augment${reset}                 Install for Augment only\n    ${cyan}--trae${reset}                    Install for Trae only\n    ${cyan}--qwen${reset}                    Install for Qwen Code only\n    ${cyan}--cline${reset}                   Install for Cline only\n    ${cyan}--codebuddy${reset}              Install for CodeBuddy only\n    ${cyan}--all${reset}                     Install for all runtimes\n    ${cyan}-u, --uninstall${reset}           Uninstall GSD (remove all GSD files)\n    ${cyan}-c, --config-dir <path>${reset}   Specify custom config directory\n    ${cyan}-h, --help${reset}                Show this help message\n    ${cyan}--force-statusline${reset}        Replace existing statusline config\n    ${cyan}--portable-hooks${reset}          Emit \$HOME-relative hook paths in settings.json\n                              (for WSL/Docker bind-mount setups; also GSD_PORTABLE_HOOKS=1)\n\n  ${yellow}Examples:${reset}\n    ${dim}# Interactive install (prompts for runtime and location)${reset}\n    npx get-shit-done-cc\n\n    ${dim}# Install for Claude Code globally${reset}\n    npx get-shit-done-cc --claude --global\n\n    ${dim}# Install for Gemini globally${reset}\n    npx get-shit-done-cc --gemini --global\n\n    ${dim}# Install for Kilo globally${reset}\n    npx get-shit-done-cc --kilo --global\n\n    ${dim}# Install for Codex globally${reset}\n    npx get-shit-done-cc --codex --global\n\n    ${dim}# Install for Copilot globally${reset}\n    npx get-shit-done-cc --copilot --global\n\n    ${dim}# Install for Copilot locally${reset}\n    npx get-shit-done-cc --copilot --local\n\n    ${dim}# Install for Antigravity globally${reset}\n    npx get-shit-done-cc --antigravity --global\n\n    ${dim}# Install for Antigravity locally${reset}\n    npx get-shit-done-cc --antigravity --local\n\n    ${dim}# Install for Cursor globally${reset}\n    npx get-shit-done-cc --cursor --global\n\n    ${dim}# Install for Cursor locally${reset}\n    npx get-shit-done-cc --cursor --local\n\n    ${dim}# Install for Windsurf globally${reset}\n    npx get-shit-done-cc --windsurf --global\n\n    ${dim}# Install for Windsurf locally${reset}\n    npx get-shit-done-cc --windsurf --local\n\n    ${dim}# Install for Augment globally${reset}\n    npx get-shit-done-cc --augment --global\n\n    ${dim}# Install for Augment locally${reset}\n    npx get-shit-done-cc --augment --local\n\n    ${dim}# Install for Trae globally${reset}\n    npx get-shit-done-cc --trae --global\n\n    ${dim}# Install for Trae locally${reset}\n    npx get-shit-done-cc --trae --local\n\n    ${dim}# Install for Cline locally${reset}\n    npx get-shit-done-cc --cline --local\n\n    ${dim}# Install for CodeBuddy globally${reset}\n    npx get-shit-done-cc --codebuddy --global\n\n    ${dim}# Install for CodeBuddy locally${reset}\n    npx get-shit-done-cc --codebuddy --local\n\n    ${dim}# Install for all runtimes globally${reset}\n    npx get-shit-done-cc --all --global\n\n    ${dim}# Install to custom config directory${reset}\n    npx get-shit-done-cc --kilo --global --config-dir ~/.kilo-work\n\n    ${dim}# Install to current project only${reset}\n    npx get-shit-done-cc --claude --local\n\n    ${dim}# Uninstall GSD from Cursor globally${reset}\n    npx get-shit-done-cc --cursor --global --uninstall\n\n  ${yellow}Notes:${reset}\n    The --config-dir option is useful when you have multiple configurations.\n    It takes priority over CLAUDE_CONFIG_DIR / OPENCODE_CONFIG_DIR / GEMINI_CONFIG_DIR / KILO_CONFIG_DIR / CODEX_HOME / COPILOT_CONFIG_DIR / ANTIGRAVITY_CONFIG_DIR / CURSOR_CONFIG_DIR / WINDSURF_CONFIG_DIR / AUGMENT_CONFIG_DIR / TRAE_CONFIG_DIR / QWEN_CONFIG_DIR / CLINE_CONFIG_DIR / CODEBUDDY_CONFIG_DIR environment variables.\n`);
   process.exit(0);
 }
 
@@ -453,16 +454,31 @@ function expandTilde(filePath) {
 /**
  * Build a hook command path using forward slashes for cross-platform compatibility.
  * On Windows, $HOME is not expanded by cmd.exe/PowerShell, so we use the actual path.
+ *
+ * @param {string} configDir - Resolved absolute config directory path
+ * @param {string} hookName - Hook filename (e.g. 'gsd-statusline.js')
+ * @param {{ portableHooks?: boolean }} [opts] - Options
+ *   portableHooks: when true, emit $HOME-relative paths instead of absolute paths.
+ *   Safe for Linux/macOS global installs and WSL/Docker bind-mount scenarios.
+ *   Not suitable for pure Windows (cmd.exe/PowerShell do not expand $HOME).
  */
-function buildHookCommand(configDir, hookName) {
-  // Use forward slashes for Node.js compatibility on all platforms
-  const hooksPath = configDir.replace(/\\/g, '/') + '/hooks/' + hookName;
-  // .sh hooks use bash; .js hooks use node. Both wrap the path in double quotes
-  // so that paths with spaces (e.g. Windows "C:/Users/First Last/") work correctly
-  // (fixes #2045). Routing .sh hooks through this function also ensures they always
-  // receive an absolute path rather than the bare relative string that the old manual
-  // concatenation produced (fixes #2046).
+function buildHookCommand(configDir, hookName, opts) {
+  if (!opts) opts = {};
   const runner = hookName.endsWith('.sh') ? 'bash' : 'node';
+
+  if (opts.portableHooks) {
+    // Replace the home directory prefix with $HOME so the path works when
+    // ~/.claude is bind-mounted into a container at a different absolute path.
+    const home = os.homedir().replace(/\\/g, '/');
+    const normalized = configDir.replace(/\\/g, '/');
+    const relative = normalized.startsWith(home)
+      ? '$HOME' + normalized.slice(home.length)
+      : normalized;
+    return `${runner} "${relative}/hooks/${hookName}"`;
+  }
+
+  // Default: absolute path with forward slashes (Windows-safe, fixes #2045/#2046).
+  const hooksPath = configDir.replace(/\\/g, '/') + '/hooks/' + hookName;
   return `${runner} "${hooksPath}"`;
 }
 
@@ -571,6 +587,27 @@ function readSettings(settingsPath) {
  */
 function writeSettings(settingsPath, settings) {
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+}
+
+/**
+ * Read model_overrides from ~/.gsd/defaults.json at install time.
+ * Returns an object mapping agent names to model IDs, or null if the file
+ * doesn't exist or has no model_overrides entry.
+ * Used by Codex TOML and OpenCode agent file generators to embed per-agent
+ * model assignments so that model_overrides is respected on non-Claude runtimes (#2256).
+ */
+function readGsdGlobalModelOverrides() {
+  try {
+    const defaultsPath = path.join(os.homedir(), '.gsd', 'defaults.json');
+    if (!fs.existsSync(defaultsPath)) return null;
+    const raw = fs.readFileSync(defaultsPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    const overrides = parsed.model_overrides;
+    if (!overrides || typeof overrides !== 'object') return null;
+    return overrides;
+  } catch {
+    return null;
+  }
 }
 
 // Cache for attribution settings (populated once per runtime during install)
@@ -1732,7 +1769,7 @@ purpose: ${toSingleLine(description)}
  * Sets required agent metadata, sandbox_mode, and developer_instructions
  * from the agent markdown content.
  */
-function generateCodexAgentToml(agentName, agentContent) {
+function generateCodexAgentToml(agentName, agentContent, modelOverrides = null) {
   const sandboxMode = CODEX_AGENT_SANDBOX[agentName] || 'read-only';
   const { frontmatter, body } = extractFrontmatterAndBody(agentContent);
   const frontmatterText = frontmatter || '';
@@ -1746,12 +1783,22 @@ function generateCodexAgentToml(agentName, agentContent) {
     `name = ${JSON.stringify(resolvedName)}`,
     `description = ${JSON.stringify(resolvedDescription)}`,
     `sandbox_mode = "${sandboxMode}"`,
-    // Agent prompts contain raw backslashes in regexes and shell snippets.
-    // TOML literal multiline strings preserve them without escape parsing.
-    `developer_instructions = '''`,
-    instructions,
-    `'''`,
   ];
+
+  // Embed model override when configured in ~/.gsd/defaults.json so that
+  // model_overrides is respected on Codex (which uses static TOML, not inline
+  // Task() model parameters). See #2256.
+  const modelOverride = modelOverrides?.[resolvedName] || modelOverrides?.[agentName];
+  if (modelOverride) {
+    lines.push(`model = ${JSON.stringify(modelOverride)}`);
+  }
+
+  // Agent prompts contain raw backslashes in regexes and shell snippets.
+  // TOML literal multiline strings preserve them without escape parsing.
+  lines.push(`developer_instructions = '''`);
+  lines.push(instructions);
+  lines.push(`'''`);
+
   return lines.join('\n') + '\n';
 }
 
@@ -2969,13 +3016,22 @@ function installCodexConfig(targetDir, agentsSrc) {
     // Replace full .claude/get-shit-done prefix so path resolves to codex GSD install
     content = content.replace(/~\/\.claude\/get-shit-done\//g, codexGsdPath);
     content = content.replace(/\$HOME\/\.claude\/get-shit-done\//g, codexGsdPath);
+    // Replace remaining .claude paths with .codex equivalents (#2320).
+    // Capture group handles both trailing-slash form (~/.claude/) and
+    // bare end-of-string form (~/.claude) in a single pass.
+    content = content.replace(/\$HOME\/\.claude(\/|$)/g, '$HOME/.codex$1');
+    content = content.replace(/~\/\.claude(\/|$)/g, '~/.codex$1');
+    content = content.replace(/\.\/\.claude(\/|$)/g, './.codex$1');
     const { frontmatter } = extractFrontmatterAndBody(content);
     const name = extractFrontmatterField(frontmatter, 'name') || file.replace('.md', '');
     const description = extractFrontmatterField(frontmatter, 'description') || '';
 
     agents.push({ name, description: toSingleLine(description) });
 
-    const tomlContent = generateCodexAgentToml(name, content);
+    // Pass model overrides from ~/.gsd/defaults.json so Codex TOML files
+    // embed the configured model — Codex cannot receive model inline (#2256).
+    const modelOverrides = readGsdGlobalModelOverrides();
+    const tomlContent = generateCodexAgentToml(name, content, modelOverrides);
     fs.writeFileSync(path.join(agentsTomlDir, `${name}.toml`), tomlContent);
   }
 
@@ -3129,7 +3185,7 @@ function convertClaudeToGeminiAgent(content) {
   return `---\n${newFrontmatter}\n---${stripSubTags(neutralBody)}`;
 }
 
-function convertClaudeToOpencodeFrontmatter(content, { isAgent = false } = {}) {
+function convertClaudeToOpencodeFrontmatter(content, { isAgent = false, modelOverride = null } = {}) {
   // Replace tool name references in content (applies to all files)
   let convertedContent = content;
   convertedContent = convertedContent.replace(/\bAskUserQuestion\b/g, 'question');
@@ -3264,6 +3320,12 @@ function convertClaudeToOpencodeFrontmatter(content, { isAgent = false } = {}) {
   // use its default model for subagents. See #1156.
   if (isAgent) {
     newLines.push('mode: subagent');
+    // Embed model override from ~/.gsd/defaults.json so model_overrides is
+    // respected on OpenCode (which uses static agent frontmatter, not inline
+    // Task() model parameters). See #2256.
+    if (modelOverride) {
+      newLines.push(`model: ${modelOverride}`);
+    }
   }
 
   // For commands: add tools object if we had allowed-tools or tools
@@ -4699,7 +4761,7 @@ function uninstall(isGlobal, runtime = 'claude') {
   // 4. Remove GSD hooks
   const hooksDir = path.join(targetDir, 'hooks');
   if (fs.existsSync(hooksDir)) {
-    const gsdHooks = ['gsd-statusline.js', 'gsd-check-update.js', 'gsd-context-monitor.js', 'gsd-prompt-guard.js', 'gsd-read-guard.js', 'gsd-workflow-guard.js', 'gsd-session-state.sh', 'gsd-validate-commit.sh', 'gsd-phase-boundary.sh'];
+    const gsdHooks = ['gsd-statusline.js', 'gsd-check-update.js', 'gsd-context-monitor.js', 'gsd-prompt-guard.js', 'gsd-read-guard.js', 'gsd-read-injection-scanner.js', 'gsd-workflow-guard.js', 'gsd-session-state.sh', 'gsd-validate-commit.sh', 'gsd-phase-boundary.sh'];
     let hookCount = 0;
     for (const hook of gsdHooks) {
       const hookPath = path.join(hooksDir, hook);
@@ -4754,8 +4816,8 @@ function uninstall(isGlobal, runtime = 'claude') {
       cmd && (cmd.includes('gsd-check-update') || cmd.includes('gsd-statusline') ||
         cmd.includes('gsd-session-state') || cmd.includes('gsd-context-monitor') ||
         cmd.includes('gsd-phase-boundary') || cmd.includes('gsd-prompt-guard') ||
-        cmd.includes('gsd-read-guard') || cmd.includes('gsd-validate-commit') ||
-        cmd.includes('gsd-workflow-guard'));
+        cmd.includes('gsd-read-guard') || cmd.includes('gsd-read-injection-scanner') ||
+        cmd.includes('gsd-validate-commit') || cmd.includes('gsd-workflow-guard'));
 
     for (const eventName of ['SessionStart', 'PostToolUse', 'AfterTool', 'PreToolUse', 'BeforeTool']) {
       if (settings.hooks && settings.hooks[eventName]) {
@@ -5666,7 +5728,11 @@ function install(isGlobal, runtime = 'claude') {
         content = processAttribution(content, getCommitAttribution(runtime));
         // Convert frontmatter for runtime compatibility (agents need different handling)
         if (isOpencode) {
-          content = convertClaudeToOpencodeFrontmatter(content, { isAgent: true });
+          // Resolve per-agent model override from ~/.gsd/defaults.json (#2256)
+          const _ocAgentName = entry.name.replace(/\.md$/, '');
+          const _ocModelOverrides = readGsdGlobalModelOverrides();
+          const _ocModelOverride = _ocModelOverrides?.[_ocAgentName] || null;
+          content = convertClaudeToOpencodeFrontmatter(content, { isAgent: true, modelOverride: _ocModelOverride });
         } else if (isKilo) {
           content = convertClaudeToKiloFrontmatter(content, { isAgent: true });
         } else if (isGemini) {
@@ -5991,21 +6057,25 @@ function install(isGlobal, runtime = 'claude') {
   // Local installs anchor paths to $CLAUDE_PROJECT_DIR so hooks resolve
   // correctly regardless of the shell's current working directory (#1906).
   const localPrefix = '"$CLAUDE_PROJECT_DIR"/' + dirName;
+  const hookOpts = { portableHooks: hasPortableHooks };
   const statuslineCommand = isGlobal
-    ? buildHookCommand(targetDir, 'gsd-statusline.js')
+    ? buildHookCommand(targetDir, 'gsd-statusline.js', hookOpts)
     : 'node ' + localPrefix + '/hooks/gsd-statusline.js';
   const updateCheckCommand = isGlobal
-    ? buildHookCommand(targetDir, 'gsd-check-update.js')
+    ? buildHookCommand(targetDir, 'gsd-check-update.js', hookOpts)
     : 'node ' + localPrefix + '/hooks/gsd-check-update.js';
   const contextMonitorCommand = isGlobal
-    ? buildHookCommand(targetDir, 'gsd-context-monitor.js')
+    ? buildHookCommand(targetDir, 'gsd-context-monitor.js', hookOpts)
     : 'node ' + localPrefix + '/hooks/gsd-context-monitor.js';
   const promptGuardCommand = isGlobal
-    ? buildHookCommand(targetDir, 'gsd-prompt-guard.js')
+    ? buildHookCommand(targetDir, 'gsd-prompt-guard.js', hookOpts)
     : 'node ' + localPrefix + '/hooks/gsd-prompt-guard.js';
   const readGuardCommand = isGlobal
-    ? buildHookCommand(targetDir, 'gsd-read-guard.js')
+    ? buildHookCommand(targetDir, 'gsd-read-guard.js', hookOpts)
     : 'node ' + localPrefix + '/hooks/gsd-read-guard.js';
+  const readInjectionScannerCommand = isGlobal
+    ? buildHookCommand(targetDir, 'gsd-read-injection-scanner.js', hookOpts)
+    : 'node ' + localPrefix + '/hooks/gsd-read-injection-scanner.js';
 
   // Enable experimental agents for Gemini CLI (required for custom sub-agents)
   if (isGemini) {
@@ -6148,6 +6218,30 @@ function install(isGlobal, runtime = 'claude') {
       console.warn(`  ${yellow}⚠${reset}  Skipped read guard hook — gsd-read-guard.js not found at target`);
     }
 
+    // Configure PostToolUse hook for read-time prompt injection scanning (#2201)
+    // Scans content returned by the Read tool for injection patterns, including
+    // summarisation-specific patterns that survive context compression.
+    const hasReadInjectionScannerHook = settings.hooks[postToolEvent].some(entry =>
+      entry.hooks && entry.hooks.some(h => h.command && h.command.includes('gsd-read-injection-scanner'))
+    );
+
+    const readInjectionScannerFile = path.join(targetDir, 'hooks', 'gsd-read-injection-scanner.js');
+    if (!hasReadInjectionScannerHook && fs.existsSync(readInjectionScannerFile)) {
+      settings.hooks[postToolEvent].push({
+        matcher: 'Read',
+        hooks: [
+          {
+            type: 'command',
+            command: readInjectionScannerCommand,
+            timeout: 5
+          }
+        ]
+      });
+      console.log(`  ${green}✓${reset} Configured read injection scanner hook`);
+    } else if (!hasReadInjectionScannerHook && !fs.existsSync(readInjectionScannerFile)) {
+      console.warn(`  ${yellow}⚠${reset}  Skipped read injection scanner hook — gsd-read-injection-scanner.js not found at target`);
+    }
+
     // Community hooks — registered on install but opt-in at runtime.
     // Each hook checks .planning/config.json for hooks.community: true
     // and exits silently (no-op) if not enabled. This lets users enable
@@ -6157,7 +6251,7 @@ function install(isGlobal, runtime = 'claude') {
     // Detects file edits outside GSD workflow context and advises using
     // /gsd-quick or /gsd-fast for state-tracked changes. Advisory only.
     const workflowGuardCommand = isGlobal
-      ? buildHookCommand(targetDir, 'gsd-workflow-guard.js')
+      ? buildHookCommand(targetDir, 'gsd-workflow-guard.js', hookOpts)
       : 'node ' + localPrefix + '/hooks/gsd-workflow-guard.js';
     const hasWorkflowGuardHook = settings.hooks[preToolEvent].some(entry =>
       entry.hooks && entry.hooks.some(h => h.command && h.command.includes('gsd-workflow-guard'))
@@ -6182,7 +6276,7 @@ function install(isGlobal, runtime = 'claude') {
 
     // Configure commit validation hook (Conventional Commits enforcement, opt-in)
     const validateCommitCommand = isGlobal
-      ? buildHookCommand(targetDir, 'gsd-validate-commit.sh')
+      ? buildHookCommand(targetDir, 'gsd-validate-commit.sh', hookOpts)
       : 'bash ' + localPrefix + '/hooks/gsd-validate-commit.sh';
     const hasValidateCommitHook = settings.hooks[preToolEvent].some(entry =>
       entry.hooks && entry.hooks.some(h => h.command && h.command.includes('gsd-validate-commit'))
@@ -6209,7 +6303,7 @@ function install(isGlobal, runtime = 'claude') {
 
     // Configure session state orientation hook (opt-in)
     const sessionStateCommand = isGlobal
-      ? buildHookCommand(targetDir, 'gsd-session-state.sh')
+      ? buildHookCommand(targetDir, 'gsd-session-state.sh', hookOpts)
       : 'bash ' + localPrefix + '/hooks/gsd-session-state.sh';
     const hasSessionStateHook = settings.hooks.SessionStart.some(entry =>
       entry.hooks && entry.hooks.some(h => h.command && h.command.includes('gsd-session-state'))
@@ -6231,7 +6325,7 @@ function install(isGlobal, runtime = 'claude') {
 
     // Configure phase boundary detection hook (opt-in)
     const phaseBoundaryCommand = isGlobal
-      ? buildHookCommand(targetDir, 'gsd-phase-boundary.sh')
+      ? buildHookCommand(targetDir, 'gsd-phase-boundary.sh', hookOpts)
       : 'bash ' + localPrefix + '/hooks/gsd-phase-boundary.sh';
     const hasPhaseBoundaryHook = settings.hooks[postToolEvent].some(entry =>
       entry.hooks && entry.hooks.some(h => h.command && h.command.includes('gsd-phase-boundary'))
@@ -6271,11 +6365,19 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
   const isCline = runtime === 'cline';
 
   if (shouldInstallStatusline && !isOpencode && !isKilo && !isCodex && !isCopilot && !isCursor && !isWindsurf && !isTrae) {
-    settings.statusLine = {
-      type: 'command',
-      command: statuslineCommand
-    };
-    console.log(`  ${green}✓${reset} Configured statusline`);
+    if (!isGlobal && !forceStatusline) {
+      // Local installs skip statusLine by default: repo settings.json takes precedence over
+      // profile-level settings.json in Claude Code, so writing here would silently clobber
+      // any profile-level statusLine the user has configured (#2248).
+      // Pass --force-statusline to override this guard.
+      console.log(`  ${yellow}⚠${reset} Skipping statusLine for local install (avoids overriding profile-level settings; use --force-statusline to override)`);
+    } else {
+      settings.statusLine = {
+        type: 'command',
+        command: statuslineCommand
+      };
+      console.log(`  ${green}✓${reset} Configured statusline`);
+    }
   }
 
   // Write settings when runtime supports settings.json
