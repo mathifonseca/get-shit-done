@@ -710,6 +710,7 @@ You're never locked in. The system adapts.
 | Command | What it does |
 |---------|--------------|
 | `/gsd-map-codebase [area]` | Analyze existing codebase before new-project |
+| `/gsd-ingest-docs [dir]` | Scan a repo of mixed ADRs, PRDs, SPECs, and DOCs and bootstrap or merge the full `.planning/` setup in one pass — parallel classification, synthesis with precedence rules, and a three-bucket conflicts report |
 
 ### Phase Management
 

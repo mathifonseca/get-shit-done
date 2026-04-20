@@ -113,8 +113,17 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Next: run this workflow with \`rc\` action to publish a pre-release to \`next\`" >> "$GITHUB_STEP_SUMMARY"
 
-  rc:
+  install-smoke-rc:
     needs: validate-version
+    if: inputs.action == 'rc'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/install-smoke.yml
+    with:
+      ref: ${{ needs.validate-version.outputs.branch }}
+
+  rc:
+    needs: [validate-version, install-smoke-rc]
     if: inputs.action == 'rc'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -251,8 +260,17 @@ jobs:
           echo "To publish another pre-release: run \`rc\` again" >> "$GITHUB_STEP_SUMMARY"
           echo "To finalize: run \`finalize\` action" >> "$GITHUB_STEP_SUMMARY"
 
-  finalize:
+  install-smoke-finalize:
     needs: validate-version
+    if: inputs.action == 'finalize'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/install-smoke.yml
+    with:
+      ref: ${{ needs.validate-version.outputs.branch }}
+
+  finalize:
+    needs: [validate-version, install-smoke-finalize]
     if: inputs.action == 'finalize'
     runs-on: ubuntu-latest
     timeout-minutes: 10

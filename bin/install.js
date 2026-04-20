@@ -10,6 +10,8 @@ const crypto = require('crypto');
 const cyan = '\x1b[36m';
 const green = '\x1b[32m';
 const yellow = '\x1b[33m';
+const red = '\x1b[31m';
+const bold = '\x1b[1m';
 const dim = '\x1b[2m';
 const reset = '\x1b[0m';
 
@@ -5825,6 +5827,7 @@ function install(isGlobal, runtime = 'claude') {
             let content = fs.readFileSync(srcFile, 'utf8');
             content = content.replace(/'\.claude'/g, configDirReplacement);
             content = content.replace(/\/\.claude\//g, `/${getDirName(runtime)}/`);
+            content = content.replace(/\.claude\//g, `${getDirName(runtime)}/`);
             if (isQwen) {
               content = content.replace(/CLAUDE\.md/g, 'QWEN.md');
               content = content.replace(/\bClaude Code\b/g, 'Qwen Code');
@@ -5950,6 +5953,7 @@ function install(isGlobal, runtime = 'claude') {
           let content = fs.readFileSync(srcFile, 'utf8');
           content = content.replace(/'\.claude'/g, configDirReplacement);
           content = content.replace(/\/\.claude\//g, `/${getDirName(runtime)}/`);
+          content = content.replace(/\.claude\//g, `${getDirName(runtime)}/`);
           content = content.replace(/\{\{GSD_VERSION\}\}/g, pkg.version);
           fs.writeFileSync(destFile, content);
           try { fs.chmodSync(destFile, 0o755); } catch (e) { /* Windows */ }
@@ -6643,8 +6647,94 @@ function promptLocation(runtimes) {
  * every /gsd-* command that depends on newer query handlers.
  *
  * Skip if --no-sdk. Skip if already on PATH (unless --sdk was explicit).
- * Failures are warnings, not fatal.
+ * Failures are FATAL — we exit non-zero so install does not complete with a
+ * silently broken SDK (issue #2439). Set GSD_ALLOW_OFF_PATH=1 to downgrade the
+ * post-install PATH verification to a warning (exit code 2) for users with an
+ * intentionally restricted PATH who will wire things up manually.
  */
+
+/**
+ * Resolve `gsd-sdk` on PATH. Uses `command -v` via `sh -c` on POSIX (portable
+ * across sh/bash/zsh) and `where` on Windows. Returns trimmed path or null.
+ */
+function resolveGsdSdk() {
+  const { spawnSync } = require('child_process');
+  if (process.platform === 'win32') {
+    const r = spawnSync('where', ['gsd-sdk'], { encoding: 'utf-8' });
+    if (r.status === 0 && r.stdout && r.stdout.trim()) {
+      return r.stdout.trim().split('\n')[0].trim();
+    }
+    return null;
+  }
+  const r = spawnSync('sh', ['-c', 'command -v gsd-sdk'], { encoding: 'utf-8' });
+  if (r.status === 0 && r.stdout && r.stdout.trim()) {
+    return r.stdout.trim();
+  }
+  return null;
+}
+
+/**
+ * Best-effort detection of the user's shell rc file for PATH remediation hints.
+ */
+function detectShellRc() {
+  const path = require('path');
+  const shell = process.env.SHELL || '';
+  const home = process.env.HOME || '~';
+  if (/\/zsh$/.test(shell)) return { shell: 'zsh', rc: path.join(home, '.zshrc') };
+  if (/\/bash$/.test(shell)) return { shell: 'bash', rc: path.join(home, '.bashrc') };
+  if (/\/fish$/.test(shell)) return { shell: 'fish', rc: path.join(home, '.config', 'fish', 'config.fish') };
+  return { shell: 'sh', rc: path.join(home, '.profile') };
+}
+
+/**
+ * Emit a red fatal banner and exit. Prints actionable PATH remediation when
+ * the global install succeeded but the bin dir is not on PATH.
+ *
+ * If exitCode is 2, this is the "off-PATH" case and GSD_ALLOW_OFF_PATH respect
+ * is applied by the caller; we only print.
+ */
+function emitSdkFatal(reason, { globalBin, exitCode }) {
+  const { shell, rc } = detectShellRc();
+  const bar = '━'.repeat(72);
+  const redBold = `${red}${bold}`;
+
+  console.error('');
+  console.error(`${redBold}${bar}${reset}`);
+  console.error(`${redBold}  ✗ GSD SDK install failed — /gsd-* commands will not work${reset}`);
+  console.error(`${redBold}${bar}${reset}`);
+  console.error(`  ${red}Reason:${reset} ${reason}`);
+
+  if (globalBin) {
+    console.error('');
+    console.error(`  ${yellow}gsd-sdk was installed to:${reset}`);
+    console.error(`    ${cyan}${globalBin}${reset}`);
+    console.error('');
+    console.error(`  ${yellow}Your shell's PATH does not include this directory.${reset}`);
+    console.error(`  Add it by running:`);
+    if (shell === 'fish') {
+      console.error(`    ${cyan}fish_add_path "${globalBin}"${reset}`);
+      console.error(`    (or append to ${rc})`);
+    } else {
+      console.error(`    ${cyan}echo 'export PATH="${globalBin}:$PATH"' >> ${rc}${reset}`);
+      console.error(`    ${cyan}source ${rc}${reset}`);
+    }
+    console.error('');
+    console.error(`  Then verify: ${cyan}command -v gsd-sdk${reset}`);
+    if (exitCode === 2) {
+      console.error('');
+      console.error(`  ${dim}(GSD_ALLOW_OFF_PATH=1 set → exit ${exitCode} instead of hard failure)${reset}`);
+    }
+  } else {
+    console.error('');
+    console.error(`  Build manually to retry:`);
+    console.error(`    ${cyan}cd <install-dir>/sdk && npm install && npm run build && npm install -g .${reset}`);
+  }
+
+  console.error(`${redBold}${bar}${reset}`);
+  console.error('');
+  process.exit(exitCode);
+}
+
 function installSdkIfNeeded() {
   if (hasNoSdk) {
     console.log(`\n  ${dim}Skipping GSD SDK install (--no-sdk)${reset}`);
@@ -6656,9 +6746,9 @@ function installSdkIfNeeded() {
   const fs = require('fs');
 
   if (!hasSdk) {
-    const probe = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['gsd-sdk'], { stdio: 'ignore' });
-    if (probe.status === 0) {
-      console.log(`  ${green}✓${reset} GSD SDK already installed (gsd-sdk on PATH)`);
+    const resolved = resolveGsdSdk();
+    if (resolved) {
+      console.log(`  ${green}✓${reset} GSD SDK already installed (gsd-sdk on PATH at ${resolved})`);
       return;
     }
   }
@@ -6671,17 +6761,8 @@ function installSdkIfNeeded() {
   const sdkDir = path.resolve(__dirname, '..', 'sdk');
   const sdkPackageJson = path.join(sdkDir, 'package.json');
 
-  const warnManual = (reason) => {
-    console.warn(`  ${yellow}⚠${reset}  ${reason}`);
-    console.warn(`     Build manually from the repo sdk/ directory:`);
-    console.warn(`       ${cyan}cd ${sdkDir} && npm install && npm run build && npm install -g .${reset}`);
-    console.warn(`     Then restart your shell so the updated PATH is picked up.`);
-    console.warn(`     Without it, /gsd-* commands will fail with "command not found: gsd-sdk".`);
-  };
-
   if (!fs.existsSync(sdkPackageJson)) {
-    warnManual(`SDK source tree not found at ${sdkDir}.`);
-    return;
+    emitSdkFatal(`SDK source tree not found at ${sdkDir}.`, { globalBin: null, exitCode: 1 });
   }
 
   console.log(`\n  ${cyan}Building GSD SDK from source (${sdkDir})…${reset}`);
@@ -6690,36 +6771,43 @@ function installSdkIfNeeded() {
   // 1. Install sdk build-time dependencies (tsc, etc.)
   const installResult = spawnSync(npmCmd, ['install'], { cwd: sdkDir, stdio: 'inherit' });
   if (installResult.status !== 0) {
-    warnManual('Failed to `npm install` in sdk/.');
-    return;
+    emitSdkFatal('Failed to `npm install` in sdk/.', { globalBin: null, exitCode: 1 });
   }
 
   // 2. Compile TypeScript → sdk/dist/
   const buildResult = spawnSync(npmCmd, ['run', 'build'], { cwd: sdkDir, stdio: 'inherit' });
   if (buildResult.status !== 0) {
-    warnManual('Failed to `npm run build` in sdk/.');
-    return;
+    emitSdkFatal('Failed to `npm run build` in sdk/.', { globalBin: null, exitCode: 1 });
   }
 
   // 3. Install the built package globally so `gsd-sdk` lands on PATH.
   const globalResult = spawnSync(npmCmd, ['install', '-g', '.'], { cwd: sdkDir, stdio: 'inherit' });
   if (globalResult.status !== 0) {
-    warnManual('Failed to `npm install -g .` from sdk/.');
+    emitSdkFatal('Failed to `npm install -g .` from sdk/.', { globalBin: null, exitCode: 1 });
+  }
+
+  // 4. Verify gsd-sdk is actually resolvable on PATH. npm's global bin dir is
+  //    not always on the current shell's PATH (Homebrew prefixes, nvm setups,
+  //    unconfigured npm prefix), so a zero exit status from `npm install -g`
+  //    alone is not proof of a working binary (issue #2439 root cause).
+  const resolved = resolveGsdSdk();
+  if (resolved) {
+    console.log(`  ${green}✓${reset} Built and installed GSD SDK from source (gsd-sdk resolved at ${resolved})`);
     return;
   }
 
-  // Verify gsd-sdk is actually resolvable on PATH. npm's global bin dir is
-  // not always on the current shell's PATH (Homebrew prefixes, nvm setups,
-  // unconfigured npm prefix), so a zero exit status from `npm install -g`
-  // alone is not proof of a working binary.
-  const resolverCmd = process.platform === 'win32' ? 'where' : 'which';
-  const verify = spawnSync(resolverCmd, ['gsd-sdk'], { encoding: 'utf-8' });
-  if (verify.status === 0 && verify.stdout && verify.stdout.trim()) {
-    console.log(`  ${green}✓${reset} Built and installed GSD SDK from source (gsd-sdk resolved at ${verify.stdout.trim().split('\n')[0]})`);
-  } else {
-    warnManual('Built and installed GSD SDK from source but gsd-sdk is not on PATH — npm global bin may not be in your PATH.');
-    if (verify.stderr) console.warn(`     resolver stderr: ${verify.stderr.trim()}`);
-  }
+  // Off-PATH: resolve npm global bin dir for actionable remediation.
+  const prefixResult = spawnSync(npmCmd, ['config', 'get', 'prefix'], { encoding: 'utf-8' });
+  const prefix = prefixResult.status === 0 ? (prefixResult.stdout || '').trim() : null;
+  const globalBin = prefix
+    ? (process.platform === 'win32' ? prefix : path.join(prefix, 'bin'))
+    : null;
+
+  const allowOffPath = process.env.GSD_ALLOW_OFF_PATH === '1';
+  emitSdkFatal(
+    'Built and installed GSD SDK, but `gsd-sdk` is not on your PATH.',
+    { globalBin, exitCode: allowOffPath ? 2 : 1 },
+  );
 }
 
 /**
