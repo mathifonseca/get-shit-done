@@ -41,7 +41,7 @@ npx get-shit-done-cc@latest
 
 **Trusted by engineers at Amazon, Google, Shopify, and Webflow.**
 
-[Why I Built This](#why-i-built-this) · [How It Works](#how-it-works) · [Commands](#commands) · [Why It Works](#why-it-works) · [User Guide](docs/USER-GUIDE.md)
+[Why I Built This](#why-i-built-this) · [How It Works](#how-it-works) · [Commands](#commands) · [Why It Works](#why-it-works) · [User Guide](docs/USER-GUIDE.md) · [Walkthrough](docs/USER-GUIDE.md#end-to-end-walkthrough)
 
 </div>
 
@@ -284,6 +284,57 @@ The GSD SDK CLI (`gsd-sdk`) is installed automatically (required by `/gsd-*` com
 </details>
 
 <details>
+<summary><strong>Minimal Install (local LLMs and token-billed APIs)</strong></summary>
+
+GSD ships 86 skills and 33 subagents. Every runtime (Claude Code, OpenCode, etc.) eagerly enumerates skill descriptions and subagent descriptions into the system prompt on **every turn** — about **~12k tokens** of fixed overhead before you've typed anything. Frontier models with large context (Sonnet 4.6, Opus 4.7 — 200K to 1M ctx) absorb that without a noticeable hit. **Local LLMs with 32K–128K context, and any model where you're paying per token, will feel it.**
+
+Pass `--minimal` (alias `--core-only`) to install only the **main GSD loop**:
+
+```bash
+npx get-shit-done-cc --claude --global --minimal
+# or any other runtime — works the same
+npx get-shit-done-cc --opencode --global --minimal
+```
+
+What you get:
+
+| Surface | Default install | `--minimal` install |
+|---|---|---|
+| Skills | 86 (`new-project`, `discuss-phase`, `plan-phase`, `execute-phase`, …82 more) | **6** (`new-project`, `discuss-phase`, `plan-phase`, `execute-phase`, `help`, `update`) |
+| Subagents | 33 `gsd-*` agents | **0** |
+| Cold-start system-prompt overhead | ~12k tokens | **~700 tokens** (≥94% reduction) |
+| Manifest mode field | `"full"` | `"minimal"` |
+
+The 6 core skills are exactly the ones you need to drive a project from zero: `new-project` to bootstrap, then the `discuss → plan → execute` loop, plus `help` for discovery and `update` to upgrade later.
+
+**This is a hard floor, not a ceiling.** Each `/gsd-*` command you start using and each subagent it dispatches loads its body content into the conversation for that turn — that's normal token use, not eager overhead. But:
+
+> [!IMPORTANT]
+> **The savings disappear the moment you re-install without `--minimal`.** Running `npx get-shit-done-cc@latest` (or `gsd update` from inside a session) without the flag puts the full 86-skill / 33-agent surface back on disk, and every subsequent session pays the full ~12k-token floor again. If you want to stay minimal, **always pass `--minimal` when updating**:
+>
+> ```bash
+> npx get-shit-done-cc@latest --claude --global --minimal
+> ```
+>
+> Need a specific skill that isn't in the core set (e.g., `gsd-autonomous`, `gsd-ship`, `gsd-debug`)? You have two options:
+> 1. **Permanent expand:** re-install without `--minimal` to get the full surface (and the full token floor).
+> 2. **One-shot:** run the slash command's underlying logic by reading the source from `commands/gsd/<name>.md` in the GSD package and executing it manually — no install change needed.
+>
+> Tip: `cat ~/.claude/get-shit-done/.gsd-manifest.json | jq .mode` (or `gsd-file-manifest.json` depending on layout) confirms which mode you're in.
+
+When to use `--minimal`:
+- Local model with 32K–128K context (Qwen3, Llama, Mistral, etc.)
+- Token-metered API where every turn matters
+- Throwaway directory or non-GSD project where you want `/gsd-new-project` available without paying for the rest
+- CI runners or ephemeral containers where install footprint matters
+
+When **not** to use `--minimal`:
+- Active GSD project where you regularly invoke the broader command set (`autonomous`, `ship`, `code-review`, `debug`, etc.) — re-installing each time is friction without payoff.
+- Frontier models with 200K–1M context — the savings are noise.
+
+</details>
+
+<details>
 <summary><strong>Development Installation</strong></summary>
 
 Clone the repository, build hooks, and run the installer locally:
@@ -348,6 +399,8 @@ If you prefer not to use that flag, add this to your project's `.claude/settings
 ---
 
 ## How It Works
+
+> **New to GSD?** See the [end-to-end walkthrough](docs/USER-GUIDE.md#end-to-end-walkthrough) in the User Guide — it shows a complete project from `/gsd-new-project` through `/gsd-verify-work` with concrete example outputs.
 
 > **Already have code?** Run `/gsd-map-codebase` first. It spawns parallel agents to analyze your stack, architecture, conventions, and concerns. Then `/gsd-new-project` knows your codebase — questions focus on what you're adding, and planning automatically loads your patterns.
 

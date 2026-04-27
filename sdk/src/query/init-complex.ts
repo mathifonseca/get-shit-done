@@ -26,7 +26,12 @@ import { homedir } from 'node:os';
 import { loadConfig } from '../config.js';
 import { resolveModel } from './config-query.js';
 import { planningPaths, normalizePhaseName, phaseTokenMatches, toPosixPath } from './helpers.js';
-import { getMilestoneInfo, extractCurrentMilestone } from './roadmap.js';
+import {
+  getMilestoneInfo,
+  extractCurrentMilestone,
+  extractNextMilestoneSection,
+  extractPhasesFromSection,
+} from './roadmap.js';
 import { withProjectRoot } from './init.js';
 import type { QueryHandler } from './utils.js';
 
@@ -48,6 +53,36 @@ function pathExists(base: string, relPath: string): boolean {
   return existsSync(join(base, relPath));
 }
 
+/**
+ * Extract ROADMAP checkbox states: `- [x] Phase N` → true, `- [ ] Phase N` → false.
+ * Shared by initProgress and initManager so both treat ROADMAP as the
+ * fallback/override source of truth for completion.
+ */
+function extractCheckboxStates(content: string): Map<string, boolean> {
+  const states = new Map<string, boolean>();
+  const pattern = /-\s*\[(x| )\]\s*.*Phase\s+(\d+[A-Z]?(?:\.\d+)*)[:\s]/gi;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(content)) !== null) {
+    states.set(m[2], m[1].toLowerCase() === 'x');
+  }
+  return states;
+}
+
+/**
+ * Derive progress-level status from a ROADMAP checkbox when the phase has
+ * no on-disk directory. Returns 'complete' for `[x]`, 'not_started' otherwise.
+ * Disk status (when present) always wins — it's more recent truth for in-flight work.
+ */
+function deriveStatusFromCheckbox(
+  phaseNum: string,
+  checkboxStates: Map<string, boolean>,
+): 'complete' | 'not_started' {
+  const stripped = phaseNum.replace(/^0+/, '') || '0';
+  if (checkboxStates.get(phaseNum) === true) return 'complete';
+  if (checkboxStates.get(stripped) === true) return 'complete';
+  return 'not_started';
+}
+
 // ─── initNewProject ───────────────────────────────────────────────────────
 
 /**
@@ -58,8 +93,8 @@ function pathExists(base: string, relPath: string): boolean {
  *
  * Port of cmdInitNewProject from init.cjs lines 296-399.
  */
-export const initNewProject: QueryHandler = async (_args, projectDir) => {
-  const config = await loadConfig(projectDir);
+export const initNewProject: QueryHandler = async (_args, projectDir, workstream) => {
+  const config = await loadConfig(projectDir, workstream);
 
   // Detect search API key availability from env vars and ~/.gsd/ files
   const gsdHome = join(homedir(), '.gsd');
@@ -162,7 +197,7 @@ export const initNewProject: QueryHandler = async (_args, projectDir) => {
     project_path: '.planning/PROJECT.md',
   };
 
-  return { data: withProjectRoot(projectDir, result) };
+  return { data: withProjectRoot(projectDir, result, config as Record<string, unknown>) };
 };
 
 // ─── initProgress ─────────────────────────────────────────────────────────
@@ -174,10 +209,10 @@ export const initNewProject: QueryHandler = async (_args, projectDir) => {
  *
  * Port of cmdInitProgress from init.cjs lines 1139-1284.
  */
-export const initProgress: QueryHandler = async (_args, projectDir) => {
-  const config = await loadConfig(projectDir);
-  const milestone = await getMilestoneInfo(projectDir);
-  const paths = planningPaths(projectDir);
+export const initProgress: QueryHandler = async (_args, projectDir, workstream) => {
+  const config = await loadConfig(projectDir, workstream);
+  const milestone = await getMilestoneInfo(projectDir, workstream);
+  const paths = planningPaths(projectDir, workstream);
 
   const phases: Record<string, unknown>[] = [];
   let currentPhase: Record<string, unknown> | null = null;
@@ -186,10 +221,11 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
   // Build set of phases from ROADMAP for the current milestone
   const roadmapPhaseNames = new Map<string, string>();
   const seenPhaseNums = new Set<string>();
+  let checkboxStates = new Map<string, boolean>();
 
   try {
     const rawRoadmap = await readFile(paths.roadmap, 'utf-8');
-    const roadmapContent = await extractCurrentMilestone(rawRoadmap, projectDir);
+    const roadmapContent = await extractCurrentMilestone(rawRoadmap, projectDir, workstream);
     const headingPattern = /#{2,4}\s*Phase\s+(\d+[A-Z]?(?:\.\d+)*)\s*:\s*([^\n]+)/gi;
     let hm: RegExpExecArray | null;
     while ((hm = headingPattern.exec(roadmapContent)) !== null) {
@@ -197,6 +233,7 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
       const pName = hm[2].replace(/\(INSERTED\)/i, '').trim();
       roadmapPhaseNames.set(pNum, pName);
     }
+    checkboxStates = extractCheckboxStates(roadmapContent);
   } catch { /* intentionally empty */ }
 
   // Scan phase directories
@@ -225,10 +262,21 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
       const summaries = phaseFiles.filter(f => f.endsWith('-SUMMARY.md') || f === 'SUMMARY.md');
       const hasResearch = phaseFiles.some(f => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md');
 
-      const status =
+      let status =
         summaries.length >= plans.length && plans.length > 0 ? 'complete' :
         plans.length > 0 ? 'in_progress' :
         hasResearch ? 'researched' : 'pending';
+
+      // #2674: align with initManager — a ROADMAP `- [x] Phase N` checkbox
+      // wins over disk state. A stub phase dir with no SUMMARY is leftover
+      // scaffolding; the user's explicit [x] is the authoritative signal.
+      const strippedNum = phaseNumber.replace(/^0+/, '') || '0';
+      const roadmapComplete =
+        checkboxStates.get(phaseNumber) === true ||
+        checkboxStates.get(strippedNum) === true;
+      if (roadmapComplete && status !== 'complete') {
+        status = 'complete';
+      }
 
       const phaseInfo: Record<string, unknown> = {
         number: phaseNumber,
@@ -251,21 +299,23 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
     }
   } catch { /* intentionally empty */ }
 
-  // Add ROADMAP-only phases not yet on disk
+  // Add ROADMAP-only phases not yet on disk. For phases with a ROADMAP
+  // `[x]` checkbox, treat them as complete (#2646).
   for (const [num, name] of roadmapPhaseNames) {
     const stripped = num.replace(/^0+/, '') || '0';
     if (!seenPhaseNums.has(stripped)) {
+      const status = deriveStatusFromCheckbox(num, checkboxStates);
       const phaseInfo: Record<string, unknown> = {
         number: num,
         name: name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''),
         directory: null,
-        status: 'not_started',
+        status,
         plan_count: 0,
         summary_count: 0,
         has_research: false,
       };
       phases.push(phaseInfo);
-      if (!nextPhase && !currentPhase) {
+      if (!nextPhase && !currentPhase && status !== 'complete') {
         nextPhase = phaseInfo;
       }
     }
@@ -309,7 +359,7 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
     config_path: toPosixPath(relative(projectDir, paths.config)),
   };
 
-  return { data: withProjectRoot(projectDir, result) };
+  return { data: withProjectRoot(projectDir, result, config as Record<string, unknown>) };
 };
 
 // ─── initManager ─────────────────────────────────────────────────────────
@@ -322,10 +372,10 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
  *
  * Port of cmdInitManager from init.cjs lines 854-1137.
  */
-export const initManager: QueryHandler = async (_args, projectDir) => {
-  const config = await loadConfig(projectDir);
-  const milestone = await getMilestoneInfo(projectDir);
-  const paths = planningPaths(projectDir);
+export const initManager: QueryHandler = async (_args, projectDir, workstream) => {
+  const config = await loadConfig(projectDir, workstream);
+  const milestone = await getMilestoneInfo(projectDir, workstream);
+  const paths = planningPaths(projectDir, workstream);
 
   let rawContent: string;
   try {
@@ -334,7 +384,7 @@ export const initManager: QueryHandler = async (_args, projectDir) => {
     return { data: { error: 'No ROADMAP.md found. Run /gsd-new-milestone first.' } };
   }
 
-  const content = await extractCurrentMilestone(rawContent, projectDir);
+  const content = await extractCurrentMilestone(rawContent, projectDir, workstream);
 
   // Pre-compute directory listing once
   let phaseDirEntries: string[] = [];
@@ -344,13 +394,8 @@ export const initManager: QueryHandler = async (_args, projectDir) => {
       .map(e => e.name);
   } catch { /* intentionally empty */ }
 
-  // Pre-extract checkbox states in a single pass
-  const checkboxStates = new Map<string, boolean>();
-  const cbPattern = /-\s*\[(x| )\]\s*.*Phase\s+(\d+[A-Z]?(?:\.\d+)*)[:\s]/gi;
-  let cbMatch: RegExpExecArray | null;
-  while ((cbMatch = cbPattern.exec(content)) !== null) {
-    checkboxStates.set(cbMatch[2], cbMatch[1].toLowerCase() === 'x');
-  }
+  // Pre-extract checkbox states in a single pass (shared helper — #2646)
+  const checkboxStates = extractCheckboxStates(content);
 
   const phasePattern = /#{2,4}\s*Phase\s+(\d+[A-Z]?(?:\.\d+)*)\s*:\s*([^\n]+)/gi;
   const phases: Record<string, unknown>[] = [];
@@ -543,6 +588,40 @@ export const initManager: QueryHandler = async (_args, projectDir) => {
 
   const completedCount = phases.filter(p => p.disk_status === 'complete').length;
 
+  // ── Next-milestone surface (issue #2497) ───────────────────────────────
+  // Populate queued_phases + metadata with the milestone immediately after
+  // the active one, so the /gsd-manager dashboard can preview what's coming
+  // next without mixing it into the active phases grid. Empty/null when the
+  // active milestone is the last one in ROADMAP.
+  let queuedPhases: Record<string, unknown>[] = [];
+  let queuedMilestoneVersion: string | null = null;
+  let queuedMilestoneName: string | null = null;
+  try {
+    const next = await extractNextMilestoneSection(rawContent, projectDir);
+    if (next) {
+      queuedMilestoneVersion = next.version;
+      queuedMilestoneName = next.name;
+      queuedPhases = extractPhasesFromSection(next.section).map(p => {
+        const MAX_NAME_WIDTH = 20;
+        const display_name = p.name.length > MAX_NAME_WIDTH
+          ? p.name.slice(0, MAX_NAME_WIDTH - 1) + '…'
+          : p.name;
+        const depNums = p.depends_on && !/^none$/i.test(p.depends_on.trim())
+          ? (p.depends_on.match(/\d+(?:\.\d+)*/g) || [])
+          : [];
+        return {
+          number: p.number,
+          name: p.name,
+          display_name,
+          goal: p.goal,
+          depends_on: p.depends_on,
+          dep_phases: depNums,
+          deps_display: depNums.length > 0 ? depNums.join(',') : '—',
+        };
+      });
+    }
+  } catch { /* queued_phases is a non-critical enhancement */ }
+
   // Read manager flags from config
   const managerConfig = (config as Record<string, unknown>).manager as Record<string, Record<string, string>> | undefined;
   const sanitizeFlags = (raw: unknown): string => {
@@ -568,11 +647,14 @@ export const initManager: QueryHandler = async (_args, projectDir) => {
     recommended_actions: recommendedActions,
     waiting_signal: waitingSignal,
     all_complete: completedCount === phases.length && phases.length > 0,
+    queued_phases: queuedPhases,
+    queued_milestone_version: queuedMilestoneVersion,
+    queued_milestone_name: queuedMilestoneName,
     project_exists: pathExists(projectDir, '.planning/PROJECT.md'),
     roadmap_exists: true,
     state_exists: true,
     manager_flags: managerFlags,
   };
 
-  return { data: withProjectRoot(projectDir, result) };
+  return { data: withProjectRoot(projectDir, result, config as Record<string, unknown>) };
 };

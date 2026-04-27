@@ -61,8 +61,8 @@ export function extractField(obj: unknown, fieldPath: string): unknown {
  * Flat command registry that routes query commands to native handlers.
  *
  * `dispatch()` throws `GSDError` for unknown command keys. The `gsd-sdk query`
- * CLI uses `resolveQueryArgv()` to map argv to a registered handler; there is
- * no passthrough to `gsd-tools.cjs` — CJS-only commands stay on the legacy CLI.
+ * CLI uses `resolveQueryArgv()` first; when no handler matches, it may shell out
+ * to `gsd-tools.cjs` (see `cli.ts` and `QUERY-HANDLERS.md` fallback policy).
  */
 export class QueryRegistry {
   private handlers = new Map<string, QueryHandler>();
@@ -110,10 +110,11 @@ export class QueryRegistry {
    * @param command - The command name to dispatch
    * @param args - Arguments to pass to the handler
    * @param projectDir - The project directory for context
+   * @param workstream - Optional workstream name to scope .planning paths
    * @returns The query result from the handler
    * @throws GSDError if no handler is registered for the command
    */
-  async dispatch(command: string, args: string[], projectDir: string): Promise<QueryResult> {
+  async dispatch(command: string, args: string[], projectDir: string, workstream?: string): Promise<QueryResult> {
     const handler = this.handlers.get(command);
     if (!handler) {
       throw new GSDError(
@@ -121,19 +122,32 @@ export class QueryRegistry {
         ErrorClassification.Validation,
       );
     }
-    return handler(args, projectDir);
+    return handler(args, projectDir, workstream);
   }
 }
 
-function expandSingleDottedToken(tokens: string[]): string[] {
-  if (tokens.length !== 1 || tokens[0].startsWith('--')) {
+/**
+ * If the first token contains a dot (e.g. `init.execute-phase`), split it into
+ * segments and prepend those segments in place of the original token. Args that
+ * follow the dotted token are preserved.
+ *
+ * Examples:
+ *   ['init.new-project']               -> ['init', 'new-project']
+ *   ['init.execute-phase', '1']        -> ['init', 'execute-phase', '1']
+ *   ['state.update', 'status', 'X']    -> ['state', 'update', 'status', 'X']
+ *
+ * Returns the original array (by reference) when no expansion applies so callers
+ * can detect "nothing changed" via identity comparison.
+ */
+function expandFirstDottedToken(tokens: string[]): string[] {
+  if (tokens.length === 0) {
     return tokens;
   }
-  const t = tokens[0];
-  if (!t.includes('.')) {
+  const first = tokens[0];
+  if (first.startsWith('--') || !first.includes('.')) {
     return tokens;
   }
-  return t.split('.');
+  return [...first.split('.'), ...tokens.slice(1)];
 }
 
 function matchRegisteredPrefix(
@@ -165,7 +179,7 @@ export function resolveQueryArgv(
 ): { cmd: string; args: string[] } | null {
   let matched = matchRegisteredPrefix(tokens, registry);
   if (!matched) {
-    const expanded = expandSingleDottedToken(tokens);
+    const expanded = expandFirstDottedToken(tokens);
     if (expanded !== tokens) {
       matched = matchRegisteredPrefix(expanded, registry);
     }

@@ -172,6 +172,61 @@ describe('initProgress', () => {
     expect(typeof data.roadmap_path).toBe('string');
     expect(typeof data.config_path).toBe('string');
   });
+
+  // ── #2646: ROADMAP checkbox fallback when no phases/ directory ─────────
+  it('derives completed_count from ROADMAP [x] checkboxes when phases/ is absent', async () => {
+    // Fresh fixture: NO phases/ directory at all, checkbox-driven ROADMAP.
+    const tmp = await mkdtemp(join(tmpdir(), 'gsd-init-complex-2646-'));
+    try {
+      await mkdir(join(tmp, '.planning'), { recursive: true });
+      await writeFile(join(tmp, '.planning', 'config.json'), JSON.stringify({
+        model_profile: 'balanced',
+        commit_docs: false,
+        git: {
+          branching_strategy: 'none',
+          phase_branch_template: 'gsd/phase-{phase}-{slug}',
+          milestone_branch_template: 'gsd/{milestone}-{slug}',
+          quick_branch_template: null,
+        },
+        workflow: { research: true, plan_check: true, verifier: true, nyquist_validation: true },
+      }));
+      await writeFile(join(tmp, '.planning', 'STATE.md'), [
+        '---',
+        'milestone: v1.0',
+        '---',
+      ].join('\n'));
+      await writeFile(join(tmp, '.planning', 'ROADMAP.md'), [
+        '# Roadmap',
+        '',
+        '## v1.0: Checkbox-Driven',
+        '',
+        '- [x] Phase 1: Scaffold',
+        '- [ ] Phase 2: Build',
+        '',
+        '### Phase 1: Scaffold',
+        '',
+        '**Goal:** Scaffold the thing',
+        '',
+        '### Phase 2: Build',
+        '',
+        '**Goal:** Build the thing',
+        '',
+      ].join('\n'));
+
+      const result = await initProgress([], tmp);
+      const data = result.data as Record<string, unknown>;
+      const phases = data.phases as Record<string, unknown>[];
+
+      expect(data.phase_count).toBe(2);
+      expect(data.completed_count).toBe(1);
+      const phase1 = phases.find(p => p.number === '1');
+      const phase2 = phases.find(p => p.number === '2');
+      expect(phase1?.status).toBe('complete');
+      expect(phase2?.status).toBe('not_started');
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('initManager', () => {
@@ -228,5 +283,202 @@ describe('initManager', () => {
     expect(typeof flags.discuss).toBe('string');
     expect(typeof flags.plan).toBe('string');
     expect(typeof flags.execute).toBe('string');
+  });
+
+  // ── queued_phases (#2497) ─────────────────────────────────────────────
+  describe('queued_phases (#2497)', () => {
+    const MULTI_MILESTONE = [
+      '# Roadmap',
+      '',
+      '## Milestone v1.0: Old — ✅ SHIPPED 2026-01-01',
+      '',
+      'Shipped.',
+      '',
+      '## Milestone v2.0.5: Current',
+      '',
+      '### Phase 35: Audit',
+      '**Goal**: Audit schemas.',
+      '**Depends on**: None',
+      '',
+      '## Milestone v2.1: Daily Emails',
+      '',
+      '### Phase 31: Schema',
+      '**Goal**: Build schema.',
+      '**Depends on**: None',
+      '',
+      '### Phase 32: Sending',
+      '**Goal**: Send emails.',
+      '**Depends on**: Phase 31',
+      '',
+      '## Milestone v2.2: Later',
+      '',
+      '### Phase 99: Future',
+      '**Goal**: Later work.',
+    ].join('\n');
+
+    beforeEach(async () => {
+      await writeFile(join(tmpDir, '.planning', 'ROADMAP.md'), MULTI_MILESTONE);
+      await writeFile(join(tmpDir, '.planning', 'STATE.md'), [
+        '---',
+        'milestone: v2.0.5',
+        'milestone_name: Current',
+        '---',
+      ].join('\n'));
+    });
+
+    it('surfaces the next milestone in queued_phases with metadata', async () => {
+      const result = await initManager([], tmpDir);
+      const data = result.data as Record<string, unknown>;
+      expect(data.queued_milestone_version).toBe('v2.1');
+      expect(data.queued_milestone_name).toBe('Daily Emails');
+      const queued = data.queued_phases as Record<string, unknown>[];
+      expect(queued.map(p => p.number)).toEqual(['31', '32']);
+      // Only the NEXT milestone's phases appear — not v2.2's Phase 99.
+      expect(queued.find(p => p.number === '99')).toBeUndefined();
+    });
+
+    it('queued_phases entries carry name, deps_display, and display_name', async () => {
+      const result = await initManager([], tmpDir);
+      const data = result.data as Record<string, unknown>;
+      const queued = data.queued_phases as Record<string, unknown>[];
+      const p32 = queued.find(p => p.number === '32');
+      expect(p32).toBeDefined();
+      expect(p32!.name).toBe('Sending');
+      expect(p32!.deps_display).toBe('31');
+      expect(typeof p32!.display_name).toBe('string');
+    });
+
+    it('does NOT mix queued phases into the active phases list', async () => {
+      const result = await initManager([], tmpDir);
+      const data = result.data as Record<string, unknown>;
+      const active = (data.phases as Record<string, unknown>[]).map(p => p.number);
+      // Active milestone is v2.0.5 → only Phase 35 belongs here.
+      expect(active).toContain('35');
+      expect(active).not.toContain('31');
+      expect(active).not.toContain('32');
+    });
+
+    it('returns empty queued_phases and null metadata when active is last milestone', async () => {
+      await writeFile(join(tmpDir, '.planning', 'ROADMAP.md'), [
+        '## Milestone v2.0.5: Only Milestone',
+        '',
+        '### Phase 35: Audit',
+        '**Goal**: Final.',
+      ].join('\n'));
+      const result = await initManager([], tmpDir);
+      const data = result.data as Record<string, unknown>;
+      expect(data.queued_phases).toEqual([]);
+      expect(data.queued_milestone_version).toBeNull();
+      expect(data.queued_milestone_name).toBeNull();
+    });
+  });
+});
+
+// ─── Workstream path threading tests (#2731) ─────────────────────────────────
+
+const WORKSTREAM_CONFIG = JSON.stringify({
+  model_profile: 'balanced',
+  commit_docs: false,
+  git: {
+    branching_strategy: 'none',
+    phase_branch_template: 'gsd/phase-{phase}-{slug}',
+    milestone_branch_template: 'gsd/{milestone}-{slug}',
+    quick_branch_template: null,
+  },
+  workflow: { research: true, plan_check: true, verifier: true, nyquist_validation: true },
+});
+
+const WORKSTREAM_STATE = [
+  '---',
+  'milestone: v1.0',
+  'status: executing',
+  '---',
+  '',
+  '# Project State',
+].join('\n');
+
+const WORKSTREAM_ROADMAP = [
+  '# Roadmap',
+  '',
+  '## v1.0: Ops Milestone',
+  '',
+  '### Phase 1: Weave Cron',
+  '',
+  '**Goal:** Set up cron jobs',
+  '',
+  '### Phase 2: Alerts',
+  '',
+  '**Goal:** Set up alerting',
+  '',
+].join('\n');
+
+describe('initProgress workstream (#2731)', () => {
+  it('scans phases from workstream subdirectory, not root', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'gsd-ws-progress-'));
+    try {
+      const wsBase = join(tmp, '.planning', 'workstreams', 'production-support');
+
+      // Root .planning has NO phases — if workstream ignored, result will be empty
+      await mkdir(join(tmp, '.planning'), { recursive: true });
+      await writeFile(join(tmp, '.planning', 'config.json'), WORKSTREAM_CONFIG);
+
+      // Workstream-scoped structure
+      await mkdir(join(wsBase, 'phases', '01-weave-cron'), { recursive: true });
+      await mkdir(join(wsBase, 'phases', '02-alerts'), { recursive: true });
+      await writeFile(join(wsBase, 'config.json'), WORKSTREAM_CONFIG);
+      await writeFile(join(wsBase, 'STATE.md'), WORKSTREAM_STATE);
+      await writeFile(join(wsBase, 'ROADMAP.md'), WORKSTREAM_ROADMAP);
+
+      // Phase 01: plan + summary (complete)
+      await writeFile(join(wsBase, 'phases', '01-weave-cron', '01-01-PLAN.md'), '# Plan');
+      await writeFile(join(wsBase, 'phases', '01-weave-cron', '01-01-SUMMARY.md'), '# Done');
+
+      // Phase 02: plan only (in_progress)
+      await writeFile(join(wsBase, 'phases', '02-alerts', '02-01-PLAN.md'), '# Plan');
+
+      const result = await initProgress([], tmp, 'production-support');
+      const data = result.data as Record<string, unknown>;
+      const phases = data.phases as Record<string, unknown>[];
+
+      expect(phases.length).toBeGreaterThan(0);
+      const phase1 = phases.find(p => (p.number as string).startsWith('01') || p.number === '1');
+      expect(phase1).toBeDefined();
+      expect(phase1?.status).toBe('complete');
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('initManager workstream (#2731)', () => {
+  it('reads ROADMAP.md from workstream subdirectory, not root', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'gsd-ws-manager-'));
+    try {
+      const wsBase = join(tmp, '.planning', 'workstreams', 'production-support');
+
+      // Root .planning has no ROADMAP — if workstream ignored, initManager errors
+      await mkdir(join(tmp, '.planning'), { recursive: true });
+      await writeFile(join(tmp, '.planning', 'config.json'), WORKSTREAM_CONFIG);
+
+      // Workstream-scoped structure
+      await mkdir(join(wsBase, 'phases', '01-weave-cron'), { recursive: true });
+      await writeFile(join(wsBase, 'config.json'), WORKSTREAM_CONFIG);
+      await writeFile(join(wsBase, 'STATE.md'), WORKSTREAM_STATE);
+      await writeFile(join(wsBase, 'ROADMAP.md'), WORKSTREAM_ROADMAP);
+      await writeFile(join(wsBase, 'phases', '01-weave-cron', '01-01-PLAN.md'), '# Plan');
+
+      const result = await initManager([], tmp, 'production-support');
+      const data = result.data as Record<string, unknown>;
+
+      // Should NOT return error (no ROADMAP found at root)
+      expect(data.error).toBeUndefined();
+      // Should find phases from the workstream ROADMAP
+      const phases = data.phases as Record<string, unknown>[];
+      expect(phases.length).toBeGreaterThan(0);
+      const phase1 = phases.find(p => p.number === '1');
+      expect(phase1).toBeDefined();
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });

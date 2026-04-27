@@ -34,6 +34,13 @@ describe('isValidConfigKey', () => {
     expect(isValidConfigKey('workflow.auto_advance').valid).toBe(true);
   });
 
+  it('accepts workflow.context_coverage_gate (#2492)', async () => {
+    const { isValidConfigKey, parseConfigValue } = await import('./config-mutation.js');
+    expect(isValidConfigKey('workflow.context_coverage_gate').valid).toBe(true);
+    expect(parseConfigValue('true')).toBe(true);
+    expect(parseConfigValue('false')).toBe(false);
+  });
+
   it('accepts wildcard agent_skills.* patterns', async () => {
     const { isValidConfigKey } = await import('./config-mutation.js');
     expect(isValidConfigKey('agent_skills.gsd-planner').valid).toBe(true);
@@ -78,6 +85,42 @@ describe('isValidConfigKey', () => {
     const r2 = isValidConfigKey('agents.nyquist_validation_enabled');
     expect(r2.valid).toBe(false);
     expect(r2.suggestion).toBe('workflow.nyquist_validation');
+  });
+
+  // #2653 — SDK/CJS config-schema drift regression.
+  // Every key accepted by the CJS config-set must also be accepted by
+  // the SDK config-set. We exercise every entry in the shared schema
+  // so drift fails this test the moment it is introduced.
+  it('#2653 — accepts every key in shared VALID_CONFIG_KEYS', async () => {
+    const { isValidConfigKey } = await import('./config-mutation.js');
+    const { VALID_CONFIG_KEYS } = await import('./config-schema.js');
+    const rejected: string[] = [];
+    for (const key of VALID_CONFIG_KEYS) {
+      const { valid } = isValidConfigKey(key);
+      if (!valid) rejected.push(key);
+    }
+    expect(rejected).toEqual([]);
+  });
+
+  it('#2653 — accepts sample dynamic keys from every DYNAMIC_KEY_PATTERN', async () => {
+    const { isValidConfigKey } = await import('./config-mutation.js');
+    const samples = [
+      'agent_skills.gsd-planner',
+      'review.models.claude',
+      'features.some_feature',
+      'claude_md_assembly.blocks.intro',
+      'model_profile_overrides.codex.opus',
+      'model_profile_overrides.codex.sonnet',
+      'model_profile_overrides.my-runtime.haiku',
+    ];
+    for (const key of samples) {
+      expect(isValidConfigKey(key).valid, `expected ${key} to be accepted`).toBe(true);
+    }
+  });
+
+  it('#2653 — accepts planning.sub_repos (CJS/docs key, previously rejected by SDK)', async () => {
+    const { isValidConfigKey } = await import('./config-mutation.js');
+    expect(isValidConfigKey('planning.sub_repos').valid).toBe(true);
   });
 });
 
@@ -158,8 +201,8 @@ describe('configSet lock protection (D6)', () => {
       configSet(['commit_docs', 'true'], tmpDir),
       configSet(['model_profile', 'quality'], tmpDir),
     ]);
-    expect((r1.data as { set: boolean }).set).toBe(true);
-    expect((r2.data as { set: boolean }).set).toBe(true);
+    expect((r1.data as { updated: boolean }).updated).toBe(true);
+    expect((r2.data as { updated: boolean }).updated).toBe(true);
 
     // Both values should be present (no lost updates)
     const raw = JSON.parse(await readFile(join(tmpDir, '.planning', 'config.json'), 'utf-8'));
@@ -184,7 +227,7 @@ describe('configSet context validation (D8)', () => {
     for (const ctx of ['dev', 'research', 'review']) {
       await writeFile(join(tmpDir, '.planning', 'config.json'), '{}');
       const result = await configSet(['context', ctx], tmpDir);
-      expect((result.data as { set: boolean }).set).toBe(true);
+      expect((result.data as { updated: boolean }).updated).toBe(true);
     }
   });
 });
@@ -202,6 +245,92 @@ describe('configNewProject global defaults (D11)', () => {
   });
 });
 
+// ─── configNewProject nested globalDefaults merging ───────────────────────
+
+describe('configNewProject nested globalDefaults merging (fix #2673)', () => {
+  let fakeHome: string;
+  let originalHome: string | undefined;
+
+  beforeEach(async () => {
+    fakeHome = await mkdtemp(join(tmpdir(), 'gsd-fakehome-'));
+    await mkdir(join(fakeHome, '.gsd'), { recursive: true });
+    originalHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+  });
+
+  afterEach(async () => {
+    if (originalHome !== undefined) {
+      process.env.HOME = originalHome;
+    } else {
+      delete process.env.HOME;
+    }
+    await rm(fakeHome, { recursive: true, force: true });
+  });
+
+  it('preserves nested workflow keys from globalDefaults', async () => {
+    await writeFile(
+      join(fakeHome, '.gsd', 'defaults.json'),
+      JSON.stringify({
+        workflow: { auto_advance: true, discuss_mode: 'skip' },
+        git: { branching_strategy: 'milestone' },
+      }),
+    );
+
+    const { configNewProject } = await import('./config-mutation.js');
+    const result = await configNewProject([], tmpDir);
+    expect((result.data as { created: boolean }).created).toBe(true);
+
+    const raw = JSON.parse(await readFile(join(tmpDir, '.planning', 'config.json'), 'utf-8'));
+    // Nested workflow keys from globalDefaults must survive
+    expect(raw.workflow.auto_advance).toBe(true);
+    expect(raw.workflow.discuss_mode).toBe('skip');
+    // Hardcoded defaults not overridden by globalDefaults must still be present
+    expect(raw.workflow.research).toBe(true);
+    // Nested git key from globalDefaults must survive
+    expect(raw.git.branching_strategy).toBe('milestone');
+    // Hardcoded git defaults not overridden must still be present
+    expect(raw.git.phase_branch_template).toBe('gsd/phase-{phase}-{slug}');
+  });
+
+  it('lets userChoices override globalDefaults nested keys', async () => {
+    await writeFile(
+      join(fakeHome, '.gsd', 'defaults.json'),
+      JSON.stringify({
+        workflow: { auto_advance: true },
+      }),
+    );
+
+    const { configNewProject } = await import('./config-mutation.js');
+    const choices = JSON.stringify({ workflow: { auto_advance: false } });
+    const result = await configNewProject([choices], tmpDir);
+    expect((result.data as { created: boolean }).created).toBe(true);
+
+    const raw = JSON.parse(await readFile(join(tmpDir, '.planning', 'config.json'), 'utf-8'));
+    // userChoices must win over globalDefaults
+    expect(raw.workflow.auto_advance).toBe(false);
+  });
+
+  it('preserves nested hooks, agent_skills, and features keys from globalDefaults', async () => {
+    await writeFile(
+      join(fakeHome, '.gsd', 'defaults.json'),
+      JSON.stringify({
+        hooks: { context_warnings: false },
+        agent_skills: { my_skill: true },
+        features: { beta_feature: true },
+      }),
+    );
+
+    const { configNewProject } = await import('./config-mutation.js');
+    const result = await configNewProject([], tmpDir);
+    expect((result.data as { created: boolean }).created).toBe(true);
+
+    const raw = JSON.parse(await readFile(join(tmpDir, '.planning', 'config.json'), 'utf-8'));
+    expect(raw.hooks.context_warnings).toBe(false);
+    expect(raw.agent_skills.my_skill).toBe(true);
+    expect(raw.features.beta_feature).toBe(true);
+  });
+});
+
 // ─── configSet ─────────────────────────────────────────────────────────────
 
 describe('configSet', () => {
@@ -212,7 +341,12 @@ describe('configSet', () => {
       JSON.stringify({ model_profile: 'balanced' }),
     );
     const result = await configSet(['model_profile', 'quality'], tmpDir);
-    expect(result.data).toEqual({ set: true, key: 'model_profile', value: 'quality' });
+    expect(result.data).toEqual({
+      updated: true,
+      key: 'model_profile',
+      value: 'quality',
+      previousValue: 'balanced',
+    });
 
     const raw = JSON.parse(await readFile(join(tmpDir, '.planning', 'config.json'), 'utf-8'));
     expect(raw.model_profile).toBe('quality');
@@ -225,7 +359,11 @@ describe('configSet', () => {
       JSON.stringify({ workflow: { research: true } }),
     );
     const result = await configSet(['workflow.auto_advance', 'true'], tmpDir);
-    expect(result.data).toEqual({ set: true, key: 'workflow.auto_advance', value: true });
+    expect(result.data).toEqual({
+      updated: true,
+      key: 'workflow.auto_advance',
+      value: true,
+    });
 
     const raw = JSON.parse(await readFile(join(tmpDir, '.planning', 'config.json'), 'utf-8'));
     expect(raw.workflow.auto_advance).toBe(true);
@@ -263,7 +401,7 @@ describe('configSetModelProfile', () => {
       JSON.stringify({ model_profile: 'balanced' }),
     );
     const result = await configSetModelProfile(['quality'], tmpDir);
-    expect((result.data as { set: boolean }).set).toBe(true);
+    expect((result.data as { updated: boolean }).updated).toBe(true);
     expect((result.data as { profile: string }).profile).toBe('quality');
 
     const raw = JSON.parse(await readFile(join(tmpDir, '.planning', 'config.json'), 'utf-8'));
@@ -300,7 +438,7 @@ describe('configNewProject', () => {
 
     const raw = JSON.parse(await readFile(join(tmpDir, '.planning', 'config.json'), 'utf-8'));
     expect(raw.model_profile).toBe('balanced');
-    expect(raw.commit_docs).toBe(false);
+    expect(raw.commit_docs).toBe(true);
   });
 
   it('merges user choices', async () => {

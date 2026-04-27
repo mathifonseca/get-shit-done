@@ -40,6 +40,7 @@ import { PromptFactory } from './phase-prompt.js';
 export class GSD {
   private readonly projectDir: string;
   private readonly gsdToolsPath: string;
+  private readonly sessionId?: string;
   private readonly defaultModel?: string;
   private readonly defaultMaxBudgetUsd: number;
   private readonly defaultMaxTurns: number;
@@ -51,6 +52,7 @@ export class GSD {
     this.projectDir = resolve(options.projectDir);
     this.gsdToolsPath =
       options.gsdToolsPath ?? resolveGsdToolsPath(this.projectDir);
+    this.sessionId = options.sessionId;
     this.defaultModel = options.model;
     this.defaultMaxBudgetUsd = options.maxBudgetUsd ?? 5.0;
     this.defaultMaxTurns = options.maxTurns ?? 50;
@@ -120,6 +122,8 @@ export class GSD {
       projectDir: this.projectDir,
       gsdToolsPath: this.gsdToolsPath,
       workstream: this.workstream,
+      eventStream: this.eventStream,
+      sessionId: this.sessionId,
     });
   }
 
@@ -135,7 +139,7 @@ export class GSD {
    */
   async runPhase(phaseNumber: string, options?: PhaseRunnerOptions): Promise<PhaseRunnerResult> {
     const tools = this.createTools();
-    const promptFactory = new PromptFactory();
+    const promptFactory = new PromptFactory({ projectDir: this.projectDir });
     const contextEngine = new ContextEngine(this.projectDir, undefined, undefined, this.workstream);
     const config = await loadConfig(this.projectDir, this.workstream);
 
@@ -292,6 +296,7 @@ export type { GSDConfig } from './config.js';
 export { GSDTools, GSDToolsError, resolveGsdToolsPath } from './gsd-tools.js';
 export { runPlanSession, runPhaseStepSession } from './session-runner.js';
 export { buildExecutorPrompt, parseAgentTools } from './prompt-builder.js';
+export type { ExecutorPromptOptions } from './prompt-builder.js';
 export * from './types.js';
 
 // S02: Event stream, context, prompt, and logging modules
@@ -316,6 +321,9 @@ export type { PhaseRunnerDeps, VerificationOutcome } from './phase-runner.js';
 export { CLITransport } from './cli-transport.js';
 export { WSTransport } from './ws-transport.js';
 export type { WSTransportOptions } from './ws-transport.js';
+
+// Query registry argv normalization (matches `gsd-sdk query` and `GSDTools` hot path)
+export { createRegistry, normalizeQueryCommand } from './query/index.js';
 
 // Workstream utilities
 export { validateWorkstreamName, relPlanningPath } from './workstream-utils.js';

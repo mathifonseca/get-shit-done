@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { GSDError } from '../errors.js';
+import { GSDError, ErrorClassification, exitCodeFor } from '../errors.js';
 
 // ─── Test setup ─────────────────────────────────────────────────────────────
 
@@ -56,6 +56,41 @@ describe('configGet', () => {
       JSON.stringify({ model_profile: 'quality' }),
     );
     await expect(configGet(['nonexistent.key'], tmpDir)).rejects.toThrow(GSDError);
+  });
+
+  it('throws GSDError that maps to exit code 1 for missing key (bug #2544)', async () => {
+    const { configGet } = await import('./config-query.js');
+    await writeFile(
+      join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({ model_profile: 'quality' }),
+    );
+    try {
+      await configGet(['nonexistent.key'], tmpDir);
+      throw new Error('expected configGet to throw for missing key');
+    } catch (err) {
+      expect(err).toBeInstanceOf(GSDError);
+      const gsdErr = err as GSDError;
+      // UNIX convention: missing config key should exit 1 (like `git config --get`).
+      // Validation (exit 10) is the previous buggy classification — see issue #2544.
+      expect(gsdErr.classification).toBe(ErrorClassification.Execution);
+      expect(exitCodeFor(gsdErr.classification)).toBe(1);
+    }
+  });
+
+  it('throws GSDError that maps to exit code 1 when traversing into non-object (bug #2544)', async () => {
+    const { configGet } = await import('./config-query.js');
+    await writeFile(
+      join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({ model_profile: 'quality' }),
+    );
+    try {
+      await configGet(['model_profile.subkey'], tmpDir);
+      throw new Error('expected configGet to throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(GSDError);
+      const gsdErr = err as GSDError;
+      expect(exitCodeFor(gsdErr.classification)).toBe(1);
+    }
   });
 
   it('reads raw config without merging defaults', async () => {
@@ -130,14 +165,39 @@ describe('resolveModel', () => {
     const data = result.data as Record<string, unknown>;
     expect(data).toHaveProperty('model', '');
   });
+
+  it('resolveModel uses workstream config when --ws is specified', async () => {
+    const { resolveModel } = await import('./config-query.js');
+    // Root config: balanced profile → gsd-executor resolves to 'sonnet'
+    await writeFile(
+      join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({ model_profile: 'balanced' }),
+    );
+    // Workstream config: quality profile → gsd-executor resolves to 'opus'
+    await mkdir(join(tmpDir, '.planning', 'workstreams', 'frontend'), { recursive: true });
+    await writeFile(
+      join(tmpDir, '.planning', 'workstreams', 'frontend', 'config.json'),
+      JSON.stringify({ model_profile: 'quality' }),
+    );
+
+    const rootResult = await resolveModel(['gsd-executor'], tmpDir);
+    const rootData = rootResult.data as Record<string, unknown>;
+    expect(rootData.profile).toBe('balanced');
+    expect(rootData.model).toBe('sonnet');
+
+    const wsResult = await resolveModel(['gsd-executor'], tmpDir, 'frontend');
+    const wsData = wsResult.data as Record<string, unknown>;
+    expect(wsData.profile).toBe('quality');
+    expect(wsData.model).toBe('opus');
+  });
 });
 
 // ─── MODEL_PROFILES ─────────────────────────────────────────────────────────
 
 describe('MODEL_PROFILES', () => {
-  it('contains all 17 agent entries', async () => {
+  it('contains all 18 agent entries (sync with model-profiles.cjs)', async () => {
     const { MODEL_PROFILES } = await import('./config-query.js');
-    expect(Object.keys(MODEL_PROFILES)).toHaveLength(17);
+    expect(Object.keys(MODEL_PROFILES)).toHaveLength(18);
   });
 
   it('has quality/balanced/budget/adaptive for each agent', async () => {

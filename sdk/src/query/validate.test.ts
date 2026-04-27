@@ -212,7 +212,7 @@ must_haves:
     expect(links[0].detail).toBe('Target referenced in source');
   });
 
-  it('falls back to literal match when regex syntax is invalid', async () => {
+  it('reports invalid regex like gsd-tools.cjs (try/catch on new RegExp)', async () => {
     await writeFile(join(tmpDir, 'source.ts'), 'const x = 1;');
     await writeFile(join(tmpDir, 'target.ts'), 'const y = 2;');
 
@@ -241,7 +241,7 @@ must_haves:
     const data = result.data as Record<string, unknown>;
     const links = data.links as Array<Record<string, unknown>>;
     expect(links[0].verified).toBe(false);
-    expect((links[0].detail as string)).toContain('not found');
+    expect((links[0].detail as string)).toMatch(/Invalid regex pattern/);
   });
 
   it('returns error when no must_haves.key_links in plan', async () => {
@@ -548,6 +548,49 @@ describe('validateHealth', () => {
     const w003 = warnings.find(w => w.code === 'W003');
     expect(w003).toBeDefined();
     expect(w003!.repairable).toBe(true);
+  });
+
+  // Regression: #2633 — W002 must consult ROADMAP.md (current + shipped
+  // milestones) for valid phase numbers, not only on-disk phase dirs. After
+  // `phases clear` at the start of a new milestone, STATE.md can legitimately
+  // reference future phases (current milestone) and history phases (shipped
+  // milestones) that no longer have a corresponding disk directory.
+  it('does not emit W002 for roadmap-valid future or history phase refs (#2633)', async () => {
+    const planning = join(tmpDir, '.planning');
+    await mkdir(join(planning, 'phases', '03-alpha'), { recursive: true });
+    await mkdir(join(planning, 'phases', '04-beta'), { recursive: true });
+
+    await writeFile(join(planning, 'PROJECT.md'), '# Project\n\n## What This Is\n\nA project.\n\n## Core Value\n\nValue here.\n\n## Requirements\n\n- Req 1\n');
+    await writeFile(join(planning, 'ROADMAP.md'), [
+      '# Roadmap', '',
+      '## v1.0: Shipped ✅ SHIPPED', '',
+      '### Phase 1: Origin', '**Goal:** O', '',
+      '### Phase 2: Continuation', '**Goal:** C', '',
+      '## v1.1: Current', '',
+      '### Phase 3: Alpha', '**Goal:** A', '',
+      '### Phase 4: Beta', '**Goal:** B', '',
+      '### Phase 5: Gamma', '**Goal:** C', '',
+    ].join('\n'));
+    await writeFile(join(planning, 'STATE.md'), [
+      '---', 'milestone: v1.1', 'milestone_name: Current', 'status: executing', '---', '',
+      '# State', '',
+      '**Current Phase:** 4',
+      '**Next:** Phase 5',
+      '',
+      '## Accumulated Context',
+      '- Decision from Phase 1',
+      '- Follow-up from Phase 2',
+    ].join('\n'));
+    await writeFile(join(planning, 'config.json'), JSON.stringify({
+      model_profile: 'balanced',
+      workflow: { nyquist_validation: true },
+    }, null, 2));
+
+    const result = await validateHealth([], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    const warnings = data.warnings as Array<Record<string, unknown>>;
+    const w002s = warnings.filter(w => w.code === 'W002');
+    expect(w002s).toEqual([]);
   });
 
   it('returns warning W005 for bad phase directory naming', async () => {

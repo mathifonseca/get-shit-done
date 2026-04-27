@@ -223,14 +223,14 @@ describe('stateUpdate', () => {
 
   it('updates a single field and round-trips through stateLoad', async () => {
     const { stateUpdate } = await import('./state-mutation.js');
-    const { stateLoad } = await import('./state.js');
+    const { stateJson } = await import('./state.js');
 
     const result = await stateUpdate(['Status', 'Phase complete'], tmpDir);
     const data = result.data as Record<string, unknown>;
     expect(data.updated).toBe(true);
 
     // Verify round-trip
-    const loaded = await stateLoad([], tmpDir);
+    const loaded = await stateJson([], tmpDir);
     const loadedData = loaded.data as Record<string, unknown>;
     // Status gets normalized by buildStateFrontmatter
     expect(loadedData.status).toBeTruthy();
@@ -271,7 +271,7 @@ describe('statePatch', () => {
     const patches = JSON.stringify({ Status: 'done', Progress: '100%' });
     const result = await statePatch([patches], tmpDir);
     const data = result.data as Record<string, unknown>;
-    expect(data.patched).toBe(true);
+    expect((data.updated as string[]).length).toBeGreaterThan(0);
 
     // Verify file was updated
     const content = await readFile(join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
@@ -303,6 +303,63 @@ describe('stateBeginPhase', () => {
     const content = await readFile(join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
     expect(content).toContain('Executing Phase 11');
     expect(content).toContain('State Mutations');
+  });
+
+  // ─── Bug #2420: flag-form args not parsed ────────────────────────────
+  it('bug-2420: parses --phase/--name/--plans flag-form args correctly', async () => {
+    const { stateBeginPhase } = await import('./state-mutation.js');
+
+    // This is how execute-phase.md calls it: flag form
+    const result = await stateBeginPhase(
+      ['--phase', '99', '--name', 'probe-test', '--plans', '1'],
+      tmpDir
+    );
+    const data = result.data as Record<string, unknown>;
+
+    // Must return the actual values, not the flag names
+    expect(data.phase).toBe('99');
+    expect(data.name).toBe('probe-test');
+    expect(data.plan_count).toBe(1);
+
+    // STATE.md must contain clean output, not literal "--phase"
+    const content = await readFile(join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    expect(content).not.toContain('--phase');
+    expect(content).not.toContain('--name');
+    expect(content).not.toContain('--plans');
+    expect(content).toContain('Executing Phase 99');
+    expect(content).toContain('probe-test');
+  });
+
+  it('bug-2420: positional args still work after flag-parsing fix', async () => {
+    const { stateBeginPhase } = await import('./state-mutation.js');
+
+    const result = await stateBeginPhase(['42', 'Positional Test', '5'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.phase).toBe('42');
+    expect(data.name).toBe('Positional Test');
+    expect(data.plan_count).toBe(5);
+  });
+
+  it('bug-2420: flag parser throws when a flag value is missing (next token is a flag)', async () => {
+    const { stateBeginPhase } = await import('./state-mutation.js');
+
+    // --phase has no value — next token is --name, which is itself a flag.
+    await expect(
+      stateBeginPhase(['--phase', '--name', 'Title', '--plans', '1'], tmpDir)
+    ).rejects.toThrow('missing value for --phase');
+  });
+
+  it('does not treat argv after named flags as positional name/plans', async () => {
+    const { stateBeginPhase } = await import('./state-mutation.js');
+
+    const result = await stateBeginPhase(['--phase', '2', '--plans', '3'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.phase).toBe('2');
+    expect(data.phase_name).toBeFalsy();
+    expect(data.plan_count).toBe(3);
+
+    const content = await readFile(join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    expect(content).toContain('Plan: 1 of 3');
   });
 });
 
@@ -347,7 +404,10 @@ describe('stateAddDecision', () => {
   it('appends decision and removes placeholder', async () => {
     const { stateAddDecision } = await import('./state-mutation.js');
 
-    const result = await stateAddDecision(['[Phase 10]: Use lockfile atomicity'], tmpDir);
+    const result = await stateAddDecision(
+      ['--phase', '10', '--summary', 'Use lockfile atomicity'],
+      tmpDir,
+    );
     const data = result.data as Record<string, unknown>;
     expect(data.added).toBe(true);
 
@@ -357,6 +417,166 @@ describe('stateAddDecision', () => {
     const decisionsMatch = content.match(/###?\s*Decisions\s*\n([\s\S]*?)(?=\n###?|\n##[^#]|$)/i);
     expect(decisionsMatch).not.toBeNull();
     expect(decisionsMatch![1]).not.toContain('None yet.');
+  });
+});
+
+// ─── stateAddRoadmapEvolution (bug #2662) ──────────────────────────────────
+
+describe('stateAddRoadmapEvolution', () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'gsd-state-evo-'));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('creates the Roadmap Evolution subsection when missing and appends the entry', async () => {
+    await setupTestProject(tmpDir); // MINIMAL_STATE has no Roadmap Evolution.
+    const { stateAddRoadmapEvolution } = await import('./state-mutation.js');
+
+    const result = await stateAddRoadmapEvolution(
+      ['--phase', '72.1', '--action', 'inserted', '--after', '72',
+       '--note', 'Fix critical auth bug', '--urgent'],
+      tmpDir,
+    );
+    const data = result.data as Record<string, unknown>;
+    expect(data.added).toBe(true);
+    expect(data.entry).toBe('- Phase 72.1 inserted after Phase 72: Fix critical auth bug (URGENT)');
+
+    const content = await readFile(join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    expect(content).toContain('### Roadmap Evolution');
+    expect(content).toContain('- Phase 72.1 inserted after Phase 72: Fix critical auth bug (URGENT)');
+    // Subsection sits under Accumulated Context.
+    const idxAccum = content.indexOf('## Accumulated Context');
+    const idxEvo = content.indexOf('### Roadmap Evolution');
+    expect(idxAccum).toBeGreaterThan(-1);
+    expect(idxEvo).toBeGreaterThan(idxAccum);
+  });
+
+  it('appends to an existing Roadmap Evolution subsection preserving prior entries', async () => {
+    const stateWithEvo = `---
+gsd_state_version: 1.0
+milestone: v3.0
+milestone_name: SDK-First Migration
+status: executing
+---
+
+# Project State
+
+## Current Position
+
+Phase: 10 — EXECUTING
+
+## Accumulated Context
+
+### Decisions
+
+None yet.
+
+### Roadmap Evolution
+
+- Phase 5 added: Baseline work
+- Phase 6 added: Follow-up
+
+## Session Continuity
+
+Last session: 2026-04-07T10:00:00.000Z
+`;
+    await setupTestProject(tmpDir, stateWithEvo);
+    const { stateAddRoadmapEvolution } = await import('./state-mutation.js');
+
+    const result = await stateAddRoadmapEvolution(
+      ['--phase', '72.1', '--action', 'inserted', '--after', '72', '--note', 'Urgent fix', '--urgent'],
+      tmpDir,
+    );
+    expect((result.data as Record<string, unknown>).added).toBe(true);
+
+    const content = await readFile(join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    expect(content).toContain('- Phase 5 added: Baseline work');
+    expect(content).toContain('- Phase 6 added: Follow-up');
+    expect(content).toContain('- Phase 72.1 inserted after Phase 72: Urgent fix (URGENT)');
+
+    // Order preserved: existing entries come before the new one.
+    const idx5 = content.indexOf('Phase 5 added');
+    const idx6 = content.indexOf('Phase 6 added');
+    const idxNew = content.indexOf('Phase 72.1 inserted');
+    expect(idx5).toBeLessThan(idx6);
+    expect(idx6).toBeLessThan(idxNew);
+  });
+
+  it('dedupes exact-match entries and reports reason=duplicate', async () => {
+    await setupTestProject(tmpDir);
+    const { stateAddRoadmapEvolution } = await import('./state-mutation.js');
+
+    const argv = ['--phase', '72.1', '--action', 'inserted', '--after', '72', '--note', 'Fix X', '--urgent'];
+
+    const first = await stateAddRoadmapEvolution(argv, tmpDir);
+    expect((first.data as Record<string, unknown>).added).toBe(true);
+
+    const second = await stateAddRoadmapEvolution(argv, tmpDir);
+    const data = second.data as Record<string, unknown>;
+    expect(data.added).toBe(false);
+    expect(data.reason).toBe('duplicate');
+
+    // Entry appears exactly once.
+    const content = await readFile(join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    const matches = content.match(/Phase 72\.1 inserted after Phase 72: Fix X \(URGENT\)/g) || [];
+    expect(matches.length).toBe(1);
+  });
+
+  it('is idempotent: calling twice with same input leaves a single entry', async () => {
+    await setupTestProject(tmpDir);
+    const { stateAddRoadmapEvolution } = await import('./state-mutation.js');
+    const argv = ['--phase', '9', '--action', 'added', '--note', 'new work'];
+
+    await stateAddRoadmapEvolution(argv, tmpDir);
+    await stateAddRoadmapEvolution(argv, tmpDir);
+
+    const content = await readFile(join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    const matches = content.match(/Phase 9 added: new work/g) || [];
+    expect(matches.length).toBe(1);
+  });
+
+  it('throws GSDError(Validation) when phase is missing', async () => {
+    await setupTestProject(tmpDir);
+    const { stateAddRoadmapEvolution } = await import('./state-mutation.js');
+    const { GSDError, ErrorClassification } = await import('../errors.js');
+
+    await expect(stateAddRoadmapEvolution(
+      ['--action', 'inserted'],
+      tmpDir,
+    )).rejects.toSatisfy((err: unknown) => {
+      return err instanceof GSDError && err.classification === ErrorClassification.Validation;
+    });
+  });
+
+  it('throws GSDError(Validation) when action is missing', async () => {
+    await setupTestProject(tmpDir);
+    const { stateAddRoadmapEvolution } = await import('./state-mutation.js');
+    const { GSDError, ErrorClassification } = await import('../errors.js');
+
+    await expect(stateAddRoadmapEvolution(
+      ['--phase', '72.1'],
+      tmpDir,
+    )).rejects.toSatisfy((err: unknown) => {
+      return err instanceof GSDError && err.classification === ErrorClassification.Validation;
+    });
+  });
+
+  it('throws GSDError(Validation) on invalid action', async () => {
+    await setupTestProject(tmpDir);
+    const { stateAddRoadmapEvolution } = await import('./state-mutation.js');
+    const { GSDError, ErrorClassification } = await import('../errors.js');
+
+    await expect(stateAddRoadmapEvolution(
+      ['--phase', '72.1', '--action', 'frobnicated'],
+      tmpDir,
+    )).rejects.toSatisfy((err: unknown) => {
+      return err instanceof GSDError && err.classification === ErrorClassification.Validation;
+    });
   });
 });
 
@@ -378,13 +598,336 @@ describe('stateRecordSession', () => {
     const { stateRecordSession } = await import('./state-mutation.js');
 
     const result = await stateRecordSession(
-      ['2026-04-08T12:00:00Z', 'Completed 11-01-PLAN.md'],
-      tmpDir
+      ['--stopped-at', 'Completed 11-01-PLAN.md', '--resume-file', 'None'],
+      tmpDir,
     );
     const data = result.data as Record<string, unknown>;
     expect(data.recorded).toBe(true);
 
     const content = await readFile(join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
     expect(content).toContain('Completed 11-01-PLAN.md');
+  });
+});
+
+// ─── Bug #2613: write-side frontmatter preservation ─────────────────────────
+
+describe('Bug #2613: STATE.md frontmatter preservation through mutations', () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'gsd-state-2613-'));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('record-session preserves milestone + milestone_name when ROADMAP has a different current milestone', async () => {
+    // STATE.md declares v12.0 / Focus (shipped). ROADMAP's heading-parseable
+    // current is v11.0 / Research-Depth. Before the fix, re-derivation pulled
+    // v11.0 / Research-Depth into STATE.md's frontmatter on every mutation.
+    const stateContent = `---
+gsd_state_version: 1.0
+milestone: v12.0
+milestone_name: Focus
+status: shipped
+---
+
+# Project State
+
+## Session Continuity
+
+Last session: 2026-04-20T00:00:00Z
+Stopped at: v12.0 SHIPPED
+Resume file: None
+`;
+    const roadmapContent = `# Roadmap
+
+## Phases
+
+## v11.0 Research-Depth Scoring (In Progress)
+
+### Phase 55
+- stuff
+
+## v12.0 Focus — ✅ SHIPPED 2026-04-20
+
+### Phase 60
+- shipped stuff
+`;
+    const planningDir = join(tmpDir, '.planning');
+    await mkdir(join(planningDir, 'phases'), { recursive: true });
+    await writeFile(join(planningDir, 'STATE.md'), stateContent, 'utf-8');
+    await writeFile(join(planningDir, 'ROADMAP.md'), roadmapContent, 'utf-8');
+    await writeFile(join(planningDir, 'config.json'), '{}', 'utf-8');
+
+    const { stateRecordSession } = await import('./state-mutation.js');
+    await stateRecordSession(
+      ['--stopped-at', 'regression test', '--resume-file', '.planning/MILESTONES.md'],
+      tmpDir,
+    );
+
+    const after = await readFile(join(planningDir, 'STATE.md'), 'utf-8');
+    const { extractFrontmatter } = await import('./frontmatter.js');
+    const fm = extractFrontmatter(after);
+    expect(fm.milestone).toBe('v12.0');
+    expect(fm.milestone_name).toBe('Focus');
+  });
+
+  it('record-session preserves status from existing frontmatter when body has no Status field', async () => {
+    // STATE.md frontmatter declares status: shipped. Body has no "Status:" line.
+    // Before the fix, derived status defaulted to 'unknown' and the frontmatter
+    // value was lost because existingFm was {} at the preservation branch.
+    const stateContent = `---
+gsd_state_version: 1.0
+milestone: v12.0
+milestone_name: Focus
+status: shipped
+---
+
+# Project State
+
+## Session Continuity
+
+Last session: 2026-04-20T00:00:00Z
+Stopped at: v12.0 SHIPPED
+Resume file: None
+`;
+    const planningDir = join(tmpDir, '.planning');
+    await mkdir(join(planningDir, 'phases'), { recursive: true });
+    await writeFile(join(planningDir, 'STATE.md'), stateContent, 'utf-8');
+    await writeFile(join(planningDir, 'ROADMAP.md'), '# Roadmap\n\n## v12.0 Focus\n', 'utf-8');
+    await writeFile(join(planningDir, 'config.json'), '{}', 'utf-8');
+
+    const { stateRecordSession } = await import('./state-mutation.js');
+    await stateRecordSession(
+      ['--stopped-at', 'regression test', '--resume-file', 'None'],
+      tmpDir,
+    );
+
+    const after = await readFile(join(planningDir, 'STATE.md'), 'utf-8');
+    const { extractFrontmatter } = await import('./frontmatter.js');
+    const fm = extractFrontmatter(after);
+    expect(fm.status).toBe('shipped');
+  });
+
+  it('record-session preserves progress from frontmatter when disk scan returns zero counts', async () => {
+    // Shipped milestone: phase directories have been archived, so disk scan
+    // returns total_plans=0. Existing frontmatter has authoritative counts
+    // (5/5, 12/12, 100%). Before the fix, disk scan stomped the counts to 0/0.
+    const stateContent = `---
+gsd_state_version: 1.0
+milestone: v12.0
+milestone_name: Focus
+status: shipped
+progress:
+  total_phases: 5
+  completed_phases: 5
+  total_plans: 12
+  completed_plans: 12
+  percent: 100
+---
+
+# Project State
+
+## Session Continuity
+
+Last session: 2026-04-20T00:00:00Z
+Stopped at: v12.0 SHIPPED
+Resume file: None
+`;
+    const planningDir = join(tmpDir, '.planning');
+    await mkdir(join(planningDir, 'phases'), { recursive: true });
+    await writeFile(join(planningDir, 'STATE.md'), stateContent, 'utf-8');
+    await writeFile(join(planningDir, 'ROADMAP.md'), '# Roadmap\n\n## v12.0 Focus\n', 'utf-8');
+    await writeFile(join(planningDir, 'config.json'), '{}', 'utf-8');
+
+    const { stateRecordSession } = await import('./state-mutation.js');
+    await stateRecordSession(
+      ['--stopped-at', 'regression test', '--resume-file', 'None'],
+      tmpDir,
+    );
+
+    const after = await readFile(join(planningDir, 'STATE.md'), 'utf-8');
+    const { extractFrontmatter } = await import('./frontmatter.js');
+    const fm = extractFrontmatter(after);
+    const progress = fm.progress as Record<string, unknown>;
+    expect(Number(progress.total_plans)).toBe(12);
+    expect(Number(progress.completed_plans)).toBe(12);
+    expect(Number(progress.percent)).toBe(100);
+  });
+
+  it('regression guard: state.update Status still updates frontmatter status when body is mutated', async () => {
+    // Legitimate status change must still propagate. If the body's Status
+    // field becomes "executing", derived status is 'executing' and option 2
+    // must NOT overwrite it with the frontmatter's prior 'shipped'.
+    await setupTestProject(tmpDir);
+
+    const { stateUpdate } = await import('./state-mutation.js');
+    await stateUpdate(['Status', 'executing'], tmpDir);
+
+    const after = await readFile(join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    const { extractFrontmatter } = await import('./frontmatter.js');
+    const fm = extractFrontmatter(after);
+    expect(fm.status).toBe('executing');
+  });
+
+  it('regression guard: disk-scanned progress wins when scan returns non-zero counts', async () => {
+    // Mid-milestone: disk has real phase directories with plans + summaries.
+    // Disk is the ground truth — frontmatter progress must not override it.
+    const stateContent = `---
+gsd_state_version: 1.0
+milestone: v3.0
+milestone_name: SDK-First Migration
+status: executing
+progress:
+  total_phases: 99
+  completed_phases: 99
+  total_plans: 99
+  completed_plans: 99
+  percent: 99
+---
+
+# Project State
+
+## Current Position
+
+Status: Executing
+Last activity: today
+
+## Session Continuity
+
+Last session: 2026-04-08T05:00:00Z
+Stopped at: work
+Resume file: None
+`;
+    const planningDir = join(tmpDir, '.planning');
+    const phasesDir = join(planningDir, 'phases');
+    await mkdir(phasesDir, { recursive: true });
+    // Real phase with 1 plan and 1 summary — disk scan must report these.
+    const phase10 = join(phasesDir, '10-foo');
+    await mkdir(phase10, { recursive: true });
+    await writeFile(join(phase10, '10-01-PLAN.md'), 'plan', 'utf-8');
+    await writeFile(join(phase10, '10-01-SUMMARY.md'), 'summary', 'utf-8');
+    await writeFile(join(planningDir, 'STATE.md'), stateContent, 'utf-8');
+    await writeFile(join(planningDir, 'ROADMAP.md'), '# Roadmap\n\n### Phase 10: Foo\n', 'utf-8');
+    await writeFile(join(planningDir, 'config.json'), '{}', 'utf-8');
+
+    const { stateRecordSession } = await import('./state-mutation.js');
+    await stateRecordSession(['--stopped-at', 'x', '--resume-file', 'None'], tmpDir);
+
+    const after = await readFile(join(planningDir, 'STATE.md'), 'utf-8');
+    const { extractFrontmatter } = await import('./frontmatter.js');
+    const fm = extractFrontmatter(after);
+    const progress = fm.progress as Record<string, unknown>;
+    // Disk ground truth — not the stale 99/99 from frontmatter.
+    expect(Number(progress.total_plans)).toBe(1);
+    expect(Number(progress.completed_plans)).toBe(1);
+    expect(Number(progress.percent)).toBe(100);
+  });
+});
+
+// ─── stateMilestoneSwitch (#2630) ──────────────────────────────────────────
+
+describe('stateMilestoneSwitch', () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'gsd-milestone-switch-'));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('writes milestone/milestone_name/status into STATE.md frontmatter and resets progress on milestone switch', async () => {
+    // Previous milestone shipped: STATE.md frontmatter points at v1.0 with
+    // non-zero progress. ROADMAP.md now advertises the NEW milestone v1.1.
+    // Regardless of what getMilestoneInfo derives from the old STATE.md
+    // frontmatter, a milestone switch must stomp the frontmatter with the new
+    // version/name and reset progress counters.
+    const stateContent = `---
+gsd_state_version: 1.0
+milestone: v1.0
+milestone_name: Foundation
+status: completed
+progress:
+  total_phases: 5
+  completed_phases: 5
+  total_plans: 12
+  completed_plans: 12
+  percent: 100
+---
+
+# Project State
+
+## Current Position
+
+Phase: 5 (Foundation) — COMPLETED
+Plan: 3 of 3
+Status: v1.0 milestone complete
+Last activity: 2026-04-20 -- v1.0 shipped
+
+## Accumulated Context
+
+### Decisions
+
+- [Phase 1]: Use Node 20
+`;
+    const planningDir = join(tmpDir, '.planning');
+    await mkdir(join(planningDir, 'phases'), { recursive: true });
+    await writeFile(join(planningDir, 'STATE.md'), stateContent, 'utf-8');
+    // ROADMAP advertises the new milestone
+    await writeFile(
+      join(planningDir, 'ROADMAP.md'),
+      '# Roadmap\n\n## v1.1 Notifications\n\n### Phase 6: Notify\n',
+      'utf-8',
+    );
+    await writeFile(join(planningDir, 'config.json'), '{}', 'utf-8');
+
+    const { stateMilestoneSwitch } = await import('./state-mutation.js');
+    const result = await stateMilestoneSwitch(
+      ['--milestone', 'v1.1', '--name', 'Notifications'],
+      tmpDir,
+    );
+
+    const data = result.data as Record<string, unknown>;
+    expect(data.switched).toBe(true);
+    expect(data.version).toBe('v1.1');
+    expect(data.name).toBe('Notifications');
+
+    const after = await readFile(join(planningDir, 'STATE.md'), 'utf-8');
+    const { extractFrontmatter } = await import('./frontmatter.js');
+    const fm = extractFrontmatter(after);
+
+    // The heart of #2630 — frontmatter must reflect the NEW milestone.
+    expect(fm.milestone).toBe('v1.1');
+    expect(fm.milestone_name).toBe('Notifications');
+    // Status resets to planning (Defining requirements phase).
+    expect(fm.status).toBe('planning');
+    // Progress counters reset for the new milestone (no phases executed yet).
+    const progress = fm.progress as Record<string, unknown> | undefined;
+    if (progress) {
+      expect(Number(progress.completed_phases ?? 0)).toBe(0);
+      expect(Number(progress.completed_plans ?? 0)).toBe(0);
+      expect(Number(progress.percent ?? 0)).toBe(0);
+    }
+
+    // Accumulated Context is preserved across the milestone switch.
+    expect(after).toContain('[Phase 1]: Use Node 20');
+
+    // Current Position body is reset to the new milestone's starting state.
+    expect(after).toMatch(/Status:\s*Defining requirements/);
+  });
+
+  it('rejects missing --milestone', async () => {
+    await writeFile(join(tmpDir, '.planning', 'config.json'), '{}', 'utf-8').catch(async () => {
+      await mkdir(join(tmpDir, '.planning'), { recursive: true });
+      await writeFile(join(tmpDir, '.planning', 'config.json'), '{}', 'utf-8');
+    });
+    const { stateMilestoneSwitch } = await import('./state-mutation.js');
+    const result = await stateMilestoneSwitch([], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.error).toBeDefined();
   });
 });

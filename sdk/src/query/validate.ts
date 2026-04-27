@@ -16,8 +16,11 @@
 
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+
+import { MODEL_PROFILES } from './config-query.js';
 import { GSDError, ErrorClassification } from '../errors.js';
 import { extractFrontmatter, parseMustHavesBlock } from './frontmatter.js';
 import { escapeRegex, normalizePhaseName, planningPaths, resolvePathUnderProject } from './helpers.js';
@@ -109,34 +112,42 @@ export const verifyKeyLinks: QueryHandler = async (args, projectDir) => {
     };
 
     let sourceContent: string | null = null;
-    try {
-      const fromPath = await resolvePathUnderProject(projectDir, check.from);
-      sourceContent = await readFile(fromPath, 'utf-8');
-    } catch {
-      // Source file not found or path invalid
+    if (check.from) {
+      try {
+        const sourcePath = await resolvePathUnderProject(projectDir, check.from);
+        sourceContent = await readFile(sourcePath, 'utf-8');
+      } catch {
+        // Source file not found or path escapes project
+      }
     }
 
     if (!sourceContent) {
       check.detail = 'Source file not found';
     } else if (linkObj.pattern) {
-      const regex = regexForKeyLinkPattern(linkObj.pattern as string);
-      if (regex.test(sourceContent)) {
-        check.verified = true;
-        check.detail = 'Pattern found in source';
-      } else {
-        let targetContent: string | null = null;
-        try {
-          const toPath = await resolvePathUnderProject(projectDir, check.to);
-          targetContent = await readFile(toPath, 'utf-8');
-        } catch {
-          // Target file not found
-        }
-        if (targetContent && regex.test(targetContent)) {
+      try {
+        const regex = new RegExp(linkObj.pattern as string);
+        if (regex.test(sourceContent)) {
           check.verified = true;
-          check.detail = 'Pattern found in target';
+          check.detail = 'Pattern found in source';
         } else {
-          check.detail = `Pattern "${linkObj.pattern}" not found in source or target`;
+          let targetContent: string | null = null;
+          if (check.to) {
+            try {
+              const targetPath = await resolvePathUnderProject(projectDir, check.to);
+              targetContent = await readFile(targetPath, 'utf-8');
+            } catch {
+              // Target file not found or path escapes project
+            }
+          }
+          if (targetContent && regex.test(targetContent)) {
+            check.verified = true;
+            check.detail = 'Pattern found in target';
+          } else {
+            check.detail = `Pattern "${linkObj.pattern}" not found in source or target`;
+          }
         }
+      } catch {
+        check.detail = `Invalid regex pattern: ${linkObj.pattern}`;
       }
     } else {
       // No pattern: check if target path is referenced in source content
@@ -175,8 +186,8 @@ export const verifyKeyLinks: QueryHandler = async (args, projectDir) => {
  * @param projectDir - Project root directory
  * @returns QueryResult with { passed, errors, warnings, warning_count }
  */
-export const validateConsistency: QueryHandler = async (_args, projectDir) => {
-  const paths = planningPaths(projectDir);
+export const validateConsistency: QueryHandler = async (_args, projectDir, workstream) => {
+  const paths = planningPaths(projectDir, workstream);
   const errors: string[] = [];
   const warnings: string[] = [];
 
@@ -333,7 +344,7 @@ export const validateConsistency: QueryHandler = async (_args, projectDir) => {
  * @param projectDir - Project root directory
  * @returns QueryResult with { status, errors, warnings, info, repairable_count, repairs_performed? }
  */
-export const validateHealth: QueryHandler = async (args, projectDir) => {
+export const validateHealth: QueryHandler = async (args, projectDir, workstream) => {
   const doRepair = args.includes('--repair');
 
   // T-12-09: Home directory guard
@@ -354,13 +365,13 @@ export const validateHealth: QueryHandler = async (args, projectDir) => {
     };
   }
 
-  const paths = planningPaths(projectDir);
-  const planBase = join(projectDir, '.planning');
+  const paths = planningPaths(projectDir, workstream);
+  const planBase = paths.planning;
   const projectPath = join(planBase, 'PROJECT.md');
-  const roadmapPath = join(planBase, 'ROADMAP.md');
-  const statePath = join(planBase, 'STATE.md');
-  const configPath = join(planBase, 'config.json');
-  const phasesDir = join(planBase, 'phases');
+  const roadmapPath = paths.roadmap;
+  const statePath = paths.state;
+  const configPath = paths.config;
+  const phasesDir = paths.phases;
 
   interface Issue {
     code: string;
@@ -421,24 +432,57 @@ export const validateHealth: QueryHandler = async (args, projectDir) => {
   } else {
     try {
       const stateContent = await readFile(statePath, 'utf-8');
-      const phaseRefs = [...stateContent.matchAll(/[Pp]hase\s+(\d+(?:\.\d+)*)/g)].map(m => m[1]);
-      const diskPhases = new Set<string>();
+      const phaseRefs = [...stateContent.matchAll(/[Pp]hase\s+(\d+[A-Z]?(?:\.\d+)*)/g)].map(m => m[1]);
+
+      // Bug #2633 — ROADMAP.md is the authority for which phases are valid.
+      // STATE.md may legitimately reference current-milestone future phases
+      // (not yet materialized on disk) and shipped-milestone history phases
+      // (archived / cleared off disk). Matching only against on-disk dirs
+      // produces false W002 warnings in both cases.
+      const validPhases = new Set<string>();
       try {
         const entries = await readdir(phasesDir, { withFileTypes: true });
         for (const e of entries) {
           if (e.isDirectory()) {
-            const m = e.name.match(/^(\d+(?:\.\d+)*)/);
-            if (m) diskPhases.add(m[1]);
+            const m = e.name.match(/^(\d+[A-Z]?(?:\.\d+)*)/);
+            if (m) validPhases.add(m[1]);
           }
         }
       } catch { /* intentionally empty */ }
 
+      // Union in every phase declared anywhere in ROADMAP.md — current milestone,
+      // shipped milestones (inside <details> / ✅ SHIPPED sections), and any
+      // preamble/Backlog. We deliberately do NOT filter by current milestone.
+      try {
+        const roadmapRaw = await readFile(roadmapPath, 'utf-8');
+        const all = [...roadmapRaw.matchAll(/#{2,4}\s*Phase\s+(\d+[A-Z]?(?:\.\d+)*)/gi)];
+        for (const m of all) validPhases.add(m[1]);
+      } catch { /* intentionally empty */ }
+
+      // Compare canonical full phase tokens. Also accept a leading-zero
+      // variant on the integer prefix only (e.g. "03" → "3", "03.1" → "3.1")
+      // so historic STATE.md formatting still validates. Suffix tokens like
+      // "3A" must match exactly — never collapsed to "3".
+      const normalizedValid = new Set<string>();
+      for (const p of validPhases) {
+        normalizedValid.add(p);
+        const dotIdx = p.indexOf('.');
+        const head = dotIdx === -1 ? p : p.slice(0, dotIdx);
+        const tail = dotIdx === -1 ? '' : p.slice(dotIdx);
+        if (/^\d+$/.test(head)) {
+          normalizedValid.add(head.padStart(2, '0') + tail);
+        }
+      }
+
       for (const ref of phaseRefs) {
-        const normalizedRef = String(parseInt(ref, 10)).padStart(2, '0');
-        if (!diskPhases.has(ref) && !diskPhases.has(normalizedRef) && !diskPhases.has(String(parseInt(ref, 10)))) {
-          if (diskPhases.size > 0) {
+        const dotIdx = ref.indexOf('.');
+        const head = dotIdx === -1 ? ref : ref.slice(0, dotIdx);
+        const tail = dotIdx === -1 ? '' : ref.slice(dotIdx);
+        const padded = /^\d+$/.test(head) ? head.padStart(2, '0') + tail : ref;
+        if (!normalizedValid.has(ref) && !normalizedValid.has(padded)) {
+          if (normalizedValid.size > 0) {
             addIssue('warning', 'W002',
-              `STATE.md references phase ${ref}, but only phases ${[...diskPhases].sort().join(', ')} exist`,
+              `STATE.md references phase ${ref}, but only phases ${[...validPhases].sort().join(', ')} are declared`,
               'Review STATE.md manually');
           }
         }
@@ -733,6 +777,64 @@ export const validateHealth: QueryHandler = async (args, projectDir) => {
       info,
       repairable_count: repairableCount,
       repairs_performed: repairActions.length > 0 ? repairActions : undefined,
+    },
+  };
+};
+
+// ─── validateAgents ────────────────────────────────────────────────────────
+
+/**
+ * Default agents directory — mirrors `getAgentsDir` in `get-shit-done/bin/lib/core.cjs`:
+ * `GSD_AGENTS_DIR`, else `../../../agents` relative to this module (`sdk/dist/query` → monorepo
+ * root), matching `core.cjs` (`get-shit-done/bin/lib` → same repo `agents/`).
+ */
+function getAgentsDirForValidateAgents(): string {
+  if (process.env.GSD_AGENTS_DIR) return process.env.GSD_AGENTS_DIR;
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve(here, '..', '..', '..', 'agents');
+}
+
+/**
+ * Validate GSD agent file installation under the managed agents directory.
+ *
+ * Port of `cmdValidateAgents` from `verify.cjs` lines 997–1009 (uses `checkAgentsInstalled` from core).
+ */
+export const validateAgents: QueryHandler = async (_args, _projectDir) => {
+  const agentsDir = getAgentsDirForValidateAgents();
+  const expected = Object.keys(MODEL_PROFILES);
+  const installed: string[] = [];
+  const missing: string[] = [];
+
+  if (!existsSync(agentsDir)) {
+    return {
+      data: {
+        agents_dir: agentsDir,
+        agents_found: false,
+        installed: [] as string[],
+        missing: expected,
+        expected,
+      },
+    };
+  }
+
+  for (const agent of expected) {
+    const agentFile = join(agentsDir, `${agent}.md`);
+    const agentFileCopilot = join(agentsDir, `${agent}.agent.md`);
+    if (existsSync(agentFile) || existsSync(agentFileCopilot)) {
+      installed.push(agent);
+    } else {
+      missing.push(agent);
+    }
+  }
+
+  const agentsInstalled = installed.length > 0 && missing.length === 0;
+  return {
+    data: {
+      agents_dir: agentsDir,
+      agents_found: agentsInstalled,
+      installed,
+      missing,
+      expected,
     },
   };
 };

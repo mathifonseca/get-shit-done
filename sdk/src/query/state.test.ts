@@ -1,7 +1,7 @@
 /**
  * Unit tests for state query handlers.
  *
- * Tests stateLoad, stateGet, and stateSnapshot handlers.
+ * Tests stateJson, stateGet, and stateSnapshot handlers.
  * Uses temp directories with real .planning/ structures.
  */
 
@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // Will be imported once implemented
-import { stateLoad, stateGet, stateSnapshot } from './state.js';
+import { stateJson, stateGet, stateSnapshot } from './state.js';
 
 // ─── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -130,11 +130,11 @@ afterEach(async () => {
   await rm(tmpDir, { recursive: true, force: true });
 });
 
-// ─── stateLoad ─────────────────────────────────────────────────────────────
+// ─── stateJson (state json / state.json) ───────────────────────────────────
 
-describe('stateLoad', () => {
+describe('stateJson', () => {
   it('rebuilds frontmatter from body + disk', async () => {
-    const result = await stateLoad([], tmpDir);
+    const result = await stateJson([], tmpDir);
     const data = result.data as Record<string, unknown>;
 
     expect(data.gsd_state_version).toBe('1.0');
@@ -145,7 +145,7 @@ describe('stateLoad', () => {
   });
 
   it('returns progress with disk-scanned counts', async () => {
-    const result = await stateLoad([], tmpDir);
+    const result = await stateJson([], tmpDir);
     const data = result.data as Record<string, unknown>;
     const progress = data.progress as Record<string, unknown>;
 
@@ -160,7 +160,7 @@ describe('stateLoad', () => {
   });
 
   it('preserves stopped_at from existing frontmatter', async () => {
-    const result = await stateLoad([], tmpDir);
+    const result = await stateJson([], tmpDir);
     const data = result.data as Record<string, unknown>;
 
     expect(data.stopped_at).toBe('Completed 10-01-PLAN.md');
@@ -180,7 +180,7 @@ Plan: 2 of 3
 `;
     await writeFile(join(tmpDir, '.planning', 'STATE.md'), stateContent);
 
-    const result = await stateLoad([], tmpDir);
+    const result = await stateJson([], tmpDir);
     const data = result.data as Record<string, unknown>;
 
     // Body has no Status field -> derived is 'unknown', should preserve frontmatter 'paused'
@@ -191,7 +191,7 @@ Plan: 2 of 3
     const emptyDir = await mkdtemp(join(tmpdir(), 'gsd-state-empty-'));
     await mkdir(join(emptyDir, '.planning'), { recursive: true });
 
-    const result = await stateLoad([], emptyDir);
+    const result = await stateJson([], emptyDir);
     const data = result.data as Record<string, unknown>;
 
     expect(data.error).toBe('STATE.md not found');
@@ -209,7 +209,7 @@ Status: In Progress
 `;
     await writeFile(join(tmpDir, '.planning', 'STATE.md'), stateContent);
 
-    const result = await stateLoad([], tmpDir);
+    const result = await stateJson([], tmpDir);
     const data = result.data as Record<string, unknown>;
 
     expect(data.status).toBe('executing');
@@ -228,7 +228,7 @@ Progress: [░░░░░░░░░░] 0%
 `;
     await writeFile(join(tmpDir, '.planning', 'STATE.md'), stateContent);
 
-    const result = await stateLoad([], tmpDir);
+    const result = await stateJson([], tmpDir);
     const data = result.data as Record<string, unknown>;
     const progress = data.progress as Record<string, unknown>;
 
@@ -343,5 +343,39 @@ describe('stateSnapshot', () => {
     if (data.total_phases !== null) {
       expect(typeof data.total_phases).toBe('number');
     }
+  });
+});
+
+// ─── Regression: --ws propagation (#2618 gap 1) ────────────────────────────
+
+describe('stateJson with --ws workstream', () => {
+  it('reads STATE.md from .planning/workstreams/<name>/ when workstream is provided', async () => {
+    // Build a workstream-scoped layout alongside the default .planning/STATE.md
+    const wsName = 'example-ws';
+    const wsDir = join(tmpDir, '.planning', 'workstreams', wsName);
+    await mkdir(join(wsDir, 'phases'), { recursive: true });
+
+    const wsState = `---
+gsd_state_version: 1.0
+milestone: ws-1.0
+milestone_name: Workstream Marker
+status: planning
+---
+
+# Project State
+
+Status: planning
+`;
+    await writeFile(join(wsDir, 'STATE.md'), wsState);
+    await writeFile(join(wsDir, 'ROADMAP.md'), '# Roadmap\n');
+
+    // Root STATE.md still has the old values (SDK-First Migration).
+    // When --ws is threaded, stateJson must read the workstream STATE.md, not the root.
+    const result = await stateJson([], tmpDir, wsName);
+    const data = result.data as Record<string, unknown>;
+
+    expect(data.milestone).toBe('ws-1.0');
+    expect(data.milestone_name).toBe('Workstream Marker');
+    expect(data.status).toBe('planning');
   });
 });

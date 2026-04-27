@@ -2,14 +2,14 @@
  * State query handlers — STATE.md loading, field extraction, and snapshots.
  *
  * Ported from get-shit-done/bin/lib/state.cjs and core.cjs.
- * Provides state.load (rebuild frontmatter from body + disk), state.get
+ * Provides `state json` / `state.json` (rebuilt frontmatter JSON, `stateJson`), `state.get`
  * (field/section extraction), and state-snapshot (structured snapshot).
  *
  * @example
  * ```typescript
- * import { stateLoad, stateGet, stateSnapshot } from './state.js';
+ * import { stateJson, stateGet, stateSnapshot } from './state.js';
  *
- * const loaded = await stateLoad([], '/project');
+ * const loaded = await stateJson([], '/project');
  * // { data: { gsd_state_version: '1.0', milestone: 'v3.0', ... } }
  *
  * const field = await stateGet(['Status'], '/project');
@@ -34,11 +34,11 @@ import type { QueryHandler } from './utils.js';
  *
  * Port of getMilestonePhaseFilter from core.cjs lines 1409-1442.
  */
-export async function getMilestonePhaseFilter(projectDir: string): Promise<((dirName: string) => boolean) & { phaseCount: number }> {
+export async function getMilestonePhaseFilter(projectDir: string, workstream?: string): Promise<((dirName: string) => boolean) & { phaseCount: number }> {
   const milestonePhaseNums = new Set<string>();
   try {
-    const roadmapContent = await readFile(planningPaths(projectDir).roadmap, 'utf-8');
-    const roadmap = await extractCurrentMilestone(roadmapContent, projectDir);
+    const roadmapContent = await readFile(planningPaths(projectDir, workstream).roadmap, 'utf-8');
+    const roadmap = await extractCurrentMilestone(roadmapContent, projectDir, workstream);
     const phasePattern = /#{2,4}\s*Phase\s+([\w][\w.-]*)\s*:/gi;
     let m: RegExpExecArray | null;
     while ((m = phasePattern.exec(roadmap)) !== null) {
@@ -77,7 +77,7 @@ export async function getMilestonePhaseFilter(projectDir: string): Promise<((dir
  * Port of buildStateFrontmatter from state.cjs lines 650-760.
  * HIGH complexity: extracts fields, scans disk, computes progress.
  */
-export async function buildStateFrontmatter(bodyContent: string, projectDir: string): Promise<Record<string, unknown>> {
+export async function buildStateFrontmatter(bodyContent: string, projectDir: string, workstream?: string): Promise<Record<string, unknown>> {
   const currentPhase = stateExtractField(bodyContent, 'Current Phase');
   const currentPhaseName = stateExtractField(bodyContent, 'Current Phase Name');
   const currentPlan = stateExtractField(bodyContent, 'Current Plan');
@@ -89,10 +89,23 @@ export async function buildStateFrontmatter(bodyContent: string, projectDir: str
   const stoppedAt = stateExtractField(bodyContent, 'Stopped At') || stateExtractField(bodyContent, 'Stopped at');
   const pausedAt = stateExtractField(bodyContent, 'Paused At');
 
+  // Bug #2613: read existing STATE.md frontmatter as preservation backstop.
+  // The write path through `readModifyWriteStateMd` strips frontmatter before
+  // invoking the modifier, so callers of `buildStateFrontmatter` only see the
+  // body. Without reading frontmatter here, status defaults to 'unknown' when
+  // body has no Status field, and progress is stomped to 0/0 when the current
+  // milestone's phase directories have been archived. Matches the #2495 READ
+  // pattern: STATE.md is authoritative, re-derive only when absent.
+  let existingFm: Record<string, unknown> = {};
+  try {
+    const raw = await readFile(planningPaths(projectDir, workstream).state, 'utf-8');
+    existingFm = extractFrontmatter(raw);
+  } catch { /* STATE.md missing on first write — no preservation needed */ }
+
   let milestone: string | null = null;
   let milestoneName: string | null = null;
   try {
-    const info = await getMilestoneInfo(projectDir);
+    const info = await getMilestoneInfo(projectDir, workstream);
     milestone = info.version;
     milestoneName = info.name;
   } catch { /* intentionally empty */ }
@@ -103,8 +116,8 @@ export async function buildStateFrontmatter(bodyContent: string, projectDir: str
   let completedPlans: number | null = null;
 
   try {
-    const phasesDir = planningPaths(projectDir).phases;
-    const isDirInMilestone = await getMilestonePhaseFilter(projectDir);
+    const phasesDir = planningPaths(projectDir, workstream).phases;
+    const isDirInMilestone = await getMilestonePhaseFilter(projectDir, workstream);
     const entries = await readdir(phasesDir, { withFileTypes: true });
     const phaseDirs = entries
       .filter(e => e.isDirectory())
@@ -160,6 +173,12 @@ export async function buildStateFrontmatter(bodyContent: string, projectDir: str
     normalizedStatus = 'executing';
   }
 
+  // Bug #2613: status preservation — if body has no Status field and existing
+  // frontmatter has a non-unknown status, prefer existing.
+  if (normalizedStatus === 'unknown' && typeof existingFm.status === 'string' && existingFm.status && existingFm.status !== 'unknown') {
+    normalizedStatus = existingFm.status;
+  }
+
   const fm: Record<string, unknown> = { gsd_state_version: '1.0' };
 
   if (milestone) fm.milestone = milestone;
@@ -181,13 +200,27 @@ export async function buildStateFrontmatter(bodyContent: string, projectDir: str
   if (progressPercent !== null) progress.percent = progressPercent;
   if (Object.keys(progress).length > 0) fm.progress = progress;
 
+  // Bug #2613: progress preservation — when disk scan returns zero counts
+  // (archived/shipped milestone) and existing frontmatter has non-zero counts,
+  // prefer existing. Legitimate mid-milestone updates see non-zero disk counts
+  // and fall through, keeping disk as ground truth.
+  const existingProgress = existingFm.progress as Record<string, unknown> | undefined;
+  if (existingProgress && typeof existingProgress === 'object') {
+    const derivedTotalPlans = Number(progress.total_plans ?? 0);
+    const derivedCompletedPlans = Number(progress.completed_plans ?? 0);
+    const existingTotalPlans = Number(existingProgress.total_plans ?? 0);
+    if (derivedTotalPlans === 0 && derivedCompletedPlans === 0 && existingTotalPlans > 0) {
+      fm.progress = existingProgress;
+    }
+  }
+
   return fm;
 }
 
 // ─── Exported handlers ─────────────────────────────────────────────────────
 
 /**
- * Query handler for state.load / state.json.
+ * Query handler for `state json` / `state.json` (CJS `cmdStateJson`).
  *
  * Reads STATE.md, rebuilds frontmatter from body + disk scanning.
  * Returns cached frontmatter-only fields (stopped_at, paused_at) when not in body.
@@ -198,8 +231,8 @@ export async function buildStateFrontmatter(bodyContent: string, projectDir: str
  * @param projectDir - Project root directory
  * @returns QueryResult with rebuilt state frontmatter
  */
-export const stateLoad: QueryHandler = async (_args, projectDir) => {
-  const statePath = planningPaths(projectDir).state;
+export const stateJson: QueryHandler = async (_args, projectDir, workstream) => {
+  const statePath = planningPaths(projectDir, workstream).state;
 
   let content: string;
   try {
@@ -212,7 +245,7 @@ export const stateLoad: QueryHandler = async (_args, projectDir) => {
   const body = stripFrontmatter(content);
 
   // Always rebuild from body + disk so progress reflects current state
-  const built = await buildStateFrontmatter(body, projectDir);
+  const built = await buildStateFrontmatter(body, projectDir, workstream);
 
   // Preserve frontmatter-only fields that cannot be recovered from body
   if (existingFm && existingFm.stopped_at && !built.stopped_at) {
@@ -242,8 +275,8 @@ export const stateLoad: QueryHandler = async (_args, projectDir) => {
  * @param projectDir - Project root directory
  * @returns QueryResult with field value or full content
  */
-export const stateGet: QueryHandler = async (args, projectDir) => {
-  const statePath = planningPaths(projectDir).state;
+export const stateGet: QueryHandler = async (args, projectDir, workstream) => {
+  const statePath = planningPaths(projectDir, workstream).state;
 
   let content: string;
   try {
@@ -294,8 +327,8 @@ export const stateGet: QueryHandler = async (args, projectDir) => {
  * @param projectDir - Project root directory
  * @returns QueryResult with structured snapshot
  */
-export const stateSnapshot: QueryHandler = async (_args, projectDir) => {
-  const statePath = planningPaths(projectDir).state;
+export const stateSnapshot: QueryHandler = async (_args, projectDir, workstream) => {
+  const statePath = planningPaths(projectDir, workstream).state;
 
   let content: string;
   try {
@@ -319,10 +352,12 @@ export const stateSnapshot: QueryHandler = async (_args, projectDir) => {
   // Parse numeric fields
   const totalPhases = totalPhasesRaw ? parseInt(totalPhasesRaw, 10) : null;
   const totalPlansInPhase = totalPlansRaw ? parseInt(totalPlansRaw, 10) : null;
-  const progressPercent = progressRaw ? (() => {
-    const m = progressRaw.match(/(\d+)%/);
-    return m ? parseInt(m[1], 10) : null;
-  })() : null;
+  // Match gsd-tools `cmdStateSnapshot` (state.cjs): parseInt(progressRaw.replace('%',''), 10) — NaN → null
+  let progressPercent: number | null = null;
+  if (progressRaw) {
+    const n = parseInt(progressRaw.replace(/%/g, ''), 10);
+    progressPercent = Number.isFinite(n) ? n : null;
+  }
 
   // Extract decisions table
   const decisions: Array<{ phase: string; summary: string; rationale: string }> = [];
