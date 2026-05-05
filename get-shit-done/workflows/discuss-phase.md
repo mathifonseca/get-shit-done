@@ -617,7 +617,7 @@ For each question asked, accumulate:
 - Which option the user selected (or their free-text response)
 - Any follow-up notes or clarifications the user provided
 This data is used to generate DISCUSSION-LOG.md in the `write_context` step.
-||||||| a42d5db7
+
 3. **Record the user's selection:**
    - If user picks from table options → record as locked decision for that area
    - If user picks "Other" → receive their input, reflect it back for confirmation, record
