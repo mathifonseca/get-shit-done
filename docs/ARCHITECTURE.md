@@ -134,7 +134,7 @@ Orchestration logic that commands reference. Contains the step-by-step process i
 #### Progressive disclosure for workflows
 
 Workflow files are loaded verbatim into Claude's context every time the
-corresponding `/gsd:*` command is invoked. To keep that cost bounded, the
+corresponding `/gsd-*` command is invoked. To keep that cost bounded, the
 workflow size budget enforced by `tests/workflow-size-budget.test.cjs`
 mirrors the agent budget from #2361:
 
@@ -257,12 +257,13 @@ See [`docs/INVENTORY.md`](INVENTORY.md#hooks-11-shipped) for the authoritative 1
 
 ### CLI Tools (`get-shit-done/bin/`)
 
-Node.js CLI utility (`gsd-tools.cjs`) with domain modules split across `get-shit-done/bin/lib/` (see [`docs/INVENTORY.md`](INVENTORY.md#cli-modules-24-shipped) for the authoritative roster):
+Node.js CLI utility (`gsd-tools.cjs`) with domain modules split across `get-shit-done/bin/lib/` (see [`docs/INVENTORY.md`](INVENTORY.md#cli-modules-33-shipped) for the authoritative roster):
 
 
 | Module                 | Responsibility                                                                                      |
 | ---------------------- | --------------------------------------------------------------------------------------------------- |
-| `core.cjs`             | Error handling, output formatting, shared utilities                                                 |
+| `core.cjs`             | Error handling, output formatting, shared utilities; compatibility re-exports for planning helpers |
+| `planning-workspace.cjs` | Planning seam (`planningDir`, `planningPaths`, active workstream routing, `.planning/.lock`)      |
 | `state.cjs`            | STATE.md parsing, updating, progression, metrics                                                    |
 | `phase.cjs`            | Phase directory operations, decimal numbering, plan indexing                                        |
 | `roadmap.cjs`          | ROADMAP.md parsing, phase extraction, plan progress                                                 |
@@ -534,7 +535,7 @@ Equivalent paths for other runtimes:
 
 ### Post-Execute Codebase Drift Gate (#2003)
 
-After the last wave of `/gsd:execute-phase` commits, the workflow runs a
+After the last wave of `/gsd-execute-phase` commits, the workflow runs a
 non-blocking `codebase_drift_gate` step (between `schema_drift_gate` and
 `verify_phase_goal`). It compares the diff `last_mapped_commit..HEAD`
 against `.planning/codebase/STRUCTURE.md` and counts four kinds of
@@ -546,7 +547,7 @@ structural elements:
 4. New route modules under `routes/` or `api/`
 
 If the count meets `workflow.drift_threshold` (default 3), the gate either
-**warns** (default) with the suggested `/gsd:map-codebase --paths …` command,
+**warns** (default) with the suggested `/gsd-map-codebase --paths …` command,
 or **auto-remaps** (`workflow.drift_action = auto-remap`) by spawning
 `gsd-codebase-mapper` scoped to the affected paths. Any error in detection
 or remap is logged and the phase continues — drift detection cannot fail
@@ -578,7 +579,7 @@ The installer (`bin/install.js`, ~3,000 lines) handles:
   - Augment Code: Skills-first with full skill conversion and config management
 5. **Path normalization** — Replaces `~/.claude/` paths with runtime-specific paths
 6. **Settings integration** — Registers hooks in runtime's `settings.json`
-7. **Patch backup** — Since v1.17, backs up locally modified files to `gsd-local-patches/` for `/gsd-reapply-patches`
+7. **Patch backup** — Since v1.17, backs up locally modified files to `gsd-local-patches/` for `/gsd-update --reapply`
 8. **Manifest tracking** — Writes `gsd-file-manifest.json` for clean uninstall
 9. **Uninstall mode** — `--uninstall` removes all GSD files, hooks, and settings
 

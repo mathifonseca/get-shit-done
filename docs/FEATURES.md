@@ -449,7 +449,6 @@
 - REQ-MILE-08: New milestone MUST follow same flow as new-project (questions → research → requirements → roadmap)
 - REQ-MILE-09: New milestone MUST NOT reset existing workflow configuration
 
-**Gap Closure:** `/gsd-plan-milestone-gaps` creates phases to close gaps identified by audit.
 
 ---
 
@@ -813,7 +812,7 @@ against the mapping point, not HEAD.
 ### 27a. Post-Execute Codebase Drift Detection
 
 **Introduced by:** #2003
-**Trigger:** Runs automatically at the end of every `/gsd:execute-phase`
+**Trigger:** Runs automatically at the end of every `/gsd-execute-phase`
 **Configuration:**
 - `workflow.drift_threshold` (integer, default `3`) — minimum new
   structural elements before the gate acts.
@@ -837,7 +836,7 @@ continues. Drift detection cannot fail verification.
 - REQ-DRIFT-02: Action fires only when element count ≥ `workflow.drift_threshold`
 - REQ-DRIFT-03: `warn` action MUST NOT spawn any agent
 - REQ-DRIFT-04: `auto-remap` action MUST pass sanitized `--paths` to the mapper
-- REQ-DRIFT-05: Detection/remap failure MUST be non-blocking for `/gsd:execute-phase`
+- REQ-DRIFT-05: Detection/remap failure MUST be non-blocking for `/gsd-execute-phase`
 - REQ-DRIFT-06: `last_mapped_commit` round-trip through YAML frontmatter
   on each `.planning/codebase/*.md` file
 
@@ -865,7 +864,7 @@ continues. Drift detection cannot fail verification.
 
 ### 29. Todo Management
 
-**Commands:** `/gsd-add-todo [desc]`, `/gsd-check-todos`
+**Commands:** `/gsd-add-todo [desc]`, `/gsd-capture --list`
 
 **Purpose:** Capture ideas and tasks during sessions for later work.
 
@@ -902,7 +901,7 @@ continues. Drift detection cannot fail verification.
 - REQ-UPDATE-02: System MUST display changelog for new version before updating
 - REQ-UPDATE-03: System MUST be runtime-aware and target the correct directory
 - REQ-UPDATE-04: System MUST back up locally modified files to `gsd-local-patches/`
-- REQ-UPDATE-05: `/gsd-reapply-patches` MUST restore local modifications after update
+- REQ-UPDATE-05: `/gsd-update --reapply` MUST restore local modifications after update
 
 ---
 
@@ -923,6 +922,8 @@ continues. Drift detection cannot fail verification.
 | `mode` | enum | `interactive` | `interactive` or `yolo` (auto-approve) |
 | `granularity` | enum | `standard` | `coarse`, `standard`, or `fine` |
 | `model_profile` | enum | `balanced` | `quality`, `balanced`, `budget`, or `inherit` |
+| `models.<phase_type>` | enum | (none) | Per-phase-type tier override (`planning`, `discuss`, `research`, `execution`, `verification`, `completion`). Values: `opus`, `sonnet`, `haiku`, `inherit`. Coarse phase-level tuning that wins over `model_profile` but loses to per-agent `model_overrides`. See [CONFIGURATION.md](CONFIGURATION.md#per-phase-type-models-models--added-in-v140). Added in v1.40 |
+| `dynamic_routing.enabled` | boolean | `false` | Master switch for failure-tier escalation. When `true`, agents resolve to `tier_models[default_tier]` and escalate one tier on orchestrator-detected soft failure. Capped by `max_escalations`. See [CONFIGURATION.md](CONFIGURATION.md#dynamic-routing-with-failure-tier-escalation-dynamic_routing--added-in-v140). Added in v1.40 |
 | `workflow.research` | boolean | `true` | Domain research before planning |
 | `workflow.plan_check` | boolean | `true` | Plan verification loop |
 | `workflow.verifier` | boolean | `true` | Post-execution verification |
@@ -1030,13 +1031,24 @@ fix(03-01): correct auth token expiry
 - REQ-HOOK-05: All hooks MUST include 3-second stdin timeout guard
 - REQ-HOOK-06: All hooks MUST fail silently on any error
 - REQ-HOOK-07: Context usage MUST normalize for autocompact buffer (16.5% reserved)
+- REQ-HOOK-08: Update banner MUST be opt-in and silent unless an update is available (PR #2795)
 
 **Statusline Display:**
-```
+```text
 [⬆ /gsd-update │] model │ [current task │] directory [█████░░░░░ 50%]
 ```
 
 Color coding: <50% green, <65% yellow, <80% orange, ≥80% red with skull emoji
+
+**Update Banner (opt-in, when GSD statusline isn't used):**
+
+When the user declines (or keeps a non-GSD) statusline, the installer offers a SessionStart banner that surfaces update availability without occupying statusline real estate. The banner reads `~/.cache/gsd/gsd-update-check.json` (written by `gsd-check-update-worker.js`) and emits one line only when an update is available:
+
+```text
+GSD update available: 1.39.0 → 1.40.0. Run /gsd-update.
+```
+
+The banner is silent when up-to-date and rate-limits "check failed" diagnostics to once per 24 hours. Removed cleanly by `npx get-shit-done-cc --uninstall` or by deleting the SessionStart entry that references `gsd-update-banner.js`.
 
 ### 38. Developer Profiling
 
@@ -1617,7 +1629,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 65. Claim Provenance Tagging
 
-**Part of:** `/gsd-research-phase`
+**Part of:** `/gsd-plan-phase --research-phase <N>`
 
 **Purpose:** Ensure research claims are tagged with source evidence and assumptions are logged separately.
 
@@ -1791,6 +1803,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 - REQ-CTXRED-01: System MUST truncate oversized markdown artifacts to fit within context budgets
 - REQ-CTXRED-02: System MUST order prompts for cache-friendly assembly (stable prefixes first)
 - REQ-CTXRED-03: Reduction MUST preserve essential information (headings, requirements, task structure)
+- REQ-CTXRED-04: Skill `description:` fields MUST be ≤ 100 chars; enforced by `npm run lint:descriptions` (see `scripts/lint-descriptions.cjs` and `tests/enh-2789-description-budget.test.cjs`)
 
 **Process:**
 1. **Measure** — Calculate total prompt size for the workflow
@@ -2107,7 +2120,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 93. Code Review Pipeline
 
-**Commands:** `/gsd-code-review`, `/gsd-code-review-fix`
+**Commands:** `/gsd-code-review`, `/gsd-code-review --fix`
 
 **Purpose:** Structured review of source files changed during a phase, with a separate auto-fix pass that commits each fix atomically.
 
@@ -2115,7 +2128,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 - REQ-REVIEW-01: `gsd-code-review` MUST scope files to the phase using SUMMARY.md and git diff fallback
 - REQ-REVIEW-02: Review MUST support three depth levels: `quick`, `standard`, `deep`
 - REQ-REVIEW-03: Findings MUST be severity-classified: Critical, Warning, Info
-- REQ-REVIEW-04: `gsd-code-review-fix` MUST read REVIEW.md and fix Critical + Warning findings by default
+- REQ-REVIEW-04: `gsd-code-review --fix` MUST read REVIEW.md and fix Critical + Warning findings by default
 - REQ-REVIEW-05: Each fix MUST be committed atomically with a descriptive message
 - REQ-REVIEW-06: `--auto` flag MUST enable fix + re-review iteration loop, capped at 3 iterations
 - REQ-REVIEW-07: Feature MUST be gated by `workflow.code_review` config flag
@@ -2254,7 +2267,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 103. Post-Merge Hunk Verification
 
-**Command:** `/gsd-reapply-patches`
+**Command:** `/gsd-update --reapply`
 
 **Purpose:** After applying local patches post-update, verify that all hunks were actually applied by comparing the expected patch content against the live filesystem. Surface any dropped or partial hunks immediately rather than silently accepting incomplete merges.
 

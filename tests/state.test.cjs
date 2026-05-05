@@ -1,3 +1,7 @@
+// allow-test-rule: source-text-is-the-product
+// Reads .md/.json/.yml product files whose deployed text IS what the
+// runtime loads — testing text content tests the deployed contract.
+
 /**
  * GSD Tools Tests - State
  */
@@ -2366,6 +2370,105 @@ describe('stale phase dirs do not corrupt phase counts (bug #2445)', () => {
     assert.ok(
       output.phase_dir_count <= 2,
       `phase_dir_count should be ≤ 2 (only new-milestone dirs), got ${output.phase_dir_count}`
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// state complete-phase: Phase-fallback decoration handling (PR #2761 nitpick)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// When STATE.md is missing the canonical `**Current Phase:**` field but
+// includes a decorated `## Current Position` body line, the fallback path used
+// to leak the decoration into downstream Status/Phase strings — producing
+// `**Status:** Phase 01 (Foo) — EXECUTING complete` instead of the expected
+// `**Status:** Phase 01 complete`. CodeRabbit flagged this on PR #2761 and the
+// Phase fallback now strips everything past the leading numeric/decimal token.
+describe('state complete-phase: decorated Phase fallback (#2761 nitpick)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('writes clean Phase identifier when only Current Position decoration is present', () => {
+    // STATE.md without the canonical `**Current Phase:**` field — the only
+    // phase signal lives inside the `## Current Position` block as a decorated
+    // line. This is the regression fixture.
+    const stateMd = [
+      '---',
+      'milestone: v1.0',
+      '---',
+      '',
+      '# State',
+      '',
+      '**Status:** Executing',
+      '**Last Activity:** 2024-01-15',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 01 (Foo) — EXECUTING',
+      'Plan: bootstrap',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateMd);
+
+    const result = runGsdTools('state complete-phase', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const updated = fs.readFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      'utf-8',
+    );
+
+    // Status should reference the bare phase identifier (`01`), not the
+    // decorated string. The negative assertion catches the regression
+    // shape directly.
+    assert.ok(
+      updated.includes('**Status:** Phase 01 complete'),
+      `Status should be "Phase 01 complete", got STATE.md:\n${updated}`,
+    );
+    assert.ok(
+      !updated.includes('Phase 01 (Foo) — EXECUTING complete'),
+      `Status must not embed Current Position decoration: ${updated}`,
+    );
+  });
+
+  test('canonical Current Phase field is preferred over Current Position decoration', () => {
+    // When both are present, Current Phase wins — same outcome as before, but
+    // pinned here so a future refactor that flips precedence is caught.
+    const stateMd = [
+      '---',
+      'milestone: v1.0',
+      '---',
+      '',
+      '# State',
+      '',
+      '**Status:** Executing',
+      '**Current Phase:** 03',
+      '**Last Activity:** 2024-01-15',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 01 (Foo) — EXECUTING',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateMd);
+
+    const result = runGsdTools('state complete-phase', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const updated = fs.readFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      'utf-8',
+    );
+    assert.ok(
+      updated.includes('**Status:** Phase 03 complete'),
+      `Status should reference canonical Current Phase (03), got: ${updated}`,
     );
   });
 });

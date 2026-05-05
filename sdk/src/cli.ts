@@ -17,6 +17,8 @@ import { CLITransport } from './cli-transport.js';
 import { WSTransport } from './ws-transport.js';
 import { InitRunner } from './init-runner.js';
 import { validateWorkstreamName } from './workstream-utils.js';
+import { loadConfig } from './config.js';
+import { assertRuntimeSupportsAutoMode } from './runtime-gate.js';
 
 // ─── Parsed CLI args ─────────────────────────────────────────────────────────
 
@@ -83,8 +85,17 @@ function parseCliArgsQueryPermissive(argv: string[]): ParsedCliArgs {
       i += 2;
       continue;
     }
+    // #3019: do NOT consume -h / --help here unconditionally. Pushing the
+    // flag onto queryArgv lets the registered handler (or the gsd-tools.cjs
+    // fallback) render contextual subcommand help. We still set the global
+    // `help` flag when the flag appears, but only short-circuit dispatch in
+    // main() when there is no real subcommand to dispatch to (i.e. the only
+    // tokens in queryArgv are the help flags themselves). That preserves
+    // `gsd-sdk query --help` → top-level USAGE while letting
+    // `gsd-sdk query phase add --help` reach the handler.
     if (a === '-h' || a === '--help') {
       help = true;
+      queryArgv.push(a);
       i += 1;
       continue;
     }
@@ -95,6 +106,14 @@ function parseCliArgsQueryPermissive(argv: string[]): ParsedCliArgs {
     }
     queryArgv.push(a);
     i += 1;
+  }
+
+  // If the user typed a real subcommand (anything other than help flags
+  // alone in queryArgv), do NOT short-circuit to top-level USAGE on help.
+  // The handler/fallback will render contextual help.
+  const nonHelpTokens = queryArgv.filter((t) => t !== '-h' && t !== '--help');
+  if (help && nonHelpTokens.length > 0) {
+    help = false;
   }
 
   return {
@@ -341,6 +360,17 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     return;
   }
 
+  // Fall back to GSD_WORKSTREAM env var when --ws is not supplied (#2791).
+  // gsd-tools.cjs resolves the active workstream via this env var; parity
+  // means gsd-sdk query commands see the same .planning/ path as gsd-tools.
+  if (args.ws === undefined && process.env.GSD_WORKSTREAM) {
+    const envWs = process.env.GSD_WORKSTREAM;
+    if (validateWorkstreamName(envWs)) {
+      args = { ...args, ws: envWs };
+    }
+    // If the env var contains an invalid name, silently ignore it (same as CJS).
+  }
+
   // Multi-repo project-root resolution (issue #2623).
   //
   // When the user launches `gsd-sdk` from inside a `sub_repos`-listed child repo,
@@ -417,7 +447,22 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
           args.ws,
         );
         if (stderr.trim()) console.error(stderr.trimEnd());
-        let output: unknown = await parseCliQueryJsonOutput(stdout, args.projectDir);
+        // #3026 CR (Major outside-diff): the gsd-tools.cjs fallback now
+        // emits plain-text usage on --help / -h with exit 0, instead of
+        // a JSON object. Wrap the JSON parse in a try/catch and forward
+        // non-JSON stdout verbatim so subcommand help reaches the user.
+        // (Previously this path JSON.parsed the help text and threw
+        // "Unexpected token 'U'" — exitCode=1 — a regression introduced
+        // alongside the --help passthrough fix.)
+        let output: unknown;
+        try {
+          output = await parseCliQueryJsonOutput(stdout, args.projectDir);
+        } catch {
+          if (stdout.trim()) {
+            process.stdout.write(stdout.endsWith('\n') ? stdout : stdout + '\n');
+          }
+          return;
+        }
         if (pickField) {
           output = extractField(output, pickField);
         }
@@ -430,7 +475,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
           output = extractField(output, pickField);
         }
 
-        console.log(JSON.stringify(output, null, 2));
+        // Handlers can signal format:'text' to emit a raw string (e.g. agent-skills
+        // emits an <agent_skills> XML block workflows embed via $(...) substitution).
+        if (!pickField && result.format === 'text' && typeof output === 'string') {
+          process.stdout.write(output);
+        } else {
+          console.log(JSON.stringify(output, null, 2));
+        }
       }
     } catch (err) {
       if (err instanceof GSDError) {
@@ -545,6 +596,18 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 
   // ─── Auto command ─────────────────────────────────────────────────────────
   if (args.command === 'auto') {
+    // #2832: refuse to silently route non-Claude runtime projects through the
+    // Claude Agent SDK. Load project config (best effort — falls back to
+    // defaults when missing) and gate before constructing GSD/InitRunner.
+    try {
+      const cfg = await loadConfig(args.projectDir, args.ws);
+      assertRuntimeSupportsAutoMode(cfg);
+    } catch (err) {
+      console.error(`Fatal error: ${(err as Error).message}`);
+      process.exitCode = 1;
+      return;
+    }
+
     const gsd = new GSD({
       projectDir: args.projectDir,
       model: args.model,

@@ -18,6 +18,11 @@ A detailed reference for workflows, troubleshooting, and configuration. For quic
 - [Troubleshooting](#troubleshooting)
 - [Recovery Quick Reference](#recovery-quick-reference)
 
+For driving GSD directly from a GitHub / Linear / Jira issue, see the
+[Issue-Driven Orchestration guide](issue-driven-orchestration.md) — a
+recipe that maps tracker issues onto the workspace → discuss → plan →
+execute → verify → review → ship loop using existing GSD primitives.
+
 ---
 
 ## End-to-End Walkthrough
@@ -664,7 +669,7 @@ Workstreams let you work on multiple milestone areas concurrently without state 
 
 Each workstream maintains its own `.planning/` directory subtree. When you switch workstreams, GSD swaps the active planning context so that `/gsd-progress`, `/gsd-discuss-phase`, `/gsd-plan-phase`, and other commands operate on that workstream's state. Active context is session-scoped when the runtime exposes a stable session identifier, which prevents one terminal or AI instance from repointing another instance's `STATE.md`.
 
-This is lighter weight than `/gsd-new-workspace` (which creates separate repo worktrees). Workstreams share the same codebase and git history but isolate planning artifacts.
+This is lighter weight than `/gsd-workspace --new` (which creates separate repo worktrees). Workstreams share the same codebase and git history but isolate planning artifacts.
 
 ---
 
@@ -743,8 +748,8 @@ After executing a phase, run a structured code review before UAT:
 The reviewer scopes files automatically using SUMMARY.md (preferred) or git diff fallback. Findings are classified as Critical, Warning, or Info in `{phase}-REVIEW.md`.
 
 ```bash
-/gsd-code-review-fix 3           # Fix Critical + Warning findings atomically
-/gsd-code-review-fix 3 --auto    # Fix and re-review until clean (max 3 iterations)
+/gsd-code-review 3 --fix           # Fix Critical + Warning findings atomically
+/gsd-code-review 3 --fix --auto    # Fix and re-review until clean (max 3 iterations)
 ```
 
 ### Autonomous Audit-to-Fix
@@ -761,7 +766,7 @@ To run an audit and fix all auto-fixable issues in one pass:
 The review step slots in after execution and before UAT:
 
 ```
-/gsd-execute-phase N   ->  /gsd-code-review N  ->  /gsd-code-review-fix N  ->  /gsd-verify-work N
+/gsd-execute-phase N   ->  /gsd-code-review N  ->  /gsd-code-review N --fix  ->  /gsd-verify-work N
 ```
 
 ---
@@ -862,16 +867,16 @@ claude --dangerously-skip-permissions
 # (normal phase workflow from here)
 ```
 
-**Post-execute drift detection (#2003).** After every `/gsd:execute-phase`,
+**Post-execute drift detection (#2003).** After every `/gsd-execute-phase`,
 GSD checks whether the phase introduced enough structural change
 (new directories, barrel exports, migrations, or route modules) to make
 `.planning/codebase/STRUCTURE.md` stale. If it did, the default behavior is
-to print a one-shot warning suggesting the exact `/gsd:map-codebase --paths …`
+to print a one-shot warning suggesting the exact `/gsd-map-codebase --paths …`
 invocation to refresh just the affected subtrees. Flip the behavior with:
 
 ```bash
-/gsd:settings workflow.drift_action auto-remap       # remap automatically
-/gsd:settings workflow.drift_threshold 5             # tune sensitivity
+/gsd-settings workflow.drift_action auto-remap       # remap automatically
+/gsd-settings workflow.drift_threshold 5             # tune sensitivity
 ```
 
 The gate is non-blocking: any internal failure logs and the phase continues.
@@ -895,7 +900,6 @@ The gate is non-blocking: any internal failure logs and the phase continues.
 
 ```bash
 /gsd-audit-milestone        # Check requirements coverage, detect stubs
-/gsd-plan-milestone-gaps    # If audit found gaps, create phases to close them
 /gsd-complete-milestone     # Archive, tag, done
 ```
 
@@ -927,10 +931,10 @@ Work on multiple repos or features in parallel with isolated GSD state.
 
 ```bash
 # Create a workspace with repos from your monorepo
-/gsd-new-workspace --name feature-b --repos hr-ui,ZeymoAPI
+/gsd-workspace --new --name feature-b --repos hr-ui,ZeymoAPI
 
 # Feature branch isolation — worktree of current repo with its own .planning/
-/gsd-new-workspace --name feature-b --repos .
+/gsd-workspace --new --name feature-b --repos .
 
 # Then cd into the workspace and initialize GSD
 cd ~/gsd-workspaces/feature-b
@@ -1012,6 +1016,94 @@ Do not re-run `/gsd-execute-phase`. Use `/gsd-quick` for targeted fixes, or `/gs
 
 Switch to budget profile: `/gsd-set-profile budget`. Disable research and plan-check agents via `/gsd-settings` if the domain is familiar to you (or to Claude).
 
+### Tuning model cost by phase (`models`) — added in v1.40
+
+If you've heard "use Opus for planning, Sonnet for verification" and want to apply that without learning the agent taxonomy, add a `models` block to `.planning/config.json`:
+
+```json
+{
+  "model_profile": "balanced",
+  "models": {
+    "planning": "opus",
+    "discuss": "opus",
+    "research": "sonnet",
+    "execution": "opus",
+    "verification": "sonnet",
+    "completion": "sonnet"
+  }
+}
+```
+
+The six slots (`planning` / `discuss` / `research` / `execution` / `verification` / `completion`) accept tier aliases (`opus`, `sonnet`, `haiku`, `inherit`). Each slot covers a group of agents — for example, setting `models.research = "sonnet"` applies to `gsd-phase-researcher`, `gsd-codebase-mapper`, `gsd-research-synthesizer`, and the other research agents in one shot.
+
+Need a per-agent exception? Add `model_overrides` alongside — it wins over `models`:
+
+```json
+{
+  "models": { "research": "sonnet" },
+  "model_overrides": {
+    "gsd-codebase-mapper": "haiku"
+  }
+}
+```
+
+That gives sonnet to all research agents *except* the codebase mapper, which runs haiku for the cheap-but-broad fan-out scan.
+
+For the full mapping table and resolution-precedence rules, see [Per-Phase-Type Models](CONFIGURATION.md#per-phase-type-models-models--added-in-v140) in the configuration reference.
+
+### Cheap-by-default with `dynamic_routing` — added in v1.40
+
+If you've been paying Opus rates everywhere as insurance against a single hard verification, dynamic routing flips it: every agent starts on a cheaper tier and escalates only when the orchestrator marks a soft failure (verification inconclusive, plan-check FLAG, etc.).
+
+```json
+{
+  "dynamic_routing": {
+    "enabled": true,
+    "tier_models": {
+      "light":    "haiku",
+      "standard": "sonnet",
+      "heavy":    "opus"
+    },
+    "escalate_on_failure": true,
+    "max_escalations": 1
+  }
+}
+```
+
+Each agent has a default tier (`light`, `standard`, or `heavy`). On the first attempt, GSD picks `tier_models[default_tier]`. If the orchestrator detects a soft failure, it re-spawns once at the next tier up. `max_escalations` caps total retries so a runaway loop can't burn through your budget.
+
+Concretely:
+- `gsd-codebase-mapper` (default `light`) → first attempt = `haiku`. If escalated → `sonnet`.
+- `gsd-verifier` (default `standard`) → first attempt = `sonnet`. If escalated → `opus`.
+- `gsd-planner` (default `heavy`) → always `opus`. No tier above; can't escalate further.
+
+To turn it off, set `dynamic_routing.enabled: false` (the default) — behavior is identical to today.
+
+For the full agent → tier mapping and resolution-precedence rules, see [Dynamic Routing](CONFIGURATION.md#dynamic-routing-with-failure-tier-escalation-dynamic_routing--added-in-v140) in the configuration reference.
+
+### Trim MCP servers to reduce per-turn cost (the biggest lever GSD doesn't own)
+
+Before tuning `model_profile` or `models.<phase_type>`, audit which **MCP servers** your harness has enabled. Every enabled MCP server injects its tool schema into every turn — heavyweight servers like browser/playwright tools or platform-specific helpers can cost 20k+ tokens each, often dwarfing whatever GSD's resolver can save.
+
+This is a **harness setting**, not a GSD setting. The toggle lives in `.claude/settings.json`:
+
+```json
+{
+  "enabledMcpjsonServers": ["context7"],
+  "disabledMcpjsonServers": ["playwright", "mac-tools"]
+}
+```
+
+Quick audit before a long phase:
+
+- Are any browser / playwright tools enabled when this phase has no UI work?
+- Are any platform-specific tools (Mac-tools, Windows-tools, OS-specific) enabled when not needed?
+- Are any project-specific MCPs from a different project still enabled here?
+
+Each disabled server removes its schema from every subsequent turn for the rest of the session. Trimming MCPs **compounds** with `model_profile` tuning — both levers are additive, and MCP savings show up immediately across every subagent the orchestrator spawns.
+
+For the full audit, harness reference, and the composition note with `model_profile`, see [MCP Tool Schema Cost](../get-shit-done/references/context-budget.md#mcp-tool-schema-cost-harness-concern) in the bundled `context-budget.md` reference.
+
 ### Using Non-Claude Runtimes (Codex, OpenCode, Gemini CLI, Kilo)
 
 If you installed GSD for a non-Claude runtime, the installer already configured model resolution so all agents use the runtime's default model. No manual setup is needed. Specifically, the installer sets `resolve_model_ids: "omit"` in your config, which tells GSD to skip Anthropic model ID resolution and let the runtime choose its own default model.
@@ -1090,11 +1182,35 @@ Set `commit_docs: false` during `/gsd-new-project` or via `/gsd-settings`. Add `
 
 ### GSD Update Overwrote My Local Changes
 
-Since v1.17, the installer backs up locally modified files to `gsd-local-patches/`. Run `/gsd-reapply-patches` to merge your changes back.
+Since v1.17, the installer backs up locally modified files to `gsd-local-patches/`. Run `/gsd-update --reapply` to merge your changes back.
 
 ### Cannot Update via npm
 
 If `npx get-shit-done-cc` fails due to npm outages or network restrictions, see [docs/manual-update.md](manual-update.md) for a step-by-step manual update procedure that works without npm access.
+
+### Surface GSD Update Notifications Without GSD's Statusline
+
+GSD checks for new versions in the background and writes the result to `~/.cache/gsd/gsd-update-check.json`. By default, GSD's statusline (`hooks/gsd-statusline.js`) reads that cache and shows the update indicator. If you use a different statusline (for example `ccstatusline`) or none at all, the update info is invisible.
+
+**Opt-in fix:** during interactive install, when you decline (or keep your existing) statusline, the installer offers a one-time prompt:
+
+```text
+Optional: GSD update banner
+  1) No banner (default)
+  2) Install update banner
+```
+
+Choose `2` (or type `y`/`yes`) and the installer registers `hooks/gsd-update-banner.js` as a `SessionStart` hook. From the next session onward, GSD prints a one-line `systemMessage` only when the cache reports an update available:
+
+```text
+GSD update available: 1.39.0 → 1.40.0. Run /gsd-update.
+```
+
+The banner is silent when no update is available. If the cache file is corrupt, GSD emits one diagnostic line (`GSD update check failed.`) and stays silent for 24 hours so a broken cache does not nag every session.
+
+**Opt-out / removal:** delete the SessionStart hook entry that references `gsd-update-banner.js` from your runtime's `settings.json` (Claude Code: `~/.claude/settings.json`; Gemini: `~/.gemini/settings.json`). `npx get-shit-done-cc --uninstall` removes both the script and the registration in one pass.
+
+The banner is not offered when GSD's statusline is installed — that channel already surfaces update info, so re-prompting would be noise.
 
 ### Workflow Diagnostics (`/gsd-forensics`)
 
@@ -1242,14 +1358,13 @@ If the installer crashes with `EPERM: operation not permitted, scandir` on Windo
 | Lost context / new session           | `/gsd-resume-work` or `/gsd-progress`                                    |
 | Phase went wrong                     | `git revert` the phase commits, then re-plan                             |
 | Need to change scope                 | `/gsd-add-phase`, `/gsd-insert-phase`, or `/gsd-remove-phase`            |
-| Milestone audit found gaps           | `/gsd-plan-milestone-gaps`                                               |
 | Something broke                      | `/gsd-debug "description"` (add `--diagnose` for analysis without fixes) |
 | STATE.md out of sync                 | `state validate` then `state sync`                                       |
 | Workflow state seems corrupted       | `/gsd-forensics`                                                         |
 | Quick targeted fix                   | `/gsd-quick`                                                             |
 | Plan doesn't match your vision       | `/gsd-discuss-phase [N]` then re-plan                                    |
 | Costs running high                   | `/gsd-set-profile budget` and `/gsd-settings` to toggle agents off       |
-| Update broke local changes           | `/gsd-reapply-patches`                                                   |
+| Update broke local changes           | `/gsd-update --reapply`                                                  |
 | Want session summary for stakeholder | `/gsd-session-report`                                                    |
 | Don't know what step is next         | `/gsd-next`                                                              |
 | Parallel execution build errors      | Update GSD or set `parallelization.enabled: false`                       |
@@ -1297,4 +1412,3 @@ For reference, here is what GSD creates in your project:
       XX-UI-REVIEW.md     # Visual audit scores (from /gsd-ui-review)
   ui-reviews/             # Screenshots from /gsd-ui-review (gitignored)
 ```
-

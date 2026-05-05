@@ -28,6 +28,7 @@ export const VALID_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'workflow.skip_discuss',
   'workflow.auto_prune_state',
   'workflow.use_worktrees',
+  'workflow.worktree_skip_hooks',
   'workflow.code_review',
   'workflow.code_review_depth',
   'workflow.code_review_command',
@@ -131,6 +132,18 @@ export const DYNAMIC_KEY_PATTERNS: readonly DynamicKeyPattern[] = [
     source: '^model_profile_overrides\\.[a-zA-Z0-9_-]+\\.(opus|sonnet|haiku)$',
     description: 'model_profile_overrides.<runtime>.<opus|sonnet|haiku>',
     test: (k) => /^model_profile_overrides\.[a-zA-Z0-9_-]+\.(opus|sonnet|haiku)$/.test(k),
+  },
+  // #3023 — per-phase-type model map: models.<phase_type> = <tier>
+  {
+    source: '^models\\.(planning|discuss|research|execution|verification|completion)$',
+    description: 'models.<planning|discuss|research|execution|verification|completion>',
+    test: (k) => /^models\.(planning|discuss|research|execution|verification|completion)$/.test(k),
+  },
+  // #3024 — dynamic routing with failure-tier escalation
+  {
+    source: '^dynamic_routing\\.(enabled|escalate_on_failure|max_escalations|tier_models\\.(light|standard|heavy))$',
+    description: 'dynamic_routing.<enabled|escalate_on_failure|max_escalations|tier_models.<light|standard|heavy>>',
+    test: (k) => /^dynamic_routing\.(enabled|escalate_on_failure|max_escalations|tier_models\.(light|standard|heavy))$/.test(k),
   },
 ];
 

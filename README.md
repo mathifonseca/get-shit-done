@@ -4,7 +4,7 @@
 
 **English** · [Português](README.pt-BR.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [한국어](README.ko-KR.md)
 
-**A light-weight and powerful meta-prompting, context engineering and spec-driven development system for Claude Code, OpenCode, Gemini CLI, Kilo, Codex, Copilot, Cursor, Windsurf, Antigravity, Augment, Trae, Qwen Code, Cline, and CodeBuddy.**
+**A light-weight and powerful meta-prompting, context engineering and spec-driven development system for Claude Code, OpenCode, Gemini CLI, Kilo, Codex, Copilot, Cursor, Windsurf, Antigravity, Augment, Trae, Qwen Code, Hermes Agent, Cline, and CodeBuddy.**
 
 **Solves context rot — the quality degradation that happens as Claude fills its context window.**
 
@@ -175,11 +175,17 @@ People who want to describe what they want and have it built correctly — witho
 
 Built-in quality gates catch real problems: schema drift detection flags ORM changes missing migrations, security enforcement anchors verification to threat models, and scope reduction detection prevents the planner from silently dropping your requirements.
 
-### v1.37.0 Highlights
+### v1.39.0 Highlights
 
-- **Spiking & sketching** — `/gsd-spike` runs 2–5 focused experiments with Given/When/Then verdicts; `/gsd-sketch` produces 2–3 interactive HTML mockup variants per design question — both store artifacts in `.planning/` and pair with wrap-up commands to package findings into project-local skills
-- **Agent size-budget enforcement** — Tiered line-count limits (XL: 1 600, Large: 1 000, Default: 500) keep agent prompts lean; violations surface in CI
-- **Shared boilerplate extraction** — Mandatory-initial-read and project-skills-discovery logic extracted to reference files, reducing duplication across a dozen agents
+See the [v1.39.0 release notes](https://github.com/gsd-build/get-shit-done/releases/tag/v1.39.0) for the full list.
+
+- **`--minimal` install profile** — alias `--core-only`, writes only the six main-loop skills (`new-project`, `discuss-phase`, `plan-phase`, `execute-phase`, `help`, `update`) and zero `gsd-*` subagents. Cuts cold-start system-prompt overhead from ~12k tokens to ~700 (≥94% reduction). Useful for local LLMs with 32K–128K context and token-billed APIs.
+- **`/gsd-edit-phase`** — modify any field of an existing phase in `ROADMAP.md` in place, without changing its number or position. `--force` skips the confirmation diff; `depends_on` references are validated and `STATE.md` is updated on write.
+- **Post-merge build & test gate** — `execute-phase` step 5.6 now auto-detects the build command from `workflow.build_command`, then falls back to Xcode (`.xcodeproj`), Makefile, Justfile, Cargo, Go, Python, or npm. Xcode/iOS projects get `xcodebuild build` + `xcodebuild test` automatically. Runs in both parallel and serial mode.
+- **Per-runtime review-model selection** — `review.models.<cli>` lets each external review CLI (codex, gemini, etc.) pick its own model independently of the planner/executor profile.
+- **Workstream config inheritance** — when `GSD_WORKSTREAM` is set, the root `.planning/config.json` is loaded first and deep-merged with the workstream config (workstream wins on conflict). Explicit `null` in a workstream config now correctly overrides a root value.
+- **Manual canary release workflow** — `.github/workflows/canary.yml` publishes `{base}-canary.{N}` builds of `get-shit-done-cc` and `@gsd-build/sdk` to the `@canary` dist-tag from `dev` on demand via `workflow_dispatch`.
+- **Skill consolidation: 86 → 59** — four new grouped skills (`capture`, `phase`, `config`, `workspace`) absorb 31 micro-skills. Six existing parents absorb wrap-up and sub-operations as flags: `update --sync/--reapply`, `sketch --wrap-up`, `spike --wrap-up`, `map-codebase --fast/--query`, `code-review --fix`, `progress --do/--next`. Zero functional loss.
 
 ---
 
@@ -190,11 +196,11 @@ npx get-shit-done-cc@latest
 ```
 
 The installer prompts you to choose:
-1. **Runtime** — Claude Code, OpenCode, Gemini, Kilo, Codex, Copilot, Cursor, Windsurf, Antigravity, Augment, Trae, Qwen Code, CodeBuddy, Cline, or all (interactive multi-select — pick multiple runtimes in a single install session)
+1. **Runtime** — Claude Code, OpenCode, Gemini, Kilo, Codex, Copilot, Cursor, Windsurf, Antigravity, Augment, Trae, Qwen Code, Hermes Agent, CodeBuddy, Cline, or all (interactive multi-select — pick multiple runtimes in a single install session)
 2. **Location** — Global (all projects) or local (current project only)
 
 Verify with:
-- Claude Code / Gemini / Copilot / Antigravity / Qwen Code: `/gsd-help`
+- Claude Code / Gemini / Copilot / Antigravity / Qwen Code / Hermes Agent: `/gsd-help`
 - OpenCode / Kilo / Augment / Trae / CodeBuddy: `/gsd-help`
 - Codex: `$gsd-help`
 - Cline: GSD installs via `.clinerules` — verify by checking `.clinerules` exists
@@ -265,6 +271,10 @@ npx get-shit-done-cc --trae --local         # Install to ./.trae/
 npx get-shit-done-cc --qwen --global        # Install to ~/.qwen/
 npx get-shit-done-cc --qwen --local         # Install to ./.qwen/
 
+# Hermes Agent
+npx get-shit-done-cc --hermes --global      # Install to ~/.hermes/ (honors $HERMES_HOME)
+npx get-shit-done-cc --hermes --local       # Install to ./.hermes/
+
 # CodeBuddy
 npx get-shit-done-cc --codebuddy --global   # Install to ~/.codebuddy/
 npx get-shit-done-cc --codebuddy --local    # Install to ./.codebuddy/
@@ -278,7 +288,7 @@ npx get-shit-done-cc --all --global      # Install to all directories
 ```
 
 Use `--global` (`-g`) or `--local` (`-l`) to skip the location prompt.
-Use `--claude`, `--opencode`, `--gemini`, `--kilo`, `--codex`, `--copilot`, `--cursor`, `--windsurf`, `--antigravity`, `--augment`, `--trae`, `--qwen`, `--codebuddy`, `--cline`, or `--all` to skip the runtime prompt.
+Use `--claude`, `--opencode`, `--gemini`, `--kilo`, `--codex`, `--copilot`, `--cursor`, `--windsurf`, `--antigravity`, `--augment`, `--trae`, `--qwen`, `--hermes`, `--codebuddy`, `--cline`, or `--all` to skip the runtime prompt.
 The GSD SDK CLI (`gsd-sdk`) is installed automatically (required by `/gsd-*` commands). Pass `--no-sdk` to skip the SDK install, or `--sdk` to force a reinstall.
 
 </details>
@@ -727,7 +737,7 @@ You're never locked in. The system adapts.
 
 | Command | What it does |
 |---------|--------------|
-| `/gsd-new-workspace` | Create isolated workspace with repo copies (worktrees or clones) |
+| `/gsd-workspace --new` | Create isolated workspace with repo copies (worktrees or clones) |
 | `/gsd-list-workspaces` | Show all GSD workspaces and their status |
 | `/gsd-remove-workspace` | Remove workspace and clean up worktrees |
 
@@ -771,9 +781,9 @@ You're never locked in. The system adapts.
 |---------|--------------|
 | `/gsd-add-phase` | Append phase to roadmap |
 | `/gsd-insert-phase [N]` | Insert urgent work between phases |
+| `/gsd-edit-phase [N] [--force]` | Modify any field of an existing phase in place — number and position unchanged |
 | `/gsd-remove-phase [N]` | Remove future phase, renumber |
 | `/gsd-list-phase-assumptions [N]` | See Claude's intended approach before planning |
-| `/gsd-plan-milestone-gaps` | Create phases to close gaps from audit |
 
 ### Session
 
@@ -815,7 +825,7 @@ You're never locked in. The system adapts.
 | `/gsd-settings` | Configure model profile and workflow agents |
 | `/gsd-set-profile <profile>` | Switch model profile (quality/balanced/budget/inherit) |
 | `/gsd-add-todo [desc]` | Capture idea for later |
-| `/gsd-check-todos` | List pending todos |
+| `/gsd-capture --list` | List pending todos |
 | `/gsd-debug [desc]` | Systematic debugging with persistent state |
 | `/gsd-do <text>` | Route freeform text to the right GSD command automatically |
 | `/gsd-note <text>` | Zero-friction idea capture — append, list, or promote notes to todos |
@@ -831,6 +841,8 @@ You're never locked in. The system adapts.
 ## Configuration
 
 GSD stores project settings in `.planning/config.json`. Configure during `/gsd-new-project` or update later with `/gsd-settings`. For the full config schema, workflow toggles, git branching options, and per-agent model breakdown, see the [User Guide](docs/USER-GUIDE.md#configuration-reference).
+
+When `GSD_WORKSTREAM` is set, GSD loads the root `.planning/config.json` first and deep-merges the workstream's `config.json` on top — workstream values win on conflict, and an explicit `null` in a workstream config overrides a root value.
 
 ### Core Settings
 
@@ -860,6 +872,8 @@ Use `inherit` when using non-Anthropic providers (OpenRouter, local models) or t
 
 Or configure via `/gsd-settings`.
 
+Per-runtime review-model overrides live under `review.models.<cli>` (e.g. `review.models.codex`, `review.models.gemini`) and let each external review CLI pick its own model independently of the planner/executor profile.
+
 ### Workflow Agents
 
 These spawn additional agents during planning/execution. They improve quality but add tokens and time.
@@ -876,6 +890,7 @@ These spawn additional agents during planning/execution. They improve quality bu
 | `workflow.questions_per_area` | `'all'` | Questions per area: `'all'` (exhaust then move on) or a number (e.g., `4`, `5`) |
 | `workflow.text_mode` | `false` | Text-only mode for remote sessions (no TUI menus) |
 | `workflow.use_worktrees` | `true` | Toggle worktree isolation for execution |
+| `workflow.build_command` | _(auto-detect)_ | Override the post-merge build gate command. Falls back to Xcode (`.xcodeproj`), Makefile, Justfile, Cargo, Go, Python, or npm; Xcode/iOS projects also run `xcodebuild test`. |
 | `workflow.test_contracts` | `true` | Tests are read-only — executor fixes implementation, not tests |
 | `workflow.adversarial_validation` | `true` | Three-layer adversarial review: Devil's Advocate (planning), Edge Case Hunter (execution), finder+critic+referee (verification) |
 | `workflow.dead_code_scan` | `true` | Scan for dead code / context pollution during verification |
@@ -1021,6 +1036,7 @@ npx get-shit-done-cc --antigravity --global --uninstall
 npx get-shit-done-cc --augment --global --uninstall
 npx get-shit-done-cc --trae --global --uninstall
 npx get-shit-done-cc --qwen --global --uninstall
+npx get-shit-done-cc --hermes --global --uninstall
 npx get-shit-done-cc --codebuddy --global --uninstall
 npx get-shit-done-cc --cline --global --uninstall
 
@@ -1037,6 +1053,7 @@ npx get-shit-done-cc --antigravity --local --uninstall
 npx get-shit-done-cc --augment --local --uninstall
 npx get-shit-done-cc --trae --local --uninstall
 npx get-shit-done-cc --qwen --local --uninstall
+npx get-shit-done-cc --hermes --local --uninstall
 npx get-shit-done-cc --codebuddy --local --uninstall
 npx get-shit-done-cc --cline --local --uninstall
 ```
