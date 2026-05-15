@@ -845,10 +845,45 @@ If "Yes":
     ---
     ```
 
-  Each rule file should contain:
-  1. A brief description of what this domain covers
-  2. Placeholder sections: `## Structure`, `## Conventions`, `## Anti-patterns`
-  3. A note: "Fill in as patterns emerge during development"
+  Each rule file uses **progressive disclosure** — three layers, cheapest first. Agents stop
+  reading at the right depth rather than consuming the full file for every task.
+
+  Template structure for each rule file (after the `paths:` frontmatter):
+
+  ```markdown
+  <!-- Layer 1 — Compact config (<500 tokens). Covers ~80% of tasks. -->
+  ## Quick Reference
+
+  - **Framework/tool:** [e.g. FastAPI, Prisma, Next.js App Router]
+  - **Key constraint:** [single most important invariant for this domain]
+  - **Common command:** [e.g. `make test`, `npx prisma migrate dev`]
+  - **Never do:** [single hardest anti-pattern to avoid]
+
+  <!-- Layer 2 — Pattern summary (<300 tokens). Load when Layer 1 is insufficient. -->
+  ## Key Patterns
+
+  - [Pattern 1 — one line]
+  - [Pattern 2 — one line]
+  - [Pattern 3 — one line]
+
+  Fill in as patterns emerge during development.
+
+  <!-- Layer 3 — Full reference (up to 3K tokens). Load for deep or unfamiliar tasks. -->
+  ## Structure
+
+  Fill in as patterns emerge during development.
+
+  ## Conventions
+
+  Fill in as patterns emerge during development.
+
+  ## Anti-patterns
+
+  Fill in as patterns emerge during development.
+  ```
+
+  The agent can stop after Layer 1 for simple tasks and escalate to Layer 3 only when needed.
+  "A rules file is not a manual — it's a routing table for the agent's attention."
 
   Commit the scaffolded files:
 
