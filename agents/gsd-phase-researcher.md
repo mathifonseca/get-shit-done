@@ -90,7 +90,7 @@ Before researching, discover project context:
 
 If CONTEXT.md exists, it constrains your research scope. Don't explore alternatives to locked decisions.
 
-**DESIGN.md** (if exists) — Frozen design spec from `/gsd-discuss-phase`
+**DESIGN.md** (if exists) — Frozen design spec from `/gsd:discuss-phase`
 
 | Section | How You Use It |
 |---------|----------------|
@@ -616,7 +616,7 @@ Also read `.planning/config.json` — include Validation Architecture section in
 Then read CONTEXT.md and DESIGN.md if they exist:
 ```bash
 cat "$phase_dir"/*-CONTEXT.md 2>/dev/null
-cat "$phase_dir"/*-DESIGN.md 2>/dev/null    # From /gsd-discuss-phase (frozen design spec)
+cat "$phase_dir"/*-DESIGN.md 2>/dev/null    # From /gsd:discuss-phase (frozen design spec)
 ```
 
 **If CONTEXT.md exists**, it constrains research:

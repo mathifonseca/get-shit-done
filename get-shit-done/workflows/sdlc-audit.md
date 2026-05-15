@@ -320,7 +320,7 @@ Score: 10/20 passed | 1 partial | 9 missing
 Current tier: Tier 1 (Foundation)
 Next steps:
   1. Create a Makefile with standard targets (make setup, make check, make test)
-  2. Configure issue tracker: /gsd-settings -> project.issue_tracker
+  2. Configure issue tracker: /gsd:settings -> project.issue_tracker
   3. Add health endpoints to your API
 ```
 
@@ -345,10 +345,10 @@ Example next steps:
 ```
 Next steps:
   1. Create a Makefile with standard targets (make setup, make check, make test)
-     -> Run: /gsd-sdlc-audit --fix  or create manually
-  2. Configure issue tracker: /gsd-settings -> project.issue_tracker
+     -> Run: /gsd:sdlc-audit --fix  or create manually
+  2. Configure issue tracker: /gsd:settings -> project.issue_tracker
   3. Add .claude/preflight.yaml for pre-ship checks
-     -> Run: /gsd-sdlc-audit --fix  or create manually
+     -> Run: /gsd:sdlc-audit --fix  or create manually
 ```
 </step>
 
@@ -393,7 +393,7 @@ For each MISS or PARTIAL item where `fix_available: true`, offer to fix it. Proc
 
 **For non-fixable items:**
 - Print the exact steps or commands needed to fix them manually.
-- Reference relevant GSD commands where applicable (e.g., `/gsd-new-project` for .planning/ setup).
+- Reference relevant GSD commands where applicable (e.g., `/gsd:new-project` for .planning/ setup).
 
 After all fixes are applied, re-run the checks for fixed items only and display an updated summary showing the new score.
 </step>

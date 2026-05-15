@@ -401,7 +401,7 @@ function runStatusline() {
           if (cache.is_fork) {
             gsdUpdate = '\x1b[36m⬆ upstream ' + (cache.latest || '') + ' available — cherry-pick from upstream\x1b[0m │ ';
           } else {
-            gsdUpdate = '\x1b[33m⬆ /gsd-update\x1b[0m │ ';
+            gsdUpdate = '\x1b[33m⬆ /gsd:update\x1b[0m │ ';
           }
         }
         if (cache.stale_hooks && cache.stale_hooks.length > 0 && !cache.is_fork) {

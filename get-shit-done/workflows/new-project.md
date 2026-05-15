@@ -927,7 +927,7 @@ If "Yes":
   node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit "chore: scaffold .claude/rules/" --files .claude/rules/
   ```
 
-**PR body onboarding:** Ask which optional PRD-style sections `/gsd-ship` should append to generated PR bodies. Use the same `ship.pr_body_sections` mapping as Step 2a: selected sections get `enabled: true`, seeded-but-unselected sections get `enabled: false`, and selecting none writes an empty list. Prefer lean/agile PRD sections that make user value, acceptance criteria, Definition of Done, and stakeholder traceability explicit.
+**PR body onboarding:** Ask which optional PRD-style sections `/gsd:ship` should append to generated PR bodies. Use the same `ship.pr_body_sections` mapping as Step 2a: selected sections get `enabled: true`, seeded-but-unselected sections get `enabled: false`, and selecting none writes an empty list. Prefer lean/agile PRD sections that make user value, acceptance criteria, Definition of Done, and stakeholder traceability explicit.
 
 Recommended options:
 
@@ -1725,7 +1725,7 @@ PHASE1_HAS_UI=$(echo "$PHASE1_SECTION" | grep -qi "UI hint.*yes" && echo "true" 
 - [ ] `$INSTRUCTION_FILE` generated with GSD workflow guidance (AGENTS.md for Codex, CLAUDE.md otherwise)
 - [ ] Preflight checklist scaffolded (if selected) → **committed**
 - [ ] Rules directory scaffolded (if selected) → **committed**
-- [ ] User knows next step is `/gsd-discuss-phase 1`
+- [ ] User knows next step is `/gsd:discuss-phase 1`
 
 **Atomic commits:** Each phase commits its artifacts immediately. If context is lost, artifacts persist.
 

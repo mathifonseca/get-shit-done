@@ -36,11 +36,14 @@ const DEFAULT_BUDGET = 500;
 const XL_AGENTS = new Set([
   'gsd-debugger',
   'gsd-planner',
+  // SDLC-aligned fork: gsd-verifier owns verification_discipline, dead-code scan,
+  // ratchet-effect enforcement, and probe execution in one rubric — promoted from
+  // LARGE so the end-to-end discipline block can live in the agent prompt.
+  'gsd-verifier',
 ]);
 
 const LARGE_AGENTS = new Set([
   'gsd-phase-researcher',
-  'gsd-verifier',
   'gsd-doc-writer',
   'gsd-plan-checker',
   'gsd-executor',

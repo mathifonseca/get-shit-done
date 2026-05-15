@@ -250,7 +250,7 @@ All workflow toggles follow the **absent = enabled** pattern. If a key is missin
 | `workflow.scaffold_rules` | boolean | `true` | Scaffold `.claude/rules/` with domain-scoped rule files during `/gsd-new-project` |
 | `workflow.update_claude_md_on_complete` | boolean | `true` | Warn if CLAUDE.md was not updated during phase completion. Ensures project guide stays current |
 | `workflow.worktree_skip_hooks` | boolean | `false` | When `true`, executor agents in worktree mode pass `--no-verify` (skipping pre-commit hooks) and post-wave hook validation runs against the merged result instead. Opt-in escape hatch for projects whose hooks cannot run in agent worktrees. Default `false` runs hooks on every commit (#2924). |
-| `workflow.code_review` | boolean | `true` | Enable `/gsd-code-review` and `/gsd-code-review-fix` commands. When `false`, the commands exit with a configuration gate message. Added in v1.34 |
+| `workflow.code_review` | boolean | `true` | Enable `/gsd-code-review` and `/gsd-code-review --fix` commands. When `false`, the commands exit with a configuration gate message. Added in v1.34 |
 | `workflow.code_review_depth` | string | `standard` | Default review depth for `/gsd-code-review`: `quick` (pattern-matching only), `standard` (per-file analysis), or `deep` (cross-file with import graphs). Can be overridden per-run with `--depth=`. Added in v1.34 |
 | `workflow.two_stage_review` | boolean | `true` | Split code review into two passes: (1) spec compliance against PLAN.md requirements, (2) code quality analysis. Stage 1 findings appear in a dedicated "Spec Compliance" section of REVIEW.md. Disable for faster single-pass reviews |
 | `workflow.verification_discipline` | boolean | `true` | Require fresh verification evidence before claiming completion. Agents must run commands and cite output before saying "done", "fixed", or "tests pass". Prevents unverified success claims |
@@ -491,6 +491,7 @@ Toggle optional capabilities via the `features.*` config namespace. Feature flag
 |---------|------|---------|-------------|
 | `graphify.enabled` | boolean | `false` | Enable the project knowledge graph. When `true`, `/gsd-graphify` builds and queries a graph in `.planning/graphs/`. Added in v1.36 |
 | `graphify.build_timeout` | number (seconds) | `300` | Maximum seconds allowed for a `/gsd-graphify build` run before it aborts. Added in v1.36 |
+| `graphify.auto_update` | boolean | `false` | **Opt-in (issue #3347).** When `true` (and `graphify.enabled` is also `true`), the bundled PostToolUse hook `hooks/gsd-graphify-update.sh` auto-rebuilds the project knowledge graph in a detached background process after `git commit/merge/pull/rebase --continue/cherry-pick` on the default branch (`git.base_branch` override, else `main`/`master`/`trunk`). Hook returns instantly; the rebuild updates `.planning/graphs/{graph.json,graph.html,GRAPH_REPORT.md}` and writes `.planning/graphs/.last-build-status.json` (`{ts, status: "running"\|"ok"\|"failed", exit_code, duration_ms, head_at_build}`). PID-locked, CI-aware (`$CI` env suppresses), bails silently if `graphify` is not on `PATH`. Default `false` so existing behaviour is unchanged after upgrade. |
 
 #### Multi-developer setup
 

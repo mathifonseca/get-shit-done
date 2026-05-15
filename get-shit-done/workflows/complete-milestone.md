@@ -941,6 +941,6 @@ Milestone completion is successful when:
 - [ ] Automated retrospective data gathered (verification, adversarial, ratchet, dead code, deviations)
 - [ ] RETROSPECTIVE.md updated with milestone section (includes automated data and manual reflections)
 - [ ] Cross-milestone trends updated (includes automated metrics for cross-milestone comparison)
-- [ ] User knows next step (/gsd-new-milestone)
+- [ ] User knows next step (/gsd:new-milestone)
 
 </success_criteria>

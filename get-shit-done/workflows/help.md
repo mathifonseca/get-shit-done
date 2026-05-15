@@ -595,6 +595,7 @@ The commands above cover the most common day-to-day flows. Every command listed 
 
 ### Diagnostics & Maintenance
 
+- **`/gsd:sdlc-audit [--fix]`** — Audit project against SDLC checklist. Shows what's set up, what's missing, and what to do next.
 - **`/gsd:health [--repair] [--context]`** — Diagnose planning directory health and optionally repair issues.
 - **`/gsd:forensics [problem description]`** — Post-mortem investigation for failed GSD workflows; diagnoses what went wrong.
 - **`/gsd:undo --last N | --phase NN | --plan NN-MM`** — Safe git revert. Roll back phase or plan commits using the phase manifest with dependency checks.

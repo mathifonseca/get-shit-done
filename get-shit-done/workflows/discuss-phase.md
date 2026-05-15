@@ -600,7 +600,7 @@ Write after each area:
 }
 ```
 
-This is a structured checkpoint, not the final CONTEXT.md — the `write_context` step still produces the canonical output. But if the session dies, the next `/gsd-discuss-phase` invocation can detect this checkpoint and offer to resume from it instead of starting from scratch.
+This is a structured checkpoint, not the final CONTEXT.md — the `write_context` step still produces the canonical output. But if the session dies, the next `/gsd:discuss-phase` invocation can detect this checkpoint and offer to resume from it instead of starting from scratch.
 
 **On session resume:** In the `check_existing` step, also check for `*-DISCUSS-CHECKPOINT.json`. If found and no CONTEXT.md exists:
 - Display: "Found interrupted discussion checkpoint ({N} areas completed). Resume from checkpoint?"
@@ -848,7 +848,7 @@ Write after each area:
 }
 ```
 
-This is a structured checkpoint, not the final CONTEXT.md — the `write_context` step still produces the canonical output. But if the session dies, the next `/gsd-discuss-phase` invocation can detect this checkpoint and offer to resume from it instead of starting from scratch.
+This is a structured checkpoint, not the final CONTEXT.md — the `write_context` step still produces the canonical output. But if the session dies, the next `/gsd:discuss-phase` invocation can detect this checkpoint and offer to resume from it instead of starting from scratch.
 
 **On session resume:** In the `check_existing` step, also check for `*-DISCUSS-CHECKPOINT.json`. If found and no CONTEXT.md exists:
 - Display: "Found interrupted discussion checkpoint ({N} areas completed). Resume from checkpoint?"

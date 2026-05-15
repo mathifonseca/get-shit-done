@@ -50,6 +50,7 @@ const MANAGED_HOOKS = [
   'gsd-check-update-worker.js',
   'gsd-check-update.js',
   'gsd-context-monitor.js',
+  'gsd-graphify-update.sh',
   'gsd-phase-boundary.sh',
   'gsd-prompt-guard.js',
   'gsd-read-guard.js',
@@ -89,7 +90,7 @@ if (configDir) {
 
 // Fork detection: if FORK.md exists at the canonical fork checkout, this is a fork.
 // Still check npm for upstream updates (user wants to know), but flag as fork so the
-// statusline surfaces "cherry-pick from upstream" instead of "run /gsd-update".
+// statusline surfaces "cherry-pick from upstream" instead of "run /gsd:update".
 let isFork = false;
 try {
   const homeCode = path.join(require('os').homedir(), 'code', 'get-shit-done', 'FORK.md');

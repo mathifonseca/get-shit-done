@@ -600,7 +600,7 @@ npm test -- --grep "$PHASE_TEST_PATTERN" 2>&1 | grep -q "passing"
 - Do not modify state (no writes, no mutations, no side effects)
 - If the project has no runnable entry points yet, skip with: "Step 7b: SKIPPED (no runnable entry points)"
 
-## Step 7c: Ratchet Effect Enforcement
+## Step 7-Ratchet: Quality Gate Ratchet Enforcement
 
 Quality gates must never regress. Check that this phase's changes did not loosen any existing quality standards.
 
@@ -646,7 +646,7 @@ git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- .github/workf
 - ⚠️ Warning: Individual lint rule disables, CI step removal
 - ℹ️ Info: New suppressions with justifying comments (acceptable if commented)
 
-## Step 7d: Probe Execution
+## Step 7c: Probe Execution
 
 SUMMARY.md probe pass claims are not evidence. If a phase declares or implies probe-based verification, the verifier must run the probe in its own process and record the command result.
 
@@ -717,7 +717,7 @@ Merge those harvested items into the same human verification list as your own an
 
 Classify status using this decision tree IN ORDER (most restrictive first):
 
-1. IF any truth FAILED, artifact MISSING/STUB, key link NOT_WIRED, blocker anti-pattern found, dead code blocker found (orphaned exports from this phase), or ratchet blocker found (Step 7c):
+1. IF any truth FAILED, artifact MISSING/STUB, key link NOT_WIRED, blocker anti-pattern found, dead code blocker found (orphaned exports from this phase), or ratchet blocker found (Step 7-Ratchet):
    → **status: gaps_found**
 
 2. IF Step 8 produced ANY human verification items (section is non-empty):

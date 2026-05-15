@@ -35,6 +35,7 @@ const CLUSTERS = Object.freeze({
     'eval-review',
     'add-tests',
     'secure-phase',
+    'sdlc-audit',
   ]),
 
   milestone: Object.freeze([

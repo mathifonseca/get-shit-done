@@ -1039,8 +1039,8 @@ If `features.global_learnings` is `true`: run `gsd-sdk query learnings.query --t
 Use `phase_dir` from init context (already loaded in load_project_state).
 
 ```bash
-cat "$phase_dir"/*-CONTEXT.md 2>/dev/null   # From /gsd-discuss-phase
-cat "$phase_dir"/*-DESIGN.md 2>/dev/null    # From /gsd-discuss-phase (frozen design spec)
+cat "$phase_dir"/*-CONTEXT.md 2>/dev/null   # From /gsd:discuss-phase
+cat "$phase_dir"/*-DESIGN.md 2>/dev/null    # From /gsd:discuss-phase (frozen design spec)
 cat "$phase_dir"/*-RESEARCH.md 2>/dev/null   # From /gsd-research-phase
 cat "$phase_dir"/*-DISCOVERY.md 2>/dev/null  # From mandatory discovery
 ```
