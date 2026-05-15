@@ -393,7 +393,7 @@
 
 ### 9. Phase Management
 
-**명령어:** `/gsd-add-phase`, `/gsd-insert-phase [N]`, `/gsd-remove-phase [N]`
+**명령어:** `/gsd-phase`, `/gsd-phase --insert [N]`, `/gsd-phase --remove [N]`
 
 **목적:** 개발 중 동적 로드맵 수정.
 
@@ -442,7 +442,7 @@
 
 ### 12. Freeform Routing
 
-**명령어:** `/gsd-do`
+**명령어:** `/gsd-fast`
 
 **목적:** 자유형 텍스트를 분석하고 적절한 GSD 명령어로 라우팅합니다.
 
@@ -456,7 +456,7 @@
 
 ### 13. Note Capture
 
-**명령어:** `/gsd-note`
+**명령어:** `/gsd-capture`
 
 **목적:** 워크플로우를 방해하지 않고 아이디어를 즉시 캡처합니다. 타임스탬프가 있는 노트를 추가하거나, 모든 노트를 나열하거나, 노트를 구조화된 할 일로 승격합니다.
 
@@ -471,7 +471,7 @@
 
 ### 14. Auto-Advance (Next)
 
-**명령어:** `/gsd-next`
+**명령어:** `/gsd-progress --next`
 
 **목적:** 현재 프로젝트 상태를 자동으로 감지하고 다음 논리적 워크플로우 단계로 진행합니다. 현재 어느 페이즈/단계에 있는지 기억할 필요가 없습니다.
 
@@ -641,7 +641,7 @@
 
 ### 24. Session Reporting
 
-**명령어:** `/gsd-session-report`
+**명령어:** `/gsd-pause-work --report`
 
 **목적:** 수행된 작업, 달성된 결과, 예상 리소스 사용량을 캡처하는 구조화된 세션 후 요약 문서를 생성합니다.
 
@@ -680,7 +680,7 @@
 
 ### 26. Model Profiles
 
-**명령어:** `/gsd-set-profile <quality|balanced|budget|inherit>`
+**명령어:** `/gsd-config --profile <quality|balanced|budget|inherit>`
 
 **목적:** 각 에이전트가 사용하는 AI 모델을 제어하여 품질과 비용의 균형을 맞춥니다.
 
@@ -762,7 +762,7 @@
 
 ### 29. Todo Management
 
-**명령어:** `/gsd-add-todo [desc]`, `/gsd-capture --list`
+**명령어:** `/gsd-capture [desc]`, `/gsd-capture --list`
 
 **목적:** 세션 중 나중에 처리할 아이디어와 작업을 캡처합니다.
 
@@ -953,7 +953,6 @@ fix(03-01): correct auth token expiry
 
 **생성 산출물.**
 - `USER-PROFILE.md` — 증거 인용이 포함된 전체 행동 프로파일
-- `/gsd-dev-preferences` 명령어 — 모든 세션에서 선호도 로드
 - `CLAUDE.md` 프로파일 섹션 — Claude Code가 자동으로 검색
 
 **플래그.**
@@ -1065,7 +1064,7 @@ fix(03-01): correct auth token expiry
 
 ### 43. Backlog Parking Lot
 
-**명령어:** `/gsd-add-backlog <description>`, `/gsd-review-backlog`, `/gsd-plant-seed <idea>`
+**명령어:** `/gsd-capture --backlog <description>`, `/gsd-review-backlog`, `/gsd-capture --seed <idea>`
 
 **목적:** 아직 적극적인 계획에 준비되지 않은 아이디어를 캡처합니다. 백로그 항목은 활성 페이즈 순서 밖에 있기 위해 999.x 번호를 사용합니다. 시드는 올바른 마일스톤에서 자동으로 표시되는 트리거 조건이 있는 미래 지향적 아이디어입니다.
 
@@ -1725,7 +1724,7 @@ Claude가 GSD 워크플로우 컨텍스트 밖에서 파일 편집을 시도하�
 
 ### 77. 페이즈 의존성 분석
 
-**명령어:** `/gsd-analyze-dependencies`
+**명령어:** `/gsd-manager --analyze-deps`
 
 **목적:** 페이즈 의존성을 감지하고 `/gsd-manager` 실행 전 ROADMAP.md에 `Depends on` 항목을 제안합니다.
 

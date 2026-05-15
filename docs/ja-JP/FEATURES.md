@@ -393,7 +393,7 @@
 
 ### 9. フェーズ管理
 
-**コマンド:** `/gsd-add-phase`、`/gsd-insert-phase [N]`、`/gsd-remove-phase [N]`
+**コマンド:** `/gsd-phase`、`/gsd-phase --insert [N]`、`/gsd-phase --remove [N]`
 
 **目的:** 開発中のロードマップの動的な変更。
 
@@ -442,7 +442,7 @@
 
 ### 12. フリーフォームルーティング
 
-**コマンド:** `/gsd-do`
+**コマンド:** `/gsd-fast`
 
 **目的:** 自由形式のテキストを分析し、適切な GSD コマンドにルーティングします。
 
@@ -456,7 +456,7 @@
 
 ### 13. ノートキャプチャ
 
-**コマンド:** `/gsd-note`
+**コマンド:** `/gsd-capture`
 
 **目的:** ワークフローを中断することなくアイデアを記録する、摩擦ゼロのメモ機能。タイムスタンプ付きメモの追加、全メモの一覧表示、または構造化された Todo へのプロモーションが可能です。
 
@@ -471,7 +471,7 @@
 
 ### 14. 自動進行（Next）
 
-**コマンド:** `/gsd-next`
+**コマンド:** `/gsd-progress --next`
 
 **目的:** 現在のプロジェクト状態を自動検出し、次の論理的なワークフローステップに進めます。どのフェーズ/ステップにいるかを覚えておく必要がなくなります。
 
@@ -641,7 +641,7 @@
 
 ### 24. セッションレポート
 
-**コマンド:** `/gsd-session-report`
+**コマンド:** `/gsd-pause-work --report`
 
 **目的:** 実施した作業、達成した成果、推定リソース使用量をキャプチャした、構造化されたセッション後のサマリードキュメントを生成します。
 
@@ -680,7 +680,7 @@
 
 ### 26. モデルプロファイル
 
-**コマンド:** `/gsd-set-profile <quality|balanced|budget|inherit>`
+**コマンド:** `/gsd-config --profile <quality|balanced|budget|inherit>`
 
 **目的:** 各エージェントが使用する AI モデルを制御し、品質とコストのバランスを取ります。
 
@@ -762,7 +762,7 @@
 
 ### 29. Todo 管理
 
-**コマンド:** `/gsd-add-todo [desc]`、`/gsd-capture --list`
+**コマンド:** `/gsd-capture [desc]`、`/gsd-capture --list`
 
 **目的:** セッション中にアイデアやタスクをキャプチャし、後で作業できるようにします。
 
@@ -953,7 +953,6 @@ fix(03-01): correct auth token expiry
 
 **生成される成果物:**
 - `USER-PROFILE.md` — 証拠引用付きの完全な行動プロファイル
-- `/gsd-dev-preferences` コマンド — 任意のセッションで好みを読み込み
 - `CLAUDE.md` プロファイルセクション — Claude Code により自動検出
 
 **フラグ:**
@@ -1065,7 +1064,7 @@ fix(03-01): correct auth token expiry
 
 ### 43. バックログパーキングロット
 
-**コマンド:** `/gsd-add-backlog <description>`、`/gsd-review-backlog`、`/gsd-plant-seed <idea>`
+**コマンド:** `/gsd-capture --backlog <description>`、`/gsd-review-backlog`、`/gsd-capture --seed <idea>`
 
 **目的:** アクティブなプランニングの準備ができていないアイデアをキャプチャします。バックログ項目は 999.x の番号付けを使用して、アクティブなフェーズシーケンスの外に留まります。シードは、適切なマイルストーンで自動的に表面化するトリガー条件を持つ、将来を見据えたアイデアです。
 
@@ -1725,7 +1724,7 @@ Claude が GSD ワークフローコンテキスト外でファイル編集を�
 
 ### 77. フェーズ依存関係分析
 
-**コマンド:** `/gsd-analyze-dependencies`
+**コマンド:** `/gsd-manager --analyze-deps`
 
 **目的:** フェーズ依存関係を検出し、`/gsd-manager` 実行前に ROADMAP.md への `Depends on` エントリを提案します。
 

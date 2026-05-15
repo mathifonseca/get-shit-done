@@ -6,7 +6,6 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { relPlanningPath } from './workstream-utils.js';
 
@@ -26,7 +25,21 @@ export interface WorkflowConfig {
   nyquist_validation: boolean;
   /** Mirrors gsd-tools flat `config.tdd_mode` (from `workflow.tdd_mode`). */
   tdd_mode: boolean;
+  /**
+   * Issue #3309. `end-of-phase` (default) suppresses mid-flight
+   * `<task type="checkpoint:human-verify">` task emission; the planner
+   * embeds verification details into the relevant `auto` task's
+   * `<verify><human-check>` block and the verifier harvests them at
+   * end-of-phase into the existing HUMAN-UAT.md path. `mid-flight`
+   * restores the pre-#3309 behavior where the executor halts at each
+   * `checkpoint:human-verify` task and pays a full executor cold-start
+   * cost (CLAUDE.md, MEMORY.md, STATE.md, plan re-read on respawn) per
+   * round-trip.
+   */
+  human_verify_mode: 'mid-flight' | 'end-of-phase';
   auto_advance: boolean;
+  /** Internal auto-chain flag used by workflow routing. */
+  _auto_chain_active?: boolean;
   node_repair: boolean;
   node_repair_budget: number;
   ui_phase: boolean;
@@ -68,8 +81,6 @@ export interface GSDConfig {
   project_code?: string | null;
   /** Interactive vs headless; mirrors gsd-tools flat `config.mode`. */
   mode?: string;
-  /** Internal auto-chain flag; mirrors gsd-tools `config._auto_chain_active`. */
-  _auto_chain_active?: boolean;
   [key: string]: unknown;
 }
 
@@ -95,6 +106,7 @@ export const CONFIG_DEFAULTS: GSDConfig = {
     verifier: true,
     nyquist_validation: true,
     tdd_mode: false,
+    human_verify_mode: 'end-of-phase',
     auto_advance: false,
     node_repair: true,
     node_repair_budget: 2,
@@ -107,6 +119,7 @@ export const CONFIG_DEFAULTS: GSDConfig = {
     max_discuss_passes: 3,
     subagent_timeout: 300000,
     context_coverage_gate: true,
+    _auto_chain_active: false,
   },
   hooks: {
     context_warnings: true,
@@ -114,44 +127,16 @@ export const CONFIG_DEFAULTS: GSDConfig = {
   agent_skills: {},
   project_code: null,
   mode: 'interactive',
-  _auto_chain_active: false,
 };
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
 
 /**
  * Load project config from `.planning/config.json`, merging with defaults.
- * When project config is missing or empty, layers user defaults
- * (`~/.gsd/defaults.json`) over built-in defaults.
+ * When project config is missing or empty, this returns `mergeDefaults({})`
+ * (built-in defaults only; no `~/.gsd/defaults.json` layering).
  * Throws on malformed JSON with a helpful error message.
  */
-/**
- * Read user-level defaults from `~/.gsd/defaults.json` (or `$GSD_HOME/.gsd/`
- * when set). Returns `{}` when the file is missing, empty, or malformed —
- * matches CJS behavior in `get-shit-done/bin/lib/core.cjs` (#1683, #2652).
- */
-async function loadUserDefaults(): Promise<Record<string, unknown>> {
-  const home = process.env.GSD_HOME || homedir();
-  const defaultsPath = join(home, '.gsd', 'defaults.json');
-  let raw: string;
-  try {
-    raw = await readFile(defaultsPath, 'utf-8');
-  } catch {
-    return {};
-  }
-  const trimmed = raw.trim();
-  if (trimmed === '') return {};
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      return {};
-    }
-    return parsed as Record<string, unknown>;
-  } catch {
-    return {};
-  }
-}
-
 export async function loadConfig(projectDir: string, workstream?: string): Promise<GSDConfig> {
   const configPath = join(projectDir, relPlanningPath(workstream), 'config.json');
   const rootConfigPath = join(projectDir, '.planning', 'config.json');
@@ -175,22 +160,16 @@ export async function loadConfig(projectDir: string, workstream?: string): Promi
     }
   }
 
-  // Pre-project context: no .planning/config.json exists. Layer user-level
-  // defaults from ~/.gsd/defaults.json over built-in defaults. Mirrors the
-  // CJS fall-back branch in get-shit-done/bin/lib/core.cjs:421 (#1683) so
-  // SDK-dispatched init queries (e.g. resolveModel in Codex installs, #2652)
-  // honor user-level knobs like `resolve_model_ids: "omit"`.
+  // Pre-project context: no .planning/config.json exists.
+  // Use built-in defaults only so SDK query parity stays stable across machines.
   if (!projectConfigFound) {
-    const userDefaults = await loadUserDefaults();
-    return mergeDefaults(userDefaults);
+    return mergeDefaults({});
   }
 
   const trimmed = raw.trim();
   if (trimmed === '') {
-    // Empty project config — treat as no project config (CJS core.cjs
-    // catches JSON.parse on empty and falls through to the pre-project path).
-    const userDefaults = await loadUserDefaults();
-    return mergeDefaults(userDefaults);
+    // Empty project config — treat as no project config.
+    return mergeDefaults({});
   }
 
   let parsed: Record<string, unknown>;
@@ -206,16 +185,21 @@ export async function loadConfig(projectDir: string, workstream?: string): Promi
   }
 
   // Project config exists — user-level defaults are ignored (CJS parity).
-  // `buildNewProjectConfig` already baked them into config.json at /gsd:new-project.
+  // `buildNewProjectConfig` already baked them into config.json at /gsd-new-project.
   return mergeDefaults(parsed);
 }
 
 function mergeDefaults(parsed: Record<string, unknown>): GSDConfig {
+  const legacyBranchingStrategy = typeof parsed.branching_strategy === 'string'
+    ? parsed.branching_strategy
+    : undefined;
+
   return {
     ...structuredClone(CONFIG_DEFAULTS),
     ...parsed,
     git: {
       ...CONFIG_DEFAULTS.git,
+      ...(legacyBranchingStrategy ? { branching_strategy: legacyBranchingStrategy } : {}),
       ...(parsed.git as Partial<GitConfig> ?? {}),
     },
     workflow: {

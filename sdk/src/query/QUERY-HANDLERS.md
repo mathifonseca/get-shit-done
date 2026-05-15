@@ -24,9 +24,18 @@ These families are sourced from `command-manifest.*.ts` files and expanded into 
 
 CJS routing seams mirror these families with thin adapters (`state/verify/init/phase/phases/validate/roadmap-command-router.cjs`) so `gsd-tools.cjs` stays orchestration-only.
 
+## SDK Runtime Bridge Module (`GSDTools` path)
+
+`GSDTools` dispatch routes through `sdk/src/query-runtime-bridge.ts`.
+
+- Native registry dispatch is preferred at the bridge seam.
+- Subprocess fallback is explicit (`allowFallbackToSubprocess`), not implicit.
+- `strictSdk` can fail fast when a command has no native adapter.
+- `onDispatchEvent` emits structured dispatch observability (`query_dispatch` / `query_hotpath_dispatch`) with dispatch mode, fallback reason, latency, outcome, and error kind.
+
 ## `gsd-sdk query` routing
 
-1. **`normalizeQueryCommand()`** (`normalize-query-command.ts`) — maps the first argv tokens to the same **command + subcommand** patterns as `gsd-tools` `runCommand()` where needed (e.g. `state json` → `state.json`, `init execute-phase 9` → `init.execute-phase` with args `['9']`, `scaffold …` → `phase.scaffold`). Re-exported from **`@gsd-build/sdk`** and **`createRegistry`’s module** (`sdk/src/query/index.ts`) so programmatic callers can mirror CLI tokenization without importing a deep path.
+1. **`normalizeQueryCommand()`** (`query-command-resolution-strategy.ts`) — maps the first argv tokens to the same **command + subcommand** patterns as `gsd-tools` `runCommand()` where needed (e.g. `state json` → `state.json`, `init execute-phase 9` → `init.execute-phase` with args `['9']`, `scaffold …` → `phase.scaffold`). Re-exported from **`@gsd-build/sdk`** and **`createRegistry`’s module** (`sdk/src/query/index.ts`) so programmatic callers can mirror CLI tokenization without importing a deep path.
 2. **`resolveQueryArgv()`** (`registry.ts`) — **longest-prefix match** on the normalized argv: tries joined keys `a.b.c` then `a b c` for each prefix length, longest first. Example: `state update status X` → handler `state.update` with args `[status, X]`.
 3. **Dotted single token**: one token like `init.new-project` matches the registry; if the first pass finds no handler, a single dotted token is split and matching runs again.
 4. **CJS fallback (CLI)**: if nothing matches a registered handler and `GSD_QUERY_FALLBACK` is not `off`/`never`/`false`/`0`, the CLI shells out to `gsd-tools.cjs` with argv derived from the normalized tokens (dotted commands are split into CJS-style segments). stderr receives a short bridge warning. Set `GSD_QUERY_FALLBACK=off` for strict mode (parity tests). CLI-only commands such as `graphify` rely on this path until native handlers exist.
@@ -36,9 +45,26 @@ CJS routing seams mirror these families with thin adapters (`state/verify/init/p
 
 ## Error handling
 
-- **Validation and programmer errors**: Handlers throw `GSDError` with an `ErrorClassification` (e.g. missing required args, invalid phase). The CLI maps these to exit codes via `exitCodeFor()`.
+- **Validation and programmer errors**: Handlers throw `GSDError` with an `ErrorClassification` (e.g. missing required args, invalid phase). The Dispatch Policy Module maps native failures into structured dispatch errors.
 - **Expected domain failures**: Handlers return `{ data: { error: string, ... } }` for cases that are not exceptional in normal use (file not found, intel disabled, todo missing, etc.). Callers must check `data.error` when present.
 - Do not mix both styles for the same failure mode in new code: prefer **throw** for "caller must fix input"; prefer `**data.error`** for "operation could not complete in this project state."
+
+### Dispatch Policy Module contract
+
+`runQueryDispatch()` returns a structured union contract:
+
+- success: `{ ok: true, stdout, stderr, exit_code: 0 }`
+- failure: `{ ok: false, error: { kind, code, message, details }, stderr, exit_code }`
+
+Current error `kind` values:
+- `unknown_command`
+- `native_failure`
+- `native_timeout`
+- `fallback_failure`
+- `validation_error`
+- `internal_error`
+
+CLI is a thin adapter over this seam and uses `exit_code` directly.
 
 ## Mutation commands and events
 
@@ -81,9 +107,9 @@ Handlers for `**state.signal-waiting`**, `**state.signal-resume**`, `**state.val
 **`state.json` vs `state.load` (different CJS commands):**
 
 - **`state.json`** / `state json` — port of **`cmdStateJson`** (`state.ts` `stateJson`): rebuilt STATE.md frontmatter JSON. Read-only golden: `read-only-parity.integration.test.ts` compares to CJS `state json` with **`last_updated`** stripped.
-- **`state.load`** / `state load` — port of **`cmdStateLoad`** (`state-project-load.ts` `stateProjectLoad`): `{ config, state_raw, state_exists, roadmap_exists, config_exists }`; **`config`** comes from **`get-shit-done/bin/lib/core.cjs`** `loadConfig` (resolved via the same candidate paths as a normal GSD install). Read-only golden: full `toEqual` vs `state load`. If `core.cjs` cannot be resolved, dispatch throws **`GSDError`** (document for minimal `@gsd-build/sdk`-only installs).
+- **`state.load`** / `state load` — port of **`cmdStateLoad`** (`state-project-load.ts` `stateProjectLoad`): `{ config, state_raw, state_exists, roadmap_exists, config_exists }`; **`config`** comes from **`get-shit-done/bin/lib/core.cjs`** `loadConfig`, but discovery now routes through the **SDK Package Seam Module** (`sdk-package-compatibility.ts`) so install-layout probing stays behind one compatibility Adapter. Read-only golden: full `toEqual` vs `state load`. If `core.cjs` cannot be resolved, dispatch throws **`GSDError`** with the checked probe list (document for minimal `@gsd-build/sdk`-only installs).
 
-`stateExtractField` in `helpers.ts` uses **horizontal whitespace only** after `Field:` so YAML keys such as lowercase `progress:` in frontmatter are not mistaken for the body `Progress:` line (see `get-shit-done/bin/lib/state.cjs` — same rule).
+`stateExtractField` in `state-document.ts` (re-exported by `helpers.ts`) uses **horizontal whitespace only** after `Field:` so YAML keys such as lowercase `progress:` in frontmatter are not mistaken for the body `Progress:` line (see `get-shit-done/bin/lib/state-document.cjs` — same rule).
 
 ## Golden parity: coverage and exceptions
 
@@ -129,7 +155,7 @@ From `read-only-parity.integration.test.ts` (full `toEqual` on this repo):
 
 | SDK dispatch (canonical) | Notes |
 | ------------------------ | ----- |
-| `resolve-model` | Args e.g. `gsd-planner`. |
+| `resolve-model` | Args e.g. `gsd-planner`; returns `reasoning_effort` when the selected runtime tier defines one. |
 | `phase-plan-index` | Phase number arg. |
 | `roadmap.get-phase` | Phase number arg. |
 | `list.todos` | No args. |
@@ -150,8 +176,9 @@ From `read-only-parity.integration.test.ts` (full `toEqual` on this repo):
 | `summary.extract` | Fixture `sdk/src/golden/fixtures/summary-extract-sample.md`; uses `extractFrontmatterLeading` (first `---` block) for parity with `frontmatter.cjs`. |
 | `history.digest` | No args; aggregate over `.planning/phases` + archived milestone phase dirs (`commands.cjs` `cmdHistoryDigest`). |
 | `audit-uat` | No args; full JSON parity with `uat.cjs` `cmdAuditUat` (`results`, `summary` with `by_category` / `by_phase`). |
-| `skill-manifest` | No args; full manifest parity with `init.cjs` `buildSkillManifest` / `cmdSkillManifest`. Handler uses `extractFrontmatterLeading` (first `---` block) like CJS `frontmatter.cjs` `extractFrontmatter` — not TS `extractFrontmatter` (last block), so skills with multiple `---` sections match CJS. |
+| `skill-manifest` | No args; full manifest parity with `init.cjs` `buildSkillManifest` / `cmdSkillManifest`. Handler uses `extractFrontmatterLeading` (first `---` block) like CJS `frontmatter.cjs` `extractFrontmatter` — not TS `extractFrontmatter` (last block), so skills with multiple `---` sections match CJS. Runtime-global skill roots now route through the **Runtime-Global Skills Policy Module**; legacy import-only skill root discovery (`~/.claude/get-shit-done/skills`) routes through the **SDK Package Seam Module**. |
 | `validate.agents` | No args; `agents_dir` matches `core.cjs` `getAgentsDir` (`GSD_AGENTS_DIR` or `sdk/dist/query/../../../agents` in this monorepo — same absolute path as CLI). `MODEL_PROFILES` / `expected` list stays aligned with `get-shit-done/bin/lib/model-profiles.cjs`. |
+| `agent-skills` | Reads `config.agent_skills[agentType]` and emits raw `<agent_skills>` XML. Project-relative entries stay project-root validated; `global:<name>` resolves through the **Runtime-Global Skills Policy Module** instead of a Claude-only path. |
 | `state.get` | Dedicated tests: no args → full `{ content }` vs `state get`; one field (`milestone`) → `{ milestone: "…" }` vs `state get milestone` (frontmatter line match). |
 | `state.json` | `state json` vs SDK; **`last_updated`** stripped before `toEqual` (volatile). |
 | `state.load` | `state load` vs SDK; full **`cmdStateLoad`** object graph (`config`, `state_raw`, existence flags). |
@@ -271,7 +298,7 @@ Disposition: **Registered** = handled in `createRegistry()` under the listed SDK
 | `state` (subcommands)                                                                                                                   | `state.load`, `state.json`, `state.get`, `state.update`, `state.patch`, … | Registered              | Dotted and `state …` space aliases in `index.ts`.                         |
 | `resolve-model`                                                                                                                         | `resolve-model`                                                           | Registered              |                                                                           |
 | `find-phase`                                                                                                                            | `find-phase`                                                              | Registered              | Golden: subset parity (see above).                                        |
-| `commit`, `check-commit`, `commit-to-subrepo`                                                                                           | `commit`, `check-commit`, `commit-to-subrepo`                             | Registered              |                                                                           |
+| `commit`, `check-commit`, `commit-to-subrepo`                                                                                           | `commit`, `check-commit`, `commit-to-subrepo`                             | Registered              | `commit`: `--files` re-stages full files by default; use `--respect-staged` to skip `git add` and commit only what is already staged within the pathspec (#3522). |
 | `verify-summary`                                                                                                                        | `verify-summary`, `verify.summary`, `verify summary`                      | Registered              |                                                                           |
 | `template`                                                                                                                              | `template.fill`, `template.select`, …                                     | Registered              |                                                                           |
 | `frontmatter`                                                                                                                           | `frontmatter.get`, `frontmatter.set`, …                                   | Registered              |                                                                           |
@@ -320,4 +347,3 @@ Disposition: **Registered** = handled in `createRegistry()` under the listed SDK
 
 - `**detect-custom-files`**: requires `--config-dir <path>`; scans installer manifest vs GSD-managed dirs (`detect-custom-files.ts`).
 - `**docs-init**`: docs-update workflow payload (`docs-init.ts`), aligned with `docs.cjs`. Golden tests omit `**agents_installed**` / `**missing_agents**` when comparing SDK vs CLI because the subprocess may resolve `~/.claude/...` differently than in-process checks.
-

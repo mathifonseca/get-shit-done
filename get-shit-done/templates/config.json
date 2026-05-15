@@ -43,10 +43,16 @@
     "pr_body_requires_issue": true,
     "ci_commands": null
   },
+  "ship": {
+    "pr_body_sections": []
+  },
   "planning": {
     "commit_docs": true,
     "search_gitignored": false,
     "sub_repos": []
+  },
+  "git": {
+    "create_tag": true
   },
   "parallelization": {
     "enabled": true,

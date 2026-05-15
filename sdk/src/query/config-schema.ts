@@ -22,6 +22,7 @@ export const VALID_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'workflow.nyquist_validation', 'workflow.ai_integration_phase', 'workflow.ui_phase', 'workflow.ui_safety_gate',
   'workflow.auto_advance', 'workflow.node_repair', 'workflow.node_repair_budget',
   'workflow.tdd_mode',
+  'workflow.human_verify_mode',
   'workflow.text_mode',
   'workflow.research_before_questions',
   'workflow.discuss_mode',
@@ -44,16 +45,25 @@ export const VALID_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'workflow.security_block_on',
   'workflow.drift_threshold',
   'workflow.drift_action',
-  'git.branching_strategy', 'git.base_branch', 'git.phase_branch_template', 'git.milestone_branch_template', 'git.quick_branch_template',
+  'code_quality.fallow.enabled',
+  'code_quality.fallow.scope',
+  'code_quality.fallow.profile',
+  'code_quality.fallow.mcp',
+  'ship.pr_body_sections',
+  'git.branching_strategy', 'git.base_branch', 'git.create_tag', 'git.phase_branch_template', 'git.milestone_branch_template', 'git.quick_branch_template',
   'planning.commit_docs', 'planning.search_gitignored', 'planning.sub_repos',
+  'review.default_reviewers',
   'review.ollama_host', 'review.lm_studio_host', 'review.llama_cpp_host',
   'workflow.cross_ai_execution', 'workflow.cross_ai_command', 'workflow.cross_ai_timeout',
   'workflow.subagent_timeout',
+  'executor.stall_detect_interval_minutes',
+  'executor.stall_threshold_minutes',
   'workflow.inline_plan_threshold',
   'hooks.context_warnings',
   'hooks.workflow_guard',
   'workflow.context_coverage_gate',
   'statusline.show_last_command',
+  'statusline.context_position',
   'workflow.ui_review',
   'workflow.max_discuss_passes',
   'features.thinking_partner',
@@ -93,6 +103,16 @@ export const VALID_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'project.pr_title_template',
   'project.pr_body_requires_issue',
   'project.ci_commands',
+  // #3162 — documented top-level key: controls model ID resolution for non-Claude runtimes
+  'resolve_model_ids',
+]);
+
+/**
+ * Internal runtime-state keys accepted by config-set workflows but not exposed
+ * as user-facing config options.
+ */
+export const RUNTIME_STATE_KEYS: ReadonlySet<string> = new Set([
+  'workflow._auto_chain_active',
 ]);
 
 /**
@@ -145,10 +165,17 @@ export const DYNAMIC_KEY_PATTERNS: readonly DynamicKeyPattern[] = [
     description: 'dynamic_routing.<enabled|escalate_on_failure|max_escalations|tier_models.<light|standard|heavy>>',
     test: (k) => /^dynamic_routing\.(enabled|escalate_on_failure|max_escalations|tier_models\.(light|standard|heavy))$/.test(k),
   },
+  // #3227 — per-agent model overrides: model_overrides.<agent-id>
+  {
+    source: '^model_overrides\\.[a-zA-Z0-9_-]+$',
+    description: 'model_overrides.<agent-id>',
+    test: (k) => /^model_overrides\.[a-zA-Z0-9_-]+$/.test(k),
+  },
 ];
 
-/** Returns true if keyPath is a valid config key (exact or dynamic pattern). */
+/** Returns true if keyPath is a valid config key (exact, runtime-state, or dynamic pattern). */
 export function isValidConfigKeyPath(keyPath: string): boolean {
   if (VALID_CONFIG_KEYS.has(keyPath)) return true;
+  if (RUNTIME_STATE_KEYS.has(keyPath)) return true;
   return DYNAMIC_KEY_PATTERNS.some((p) => p.test(keyPath));
 }

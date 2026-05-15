@@ -67,6 +67,30 @@ A feature adds something new — a new command, a new workflow, a new concept, a
 
 ---
 
+### 📐 Proposing an ADR or PRD
+
+An ADR (Architecture Decision Record) documents a significant architectural decision. A PRD (Product Requirements Document) captures the what and why of a feature before implementation. Both are governed by the same issue-first rule as everything else.
+
+**Process:**
+
+1. Open an issue of the appropriate type (enhancement for an ADR revisiting an existing area, feature for a new architectural surface, chore for policy/docs decisions). Fill it out completely.
+2. **Wait for maintainer approval.** A maintainer must label the issue `approved-enhancement`, `approved-feature`, or confirm the chore before any file is created.
+3. The GitHub-assigned issue number becomes your filename prefix. Create the file on a branch named after the issue:
+   - `docs/adr/<issue#>-<slug>.md` for ADRs
+   - `docs/prd/<issue#>-<slug>.md` for PRDs
+   - Branch: `docs/<issue#>-<slug>`
+4. Open a PR using the appropriate template and close the issue with `Closes #<issue#>` in the PR body.
+
+**One issue = one ADR-or-PRD = one PR.** Do not batch multiple decisions into one file or one PR.
+
+**Do not compute a "next number" locally.** Any PR that uses the legacy `NNNN-*` sequential pattern for a *new* ADR or PRD will be asked to rename the file to the `<issue#>-<slug>.md` format before merge.
+
+**Example:** Issue #3485 was opened, approved, and its number became the prefix: `docs/adr/3485-adr-prd-naming-convention.md` on branch `docs/3485-adr-prd-naming-convention`.
+
+**Rejection reasons:** Issue not approved before file was created, filename uses local-compute sequential number instead of issue#, multiple decisions bundled in one PR, file placed in wrong directory (`docs/adr/` vs `docs/prd/`).
+
+---
+
 ## The Issue-First Rule — No Exceptions
 
 > **No code before approval.**
@@ -80,6 +104,23 @@ PRs that arrive without a properly-labeled linked issue are closed automatically
 ---
 
 ## Pull Request Guidelines
+
+### Architecture & Domain Standards (Maintainer-Defined)
+
+The following files are maintainer-owned coding standards and must be treated as canonical when contributing:
+
+- `CONTEXT.md` — domain language and module naming standards
+- `docs/adr/` — Architecture Decision Records (ADRs) for accepted architectural decisions
+
+Full contributor requirements — including CONTEXT.md format, ADR governance, and AI-agent-assisted work standards — are in **[`docs/contributor-standards.md`](docs/contributor-standards.md)**.
+
+Contributor requirements (summary):
+- Read `CONTEXT.md` before naming or refactoring modules/interfaces/seams.
+- Use `CONTEXT.md` vocabulary consistently in code comments, tests, issue/PR text, and docs for the touched area.
+- Check relevant ADRs in `docs/adr/` before proposing or implementing architectural changes.
+- If a change intentionally revisits an ADR decision, call it out explicitly in the linked issue and PR rationale.
+- Do not rewrite maintainer intent in `CONTEXT.md`/ADRs as part of drive-by cleanup; propose focused updates tied to approved scope.
+- If using an AI assistant, prompt it to read `CONTEXT.md` and the relevant ADRs before writing any code or docs, and verify it used the correct vocabulary before opening the PR.
 
 **Every PR must link to an approved issue.** PRs without a linked issue are closed without review, no exceptions.
 
@@ -503,6 +544,14 @@ The following checks run on every PR in addition to the test suite:
 Run locally before pushing: `npm run lint:tests`
 
 ### Test Requirements by Contribution Type
+
+### Architecture-Aware Testing Requirements
+
+When work touches architecture, routing, policy, registry assembly, or command semantics:
+- Write tests against module **interfaces** and seam behavior, not implementation trivia.
+- Prefer invariant/contract tests that protect ADR-backed behavior and `CONTEXT.md` terminology.
+- Ensure tests validate canonical behavior through the defined seam (for example: structured result contracts, canonical command metadata, and adapter parity), not source-text coupling.
+- If ADRs define expected behavior, tests should assert those expectations directly.
 
 The required tests differ depending on what you are contributing:
 

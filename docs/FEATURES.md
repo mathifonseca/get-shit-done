@@ -120,7 +120,7 @@
   - [Autonomous Audit-to-Fix](#98-autonomous-audit-to-fix)
   - [Improved Prompt Injection Scanner](#99-improved-prompt-injection-scanner)
   - [Stall Detection in Plan-Phase](#100-stall-detection-in-plan-phase)
-  - [Hard Stop Safety Gates in /gsd-next](#101-hard-stop-safety-gates-in-gsd-next)
+  - [Hard Stop Safety Gates in /gsd-progress --next](#101-hard-stop-safety-gates-in-gsd-progress---next)
   - [Adaptive Model Preset](#102-adaptive-model-preset)
   - [Post-Merge Hunk Verification](#103-post-merge-hunk-verification)
 - [v1.35.0 Features](#v1350-features)
@@ -144,27 +144,30 @@
   - [Agent Size-Budget Enforcement](#119-agent-size-budget-enforcement)
   - [Shared Boilerplate Extraction](#120-shared-boilerplate-extraction)
   - [Knowledge Graph Integration](#121-knowledge-graph-integration)
-- [v1.32 Features](#v132-features)
-  - [STATE.md Consistency Gates](#69-statemd-consistency-gates)
-  - [Autonomous `--to N` Flag](#70-autonomous---to-n-flag)
-  - [Research Gate](#71-research-gate)
-  - [Verifier Milestone Scope Filtering](#72-verifier-milestone-scope-filtering)
-  - [Read-Before-Edit Guard Hook](#73-read-before-edit-guard-hook)
-  - [Context Reduction](#74-context-reduction)
-  - [Discuss-Phase `--power` Flag](#75-discuss-phase---power-flag)
-  - [Debug `--diagnose` Flag](#76-debug---diagnose-flag)
-  - [Phase Dependency Analysis](#77-phase-dependency-analysis)
-  - [Anti-Pattern Severity Levels](#78-anti-pattern-severity-levels)
-  - [Methodology Artifact Type](#79-methodology-artifact-type)
-  - [Planner Reachability Check](#80-planner-reachability-check)
-  - [Playwright-MCP UI Verification](#81-playwright-mcp-ui-verification)
-  - [Pause-Work Expansion](#82-pause-work-expansion)
-  - [Response Language Config](#83-response-language-config)
-  - [Manual Update Procedure](#84-manual-update-procedure)
-  - [New Runtime Support (Trae, Cline, Augment Code)](#85-new-runtime-support-trae-cline-augment-code)
-  - [Autonomous `--interactive` Flag](#86-autonomous---interactive-flag)
-  - [Commit-Docs Guard Hook](#87-commit-docs-guard-hook)
-  - [Community Hooks Opt-In](#88-community-hooks-opt-in)
+- [v1.40.0 Features](#v1400-features)
+  - [Skill Surface Consolidation](#122-skill-surface-consolidation)
+  - [Namespace Meta-Skills (Two-Stage Routing)](#123-namespace-meta-skills-two-stage-routing)
+  - [Context-Window Utilization Guard](#124-context-window-utilization-guard)
+  - [Phase-Lifecycle Status-Line Read-Side](#125-phase-lifecycle-status-line-read-side)
+- [v1.41.0 Features](#v1410-features)
+  - [Per-Phase-Type Model Selection](#126-per-phase-type-model-selection)
+  - [Dynamic Routing with Failure-Tier Escalation](#127-dynamic-routing-with-failure-tier-escalation)
+  - [Update Banner Opt-In](#128-update-banner-opt-in)
+  - [Issue-Driven Orchestration Guide](#129-issue-driven-orchestration-guide)
+  - [Graphify Commit-Based Staleness](#130-graphify-commit-based-staleness)
+  - [MVP Mode SDK Resolution Layer](#131-mvp-mode-sdk-resolution-layer)
+- [v1.42.1 Features](#v1421-features)
+  - [Package Legitimacy Gate](#132-package-legitimacy-gate)
+  - [Skill Surface Budgeting](#133-skill-surface-budgeting)
+  - [Installer Migrations](#134-installer-migrations)
+  - [Custom Ship PR Body Sections](#135-custom-ship-pr-body-sections)
+  - [Review Default Reviewers](#136-review-default-reviewers)
+  - [Fallow Structural Review Pre-Pass](#137-fallow-structural-review-pre-pass)
+  - [End-of-Phase Human Verification Mode](#138-end-of-phase-human-verification-mode)
+  - [Quota and Rate-Limit Failure Classification](#139-quota-and-rate-limit-failure-classification)
+  - [Statusline Context Position](#140-statusline-context-position)
+  - [Milestone Tag Creation Toggle](#141-milestone-tag-creation-toggle)
+  - [Structured JSON Error Mode](#142-structured-json-error-mode)
 
 ---
 
@@ -400,10 +403,13 @@
 - REQ-SHIP-03: System MUST auto-generate PR body from SUMMARY.md, VERIFICATION.md, and REQUIREMENTS.md
 - REQ-SHIP-04: System MUST update STATE.md with shipping status and PR number
 - REQ-SHIP-05: System MUST support `--draft` flag for draft PRs
+- REQ-SHIP-06: System MUST support append-only project PR body sections configured with `ship.pr_body_sections`
 
 **Prerequisites:** Phase verified, `gh` CLI installed and authenticated, work on feature branch
 
-**Produces:** GitHub PR with rich body, STATE.md updated
+**Produces:** GitHub PR with rich body, optional configured PRD-style sections, STATE.md updated
+
+**User documentation:** [Custom PR Body Sections](ship-pr-body-sections.md)
 
 ---
 
@@ -456,7 +462,7 @@
 
 ### 9. Phase Management
 
-**Commands:** `/gsd-add-phase`, `/gsd-insert-phase [N]`, `/gsd-remove-phase [N]`
+**Commands:** `/gsd-phase`, `/gsd-phase --insert [N]`, `/gsd-phase --remove [N]`
 
 **Purpose:** Dynamic roadmap modification during development.
 
@@ -505,7 +511,7 @@
 
 ### 12. Freeform Routing
 
-**Command:** `/gsd-do`
+**Command:** `/gsd-progress --do` (see also `/gsd-manager` for interactive routing)
 
 **Purpose:** Analyze freeform text and route to the appropriate GSD command.
 
@@ -519,7 +525,7 @@
 
 ### 13. Note Capture
 
-**Command:** `/gsd-note`
+**Command:** `/gsd-capture`
 
 **Purpose:** Zero-friction idea capture without interrupting workflow. Append timestamped notes, list all notes, or promote notes to structured todos.
 
@@ -534,7 +540,7 @@
 
 ### 14. Auto-Advance (Next)
 
-**Command:** `/gsd-next`
+**Command:** `/gsd-progress --next`
 
 **Purpose:** Automatically detect current project state and advance to the next logical workflow step, eliminating the need to remember which phase/step you're on.
 
@@ -704,7 +710,7 @@
 
 ### 24. Session Reporting
 
-**Command:** `/gsd-session-report`
+**Command:** `/gsd-pause-work --report`
 
 **Purpose:** Generate a structured post-session summary document capturing work performed, outcomes achieved, and estimated resource usage.
 
@@ -743,7 +749,7 @@
 
 ### 26. Model Profiles
 
-**Command:** `/gsd-set-profile <quality|balanced|budget|inherit>`
+**Command:** `/gsd-config --profile <quality|balanced|budget|adaptive|inherit>`
 
 **Purpose:** Control which AI model each agent uses, balancing quality vs cost.
 
@@ -864,7 +870,7 @@ continues. Drift detection cannot fail verification.
 
 ### 29. Todo Management
 
-**Commands:** `/gsd-add-todo [desc]`, `/gsd-capture --list`
+**Commands:** `/gsd-capture [desc]`, `/gsd-capture --list`
 
 **Purpose:** Capture ideas and tasks during sessions for later work.
 
@@ -1068,7 +1074,6 @@ The banner is silent when up-to-date and rate-limits "check failed" diagnostics 
 
 **Generated Artifacts:**
 - `USER-PROFILE.md` — Full behavioral profile with evidence citations
-- `/gsd-dev-preferences` command — Load preferences in any session
 - `CLAUDE.md` profile section — Auto-discovered by Claude Code
 
 **Flags:**
@@ -1163,7 +1168,7 @@ When verification returns `human_needed`, items are persisted as a trackable HUM
 
 ### 42. Cross-AI Peer Review
 
-**Command:** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--all]`
+**Command:** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--ollama] [--lm-studio] [--llama-cpp] [--all]`
 
 **Purpose:** Invoke external AI CLIs (Gemini, Claude, Codex, CodeRabbit, OpenCode, Qwen Code, Cursor) to independently review phase plans. Produces structured REVIEWS.md with per-reviewer feedback.
 
@@ -1173,14 +1178,20 @@ When verification returns `human_needed`, items are persisted as a trackable HUM
 - REQ-REVIEW-03: System MUST invoke each selected CLI independently
 - REQ-REVIEW-04: System MUST collect responses and produce `REVIEWS.md`
 - REQ-REVIEW-05: Reviews MUST be consumable by `/gsd-plan-phase --reviews`
+- REQ-REVIEW-06: System MUST support project-level no-flag defaults via `review.default_reviewers`
+- REQ-REVIEW-07: Reviewer precedence MUST be explicit flags > `--all` > `review.default_reviewers` > all detected reviewers
 
 **Produces:** `{phase}-REVIEWS.md` — Per-reviewer structured feedback
+
+**User configuration note:**
+- Set `review.default_reviewers` in `.planning/config.json` (or via `gsd config-set`) to control no-flag `/gsd-review` fan-out.
+- Use `--all` for a full pre-merge sweep without changing project defaults.
 
 ---
 
 ### 43. Backlog Parking Lot
 
-**Commands:** `/gsd-add-backlog <description>`, `/gsd-review-backlog`, `/gsd-plant-seed <idea>`
+**Commands:** `/gsd-capture --backlog <description>`, `/gsd-review-backlog`, `/gsd-capture --seed <idea>`
 
 **Purpose:** Capture ideas that aren't ready for active planning. Backlog items use 999.x numbering to stay outside the active phase sequence. Seeds are forward-looking ideas with trigger conditions that surface automatically at the right milestone.
 
@@ -1840,7 +1851,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 77. Phase Dependency Analysis
 
-**Command:** `/gsd-analyze-dependencies`
+**Command:** `/gsd-manager --analyze-deps`
 
 **Purpose:** Detect phase dependencies and suggest `Depends on` entries for ROADMAP.md before running `/gsd-manager`.
 
@@ -2023,7 +2034,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
   - [Autonomous Audit-to-Fix](#98-autonomous-audit-to-fix)
   - [Improved Prompt Injection Scanner](#99-improved-prompt-injection-scanner)
   - [Stall Detection in Plan-Phase](#100-stall-detection-in-plan-phase)
-  - [Hard Stop Safety Gates in /gsd-next](#101-hard-stop-safety-gates-in-gsd-next)
+  - [Hard Stop Safety Gates in /gsd-progress --next](#101-hard-stop-safety-gates-in-gsd-progress---next)
   - [Adaptive Model Preset](#102-adaptive-model-preset)
   - [Post-Merge Hunk Verification](#103-post-merge-hunk-verification)
 
@@ -2052,7 +2063,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 90. Queryable Codebase Intelligence
 
-**Command:** `/gsd-intel [query <term>|status|diff|refresh]`
+**Command:** `/gsd-map-codebase --query [<term>|status|diff|refresh]`
 **Config:** `intel.enabled`
 
 **Purpose:** Maintain a queryable JSON index of codebase structure, API surface, dependency graph, file roles, and architecture decisions in `.planning/intel/`. Enables targeted lookups without reading the entire codebase.
@@ -2186,13 +2197,13 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 97. Rapid Codebase Scan
 
-**Command:** `/gsd-scan [--focus tech|arch|quality|concerns|tech+arch]`
+**Command:** `/gsd-map-codebase --fast [--focus tech|arch|quality|concerns]`
 
-**Purpose:** Lightweight alternative to `/gsd-map-codebase` that spawns a single mapper agent for a specific focus area, producing targeted output in `.planning/codebase/` without the overhead of 4 parallel agents.
+**Purpose:** Lightweight alternative to `/gsd-map-codebase` that spawns a single mapper agent for one or two combined focus areas, producing targeted output in `.planning/codebase/` without the overhead of 4 parallel agents.
 
 **Requirements:**
 - REQ-SCAN-01: Scan MUST spawn exactly one mapper agent (not four parallel agents)
-- REQ-SCAN-02: Focus area MUST be one of: `tech`, `arch`, `quality`, `concerns`, `tech+arch` (default)
+- REQ-SCAN-02: Focus area MUST be one of: `tech`, `arch`, `quality`, `concerns`, or the combined `tech+arch` shorthand (default: `tech+arch`); combined focus runs as a single agent covering both areas in one pass
 - REQ-SCAN-03: Output MUST be written to `.planning/codebase/` in the same format as `/gsd-map-codebase`
 
 ---
@@ -2240,14 +2251,14 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ---
 
-### 101. Hard Stop Safety Gates in /gsd-next
+### 101. Hard Stop Safety Gates in /gsd-progress --next
 
-**Command:** `/gsd-next`
+**Command:** `/gsd-progress --next`
 
-**Purpose:** Prevent `/gsd-next` from entering runaway loops by adding hard stop safety gates and a consecutive-call guard that interrupts autonomous chaining when repeated identical steps are detected.
+**Purpose:** Prevent `/gsd-progress --next` from entering runaway loops by adding hard stop safety gates and a consecutive-call guard that interrupts autonomous chaining when repeated identical steps are detected.
 
 **Requirements:**
-- REQ-NEXT-GATE-01: `/gsd-next` MUST track consecutive same-step calls
+- REQ-NEXT-GATE-01: `/gsd-progress --next` MUST track consecutive same-step calls
 - REQ-NEXT-GATE-02: On repeated same-step, system MUST present a hard stop gate to the user
 - REQ-NEXT-GATE-03: User MUST explicitly confirm to continue past a hard stop gate
 
@@ -2261,7 +2272,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 **Requirements:**
 - REQ-ADAPTIVE-01: `adaptive` preset MUST assign model tiers based on agent role (planner → quality tier, executor → balanced tier, etc.)
-- REQ-ADAPTIVE-02: `adaptive` MUST be selectable via `/gsd-set-profile adaptive`
+- REQ-ADAPTIVE-02: `adaptive` MUST be selectable via `/gsd-config --profile adaptive`
 
 ---
 
@@ -2310,7 +2321,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ### 105. GSD-2 Reverse Migration
 
-**Command:** `/gsd-from-gsd2 [--dry-run] [--force] [--path <dir>]`
+**Command:** `/gsd-import --from-gsd2 [--dry-run] [--force] [--path <dir>]`
 
 **Purpose:** Migrate a project from GSD-2 format (`.gsd/` directory with Milestone→Slice→Task hierarchy) back to the v1 `.planning/` format, restoring full compatibility with all GSD v1 commands.
 
@@ -2526,7 +2537,7 @@ Users who run a memory / knowledge-base MCP server (for example, ExoCortex-style
 
 **Command:** `/gsd-spike [idea] [--quick]`
 
-**Purpose:** Run 2–5 focused feasibility experiments before committing to an implementation approach. Each experiment uses Given/When/Then framing, produces executable code, and returns a VALIDATED / INVALIDATED / PARTIAL verdict. Companion `/gsd-spike-wrap-up` packages findings into a project-local skill.
+**Purpose:** Run 2–5 focused feasibility experiments before committing to an implementation approach. Each experiment uses Given/When/Then framing, produces executable code, and returns a VALIDATED / INVALIDATED / PARTIAL verdict. Companion `/gsd-spike --wrap-up` packages findings into a project-local skill.
 
 **Requirements:**
 - REQ-SPIKE-01: Each experiment MUST produce a Given/When/Then hypothesis before any code is written
@@ -2534,14 +2545,15 @@ Users who run a memory / knowledge-base MCP server (for example, ExoCortex-style
 - REQ-SPIKE-03: Each experiment MUST return one of: VALIDATED, INVALIDATED, or PARTIAL verdict with evidence
 - REQ-SPIKE-04: Results MUST be stored in `.planning/spikes/NNN-experiment-name/` with a README and MANIFEST.md
 - REQ-SPIKE-05: `--quick` flag skips intake conversation and uses the argument text as the experiment direction
-- REQ-SPIKE-06: `/gsd-spike-wrap-up` MUST package findings into `.claude/skills/spike-findings-[project]/`
+- REQ-SPIKE-06: `/gsd-spike --wrap-up` MUST package findings into `.claude/skills/spike-findings-[project]/`
 
 **Produces:**
+
 | Artifact | Description |
 |----------|-------------|
 | `.planning/spikes/NNN-name/README.md` | Hypothesis, experiment code, verdict, and evidence |
 | `.planning/spikes/MANIFEST.md` | Index of all spikes with verdicts |
-| `.claude/skills/spike-findings-[project]/` | Packaged findings (via `/gsd-spike-wrap-up`) |
+| `.claude/skills/spike-findings-[project]/` | Packaged findings (via `/gsd-spike --wrap-up`) |
 
 ---
 
@@ -2549,7 +2561,7 @@ Users who run a memory / knowledge-base MCP server (for example, ExoCortex-style
 
 **Command:** `/gsd-sketch [idea] [--quick] [--text]`
 
-**Purpose:** Explore design directions through throwaway HTML mockups before committing to implementation. Produces 2–3 interactive variants per design question, all viewable directly in a browser with no build step. Companion `/gsd-sketch-wrap-up` packages winning decisions into a project-local skill.
+**Purpose:** Explore design directions through throwaway HTML mockups before committing to implementation. Produces 2–3 interactive variants per design question, all viewable directly in a browser with no build step. Companion `/gsd-sketch --wrap-up` packages winning decisions into a project-local skill.
 
 **Requirements:**
 - REQ-SKETCH-01: Each sketch MUST answer one specific visual design question
@@ -2559,7 +2571,7 @@ Users who run a memory / knowledge-base MCP server (for example, ExoCortex-style
 - REQ-SKETCH-05: A shared `themes/default.css` MUST provide CSS variables adapted to the agreed aesthetic
 - REQ-SKETCH-06: `--quick` flag skips mood intake; `--text` flag replaces `AskUserQuestion` with numbered lists for non-Claude runtimes
 - REQ-SKETCH-07: The winning variant MUST be marked in the README frontmatter and with a ★ in the HTML tab
-- REQ-SKETCH-08: `/gsd-sketch-wrap-up` MUST package winning decisions into `.claude/skills/sketch-findings-[project]/`
+- REQ-SKETCH-08: `/gsd-sketch --wrap-up` MUST package winning decisions into `.claude/skills/sketch-findings-[project]/`
 
 **Produces:**
 | Artifact | Description |
@@ -2568,7 +2580,7 @@ Users who run a memory / knowledge-base MCP server (for example, ExoCortex-style
 | `.planning/sketches/NNN-name/README.md` | Design question, variants, winner, what to look for |
 | `.planning/sketches/themes/default.css` | Shared CSS theme variables |
 | `.planning/sketches/MANIFEST.md` | Index of all sketches with winners |
-| `.claude/skills/sketch-findings-[project]/` | Packaged decisions (via `/gsd-sketch-wrap-up`) |
+| `.claude/skills/sketch-findings-[project]/` | Packaged decisions (via `/gsd-sketch --wrap-up`) |
 
 ---
 
@@ -2601,7 +2613,7 @@ Users who run a memory / knowledge-base MCP server (for example, ExoCortex-style
 
 ### 121. Knowledge Graph Integration
 
-**Purpose:** Build, query, and inspect a lightweight knowledge graph of the project in `.planning/graphs/`. Opt-in per project. Exposed as the `/gsd-graphify` user-facing command and the `gsd-tools.cjs graphify …` programmatic verb family. Complements `/gsd-intel` (snapshot-oriented) with a graph-oriented view of nodes and edges across commands, agents, workflows, and phases.
+**Purpose:** Build, query, and inspect a lightweight knowledge graph of the project in `.planning/graphs/`. Opt-in per project. Exposed as the `/gsd-graphify` user-facing command and the `gsd-tools.cjs graphify …` programmatic verb family. Complements `/gsd-map-codebase --query` (snapshot-oriented) with a graph-oriented view of nodes and edges across commands, agents, workflows, and phases.
 
 **Requirements:**
 - REQ-GRAPH-01: Opt-in via `graphify.enabled: true` in `.planning/config.json`. When disabled, `/gsd-graphify` prints an activation hint and stops without writing.
@@ -2612,3 +2624,446 @@ Users who run a memory / knowledge-base MCP server (for example, ExoCortex-style
 
 **Configuration:** `graphify.enabled`, `graphify.build_timeout`
 **Reference files:** `commands/gsd/graphify.md`, `bin/lib/graphify.cjs`
+
+---
+
+## v1.40.0 Features
+
+### 122. Skill Surface Consolidation
+
+**Purpose:** Cut the eager skill-listing overhead by folding 31 micro-skills into 4 new grouped parents and 6 existing parents that absorb sub-operations as flags. Zero functional loss — every removed micro-skill's behavior survives via a flag on a consolidated parent. After consolidation, `commands/gsd/*.md` ships 59 sub-skills (plus 6 namespace meta-skills, see #123).
+
+**Requirements:**
+- REQ-CONSOLIDATE-01: Four new grouped skills replace clusters of micro-skills:
+  - `/gsd-capture` — folds add-todo (default), note (`--note`), add-backlog (`--backlog`), plant-seed (`--seed`), check-todos (`--list`)
+  - `/gsd-phase` — folds add-phase (default), insert-phase (`--insert`), remove-phase (`--remove`), edit-phase (`--edit`)
+  - `/gsd-config` — folds settings-advanced (`--advanced`), settings-integrations (`--integrations`), set-profile (`--profile`)
+  - `/gsd-workspace` — folds new-workspace (`--new`), list-workspaces (`--list`), remove-workspace (`--remove`)
+- REQ-CONSOLIDATE-02: Six existing parents absorb wrap-up / sub-operations as flags: `/gsd-update --sync`, `/gsd-update --reapply`, `/gsd-sketch --wrap-up`, `/gsd-spike --wrap-up`, `/gsd-map-codebase --fast`, `/gsd-map-codebase --query`, `/gsd-code-review --fix`, `/gsd-progress --do`, `/gsd-progress --next`.
+- REQ-CONSOLIDATE-03: Deleted micro-skill slash forms (the bare `gsd-add-todo`, `gsd-add-backlog`, `gsd-plant-seed`, `gsd-check-todos`, `gsd-add-phase`, `gsd-insert-phase`, `gsd-remove-phase`, `gsd-edit-phase`, `gsd-new-workspace`, `gsd-list-workspaces`, `gsd-remove-workspace`, `gsd-settings-advanced`, `gsd-settings-integrations`, `gsd-set-profile`, `gsd-sketch-wrap-up`, `gsd-spike-wrap-up`, `gsd-reapply-patches`, `gsd-code-review-fix`, …) MUST resolve to "Unknown command" — no shadow stubs.
+- REQ-CONSOLIDATE-04: `autonomous.md` invokes `/gsd-code-review --fix` (was previously calling the deleted `gsd-code-review-fix`).
+
+**Reference issue:** [#2790](https://github.com/gsd-build/get-shit-done/issues/2790)
+
+---
+
+### 123. Namespace Meta-Skills (Two-Stage Routing)
+
+**Purpose:** Replace the flat eager skill listing with a two-stage hierarchical routing layer. The model sees 6 namespace routers instead of 86 entries, selects a namespace, then routes to the sub-skill. Descriptions use pipe-separated keyword tags (≤ 60 chars) for routing density.
+
+**Commands:**
+- `/gsd-workflow` — phase pipeline router (discuss / plan / execute / verify / phase / progress)
+- `/gsd-project` — project lifecycle (milestones, audits, summary)
+- `/gsd-quality` — quality gates (code review, debug, audit, security, eval, ui)
+- `/gsd-context` — codebase intelligence (map, graphify, docs, learnings)
+- `/gsd-manage` — config / workspace / workstreams / thread / update / ship / inbox
+- `/gsd-ideate` — exploration & capture (explore, sketch, spike, spec, capture)
+
+**Token cost:**
+
+| | Entries | Approx tokens |
+|---|---|---|
+| Pre-1.40 full install | 86 | ~2,150 |
+| Namespace meta-skills | 6 | ~120 |
+
+**Requirements:**
+- REQ-NS-01: Six `commands/gsd/ns-*.md` namespace routers ship with pipe-separated keyword-tag descriptions (≤ 60 chars).
+- REQ-NS-02: Existing sub-skills are unchanged and still invocable directly — namespace skills are additive, not a replacement for direct slash forms.
+- REQ-NS-03: The body of each namespace router contains a routing table that maps user intent to the correct concrete sub-skill on the post-#2790 consolidated surface.
+
+**Reference issue:** [#2792](https://github.com/gsd-build/get-shit-done/issues/2792)
+
+---
+
+### 124. Context-Window Utilization Guard
+
+**Command:** `/gsd-health --context`
+
+**Purpose:** Quality guard against context-window saturation. Two thresholds: 60 % utilization warns ("consider `/gsd-thread`"), 70 % is critical ("reasoning quality may degrade"; matches the fracture-point per recent context-attention research).
+
+**Requirements:**
+- REQ-CTX-GUARD-01: `/gsd-health --context` prints a structured status line with current utilization, threshold tier (`ok` / `warn` / `critical`), and a remediation suggestion.
+- REQ-CTX-GUARD-02: The same triage is exposed as `gsd-sdk query validate.context --tokens-used <int> --context-window <int>` — a structured envelope for status-line and hook callers (#125). Both flags are required; the handler returns the same `{ percent, state }` envelope as the pure classifier in REQ-CTX-GUARD-03.
+- REQ-CTX-GUARD-03: The classifier (`bin/lib/context-utilization.cjs`) is pure: input `(tokensUsed, contextWindow)`, output `{ percent, state }`. Easy to unit-test, easy to reuse from any caller.
+
+**Reference issue:** [#2792](https://github.com/gsd-build/get-shit-done/issues/2792)
+
+---
+
+### 125. Phase-Lifecycle Status-Line Read-Side
+
+**Purpose:** Surface phase orchestration state on the status-line. `parseStateMd()` reads four new STATE.md frontmatter fields and `formatGsdState()` renders in-flight, idle, and progress scenes. Write-side wiring follows in a later RC.
+
+**Requirements:**
+- REQ-LIFECYCLE-01: `parseStateMd()` reads four optional fields:
+  - `active_phase` — phase number when an orchestrator is in flight
+  - `next_action` — recommended next command when idle
+  - `next_phases` — YAML flow array of next phase numbers
+  - `progress` — nested `total_phases` / `completed_phases` / `percent` block
+- REQ-LIFECYCLE-02: `formatGsdState()` checks the lifecycle fields in priority order and emits the first matching scene (Phase active → Idle next-recommended → Milestone complete → Default fallback).
+- REQ-LIFECYCLE-03: All four fields default to undefined; existing STATE.md files render byte-for-byte identically.
+
+**Reference issue:** [#2833](https://github.com/gsd-build/get-shit-done/issues/2833) — see [`docs/STATE-MD-LIFECYCLE.md`](STATE-MD-LIFECYCLE.md) for the full field reference and rendering rules.
+
+---
+
+## v1.41.0 Features
+
+### 126. Per-Phase-Type Model Selection
+
+**Purpose:** Express model tuning at the phase level (planning, research, execution, verification) without learning the full agent taxonomy. Sits between per-agent `model_overrides` (precise, verbose) and the global `model_profile` tier (coarse, uniform).
+
+**Config key:** `models` in `.planning/config.json`
+
+**Phase-type slots:**
+
+| Slot | Agents assigned |
+|------|-----------------|
+| `planning` | `gsd-planner`, `gsd-roadmapper`, `gsd-pattern-mapper` |
+| `discuss` | (reserved for future subagent) |
+| `research` | `gsd-phase-researcher`, `gsd-project-researcher`, `gsd-research-synthesizer`, `gsd-codebase-mapper`, `gsd-ui-researcher` |
+| `execution` | `gsd-executor`, `gsd-debugger`, `gsd-doc-writer` |
+| `verification` | `gsd-verifier`, `gsd-plan-checker`, `gsd-integration-checker`, `gsd-nyquist-auditor`, `gsd-ui-checker`, `gsd-ui-auditor`, `gsd-doc-verifier` |
+| `completion` | (reserved for future subagent) |
+
+**Accepted values:** `"opus"` / `"sonnet"` / `"haiku"` / `"inherit"`
+
+**Resolution precedence (highest → lowest):**
+
+```text
+1. model_overrides[<agent>]
+2. dynamic_routing.tier_models[<tier>]   (when enabled)
+3. models[<phase_type>]                  (this feature)
+4. model_profile
+5. Runtime default
+```
+
+**Requirements:**
+- REQ-PHASE-MODELS-01: Six named `models.*` slots accepted by `config-schema.cjs` and `config-schema.ts`; `config-set` rejects unknown phase-types.
+- REQ-PHASE-MODELS-02: Configs without a `models` block behave byte-for-byte identically to pre-v1.41 behavior.
+- REQ-PHASE-MODELS-03: `discuss` and `completion` are accepted by the schema for forward compatibility; setting them today is a no-op until a subagent maps to each.
+
+**Reference issue:** [#3023](https://github.com/gsd-build/get-shit-done/pull/3030)
+
+---
+
+### 127. Dynamic Routing with Failure-Tier Escalation
+
+**Purpose:** Pay for the cheap tier by default; escalate to a more capable model automatically when the orchestrator detects a soft failure (verification inconclusive, plan-check FLAG, etc.).
+
+**Config key:** `dynamic_routing` in `.planning/config.json`
+
+**Behavior:**
+- `enabled: false` (default) — feature is off; all agents use the precedence chain unchanged.
+- `enabled: true` — the resolver picks `tier_models[default_tier]` for the first spawn and escalates one tier up on orchestrator-detected soft failure, capped by `max_escalations`.
+
+**Composition:** `model_overrides` always wins; `dynamic_routing.tier_models[<tier>]` resolves above `models.<phase_type>` and `model_profile`.
+
+**Requirements:**
+- REQ-DYNROUTE-01: `dynamic_routing.enabled` acts as a master switch; when `false` or block is absent, zero behavior change.
+- REQ-DYNROUTE-02: New resolver `resolveModelForTier(cwd, agent, attempt)` in `core.cjs` is the single call-site for orchestrator integration.
+- REQ-DYNROUTE-03: `max_escalations` caps the escalation chain to prevent runaway cost.
+
+**Reference issue:** [#3024](https://github.com/gsd-build/get-shit-done/pull/3031)
+
+---
+
+### 128. Update Banner Opt-In
+
+**Purpose:** Surface update availability to users who have declined or bypassed the GSD statusline, without requiring the statusline.
+
+**Behavior:**
+- At install time, if the installer detects no GSD statusline, it offers an opt-in `SessionStart` hook.
+- The hook reads the existing `~/.cache/gsd/gsd-update-check.json` cache — the same cache used by the statusline — and prints a banner only when an update is available.
+- Silent when up-to-date.
+- Failure diagnostics rate-limited to once per 24 h.
+- Cleanly removed by `npx get-shit-done-cc --uninstall`.
+
+**Requirements:**
+- REQ-BANNER-01: Banner does not install without explicit opt-in.
+- REQ-BANNER-02: No additional network requests — reuses the existing background update-check cache.
+- REQ-BANNER-03: Uninstall path removes the banner hook.
+
+**Reference issue:** [#2795](https://github.com/gsd-build/get-shit-done/pull/2795)
+
+---
+
+### 129. Issue-Driven Orchestration Guide
+
+**Purpose:** Document a recipe for driving the full GSD workflow from a GitHub / Linear / Jira issue, mapping tracker-centric concepts onto existing GSD primitives.
+
+**Document:** [`docs/issue-driven-orchestration.md`](issue-driven-orchestration.md)
+
+**Covered workflow:**
+1. Create an isolated workspace per issue (`/gsd-workspace --new`)
+2. Run the manager dashboard to get oriented (`/gsd-manager`)
+3. Execute autonomously (`/gsd-autonomous`)
+4. Verify and review (`/gsd-verify-work`, `/gsd-review`)
+5. Ship and close the issue (`/gsd-ship`)
+
+No new commands or daemon process — purely a documentation artifact that maps existing primitives onto a tracker-driven workflow.
+
+**Reference issue:** [#2840](https://github.com/gsd-build/get-shit-done/pull/2840)
+
+---
+
+### 130. Graphify Commit-Based Staleness
+
+**Purpose:** Surface whether the architecture graph was built from the current commit or an older one, complementing the existing mtime-based stale signal.
+
+**Command:** `/gsd-graphify status`
+
+**New fields returned (graphify v0.7+ graphs):**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `built_at_commit` | string | Commit SHA the graph was built from |
+| `current_commit` | string | Current `git HEAD` |
+| `commits_behind` | number | How many commits behind HEAD the graph is |
+| `commit_stale` | boolean \| null | `true`=stale, `false`=current, `null`=unavailable (pre-v0.7, non-git) |
+
+**Rendered output (when signal is available):**
+```
+Source commit: abc1234 (3 commits behind HEAD)
+```
+
+**Security:** `built_at_commit` validated as 4–40 hex chars before reaching `git` — a hostile `graph.json` cannot inject dashed options into argv.
+
+**Fallback:** pre-v0.7 graphs and non-git checkouts return `commit_stale: null`; callers fall back to the existing mtime-based `stale` flag. No behavior change for existing users.
+
+**Reference issue:** [#3170](https://github.com/gsd-build/get-shit-done/issues/3170)
+
+---
+
+### 131. MVP Mode SDK Resolution Layer
+
+**Purpose:** Replace per-workflow MVP-mode predicate duplication with three canonical SDK query verbs. All consuming workflows now call a single source of truth instead of inlining 4–8 bash lines each.
+
+**New query verbs:**
+
+| Verb | Returns | Used by |
+|------|---------|---------|
+| `gsd-sdk query phase.mvp-mode <N>` | `{active, source, roadmap_mode, config_mvp_mode, cli_flag_present}` | `plan-phase`, `execute-phase`, `verify-work`, `progress` |
+| `gsd-sdk query task.is-behavior-adding <plan-file>` | `{is_behavior_adding, checks: {tdd_true, has_behavior_block, has_source_files}, reason}` | `gsd-executor` agent |
+| `gsd-sdk query user-story.validate "<text>"` | `{valid, slots: {role, capability, outcome}, errors[]}` | `gsd-verifier`, `/gsd-mvp-phase` |
+
+**Resolution precedence for `phase.mvp-mode`:**
+CLI flag → ROADMAP `**Mode:** mvp` → `workflow.mvp_mode` config → `false`
+
+**Bug fix:** `roadmap.get-phase --pick mode` in the SDK's `roadmap.ts` previously returned `null` for phases with `**Mode:** mvp`, causing MVP_MODE to silently fall through to false on the native dispatch path. Restores parity with the CJS implementation.
+
+**Reference issue:** [#3178](https://github.com/gsd-build/get-shit-done/pull/3178)
+
+---
+
+## v1.42.1 Features
+
+### 132. Package Legitimacy Gate
+
+**Purpose:** Stop hallucinated, suspicious, or slopsquatting package names before they reach a shell install command.
+
+**Behavior:**
+- Phase research writes a `## Package Legitimacy Audit` table for recommended packages.
+- Packages verified only through search are treated as `[ASSUMED]`, not trusted.
+- `[SLOP]` packages are removed from recommendations.
+- Plans that need `[ASSUMED]` or suspicious packages add a human verification checkpoint.
+- Executor install failures stop for human verification instead of auto-trying similarly named packages.
+
+**Requirements:**
+- REQ-PKG-GATE-01: Research MUST record package registry, age, download/source signals, slopcheck verdict, and disposition.
+- REQ-PKG-GATE-02: Planner MUST gate unverified or suspicious package installs before execution.
+- REQ-PKG-GATE-03: Executor MUST NOT auto-substitute package names after failed package-manager installs.
+
+**Reference:** [v1.42.1 Release Notes](RELEASE-v1.42.1.md)
+
+---
+
+### 133. Skill Surface Budgeting
+
+**Purpose:** Let users reduce installed skill and agent surface area when context budget matters.
+
+**Install profiles:**
+| Profile | Purpose |
+|---------|---------|
+| `core` | Minimal main-loop surface |
+| `standard` | Core plus common phase-management commands |
+| `full` | Complete surface; default |
+
+**Runtime control:** `/gsd:surface` lists profile state and enables, disables, or resets skill clusters without reinstalling.
+
+**Requirements:**
+- REQ-SURFACE-01: Installer MUST resolve `--profile=<name>` and persist the active profile in `.gsd-profile`.
+- REQ-SURFACE-02: `--minimal` and `--core-only` MUST remain aliases for `--profile=core`.
+- REQ-SURFACE-03: Runtime surface state MUST persist outside the install profile marker.
+
+**Reference:** [ADR-0011](adr/0011-skill-surface-budget-module.md)
+
+---
+
+### 134. Installer Migrations
+
+**Purpose:** Make runtime config cleanup explicit, auditable, and rollback-aware during installs and updates.
+
+**Capabilities:**
+- First-time baseline migration records managed files.
+- Legacy stale-file cleanup uses ownership evidence before deleting or rewriting.
+- User-owned artifacts are preserved.
+- Ambiguous GSD-looking files block with a clear report instead of being silently overwritten.
+- Migration plans support dry-run reporting and rollback protection.
+
+**Requirements:**
+- REQ-INSTALL-MIGRATION-01: Migration records MUST include metadata, install scope, and ownership evidence.
+- REQ-INSTALL-MIGRATION-02: Destructive actions MUST fail closed when ownership is ambiguous.
+- REQ-INSTALL-MIGRATION-03: Install failures MUST restore the pre-install state when rollback data exists.
+
+**Reference:** [Installer Migrations](installer-migrations.md)
+
+---
+
+### 135. Custom Ship PR Body Sections
+
+**Command:** `/gsd-ship`
+
+**Config key:** `ship.pr_body_sections`
+
+**Purpose:** Add project-specific PRD-style sections to generated PR bodies without editing GSD workflow files.
+
+**Behavior:** Configured sections append after the required `Summary`, `Changes`, `Requirements Addressed`, `Verification`, and `Key Decisions` sections. They can copy from artifact headings, render templates, or fall back to static text.
+
+**Requirements:**
+- REQ-SHIP-SECTIONS-01: Custom sections MUST NOT replace, remove, or reorder required PR sections.
+- REQ-SHIP-SECTIONS-02: Unknown template tokens MUST be rejected by config validation.
+- REQ-SHIP-SECTIONS-03: Disabled sections MUST stay in config without appearing in PR output.
+
+**Reference:** [Custom PR Body Sections](ship-pr-body-sections.md)
+
+---
+
+### 136. Review Default Reviewers
+
+**Command:** `/gsd-review`
+
+**Config key:** `review.default_reviewers`
+
+**Purpose:** Let teams choose the default reviewer subset for no-flag `/gsd-review` runs.
+
+**Precedence:**
+```text
+explicit reviewer flags -> --all -> review.default_reviewers -> all detected reviewers
+```
+
+**Requirements:**
+- REQ-REVIEW-DEFAULTS-01: Missing `review.default_reviewers` MUST preserve the previous all-detected behavior.
+- REQ-REVIEW-DEFAULTS-02: Empty arrays MUST be rejected; remove the key to restore all-detected behavior.
+- REQ-REVIEW-DEFAULTS-03: Known but unavailable reviewers MUST be skipped with diagnostics rather than hard-failing the run.
+
+**Reference:** [Configuration Reference](CONFIGURATION.md#reviewer-defaults-for-gsd-review)
+
+---
+
+### 137. Fallow Structural Review Pre-Pass
+
+**Command:** `/gsd-code-review`
+
+**Config keys:** `code_quality.fallow.*`
+
+**Purpose:** Add an optional structural analysis pass before the agent review.
+
+**Behavior:** When enabled, GSD resolves a `fallow` binary, runs a bounded audit, writes `FALLOW.json`, and embeds structural findings in `REVIEW.md`.
+
+**Requirements:**
+- REQ-FALLOW-01: Fallow MUST be opt-in and disabled by default.
+- REQ-FALLOW-02: Missing or failing fallow runs MUST produce clear diagnostics.
+- REQ-FALLOW-03: Findings larger than the embed budget MUST be skipped with a warning, preserving the raw JSON artifact.
+
+**Reference:** [Configuration Reference](CONFIGURATION.md#code-quality-settings)
+
+---
+
+### 138. End-of-Phase Human Verification Mode
+
+**Config key:** `workflow.human_verify_mode`
+
+**Purpose:** Reduce mid-flight human checkpoint interruptions while preserving human verification requirements.
+
+**Behavior:** The default `"end-of-phase"` mode embeds human checks into `<verify><human-check>` blocks for phase review. `"mid-flight"` restores blocking `checkpoint:human-verify` tasks.
+
+**Requirements:**
+- REQ-HUMAN-VERIFY-01: `checkpoint:decision` and `checkpoint:human-action` MUST remain blocking regardless of mode.
+- REQ-HUMAN-VERIFY-02: Human-needed verification MUST remain pending until the end-of-phase review resolves it.
+- REQ-HUMAN-VERIFY-03: Configs without the key MUST use `"end-of-phase"`.
+
+**Reference:** [Checkpoints Reference](../get-shit-done/references/checkpoints.md)
+
+---
+
+### 139. Quota and Rate-Limit Failure Classification
+
+**Command:** `/gsd-execute-phase`
+
+**Purpose:** Treat provider quota and rate-limit failures as wait-and-resume conditions, not normal executor failures.
+
+**Behavior:** Agent output is classified for signals such as `429`, `rate limit`, `usage limit`, `RESOURCE_EXHAUSTED`, and `usage_limit_reached`. Matching failures present a wait-for-reset recovery path.
+
+**Requirements:**
+- REQ-QUOTA-01: Quota failures MUST NOT offer immediate retry as the primary recovery.
+- REQ-QUOTA-02: Classification MUST cover Claude, Copilot, Codex, Gemini, and generic provider sentinels.
+- REQ-QUOTA-03: Non-quota failures MUST continue through the normal execution failure path.
+
+**Reference:** [Provider Rate Limit Signals](research/provider-rate-limit-signals.md)
+
+---
+
+### 140. Statusline Context Position
+
+**Config key:** `statusline.context_position`
+
+**Purpose:** Keep the context meter visible in narrow terminals.
+
+**Options:**
+| Value | Behavior |
+|-------|----------|
+| `"end"` | Default; render context meter near the line tail |
+| `"front"` | Render context meter immediately after the model name |
+
+**Requirements:**
+- REQ-STATUSLINE-POS-01: Invalid values MUST be rejected by config validation.
+- REQ-STATUSLINE-POS-02: Missing config MUST preserve existing end-position rendering.
+
+**Reference:** [Configuration Reference](CONFIGURATION.md#statusline-settings)
+
+---
+
+### 141. Milestone Tag Creation Toggle
+
+**Command:** `/gsd-complete-milestone`
+
+**Config key:** `git.create_tag`
+
+**Purpose:** Let projects with external release automation complete milestones without creating local git tags.
+
+**Behavior:** `git.create_tag: false` skips milestone tag creation. The workflow still updates milestone artifacts and state.
+
+**Requirements:**
+- REQ-MILESTONE-TAG-01: Missing config MUST preserve automatic tag creation.
+- REQ-MILESTONE-TAG-02: Existing tag collisions MUST fail clearly instead of overwriting tags.
+- REQ-MILESTONE-TAG-03: Disabling tag creation MUST NOT skip milestone archival.
+
+**Reference:** [Configuration Reference](CONFIGURATION.md#git-branching)
+
+---
+
+### 142. Structured JSON Error Mode
+
+**CLI:** `gsd-tools --json-errors`
+
+**Purpose:** Give SDK and automation callers stable machine-readable error envelopes.
+
+**Behavior:** Commands that fail under `--json-errors` return structured `ok: false` payloads with error kind, message, command context, and exit mapping instead of prose-only stderr.
+
+**Requirements:**
+- REQ-JSON-ERRORS-01: Unknown commands, validation errors, timeouts, native failures, fallback failures, and internal errors MUST map to canonical error kinds.
+- REQ-JSON-ERRORS-02: CLI exit code mapping MUST remain stable for automation callers.
+- REQ-JSON-ERRORS-03: Human-readable output MUST remain the default when `--json-errors` is absent.
+
+**Reference:** [JSON Error Mode](json-errors.md)

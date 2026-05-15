@@ -1,9 +1,11 @@
 # STATE.md Phase Lifecycle Frontmatter
 
-> **Status:** Reference for the phase-lifecycle status-line proposed in
-> [issue #2833](https://github.com/gsd-build/get-shit-done/issues/2833).
-> The status-line hook (`hooks/gsd-statusline.js`) reads the fields below;
-> SDK write-side support to maintain them is tracked separately.
+> **Status:** Read-side shipped in v1.40.0 (issue
+> [#2833](https://github.com/gsd-build/get-shit-done/issues/2833)).
+> `parseStateMd()` reads the four frontmatter fields below and
+> `formatGsdState()` renders the in-flight / idle / progress scenes.
+> SDK write-side support to maintain the fields automatically is tracked
+> separately.
 
 GSD's `STATE.md` carries YAML frontmatter that the status-line hook reads on
 every render. This document describes the **phase-lifecycle fields** and the
@@ -105,7 +107,7 @@ is to use the lifecycle stage:
 | `/gsd-discuss-phase` | `discussing` |
 | `/gsd-plan-phase` | `planning` |
 | `/gsd-execute-phase` | `executing` |
-| `/gsd-verify-phase` | `verifying` |
+| `/gsd-verify-work` | `verifying` |
 
 If `status` is left at `in_progress` (the milestone-level value), Scene 1
 renders just `Phase 4.5` without the stage suffix.

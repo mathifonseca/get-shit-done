@@ -25,6 +25,32 @@ execute → verify → review → ship loop using existing GSD primitives.
 
 ---
 
+## Slash-command forms (hyphen vs colon)
+
+GSD ships **the same set of skills** to every supported runtime, but two slash-form spellings are in play:
+
+- **Hyphen form** — `/gsd-command-name` — used by Claude Code, Copilot, OpenCode, Kilo, Cursor, Windsurf, Augment, Antigravity, and Trae.
+- **Colon form** — `/gsd:command-name` — used by **Gemini CLI only**. Gemini namespaces every plugin's commands under the plugin id, so the install path rewrites every body-text reference and command file to the colon form during `--gemini` install.
+
+You don't need to choose — the installer writes the correct form into the command directory of each runtime you target. When following a walkthrough on a Gemini terminal, replace the hyphen after `gsd` with a colon as you read each slash command.
+
+## Namespace routing primer (`gsd:<namespace>`, v1.40)
+
+v1.40 ships six **namespace meta-skills** as the first-stage entry points for hierarchical routing — they keep the eager skill-listing token cost low (~120 tokens for 6 routers vs ~2,150 for a flat 86-skill listing) while every concrete sub-skill remains directly invocable. Each namespace router's body contains a routing table that maps your intent to the correct concrete sub-skill.
+
+| Namespace | Router | Routes to |
+|-----------|--------|-----------|
+| Phase pipeline | `/gsd-workflow` | discuss / plan / execute / verify / phase / progress |
+| Project lifecycle | `/gsd-project` | milestones, audits, summary |
+| Quality gates | `/gsd-quality` | code review, debug, audit, security, eval, ui |
+| Codebase intelligence | `/gsd-context` | map, graphify, docs, learnings |
+| Management | `/gsd-manage` | config, workspace, workstreams, thread, update, ship, inbox |
+| Exploration & capture | `/gsd-ideate` | explore, sketch, spike, spec, capture |
+
+You almost never need to type a namespace router yourself. Their value is in the routing layer the model uses to discover the right sub-skill — they exist so the system prompt can list 6 entries instead of 86. If you already know the concrete command (e.g. `/gsd-plan-phase`), call it directly.
+
+---
+
 ## End-to-End Walkthrough
 
 This walkthrough shows how GSD phases connect for a typical single-phase project — a small Node.js REST API that validates webhook signatures. Follow it to understand what each command does, what it creates, and how the next command consumes it.
@@ -223,6 +249,10 @@ Once a phase is verified, ship it:
 /gsd-ship 1          # Creates a PR with auto-generated body
 ```
 
+The PR body always includes the required GSD sections: `Summary`, `Changes`, `Requirements Addressed`, `Verification`, and `Key Decisions`. During `/gsd-new-project`, you can also enable optional PRD-style sections such as user stories, acceptance criteria, risks, release criteria, and stakeholder approval. These are appended through `ship.pr_body_sections` and do not change the required core sections.
+
+For setup examples, field definitions, and troubleshooting, see [Custom PR Body Sections](ship-pr-body-sections.md).
+
 For multi-phase projects, repeat the loop:
 
 ```
@@ -235,7 +265,7 @@ For multi-phase projects, repeat the loop:
 Or let GSD figure out the next step automatically:
 
 ```
-/gsd-next
+/gsd-progress --next
 ```
 
 When all phases are done:
@@ -571,7 +601,7 @@ Each spike runs 2–5 experiments. Every experiment has:
 
 Results land in `.planning/spikes/NNN-name/README.md` and are indexed in `.planning/spikes/MANIFEST.md`.
 
-Once you have signal, run `/gsd-spike-wrap-up` to package the findings into `.claude/skills/spike-findings-[project]/` — future sessions will load them automatically via project-skills discovery.
+Once you have signal, run `/gsd-spike --wrap-up` to package the findings into `.claude/skills/spike-findings-[project]/` — future sessions will load them automatically via project-skills discovery.
 
 ### When to Sketch
 
@@ -586,16 +616,16 @@ Sketch when you need to compare layout structures, interaction models, or visual
 
 Each sketch answers **one design question** with 2–3 variants in a single `index.html` you open directly in a browser — no build step. Variants use tab navigation and shared CSS variables from `themes/default.css`. All interactive elements (hover, click, transitions) are functional.
 
-After picking a winner, run `/gsd-sketch-wrap-up` to capture the visual decisions into `.claude/skills/sketch-findings-[project]/`.
+After picking a winner, run `/gsd-sketch --wrap-up` to capture the visual decisions into `.claude/skills/sketch-findings-[project]/`.
 
 ### Spike → Sketch → Phase Flow
 
 ```
 /gsd-spike "SSE vs WebSocket"     # Validate the approach
-/gsd-spike-wrap-up                # Package learnings
+/gsd-spike --wrap-up              # Package learnings
 
 /gsd-sketch "real-time feed UI"   # Explore the design
-/gsd-sketch-wrap-up               # Package decisions
+/gsd-sketch --wrap-up             # Package decisions
 
 /gsd-discuss-phase N              # Lock in preferences (now informed by spike + sketch)
 /gsd-plan-phase N                 # Plan with confidence
@@ -610,8 +640,8 @@ After picking a winner, run `/gsd-sketch-wrap-up` to capture the visual decision
 Ideas that aren't ready for active planning go into the backlog using 999.x numbering, keeping them outside the active phase sequence.
 
 ```
-/gsd-add-backlog "GraphQL API layer"     # Creates 999.1-graphql-api-layer/
-/gsd-add-backlog "Mobile responsive"     # Creates 999.2-mobile-responsive/
+/gsd-capture --backlog "GraphQL API layer"     # Creates 999.1-graphql-api-layer/
+/gsd-capture --backlog "Mobile responsive"     # Creates 999.2-mobile-responsive/
 ```
 
 Backlog items get full phase directories, so you can use `/gsd-discuss-phase 999.1` to explore an idea further or `/gsd-plan-phase 999.1` when it's ready.
@@ -623,7 +653,7 @@ Backlog items get full phase directories, so you can use `/gsd-discuss-phase 999
 Seeds are forward-looking ideas with trigger conditions. Unlike backlog items, seeds surface automatically when the right milestone arrives.
 
 ```
-/gsd-plant-seed "Add real-time collab when WebSocket infra is in place"
+/gsd-capture --seed "Add real-time collab when WebSocket infra is in place"
 ```
 
 Seeds preserve the full WHY and WHEN to surface. `/gsd-new-milestone` scans all seeds and presents matches.
@@ -642,7 +672,7 @@ Threads are lightweight cross-session knowledge stores for work that spans multi
 
 Threads are lighter weight than `/gsd-pause-work` — no phase state, no plan context. Each thread file includes Goal, Context, References, and Next Steps sections.
 
-Threads can be promoted to phases (`/gsd-add-phase`) or backlog items (`/gsd-add-backlog`) when they mature.
+Threads can be promoted to phases (`/gsd-phase`) or backlog items (`/gsd-capture --backlog`) when they mature.
 
 **Storage:** `.planning/threads/{slug}.md`
 
@@ -692,6 +722,87 @@ The `security.cjs` module scans for known injection patterns (role overrides, in
 
 **CI Scanner:**
 `prompt-injection-scan.test.cjs` scans all agent, workflow, and command files for embedded injection vectors. Run as part of the test suite.
+
+---
+
+### Package Legitimacy Gate (v1.42.1)
+
+AI coding tools hallucinate package names. Attackers pre-register those names on npm, PyPI, and crates.io with malicious post-install scripts — a technique called *slopsquatting*. A hallucinated name that passes `npm view` looks legitimate, so it would flow undetected through GSD's research → plan → execute pipeline all the way to `npm install <malicious-pkg>` running on your machine.
+
+v1.42.1 adds a three-layer gate that stops this before it reaches your shell.
+
+#### What you'll see
+
+**In RESEARCH.md** — every phase that recommends external packages now includes a `## Package Legitimacy Audit` table:
+
+```markdown
+## Package Legitimacy Audit
+
+| Package | Registry | Age | Downloads | Source Repo | slopcheck | Disposition |
+|---------|----------|-----|-----------|-------------|-----------|-------------|
+| express | npm | 13 yrs | 100M+/wk | github.com/expressjs/express | [OK] | Approved |
+| some-new-util | npm | 3 days | 47 | none | [SLOP] | REMOVED |
+| api-bridge | npm | 6 mo | 1.2k/wk | github.com/user/api-bridge | [SUS] | Flagged |
+
+**Packages removed due to slopcheck:** some-new-util
+**Packages flagged as suspicious:** api-bridge — planner will require human verification before install
+```
+
+`[SLOP]` packages are removed from RESEARCH.md entirely. They never reach the planner.
+
+**In PLAN.md** — if a package is tagged `[ASSUMED]` (sourced from WebSearch, not registry-verified) or `[SUS]` (slopcheck suspicious), the plan includes a verification checkpoint *before* the install task:
+
+```xml
+<task type="checkpoint:human-verify">
+  <what-built>Package verification required before install</what-built>
+  <how-to-verify>
+    Verify these packages before proceeding:
+    - `api-bridge` [SUS — 6 months old, 1.2k downloads/week, GitHub repo present]
+      Check: https://npmjs.com/package/api-bridge
+      Look for: maintainer history, issue tracker activity, no suspicious install scripts
+  </how-to-verify>
+  <resume-signal>Type "verified" once you've confirmed all packages are legitimate</resume-signal>
+</task>
+```
+
+**During execution** — if an install fails, the executor surfaces a checkpoint and stops. It does not silently try a similarly-named alternative (which could be even more dangerous).
+
+#### Slopcheck verdicts
+
+| Verdict | Meaning | GSD action |
+|---------|---------|------------|
+| `[OK]` | Package passes all legitimacy checks | Proceeds — no checkpoint added |
+| `[SUS]` | Suspicious signals (new, low downloads, no source repo, etc.) | Flagged in Audit table; planner adds `checkpoint:human-verify` before install |
+| `[SLOP]` | High-confidence hallucination or attacker-registered package | Removed from RESEARCH.md; never reaches planner |
+
+#### Claim provenance and WebSearch packages
+
+Package names discovered through WebSearch are always tagged `[ASSUMED]` in RESEARCH.md, regardless of whether `npm view` succeeds. A package that exists on the registry is not the same as a package that's safe to install — `npm view` only proves registration, not legitimacy.
+
+`[ASSUMED]` packages trigger the same `checkpoint:human-verify` gate as `[SUS]` packages. You'll see the checkpoint with a link to the registry page and guidance on what to look for.
+
+#### If slopcheck isn't installed
+
+GSD attempts `pip install slopcheck` at research time. If that fails:
+
+- Every recommended package is tagged `[ASSUMED]`
+- The planner gates every install with a `checkpoint:human-verify` task
+- Research and planning complete normally — nothing hard-fails
+
+This is intentionally stricter than the normal flow: slopcheck unavailability means every package install gets a human checkpoint, which is the safest fallback.
+
+To install slopcheck manually:
+
+```bash
+pip install slopcheck
+# verify: slopcheck install express --json
+```
+
+#### slopcheck dependency
+
+`slopcheck` is a MIT-licensed Python tool maintained by ToxSec (the researcher who documented the slopsquatting attack surface). It checks packages across npm, PyPI, crates.io, RubyGems, Go modules, Maven, and Packagist using multi-signal heuristics: registry age, download count, source-repo linkage, naming distance to popular packages, and registry-specific suspicion patterns.
+
+If `slopcheck` is ever unavailable or abandoned, GSD's `[ASSUMED]`-gate fallback ensures you always get a human checkpoint before any install — the system never silently degrades to the pre-v1.42.1 behavior.
 
 ---
 
@@ -795,10 +906,10 @@ For queryable codebase insights without reading the entire codebase, enable the 
 Then build the index:
 
 ```bash
-/gsd-intel refresh             # Analyze codebase and write .planning/intel/ files
-/gsd-intel query auth          # Search for a term across all intel files
-/gsd-intel status              # Check freshness of intel files
-/gsd-intel diff                # See what changed since last snapshot
+/gsd-map-codebase --query refresh             # Analyze codebase and write .planning/intel/ files
+/gsd-map-codebase --query auth               # Search for a term across all intel files
+/gsd-map-codebase --query status             # Check freshness of intel files
+/gsd-map-codebase --query diff               # See what changed since last snapshot
 ```
 
 Intel files cover stack, API surface, dependency graph, file roles, and architecture decisions.
@@ -808,9 +919,9 @@ Intel files cover stack, API surface, dependency graph, file roles, and architec
 For a focused assessment without full `/gsd-map-codebase` overhead:
 
 ```bash
-/gsd-scan                      # Quick tech + arch overview
-/gsd-scan --focus quality      # Quality and code health only
-/gsd-scan --focus concerns     # Risk areas and concerns
+/gsd-map-codebase --fast                        # Quick tech + arch overview
+/gsd-map-codebase --fast --focus quality        # Quality and code health only
+/gsd-map-codebase --fast --focus concerns       # Risk areas and concerns
 ```
 
 ---
@@ -844,11 +955,11 @@ claude --dangerously-skip-permissions
 /gsd-ship 1                 # Create PR from verified work
 /gsd-ui-review 1            # Visual audit (frontend phases)
 /clear
-/gsd-next                   # Auto-detect and run next step
+/gsd-progress --next                   # Auto-detect and run next step
 ...
 /gsd-audit-milestone        # Check everything shipped
 /gsd-complete-milestone     # Archive, tag, done
-/gsd-session-report         # Generate session summary
+/gsd-pause-work --report         # Generate session summary
 ```
 
 ### New Project from Existing Document
@@ -918,11 +1029,13 @@ The gate is non-blocking: any internal failure logs and the phase continues.
 ### Mid-Milestone Scope Changes
 
 ```bash
-/gsd-add-phase              # Append a new phase to the roadmap
+/gsd-phase                  # Append a new phase to the roadmap (default mode)
 # or
-/gsd-insert-phase 3         # Insert urgent work between phases 3 and 4
+/gsd-phase --insert 3       # Insert urgent work between phases 3 and 4
 # or
-/gsd-remove-phase 7         # Descope phase 7 and renumber
+/gsd-phase --remove 7       # Descope phase 7 and renumber
+# or
+/gsd-phase --edit 4         # Edit any field of phase 4 in place
 ```
 
 ### Multi-Project Workspaces
@@ -941,8 +1054,8 @@ cd ~/gsd-workspaces/feature-b
 /gsd-new-project
 
 # List and manage workspaces
-/gsd-list-workspaces
-/gsd-remove-workspace feature-b
+/gsd-workspace --list
+/gsd-workspace --remove feature-b
 ```
 
 Each workspace gets:
@@ -992,7 +1105,7 @@ Clear your context window between major commands: `/clear` in Claude Code. GSD i
 
 ### Plans Seem Wrong or Misaligned
 
-Run `/gsd-discuss-phase [N]` before planning. Most plan quality issues come from Claude making assumptions that `CONTEXT.md` would have prevented. You can also run `/gsd-list-phase-assumptions [N]` to see what Claude intends to do before committing to a plan.
+Run `/gsd-discuss-phase [N]` before planning. Most plan quality issues come from Claude making assumptions that `CONTEXT.md` would have prevented. You can also run `/gsd-discuss-phase --assumptions [N]` to see what Claude intends to do before committing to a plan.
 
 ### Discuss-Phase Uses Technical Jargon I Don't Understand
 
@@ -1014,7 +1127,7 @@ Do not re-run `/gsd-execute-phase`. Use `/gsd-quick` for targeted fixes, or `/gs
 
 ### Model Costs Too High
 
-Switch to budget profile: `/gsd-set-profile budget`. Disable research and plan-check agents via `/gsd-settings` if the domain is familiar to you (or to Claude).
+Switch to budget profile: `/gsd-config --profile budget`. Disable research and plan-check agents via `/gsd-settings` if the domain is familiar to you (or to Claude).
 
 ### Tuning model cost by phase (`models`) — added in v1.40
 
@@ -1172,9 +1285,44 @@ npx get-shit-done-cc --qwen --global
 
 Skills are installed to `~/.qwen/skills/gsd-*/SKILL.md`. Use the `QWEN_CONFIG_DIR` environment variable to override the default install path.
 
+### Installing for Prerelease Editions (Next / Nightly / Insiders / Preview)
+
+Many supported runtimes ship a prerelease edition alongside their stable release — Windsurf Next, Cursor Nightly, VS Code Insiders, Codex preview channels, JetBrains EAP, and so on. Prerelease editions read from a sibling configuration directory, so the default install path won't reach them.
+
+GSD does not enumerate prerelease editions as separate named runtimes. They are accommodated through the existing `<RUNTIME>_CONFIG_DIR` environment variables and the free-string runtime policy (see [#2517](https://github.com/gsd-build/get-shit-done/issues/2517)) — installs work, paths resolve, GSD operates. Prerelease editions are **best-effort and not separately tested** as part of release CI.
+
+**Pattern.** Set the runtime's `*_CONFIG_DIR` env var to the prerelease directory before running the installer:
+
+```bash
+WINDSURF_CONFIG_DIR=~/.codeium/windsurf-next npx get-shit-done-cc@latest --windsurf --global
+```
+
+Select the corresponding stable runtime in the installer prompt. Skills land in the prerelease directory; commands appear in the prerelease editor.
+
+**Env-var reference for supported runtimes:**
+
+| Runtime | Stable default | Override env var |
+|---|---|---|
+| Claude Code | `~/.claude` | `CLAUDE_CONFIG_DIR` |
+| Gemini CLI | `~/.gemini` | `GEMINI_CONFIG_DIR` |
+| OpenCode | `XDG_CONFIG_HOME/opencode` | `OPENCODE_CONFIG_DIR` |
+| Codex | (per Codex CLI) | `--config-dir` flag |
+| Copilot | `~/.copilot` | `COPILOT_CONFIG_DIR` |
+| Cursor | `~/.cursor` | `CURSOR_CONFIG_DIR` |
+| Windsurf | `~/.codeium/windsurf` | `WINDSURF_CONFIG_DIR` |
+| Antigravity | `~/.gemini/antigravity` | `ANTIGRAVITY_CONFIG_DIR` |
+| Augment | `~/.augment` | `AUGMENT_CONFIG_DIR` |
+| Trae | `~/.trae` | `TRAE_CONFIG_DIR` |
+| Qwen Code | `~/.qwen` | `QWEN_CONFIG_DIR` |
+| Kilo | `~/.config/kilo` | `KILO_CONFIG_DIR` |
+| CodeBuddy | `~/.codebuddy` | `CODEBUDDY_CONFIG_DIR` |
+| Cline | `~/.cline` | `CLINE_CONFIG_DIR` |
+
+If your runtime's prerelease channel is not listed, point the matching env var at its config directory and file an issue if the install fails for any reason other than the path mapping.
+
 ### Using Claude Code with Non-Anthropic Providers (OpenRouter, Local)
 
-If GSD subagents call Anthropic models and you're paying through OpenRouter or a local provider, switch to the `inherit` profile: `/gsd-set-profile inherit`. This makes all agents use your current session model instead of specific Anthropic models. See also `/gsd-settings` → Model Profile → Inherit.
+If GSD subagents call Anthropic models and you're paying through OpenRouter or a local provider, switch to the `inherit` profile: `/gsd-config --profile inherit`. This makes all agents use your current session model instead of specific Anthropic models. See also `/gsd-settings` → Model Profile → Inherit.
 
 ### Working on a Sensitive/Private Project
 
@@ -1357,16 +1505,16 @@ If the installer crashes with `EPERM: operation not permitted, scandir` on Windo
 | ------------------------------------ | ------------------------------------------------------------------------ |
 | Lost context / new session           | `/gsd-resume-work` or `/gsd-progress`                                    |
 | Phase went wrong                     | `git revert` the phase commits, then re-plan                             |
-| Need to change scope                 | `/gsd-add-phase`, `/gsd-insert-phase`, or `/gsd-remove-phase`            |
+| Need to change scope                 | `/gsd-phase` (default), `/gsd-phase --insert`, or `/gsd-phase --remove`  |
 | Something broke                      | `/gsd-debug "description"` (add `--diagnose` for analysis without fixes) |
 | STATE.md out of sync                 | `state validate` then `state sync`                                       |
 | Workflow state seems corrupted       | `/gsd-forensics`                                                         |
 | Quick targeted fix                   | `/gsd-quick`                                                             |
 | Plan doesn't match your vision       | `/gsd-discuss-phase [N]` then re-plan                                    |
-| Costs running high                   | `/gsd-set-profile budget` and `/gsd-settings` to toggle agents off       |
+| Costs running high                   | `/gsd-config --profile budget` and `/gsd-settings` to toggle agents off  |
 | Update broke local changes           | `/gsd-update --reapply`                                                  |
-| Want session summary for stakeholder | `/gsd-session-report`                                                    |
-| Don't know what step is next         | `/gsd-next`                                                              |
+| Want session summary for stakeholder | `/gsd-pause-work --report`                                                    |
+| Don't know what step is next         | `/gsd-progress --next`                                                              |
 | Parallel execution build errors      | Update GSD or set `parallelization.enabled: false`                       |
 
 
@@ -1386,7 +1534,7 @@ For reference, here is what GSD creates in your project:
   MILESTONES.md           # Completed milestone archive
   HANDOFF.json            # Structured session handoff (from /gsd-pause-work)
   research/               # Domain research from /gsd-new-project
-  reports/                # Session reports (from /gsd-session-report)
+  reports/                # Session reports (from /gsd-pause-work --report)
   todos/
     pending/              # Captured ideas awaiting work
     done/                 # Completed todos
