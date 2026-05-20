@@ -4,9 +4,21 @@ This is a personalized fork of [GET SHIT DONE](https://github.com/gsd-build/get-
 
 ## Why this fork exists
 
-The upstream GSD project is an excellent meta-prompting system for AI-assisted development. This fork integrates a comprehensive [Software Development Lifecycle methodology](https://github.com/mathifonseca/dotfiles/blob/main/.claude/sdlc.md) (current: v1.2.5) that adds opinionated defaults around quality gates, testing discipline, issue tracking, and verification rigor.
+The upstream GSD project is an excellent meta-prompting system for AI-assisted development. This fork integrates a comprehensive [Software Development Lifecycle methodology](https://github.com/mathifonseca/dotfiles/blob/main/.claude/sdlc.md) (current: v1.2.6) that adds opinionated defaults around quality gates, testing discipline, issue tracking, and verification rigor.
 
 The upstream project is designed to work for everyone. This fork is designed to work for me specifically — and for anyone who shares similar engineering values.
+
+## External alignment
+
+Selected fork patterns that match independently-published industry guidance (validation, not a change directive — recorded so the fork's design intent is auditable against external references):
+
+| Fork pattern | Aligned with |
+|--------------|--------------|
+| `/gsd-explore` vs `/gsd-execute-phase` split (exploration agents distinct from editing agents) | Anthropic, "How Claude Code Works in Large Codebases" (2026-05-14) — "subagents split exploration from editing" as a load-bearing pattern for large-codebase work |
+| Path-scoped `.claude/rules/` scaffold (`workflow.scaffold_rules`) | Same Anthropic article — "skills scoped to specific paths so they only activate in the relevant part" |
+| Spec-outcome enforcement + adversarial validation | Spec-Driven Development (Álvaro Moya / LIDR) + general agent-skeptical practitioner consensus |
+
+No fork changes required from this alignment check — the convergence with external playbooks is the signal.
 
 ## What's different
 
