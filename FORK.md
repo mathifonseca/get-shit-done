@@ -82,9 +82,13 @@ All default to `true` (opinionated — the upstream would likely default most to
 
 ### Command naming
 
-This fork invokes commands with **hyphen syntax** (`/gsd-execute-phase`), not upstream's colon namespacing (`/gsd:execute-phase`). The installer (`bin/install.js`) maps `SlashCommand → skill`, so the commands under `commands/gsd/*.md` are deployed as **skills with hyphenated names** (`gsd-execute-phase`, `gsd-plan-phase`, …). The colon form does not resolve in an installed fork.
+GSD source uses **colon syntax** (`/gsd:execute-phase`) in all Claude-facing files — upstream's canonical authored form, enforced by `tests/bug-2543-gsd-slash-namespace.test.cjs` (#3443). The repo is authored for Claude command registration under `.claude/commands/gsd/`. **Do not** rewrite source refs to hyphen — it breaks the invariant test and fights every upstream sync. (`scripts/fix-slash-commands.cjs` exists to re-normalize stray `/gsd-<cmd>` refs *back* to colon, not the other way around.)
 
-The fork renamed `/gsd: → /gsd-` at the v1.32.0 sync. Upstream still ships colon refs, and merges (plus upstream's `scripts/fix-slash-commands.cjs`) periodically reintroduce `/gsd:` into the tree — these are drift and should be migrated back to `/gsd-`. When recommending or documenting commands, always use `/gsd-<command>`.
+The installer (`bin/install.js`) converts at install time, depending on target:
+- **Claude as skills** (this fork's default install, `SlashCommand → skill`): skills are named `gsd-<cmd>` (hyphen, #2808), so the user invokes **`/gsd-execute-phase`**.
+- **Non-Claude runtimes** (Copilot, Cursor, Antigravity, …): source `/gsd:<cmd>` is rewritten to `/gsd-<cmd>` (`replace(/gsd:/, 'gsd-')`).
+
+So in an installed fork you type the **hyphen** form even though the source (correctly) uses colon. When recommending commands to a fork user, use `/gsd-<command>`; when editing repo source, keep `/gsd:<command>`.
 
 ### Files modified from upstream
 
