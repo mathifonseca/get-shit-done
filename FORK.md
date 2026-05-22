@@ -80,6 +80,12 @@ All default to `true` (opinionated — the upstream would likely default most to
 | `workflow.verification_discipline` | Require fresh evidence before completion claims |
 | `workflow.design_spec` | Generate DESIGN.md during discuss-phase for architectural phases |
 
+### Command naming
+
+This fork invokes commands with **hyphen syntax** (`/gsd-execute-phase`), not upstream's colon namespacing (`/gsd:execute-phase`). The installer (`bin/install.js`) maps `SlashCommand → skill`, so the commands under `commands/gsd/*.md` are deployed as **skills with hyphenated names** (`gsd-execute-phase`, `gsd-plan-phase`, …). The colon form does not resolve in an installed fork.
+
+The fork renamed `/gsd: → /gsd-` at the v1.32.0 sync. Upstream still ships colon refs, and merges (plus upstream's `scripts/fix-slash-commands.cjs`) periodically reintroduce `/gsd:` into the tree — these are drift and should be migrated back to `/gsd-`. When recommending or documenting commands, always use `/gsd-<command>`.
+
 ### Files modified from upstream
 
 **Agents:**
