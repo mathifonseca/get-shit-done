@@ -88,6 +88,21 @@ Accent reserved for: {explicit list — never "all interactive elements"}
 
 ---
 
+## Platform API Choices
+
+Modern web platform APIs chosen over hand-rolled equivalents. Fill only when the phase introduces relevant patterns; otherwise write "none in scope".
+
+| Component / pattern | Platform API | Source consulted |
+|---------------------|--------------|------------------|
+| {e.g. Settings modal} | `<dialog>` element | {skill name or MDN URL} |
+| {e.g. User menu dropdown} | Popover API | {skill name or MDN URL} |
+| {e.g. Tooltip anchored to button} | CSS Anchor Positioning | {skill name or MDN URL} |
+| {e.g. Card grid responsiveness} | Container queries | {skill name or MDN URL} |
+
+Not validated by the checker — this section informs the planner and executor, but the 6 verification dimensions cover design rigor only.
+
+---
+
 ## Checker Sign-Off
 
 - [ ] Dimension 1 Copywriting: PASS

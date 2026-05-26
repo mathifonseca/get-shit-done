@@ -136,6 +136,32 @@ test -f components.json && npx shadcn info 2>/dev/null
 
 </tool_strategy>
 
+<platform_api_skills>
+
+When the phase introduces modal, popover, tooltip, dropdown, anchored, or container-responsive UI, prefer modern web platform APIs over hand-rolled equivalents:
+
+| Pattern | Modern API |
+|---------|------------|
+| Modal / overlay | `<dialog>` element |
+| Tooltip / menu / dropdown | Popover API |
+| Element-anchored positioning | CSS Anchor Positioning |
+| Component-local responsiveness | Container queries |
+
+Before recommending a custom implementation, check for installed platform-API skills (e.g. Chrome's `modern-web-guidance` plugin, web.dev patterns). Skills install under either user-level skills or marketplace plugins:
+
+```bash
+find ~/.claude/skills ~/.claude/plugins -name SKILL.md 2>/dev/null \
+  | grep -iE 'web|chrome|platform|modern' \
+  | head -5 \
+  || true
+```
+
+If a relevant skill exists, read its `SKILL.md` for current guidance — the Chrome plugin in particular flags itself as MANDATORY for HTML/CSS/clientside JS tasks. Otherwise fall back to MDN via Context7 or WebFetch. Record the chosen API as an implementation note alongside the relevant component in UI-SPEC.md.
+
+This is research input only — it does not add a verification dimension. The checker still validates design rigor; platform-API choice is reflected in implementation notes, not contract assertions.
+
+</platform_api_skills>
+
 <shadcn_gate>
 
 ## shadcn Initialization Gate
@@ -287,7 +313,9 @@ Batch questions into a single interaction where possible.
 
 Read template: `~/.claude/get-shit-done/templates/UI-SPEC.md`
 
-Fill all sections. Write to `$PHASE_DIR/$PADDED_PHASE-UI-SPEC.md`.
+Fill all sections. For any modal, popover, tooltip, dropdown, or anchored UI in scope, consult `<platform_api_skills>` and record the chosen platform API in the relevant component's implementation notes.
+
+Write to `$PHASE_DIR/$PADDED_PHASE-UI-SPEC.md`.
 
 ## Step 6: Commit (optional)
 

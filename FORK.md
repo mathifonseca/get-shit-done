@@ -10,15 +10,14 @@ The upstream project is designed to work for everyone. This fork is designed to 
 
 ## External alignment
 
-Selected fork patterns that match independently-published industry guidance (validation, not a change directive — recorded so the fork's design intent is auditable against external references):
+Fork patterns recorded against independently-published industry guidance so the fork's design intent is auditable against external references. Each row notes whether it validates a pre-existing fork pattern or introduces a new one informed by the cited source.
 
-| Fork pattern | Aligned with |
-|--------------|--------------|
-| `/gsd-explore` vs `/gsd-execute-phase` split (exploration agents distinct from editing agents) | Anthropic, "How Claude Code Works in Large Codebases" (2026-05-14) — "subagents split exploration from editing" as a load-bearing pattern for large-codebase work |
-| Path-scoped `.claude/rules/` scaffold (`workflow.scaffold_rules`) | Same Anthropic article — "skills scoped to specific paths so they only activate in the relevant part" |
-| Spec-outcome enforcement + adversarial validation | Spec-Driven Development (Álvaro Moya / LIDR) + general agent-skeptical practitioner consensus |
-
-No fork changes required from this alignment check — the convergence with external playbooks is the signal.
+| Fork pattern | Aligned with | Direction |
+|--------------|--------------|-----------|
+| `/gsd-explore` vs `/gsd-execute-phase` split (exploration agents distinct from editing agents) | Anthropic, "How Claude Code Works in Large Codebases" (2026-05-14) — "subagents split exploration from editing" as a load-bearing pattern for large-codebase work | Validates existing |
+| Path-scoped `.claude/rules/` scaffold (`workflow.scaffold_rules`) | Same Anthropic article — "skills scoped to specific paths so they only activate in the relevant part" | Validates existing |
+| Spec-outcome enforcement + adversarial validation | Spec-Driven Development (Álvaro Moya / LIDR) + general agent-skeptical practitioner consensus | Validates existing |
+| `gsd-ui-researcher` consults installed platform-API skills when modal/popover/anchored/container-responsive UI is in scope (`<platform_api_skills>` block, `Step 5` trigger) | Chrome, "Modern Web Guidance" (preview, 2026-05-26) — distributes web-platform best practices (`<dialog>`, Popover API, CSS Anchor Positioning, container queries) as Claude Code skills; complements GSD's 6 design-rigor pillars without altering them | Introduces new |
 
 ## What's different
 
