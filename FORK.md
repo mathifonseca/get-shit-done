@@ -203,6 +203,40 @@ Designed but not yet implemented. Recorded here so the design intent is visible 
 
 **Why not just extend `gsd-map-codebase`.** Map-codebase is read-only intel for execution context; this is design-exploration with a parallel-subagent fan-out and a refactor-RFC artifact — different output, different cadence, different consumer (planner, not executor). Conflating them would dilute both.
 
+**Skill-writing guidance for the skill itself** (added 2026-05-26 from Tharlq, "How We Use Skills" — anthropic-internal practice):
+
+- Skill body follows "Don't State the Obvious" — describe the parallel-subagent fan-out + radically-different-interface-design pattern; do not re-explain what refactoring is or why deep modules matter (Claude knows that).
+- Carry a Gotchas section seeded from real failure points the first invocations expose. Likely seeds: (a) subagents producing surface-variant designs rather than radically different ones — fix via explicit "must differ on module boundary OR API shape OR state location" constraint in the subagent prompts; (b) the recommendation collapsing to "design 1 with minor tweaks" — fix via requiring the recommendation to name *which dimensions* of design 2 or design 3 it adopts.
+- The description field is the trigger — phrase it as a question Claude asks itself about the codebase state, e.g., "Use this when a phase has visibly bloated a module beyond a clean test boundary, or when verification has flagged module coupling as a recurring source of regressions." Not "this is the architecture pass skill."
+
+### `/gsd-skill-audit` (designed 2026-05-26)
+
+**Intent.** Periodic last-used auditing of the GSD skill set to surface bloat. The fork installs ~80 GSD skills plus user-added ones; without an audit pass the skill list rots into noise the way a CLAUDE.md does without pruning.
+
+**Source.** Naitik Mehta (@HeyNaitik), surfaced in replies to Tharlq's "How We Use Skills" — Mehta runs a bi-weekly CLAUDE.md-driven audit that surfaces all skills not invoked in the last two weeks. Tharlq calls the pattern out as "actually smart" in-thread.
+
+**Sketch.**
+
+1. Track invocation events for every GSD skill via a PreToolUse-style hook (the measurement-pattern Tharlq describes for Anthropic-internal skills) → write to `.planning/state/skill-usage.jsonl` (append-only).
+2. On manual invocation: read the usage log, compute last-invocation timestamp per skill, surface any skill with no invocation in the configured stale-window (default: 14 days).
+3. For each stale skill, propose one of: (a) keep with documented rationale, (b) deprecate (move to `commands/gsd/_deprecated/`), (c) merge into a related skill.
+4. Emit a `SKILL-AUDIT.md` report at the project root; do not auto-deprecate — taste decisions require human-in-the-loop.
+
+**Config knob.** `workflow.skill_audit_stale_days` (default: `14`).
+
+**Why this is fork-shaped, not upstream-shaped.** Upstream GSD ships skills, but doesn't take a position on which the user is actually invoking. The fork's stance (opinionated quality gates, ratchet effect) extends naturally to "the skill registry itself is subject to the ratchet — skills earn their slot via use, or get pruned."
+
+### "Don't shell out to `claude -p`" anti-pattern (recorded 2026-05-26)
+
+Surfaced in the Tharlq thread: Tyler Laprade argued 5 of the 9 skill categories should be scripts that invoke `claude -p` rather than skills that invoke scripts. Tharlq pushed back — invoking `claude -p` from inside an existing agentic loop is the wrong shape; the right primitive for context control inside an agentic loop is **subagents**, not a fresh Claude session.
+
+This aligns with the fork's existing anti-rationalization-engineering stance (see "What's different" table). Worth recording explicitly as a fork anti-pattern so future fork additions (especially around skill design) don't accidentally introduce shell-out patterns:
+
+- DO: use subagents (`gsd-explore`, `gsd-codebase-mapper`, custom Task tool agents) for context control inside an agentic loop.
+- DON'T: shell out to `claude -p ...` from a skill, hook, or workflow step. If a skill needs to do "fresh Claude work," that's a signal the skill should be restructured as a subagent invocation instead.
+
+Source: Tharlq vs Laprade exchange — `wiki/sources/trq212-lessons-from-building-claude-code-how-we-use-skills.md` in lifeos-work.
+
 ## Divergence point
 
 This fork diverged from upstream at commit `2f7f317` (2026-04-03), tagged as `fork-divergence-point`. To see the full delta:
