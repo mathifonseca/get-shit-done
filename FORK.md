@@ -18,6 +18,7 @@ Fork patterns recorded against independently-published industry guidance so the 
 | Path-scoped `.claude/rules/` scaffold (`workflow.scaffold_rules`) | Same Anthropic article — "skills scoped to specific paths so they only activate in the relevant part" | Validates existing |
 | Spec-outcome enforcement + adversarial validation | Spec-Driven Development (Álvaro Moya / LIDR) + general agent-skeptical practitioner consensus | Validates existing |
 | `gsd-ui-researcher` consults installed platform-API skills when modal/popover/anchored/container-responsive UI is in scope (`<platform_api_skills>` block, `Step 5` trigger) | Chrome, "Modern Web Guidance" (preview, 2026-05-26) — distributes web-platform best practices (`<dialog>`, Popover API, CSS Anchor Positioning, container queries) as Claude Code skills; complements GSD's 6 design-rigor pillars without altering them | Introduces new |
+| `gsd-planner` orders vertical slices by unknown-unknowns first (tracer-bullet ordering) — the unfamiliar integration or unproven assumption ships first as a thin end-to-end slice, before easy-but-safe work | Matt Pocock, "5 Claude Code skills I use every single day" (YouTube, 2026-03-16) — `/prd-to-issues` skill explicitly invokes the tracer-bullet analogy for slice ordering; risk-first slicing is a long-standing XP practice (Hunt & Thomas, *Pragmatic Programmer*) that GSD had not previously made explicit | Validates existing |
 
 ## What's different
 
@@ -177,6 +178,30 @@ The fork-aware statusline shows `⬆ upstream X.Y.Z available — cherry-pick fr
 ### Pending upstream (not yet merged)
 
 _None — fork is current as of v1.43.0-rc1 (latest tag as of 2026-05-15). Upstream main is 31 commits past the rc; next stable is v1.43.0._
+
+## Pending fork additions
+
+Designed but not yet implemented. Recorded here so the design intent is visible at audit time and so the work can be picked up cleanly.
+
+### `/gsd-architecture-pass` skill (designed 2026-05-26)
+
+**Intent.** A periodic codebase-deepening pass that finds shallow-module candidates and explores deeper interface designs via parallel subagents. Closes a gap in the current fork: `gsd-map-codebase` produces intel, `gsd-code-review` audits diffs, but nothing systematically surfaces *architectural* deepening opportunities the way a senior engineer would on a quarterly review.
+
+**Source.** Matt Pocock, "5 Claude Code skills I use every single day" (YouTube, 2026-03-16); `/improve-codebase-architecture` skill — informed by Ousterhout, *A Philosophy of Software Design* (deep modules with thin interfaces).
+
+**Sketch.**
+
+1. **Explore for deepening candidates.** Walk the codebase looking for: (a) places where understanding one concept requires bouncing between many small files, (b) pure functions extracted only for testability where real bugs live in their callers, (c) tightly coupled modules with integration risk in the seams.
+2. **Present a numbered list of candidates** with a one-line "why this is shallow" rationale per candidate. User picks one (and only one) to deepen per pass — these decisions require taste and shouldn't be batched.
+3. **Spawn ≥3 parallel subagents**, each producing a *radically different* interface design for the deepening target. Constraint: the designs must be genuinely different, not surface variants — different module boundaries, different API shapes, different stateful-vs-pure splits. Then compare, recommend the strongest, propose a hybrid when warranted.
+4. **Emit a refactor RFC as a GitHub issue** (or the configured issue tracker per `project.issue_tracker`). The RFC references the deepening rationale and the rejected alternatives, not just the winner.
+5. **Hand off to `/gsd-plan-phase`** for journey planning — the RFC describes the destination, the plan describes how to get there.
+
+**Cadence.** Manual invocation (not auto). Recommended cadence: monthly, or after any phase that materially expands the codebase footprint.
+
+**Config knob.** `workflow.architecture_pass` (default: `false` — opt-in until validated).
+
+**Why not just extend `gsd-map-codebase`.** Map-codebase is read-only intel for execution context; this is design-exploration with a parallel-subagent fan-out and a refactor-RFC artifact — different output, different cadence, different consumer (planner, not executor). Conflating them would dilute both.
 
 ## Divergence point
 

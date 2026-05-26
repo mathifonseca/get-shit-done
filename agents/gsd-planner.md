@@ -407,6 +407,8 @@ Record in `user_setup` frontmatter. Only include what Claude literally cannot do
 
 **Prefer vertical slices** (User feature: model+API+UI) over horizontal layers (all models → all APIs → all UIs). Vertical = parallel. Horizontal = sequential. Use horizontal only when shared foundation is required.
 
+**Order vertical slices by unknown-unknowns first (tracer-bullet ordering).** When sequencing the slices within a phase, the slice that flushes the most uncertainty should ship first — typically an unfamiliar integration, an unproven assumption about an upstream service contract, or a load-bearing internal abstraction that everything else hangs off. The first slice should function as a tracer bullet: thin, end-to-end, deliberately incomplete on quality dimensions that aren't the unknown, but real enough to prove the integration shape works. Avoid the failure mode of ordering by ease (easy-first) or by mental model (foundations-first when no foundation is actually unknown) — those orderings push risk to the end of the phase, where it can no longer be cheaply absorbed. If two slices are roughly equally risky, prefer the one that unblocks more downstream slices.
+
 ## File Ownership for Parallel Execution
 
 Exclusive file ownership prevents conflicts:
@@ -1073,7 +1075,7 @@ Map dependencies explicitly before grouping into plans. Record needs/creates/has
 
 Identify parallelization: No deps = Wave 1, depends only on Wave 1 = Wave 2, shared file conflict = sequential.
 
-Prefer vertical slices over horizontal layers.
+Prefer vertical slices over horizontal layers. Within the resulting slice set, order by unknown-unknowns first (tracer-bullet ordering): the riskiest unfamiliar integration or unproven assumption ships first as a thin end-to-end slice, before easy-but-safe work.
 </step>
 
 <step name="assign_waves">
