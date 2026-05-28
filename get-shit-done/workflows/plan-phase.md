@@ -546,6 +546,14 @@ test -f "${PHASE_DIR}/${PADDED_PHASE}-VALIDATION.md" && echo "VALIDATION_CREATED
 
 **If not found:** Warn and continue — plans may fail Dimension 8.
 
+## 5.54. Dependent-Repo Freshness Gate
+
+If `discuss-phase` recorded `LOCKED` blockers from the dependent-repo pre-flight (CONTEXT.md `<decisions>` block citing a `gh search prs` finding), plans MUST cite the merge timestamp for each dependent repo and the surface verified. Plans citing dependent-repo state older than **14 days** must re-run `gh search prs --repo=<repo> --merged --search='<surface>' --limit=20` before execution starts; if any new merge intersects the surface, the plan is invalid and must be re-issued.
+
+This gate exists to prevent multi-hour execution work from unwinding when an upstream contract changes silently between plan and execution. See SDLC §3 "Dependent-Repo Pre-Flight Check."
+
+If CONTEXT.md has no dependent-repo entries, skip this gate.
+
 ## 5.55. Security Threat Model Gate
 
 > Skip if `workflow.security_enforcement` is explicitly `false`. Absent = enabled.

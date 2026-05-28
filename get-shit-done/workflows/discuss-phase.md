@@ -304,6 +304,8 @@ Analyze the phase to identify gray areas. Use both `prior_decisions` and `codeba
 
 3. **Gray areas** — For each relevant category, identify 1-2 specific ambiguities that would change implementation. Annotate with code context where relevant.
 
+3b. **Dependent-repo pre-flight** — If the phase will consume contracts from a backend wire, an external API, or a sibling repo (frontend↔backend handoffs, shared schemas, cross-repo workflows): identify the specific surfaces (endpoints, fields, error codes, file paths) this phase touches. For each dependent repo, run `gh search prs --repo=<repo> --merged --search='<surface>' --limit=20` filtered to the last 30 days. **Read the diffs that intersect the surface, not the PR descriptions.** PR descriptions describe intent; diffs describe state. If any recent merge invalidates the planning assumption, surface it as a `LOCKED` blocker in CONTEXT.md — not as a gray area to discuss. Plans must reflect the post-merge contract before execution starts.
+
 4. **Skip assessment** — If no meaningful gray areas exist (pure infrastructure, clear-cut implementation, all already decided), the phase may not need discussion.
 
 **Advisor mode hand-off:** If `ADVISOR_MODE` is true, follow `workflows/discuss-phase/modes/advisor.md` for the rest of analyze/discuss flow (it adds an `advisor_research` substep and replaces the standard `discuss_areas` with table-first selection). The detection block (USER-PROFILE.md existence + non-technical-owner signals + calibration tier resolution) lives in that file — read it once when ADVISOR_MODE is true and follow its rules.

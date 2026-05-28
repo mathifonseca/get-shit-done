@@ -4,7 +4,7 @@ This is a personalized fork of [GET SHIT DONE](https://github.com/gsd-build/get-
 
 ## Why this fork exists
 
-The upstream GSD project is an excellent meta-prompting system for AI-assisted development. This fork integrates a comprehensive [Software Development Lifecycle methodology](https://github.com/mathifonseca/dotfiles/blob/main/.claude/sdlc.md) (current: v1.2.6) that adds opinionated defaults around quality gates, testing discipline, issue tracking, and verification rigor.
+The upstream GSD project is an excellent meta-prompting system for AI-assisted development. This fork integrates a comprehensive [Software Development Lifecycle methodology](https://github.com/mathifonseca/dotfiles/blob/main/.claude/sdlc.md) (current: v1.2.8) that adds opinionated defaults around quality gates, testing discipline, issue tracking, and verification rigor.
 
 The upstream project is designed to work for everyone. This fork is designed to work for me specifically — and for anyone who shares similar engineering values.
 
@@ -19,6 +19,7 @@ Fork patterns recorded against independently-published industry guidance so the 
 | Spec-outcome enforcement + adversarial validation | Spec-Driven Development (Álvaro Moya / LIDR) + general agent-skeptical practitioner consensus | Validates existing |
 | `gsd-ui-researcher` consults installed platform-API skills when modal/popover/anchored/container-responsive UI is in scope (`<platform_api_skills>` block, `Step 5` trigger) | Chrome, "Modern Web Guidance" (preview, 2026-05-26) — distributes web-platform best practices (`<dialog>`, Popover API, CSS Anchor Positioning, container queries) as Claude Code skills; complements GSD's 6 design-rigor pillars without altering them | Introduces new |
 | `gsd-planner` orders vertical slices by unknown-unknowns first (tracer-bullet ordering) — the unfamiliar integration or unproven assumption ships first as a thin end-to-end slice, before easy-but-safe work | Matt Pocock, "5 Claude Code skills I use every single day" (YouTube, 2026-03-16) — `/prd-to-issues` skill explicitly invokes the tracer-bullet analogy for slice ordering; risk-first slicing is a long-standing XP practice (Hunt & Thomas, *Pragmatic Programmer*) that GSD had not previously made explicit | Validates existing |
+| Fork pattern bundle: spec-driven planning + `gsd-executor` + `gsd-verifier` + `gsd-code-reviewer` (the "loop with guardrails" shape — distinct from a single autonomous loop) | LangChain, "Open SWE: An Open-Source Framework for Internal Coding Agents" (2026-05-26) — surveys Stripe's Devin-style agent + Ramp's OpenCode-composed agent + LangChain's own Open SWE and finds independent convergence on: planner-executor-reviewer split, `AGENTS.md` repo-wide context file, deterministic middleware as safety-net for load-bearing steps. The three companies arrived at GSD's split independently | Validates existing |
 
 ## What's different
 
