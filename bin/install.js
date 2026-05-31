@@ -8417,6 +8417,21 @@ function install(isGlobal, runtime = 'claude', options = {}) {
     failures.push('sdk/shared/model-catalog.json (source missing)');
   }
 
+  // #3536 follow-up — defense in depth: the generated Configuration Module CJS
+  // inlines its manifests and must be self-contained. A stale or hand-reverted
+  // copy that require()s '../../../sdk/shared/*.manifest.json' resolves to a
+  // non-existent path post-install (the installer ships bin/ but not the sibling
+  // sdk/ tree) and would throw only at runtime — in every gsd-tools invocation.
+  // Load it here so any such regression fails the install loudly instead.
+  const configGenDest = path.join(skillDest, 'bin', 'lib', 'configuration.generated.cjs');
+  try {
+    require(configGenDest);
+    console.log(`  ${green}✓${reset} Verified configuration.generated.cjs is self-contained`);
+  } catch (err) {
+    console.log(`  ${yellow}⚠${reset}  configuration.generated.cjs failed to load: ${err.message}`);
+    failures.push('configuration.generated.cjs (not self-contained — regenerate via `cd sdk && npm run gen:configuration`)');
+  }
+
   // Copy agents to agents directory.
   // Skipped under --minimal: gsd-* subagent descriptions are eagerly loaded
   // into the runtime's Agent tool schema, costing ~6k tokens per turn even

@@ -74,6 +74,24 @@ const dtgMatch = distSrc.match(/const DEPTH_TO_GRANULARITY = \{[^}]+\};/);
 if (!dtgMatch) throw new Error('DEPTH_TO_GRANULARITY not found in dist source');
 const dtgConst = dtgMatch[0];
 
+// ─── Read the shared manifests for inlining ──────────────────────────────────
+// We INLINE these manifests into the generated CJS rather than emitting a
+// require('../../../sdk/shared/...'). That relative path only resolves in the
+// dev monorepo (where get-shit-done/ and sdk/ are siblings); the installer
+// copies get-shit-done/bin/ but NOT the sibling sdk/ tree, so a require() there
+// resolves to a non-existent location post-install (#3536 broke this; same
+// class of bug the #3288 model-catalog fix addressed). Inlining makes the
+// generated file self-contained and install-layout-independent.
+const sharedDir = resolve(here, '..', 'shared');
+const configDefaults = JSON.parse(
+  readFileSync(resolve(sharedDir, 'config-defaults.manifest.json'), 'utf-8'),
+);
+const schemaManifest = JSON.parse(
+  readFileSync(resolve(sharedDir, 'config-schema.manifest.json'), 'utf-8'),
+);
+const configDefaultsLiteral = JSON.stringify(configDefaults, null, 2);
+const schemaManifestLiteral = JSON.stringify(schemaManifest, null, 2);
+
 // ─── Build CJS output ─────────────────────────────────────────────────────────
 
 /**
@@ -97,12 +115,15 @@ export function buildConfigurationCjs() {
     `const { readFileSync, writeFileSync, existsSync, readdirSync } = require('node:fs');`,
     `const { join } = require('node:path');`,
     ``,
-    `// ─── Manifest requires ───────────────────────────────────────────────────────`,
-    `// Resolved relative to this file: get-shit-done/bin/lib/ → sdk/shared/`,
-    `// This file lives at: get-shit-done/bin/lib/configuration.generated.cjs`,
-    `// sdk/shared lives at: sdk/shared/ (3 dirs up from bin/lib, then into sdk/shared)`,
-    `const CONFIG_DEFAULTS = require('../../../sdk/shared/config-defaults.manifest.json');`,
-    `const SCHEMA_MANIFEST = require('../../../sdk/shared/config-schema.manifest.json');`,
+    `// ─── Inlined manifests ───────────────────────────────────────────────────────`,
+    `// Extracted from sdk/shared/config-defaults.manifest.json and`,
+    `// sdk/shared/config-schema.manifest.json at generation time and inlined so this`,
+    `// file is self-contained. It must NOT require() anything outside the installed`,
+    `// get-shit-done/bin/ tree — the installer does not ship the sibling sdk/ dir,`,
+    `// so a runtime require('../../../sdk/shared/...') fails post-install.`,
+    `// To change a default or schema key, edit the manifest and regenerate.`,
+    `const CONFIG_DEFAULTS = ${configDefaultsLiteral};`,
+    `const SCHEMA_MANIFEST = ${schemaManifestLiteral};`,
     `const VALID_CONFIG_KEYS = new Set(SCHEMA_MANIFEST.validKeys);`,
     `const RUNTIME_STATE_KEYS = new Set(SCHEMA_MANIFEST.runtimeStateKeys);`,
     `const DYNAMIC_KEY_PATTERNS = SCHEMA_MANIFEST.dynamicKeyPatterns.map((p) => {`,

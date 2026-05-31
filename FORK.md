@@ -182,6 +182,7 @@ _None — fork is current as of v1.43.0-rc1 (latest tag as of 2026-05-15). Upstr
 
 ## Pending fork additions
 
+- **Fix #3536 post-install crash** — `get-shit-done/bin/lib/configuration.generated.cjs` now **inlines** its two `sdk/shared/*.manifest.json` manifests instead of `require()`-ing them across the sibling `sdk/` tree (which the installer does not ship), so installed `gsd-tools.cjs` no longer throws `Cannot find module`. Generator (`sdk/scripts/gen-configuration.mjs`) emits the inlined literals; `bin/install.js` now loads the generated CJS during install to fail loudly on any cross-tree-require regression. Same class as the #3288 model-catalog fix.
 Designed but not yet implemented. Recorded here so the design intent is visible at audit time and so the work can be picked up cleanly.
 
 ### `/gsd-architecture-pass` skill (designed 2026-05-26)
