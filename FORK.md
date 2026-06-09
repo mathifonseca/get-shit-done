@@ -20,6 +20,10 @@ Fork patterns recorded against independently-published industry guidance so the 
 | `gsd-ui-researcher` consults installed platform-API skills when modal/popover/anchored/container-responsive UI is in scope (`<platform_api_skills>` block, `Step 5` trigger) | Chrome, "Modern Web Guidance" (preview, 2026-05-26) — distributes web-platform best practices (`<dialog>`, Popover API, CSS Anchor Positioning, container queries) as Claude Code skills; complements GSD's 6 design-rigor pillars without altering them | Introduces new |
 | `gsd-planner` orders vertical slices by unknown-unknowns first (tracer-bullet ordering) — the unfamiliar integration or unproven assumption ships first as a thin end-to-end slice, before easy-but-safe work | Matt Pocock, "5 Claude Code skills I use every single day" (YouTube, 2026-03-16) — `/prd-to-issues` skill explicitly invokes the tracer-bullet analogy for slice ordering; risk-first slicing is a long-standing XP practice (Hunt & Thomas, *Pragmatic Programmer*) that GSD had not previously made explicit | Validates existing |
 | Fork pattern bundle: spec-driven planning + `gsd-executor` + `gsd-verifier` + `gsd-code-reviewer` (the "loop with guardrails" shape — distinct from a single autonomous loop) | LangChain, "Open SWE: An Open-Source Framework for Internal Coding Agents" (2026-05-26) — surveys Stripe's Devin-style agent + Ramp's OpenCode-composed agent + LangChain's own Open SWE and finds independent convergence on: planner-executor-reviewer split, `AGENTS.md` repo-wide context file, deterministic middleware as safety-net for load-bearing steps. The three companies arrived at GSD's split independently | Validates existing |
+| Ratchet effect on quality gates (`workflow.adversarial_validation`, `gsd-verifier` step 7-Ratchet) generalized to numeric ratchets, not just binary gates | sdlc.md §8 v1.2.9 "Numeric ratchets, not just binary gates" — scalar quality signals (code-health scores, coverage %) ratcheted on best-known value, not pass/fail. Tolaria AGENTS.md (Luca Rossi, 2026-04) uses CodeScene Hotspot + Code Health Average at pre-commit / pre-push as one-way valves. The concept is portable to any tool emitting a scalar; fork ratchet effect was binary-shaped, now has explicit scalar-shaped variant | Validates existing |
+| Adversarial validation finder + critic + referee → applies to *agent-context* changes too, not only code (every skill / rule / prompt edit ships with offline-eval delta in PR description) | sdlc.md §18 v1.2.9 "Ablate at PR Granularity" — Anthropic data-science case study (claude.com, 2026-06-03) ablates skill/prompt changes at PR granularity against a fixed offline eval set; reports the delta in the PR description; maintains a list of negative results. Treats agent context as engineering work, not docs work — the eval set is the test suite for the prompt. Fork has the *shape* (adversarial validation) but did not previously name the discipline at the agent-context layer | Validates existing |
+| "Standards live in tooling, not reviews" — fork's pre-commit/pre-push scaffolds (`workflow.scaffold_precommit`, ratchet effect) + tool-enforced rules over reviewer-enforced rules | sdlc.md §8 v1.2.9 + Brier "Culture of AI Engineering" (Every, 2026-05-08) — *"His strict approach to linting meant my code wouldn't even run unless it met his standards. Cutting corners was no longer an option."* Tool-enforced rules reject the run; reviewer-enforced rules are negotiable by default in agentic flows where the human is downstream of many small commits. Fork already operates this way; the principle now has explicit external articulation | Validates existing |
+| Bracket agents, don't watch them — fork's scheduled review cadence (Definition of Done + 3-fix architecture escalation + per-phase verify-work) corresponds to a maker/manager schedule rather than continuous supervision | sdlc.md §18 v1.2.9 "Bracket Agents, Don't Watch Them" + Hoang "Escape from Agentic Loop" (Proof of Concept Issue 297, 2026-05-10) — agents need clear start and end conditions + scheduled review blocks, not continuous monitoring. Continuous watching activates the same variable-reward attention-economy dynamic as doom-scrolling. Fork's per-phase / per-plan structure naturally produces brackets; the discipline of *not checking in between* is the user-side counterpart to the fork's structural choice | Validates existing |
 
 ## What's different
 
@@ -226,6 +230,69 @@ Designed but not yet implemented. Recorded here so the design intent is visible 
 **Config knob.** `workflow.skill_audit_stale_days` (default: `14`).
 
 **Why this is fork-shaped, not upstream-shaped.** Upstream GSD ships skills, but doesn't take a position on which the user is actually invoking. The fork's stance (opinionated quality gates, ratchet effect) extends naturally to "the skill registry itself is subject to the ratchet — skills earn their slot via use, or get pruned."
+
+### `ARCHITECTURE.md` artifact between PROJECT.md and ROADMAP.md (designed 2026-06-09)
+
+**Intent.** Add a slow-moving artifact between `PROJECT.md` (intent / scope) and `ROADMAP.md` (phase sequencing) that captures the *theory of the system*: business-to-codebase mapping, inviolable rules, key architectural decisions and rationale, open architectural questions. Read by every `gsd-plan-phase` invocation so plans constrain to architecture, not just to ROADMAP sequencing.
+
+**Source.** Noah Brier, "Culture of AI Engineering" (Every, 2026-05-08) — Brier's Pace Layers model (Standards → Architecture → Specs → Plans → Code) places Architecture as the slow-moving layer that encodes Peter Naur's "theory of the system." Today this content scatters across PROJECT.md prose, individual PLAN.md files, and CLAUDE.md.
+
+**Why now.** GSD's SPEC → PLAN → EXECUTE phases map onto Brier's three *fastest* layers; PROJECT.md captures intent; ROADMAP.md captures sequencing. Neither carries the architectural theory in one durable place that every plan-phase reads. The fork already has DESIGN.md as a per-phase frozen design spec (`workflow.design_spec`), but DESIGN.md is *phase-scoped* — ARCHITECTURE.md is *project-scoped* and slower-moving.
+
+**Sketch.**
+
+1. Add `workflow.architecture_md` config knob (default: `false`, opt-in until validated).
+2. On `/gsd-new-project` or `/gsd-new-milestone` with the knob enabled, generate `.planning/ARCHITECTURE.md` skeleton: business-to-codebase map, inviolable rules, key decisions with rationale, open architectural questions.
+3. `gsd-planner` reads ARCHITECTURE.md as upstream constraint alongside PROJECT.md and ROADMAP.md; planning that would violate an inviolable rule must surface the violation explicitly before proceeding.
+4. `gsd-verifier` checks plan artifacts against ARCHITECTURE.md as part of the verification pass.
+5. ARCHITECTURE.md updates ship in their own PRs, separately from feature work — the slow-layer discipline.
+
+**Open design questions.**
+
+- Drift risk: ARCHITECTURE.md vs CLAUDE.md duplication. Which is source of truth? Recommended: CLAUDE.md describes *how to work in the repo* (conventions, commands); ARCHITECTURE.md describes *what the system is* (boundaries, invariants, why).
+- DESIGN.md (per-phase) vs ARCHITECTURE.md (per-project) relationship. Recommended: DESIGN.md may *extend* ARCHITECTURE.md inviolables for the phase's scope; cannot *override* them.
+- Migration path for existing fork projects with PROJECT.md + DESIGN.md but no ARCHITECTURE.md. Recommended: opt-in only; existing projects continue to work without it.
+
+**Status.** Designed, not implemented. Tracked in `lifeos-work` `wiki/topics/sdlc-gsd-pending-updates.md` GSD item 4. Requires deliberate review before adoption — adds another artifact to the per-project surface, which is non-trivial.
+
+### Kill criteria as a first-class GSD artifact (designed 2026-06-09)
+
+**Intent.** Add `KILL-CRITERIA.md` (or a section in PROJECT.md / per-phase PLAN.md) capturing **pre-committed quit triggers** written down in advance, declared, and checked against at every plan-phase and verify-work boundary. Surfaces "what would tell us to stop?" as a first-class question, distinct from open-questions (which capture uncertainty) and from success criteria (which capture what good looks like).
+
+**Source.** Annie Duke + Luca Rossi, "Thinking in Bets for Engineers" (Refactoring S5 E8, 2025-08-01) — without pre-committed kill criteria, identity threat and sunk cost keep a project running on a broken leg. *"The signals already happened 6 months ago"* is the recurring shape of late realization.
+
+**Why now.** GSD captures intent (PROJECT.md), scope/sequencing (ROADMAP.md), plan (PLAN.md), and verification outcomes (VERIFICATION.md). None of these is the stable place for *what would tell us to stop?* Kill criteria are pre-committed *response* to uncertainty, not capture of uncertainty — different shape from open-questions sections.
+
+**Sketch.**
+
+1. Add `workflow.kill_criteria` config knob (default: `false`).
+2. At phase start (or new-project), prompt for 2-5 kill criteria — measurable conditions under which the work should stop. Examples: "if integration test for X is still failing after 3 fix attempts, stop and surface architectural concern"; "if velocity drops below 1 task/day for 2 weeks, stop and re-scope."
+3. Kill criteria live in PLAN.md frontmatter (per-phase) or PROJECT.md (per-project, slower-moving).
+4. `gsd-verifier` checks each kill criterion at phase-completion and surfaces any that fire — does not auto-kill, but cannot complete the phase without explicit human acknowledgment of fired criteria.
+5. Pairs with the fork's existing **3-fix architecture escalation** rule (`gsd-debugger`) — that rule is one specific kill criterion ("after 3 failed fixes, escalate"); KILL-CRITERIA.md generalizes the pattern to arbitrary measurable conditions.
+
+**Pairs naturally with ARCHITECTURE.md** (above) — both are slow-moving artifacts that constrain faster artifacts. ARCHITECTURE.md constrains plans toward what the system *should be*; KILL-CRITERIA.md constrains plans away from what the work *shouldn't keep doing*.
+
+**Status.** Designed, not implemented. Tracked in `lifeos-work` `wiki/topics/sdlc-gsd-pending-updates.md` GSD item 5. Requires deliberate review before adoption.
+
+### Pairwise knowledge/unbook skill structure with costed adversarial review (designed 2026-06-09)
+
+**Intent.** Adopt the **pairwise skill pattern** from Anthropic's data-science case study as fork-level philosophy: every domain skill should ship as a pair — a **knowledge skill** (thin router into curated reference files) plus an **unbook skill** (procedural workflow encoding "how a senior would do this," including adversarial-review sub-agents).
+
+**Source.** Anthropic, "How Anthropic enables self-service data analytics with Claude" (claude.com, 2026-06-03). Pairwise skills moved their data team from 21% accuracy to 95%+ in aggregate, 99% in some domains. Adversarial-review sub-agent costed at **+6% accuracy, +32% tokens, +72% latency** — explicit budget data for when to pay the tax.
+
+**Why now.** GSD already separates rules (declarative knowledge, scoped by path) from phases (procedural workflows), which is structurally close to the pairwise pattern but not named at the philosophy layer. The fork's adversarial-validation stance (finder + critic + referee) is the adversarial-review sub-agent, but the cost-benefit is not captured anywhere — users have no basis for choosing between adversarial and non-adversarial flows.
+
+**Sketch.**
+
+1. Document the pairwise pattern in FORK.md philosophy: every domain skill ships as `<domain>-knowledge.md` (router into refs) + `<domain>-unbook.md` (procedural workflow with embedded adversarial-review step). The fork's existing `gsd-explore` + `gsd-execute-phase` split is the platform-level instance of the same pattern.
+2. Cost-benefit guidance for adversarial-review subagents: name the +6% accuracy / +32% tokens / +72% latency tradeoff explicitly in `gsd-verifier` docs. Default-on for load-bearing work; default-off for exploratory iteration.
+3. Add `workflow.adversarial_review_costed` config knob to surface the tradeoff at config-set time rather than implicitly.
+4. Template: when authoring a new skill, the fork-side authoring guidance is "is this a knowledge skill or an unbook skill?" — single skills that try to be both should split.
+
+**Open design question.** Whether to retrofit the fork's existing skills (~80 of them) into pairs, or only apply the discipline going forward. Recommended: forward-only, with a `/gsd-skill-audit` pass (already in Pending) flagging single-skill candidates for split.
+
+**Status.** Designed, not implemented. Tracked in `lifeos-work` `wiki/topics/sdlc-gsd-pending-updates.md` GSD item 7. Lowest-risk of the three structural items — mostly documentation and a config knob.
 
 ### "Don't shell out to `claude -p`" anti-pattern (recorded 2026-05-26)
 
