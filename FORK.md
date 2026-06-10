@@ -48,6 +48,7 @@ Fork patterns recorded against independently-published industry guidance so the 
 | **Quality gates** | No regression checks | **Ratchet effect** — coverage, type strictness, lint rules, and CI steps can never regress |
 | **Agent discipline** | Trust agents to follow instructions | **Anti-rationalization engineering** — red flags lists and excuse/reality tables prevent agents from rationalizing shortcuts |
 | **Completion claims** | Self-check after SUMMARY | **Verification discipline** — agents must run commands and cite output before saying "done" or "tests pass" |
+| **Verification rubric** | Terminal outcomes (tests pass / artifacts present) | **Intermediate bets check** — `gsd-verifier` Step 7d (`workflow.intermediate_bets_check`) lists each plan's necessary-but-not-sufficient gates and verifies hit/miss, surfacing decision-quality signal alongside outcome. Non-blocking — a phase can pass terminal verification with a poor intermediate-bet trajectory, which becomes a retrospective-review flag. Pairs with SDLC §16 v1.2.9 Release-Readiness Completion Comment (Tolaria/Duke pattern) |
 | **Code review** | Single-pass review | **Two-stage review** — spec compliance (does it match PLAN.md?) then code quality (bugs, security, patterns) |
 | **Debugging** | General restart guidance | **3-fix architecture escalation** — after 3 failed fixes, agents must stop and surface an architectural concern |
 | **Design capture** | Decisions in CONTEXT.md only | **DESIGN.md artifact** — frozen design spec (architecture, components, contracts, NFRs) consumed by planner and researcher |
@@ -85,6 +86,7 @@ All default to `true` (opinionated — the upstream would likely default most to
 | `workflow.two_stage_review` | Split code review into spec compliance + code quality passes |
 | `workflow.verification_discipline` | Require fresh evidence before completion claims |
 | `workflow.design_spec` | Generate DESIGN.md during discuss-phase for architectural phases |
+| `workflow.intermediate_bets_check` | Add intermediate-bets check (Step 7d) to `gsd-verifier` — lists each plan's necessary-but-not-sufficient gates and verifies hit/miss, separately from terminal outcome; non-blocking decision-quality signal |
 
 ### Command naming
 

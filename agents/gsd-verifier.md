@@ -687,6 +687,47 @@ done
 | ----- | ------- | ------ | ------ |
 | `scripts/.../probe-name.sh` | `bash "$probe"` | exit code/output | PASS / FAILED / MISSING_PROBE |
 
+## Step 7d: Intermediate Bets Check (workflow.intermediate_bets_check)
+
+**Gate:** This step runs when `workflow.intermediate_bets_check` is `true` (default for the fork). Skip the step entirely when the knob is `false`.
+
+```bash
+INTERMEDIATE_BETS=$(gsd_run query config-get workflow.intermediate_bets_check 2>/dev/null || echo "true")
+if [ "$INTERMEDIATE_BETS" != "true" ]; then
+  # Skip Step 7d — knob disabled
+  :
+fi
+```
+
+**Why this step exists.** Steps 0–7c verify *terminal outcomes* — does the feature work, do the tests pass, are the artifacts present. That's necessary but not sufficient. In noisy or hidden-information work, a feature can ship with the right surface result while the *intermediate gates* — the necessary-but-not-sufficient checks that should have been hit along the way — silently failed. Duke (Annie Duke, "Thinking in Bets") names these *bets in between*: the gates whose hit-rate tells you about *decision quality*, separate from *outcome*. A phase can pass terminal verification with the wrong intermediate-bet trajectory; without this step, that quality signal is invisible.
+
+**Source.** Duke / Rossi, "Thinking in Bets for Engineers" (Refactoring S5 E8, 2025-08-01) — *"in noisy environments with hidden information, terminal outcome tells you the result, not the decision quality. Identify the necessary-but-not-sufficient gates and verify each one."*
+
+**Pairs with:** SDLC §16 v1.2.9 Release-Readiness Completion Comment — the comment template (what was built · QA method · test/coverage commands · code-health before/after · localization · telemetry · refactor count · ADRs · docs) IS the receipt of intermediate bets. This step reads that receipt against the actual record.
+
+**What to check.**
+
+For each plan in the phase, build the list of intermediate bets the plan committed to (explicitly via PLAN.md success criteria, implicitly via task structure) and verify whether each was hit:
+
+| Plan | Intermediate bet | Expected gate | Observed | Hit / Missed | Notes |
+|------|------------------|---------------|----------|--------------|-------|
+| `01-name` | Tests added for new exported surface | Test files referenced from impl files | grep cite | HIT / MISSED | … |
+| `01-name` | No unreviewed external dep added | `git diff origin/main -- package.json` shows additions all in changeset/PR body | diff cite | HIT / MISSED | … |
+| `01-name` | Code-health ratchet did not regress | Pre vs post code-health score | tool cite | HIT / MISSED | … |
+| `01-name` | Telemetry event names declared in PLAN actually exist in code | grep on declared event names | grep cite | HIT / MISSED | … |
+| `01-name` | ADR created for architectural change | `.planning/adrs/NNNN-*.md` co-committed with motivating code (when `workflow.adr_co_commit`) | git log cite | HIT / MISSED / N/A | … |
+
+**Bet sources (read each, build the list):**
+
+1. PLAN.md `## Success Criteria` — each criterion is a candidate intermediate bet.
+2. PLAN.md task structure — each task is implicitly a bet ("by completing this task, the gate X is hit").
+3. SDLC §16 Release-Readiness Completion Comment template — each named section is a generic intermediate bet that applies to every phase.
+4. ARCHITECTURE.md inviolable rules (if `workflow.architecture_md` enabled and the artifact exists) — each rule is an intermediate bet *not* to violate.
+
+**Outcome.** This step does not BLOCK verification. It surfaces decision-quality signal alongside the terminal outcome. A phase can pass verification (terminal outcome green) while showing a poor intermediate-bet trajectory (many MISSED rows) — that combination is a flag for retrospective review, not for blocking the ship. Record results in the VERIFICATION.md section below.
+
+**Reasoning trap to avoid:** Do not classify a bet as HIT just because the terminal outcome is green. The intermediate bet may have been *skipped* (not hit, not missed — never run) and the terminal outcome may have passed *despite* the skip. Mark such cases as MISSED with a "skipped, terminal outcome green anyway" note — the gap is real even when the result is acceptable.
+
 ## Step 8: Identify Human Verification Needs
 
 **Always needs human:** Visual appearance, user flow completion, real-time behavior, external service integration, performance feel, error message clarity.
@@ -956,6 +997,13 @@ _Checks: schema change without migration, migration without downgrade path_
 ### Ratchet Effect
 | Check | Status | Detail |
 |-------|--------|--------|
+
+### Intermediate Bets (workflow.intermediate_bets_check)
+
+_Decision-quality signal alongside terminal outcome. A poor trajectory here is a flag for retrospective review, not for blocking the ship. Omit this section when `workflow.intermediate_bets_check` is `false`._
+
+| Plan | Intermediate bet | Expected gate | Observed | Hit / Missed | Notes |
+|------|------------------|---------------|----------|--------------|-------|
 
 ### Human Verification Required
 

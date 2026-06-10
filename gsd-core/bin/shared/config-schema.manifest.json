@@ -119,6 +119,7 @@
     "project.pr_title_template",
     "project.pr_body_requires_issue",
     "project.ci_commands",
+    "workflow.intermediate_bets_check",
     "effort.default",
     "fast_mode.enabled",
     "plan_review.source_grounding",
