@@ -102,7 +102,7 @@ Additional checks:
 
 Read the two-stage config:
 ```bash
-TWO_STAGE=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.two_stage_review 2>/dev/null || echo "true")
+TWO_STAGE=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.two_stage_review 2>/dev/null || echo "true")
 ```
 
 **When `TWO_STAGE` is `"true"` (default) AND `plan_files` is provided in `<config>`:**

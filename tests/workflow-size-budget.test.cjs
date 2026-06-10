@@ -104,9 +104,18 @@ const DEFAULT_BUDGET = 40000;
 // Grandfathered at current sizes — see PR #2551 for the progressive-disclosure
 // pattern that future shrinks should follow. Byte counts noted for reference.
 const XL_WORKFLOWS = new Set([
-  'execute-phase',  // 92525 bytes (tier high-water mark; grew in #913 inline-fallback scope clarification)
-  'plan-phase',     // 90748 bytes (grew in #922 attempt-based Agent gate)
-  'new-project',    // 55850 bytes
+  'execute-phase',  // ~103181 bytes on the fork (tier high-water mark; fork carries test_contracts + adversarial_validation + dead_code_scan + playwright_verification blocks on top of upstream)
+  'plan-phase',     // ~96251 bytes on the fork (Devil's Advocate review 12.6 + plan_bounce 12.5 + design_spec on top of upstream)
+  'new-project',    // ~70469 bytes on the fork (Round 3 Project Integration + Round 4 Scaffolding on top of upstream's onboarding)
+  // Fork classification: discuss-phase belongs in XL on this fork — the design_spec
+  // generation + SDLC checkpoint + questions_per_area="all" + key-decisions
+  // propagation blocks push it to ~61750 bytes, well above DEFAULT_BUDGET and
+  // LARGE_BUDGET. The dedicated DISCUSS_PHASE_TARGET test (below) keeps a tighter
+  // ratchet specific to this file. On upstream the file is a thin dispatcher
+  // (~28000 bytes) and would sit naturally in DEFAULT — once the fork extracts
+  // its added blocks per the discuss-phase/modes/ precedent, move it back out
+  // of XL_WORKFLOWS.
+  'discuss-phase',
 ]);
 
 // Multi-step planners and bigger feature workflows. Grandfathered.

@@ -20,6 +20,6 @@ NPM_CMD="${NPM_OVERRIDE:-npm}"
 # / inputs were retired upstream along with the SDK; re-add a guard here
 # only when a corresponding `check:*` npm script exists.
 
-if "$GIT_CMD" diff --cached --name-only | grep -Eq "^src/command-aliases\.cts$|^gsd-core/bin/lib/command-aliases\.cjs$|^scripts/check-alias-drift\.cjs$"; then
+if "$GIT_CMD" diff --cached --name-only | grep -Eq "^sdk/src/query/command-manifest\.|^src/command-aliases\.cts$|^gsd-core/bin/lib/command-aliases\.cjs$|^scripts/check-alias-drift\.cjs$|^scripts/gen-command-aliases\."; then
   "$NPM_CMD" run check:alias-drift
 fi

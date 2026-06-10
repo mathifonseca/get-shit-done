@@ -171,7 +171,7 @@ For each task:
 <test_contracts>
 Read the test contracts config:
 ```bash
-TEST_CONTRACTS=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.test_contracts 2>/dev/null || echo "true")
+TEST_CONTRACTS=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.test_contracts 2>/dev/null || echo "true")
 ```
 
 **When `TEST_CONTRACTS` is `"true"` (default):**
@@ -758,7 +758,7 @@ Do NOT skip. Do NOT proceed to state updates if self-check fails.
 <verification_discipline>
 Read the verification discipline config:
 ```bash
-VERIFICATION_DISCIPLINE=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.verification_discipline 2>/dev/null || echo "true")
+VERIFICATION_DISCIPLINE=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.verification_discipline 2>/dev/null || echo "true")
 ```
 
 **When `VERIFICATION_DISCIPLINE` is `"true"` (default):**

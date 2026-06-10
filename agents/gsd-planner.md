@@ -251,7 +251,7 @@ Every task has four required fields:
 
 Read the config:
 ```bash
-SPEC_OUTCOME=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.spec_outcome_enforcement 2>/dev/null || echo "true")
+SPEC_OUTCOME=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.spec_outcome_enforcement 2>/dev/null || echo "true")
 ```
 
 When enabled, task `<action>` fields should describe WHAT the code should accomplish, not step-by-step HOW to write it. The executor agent is better at figuring out implementation details than a prescriptive plan.

@@ -71,7 +71,7 @@ Then verify each level against the actual codebase.
 <verification_discipline>
 Read the verification discipline config:
 ```bash
-VERIFICATION_DISCIPLINE=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.verification_discipline 2>/dev/null || echo "true")
+VERIFICATION_DISCIPLINE=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.verification_discipline 2>/dev/null || echo "true")
 ```
 
 **When `VERIFICATION_DISCIPLINE` is `"true"` (default):**
@@ -497,7 +497,7 @@ Dead code degrades agent comprehension — commented-out blocks, TODO/FIXME, orp
 Read the dead code scan config:
 
 ```bash
-DEAD_CODE_SCAN=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.dead_code_scan 2>/dev/null || echo "true")
+DEAD_CODE_SCAN=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.dead_code_scan 2>/dev/null || echo "true")
 ```
 
 When enabled (`DEAD_CODE_SCAN` is `true`), scan modified files for context pollution patterns:
@@ -701,18 +701,14 @@ fi
 
 **Convention.**
 
-ADRs (Architectural Decision Records) are project-level decision records — distinct from per-phase DESIGN.md (`workflow.design_spec`), which is a frozen design spec scoped to one phase. ADRs live at `.planning/adrs/NNNN-kebab-case-title.md` with required frontmatter:
+ADRs (Architectural Decision Records) are project-level decision records — distinct from per-phase DESIGN.md (`workflow.design_spec`), which is a frozen design spec scoped to one phase. ADRs live at `.planning/adrs/NNNN-kebab-case-title.md` with required frontmatter (fields):
 
-```yaml
----
-id: NNNN
-title: One-line decision (verb-led)
-status: proposed | accepted | superseded
-date: YYYY-MM-DD
-supersedes: NNNN  # if applicable
-superseded-by: NNNN  # set when this ADR is superseded by a newer one
----
-```
+- `id` — `NNNN` (zero-padded sequence)
+- `title` — one-line decision (verb-led)
+- `adr_status` — one of `proposed`, `accepted`, `superseded` (the ADR's lifecycle state; named `adr_status` to avoid collision with the verifier's own `status:` field)
+- `date` — `YYYY-MM-DD`
+- `supersedes` — `NNNN` if applicable
+- `superseded_by` — set when this ADR is superseded by a newer one
 
 **Rules.**
 
