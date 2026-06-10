@@ -1015,6 +1015,19 @@ _Decision-quality signal alongside terminal outcome. A poor trajectory here is a
 
 ---
 
+### Provenance (workflow.provenance_footer)
+
+_Trust footer for the receipt downstream consumers act on. Names source tier, data freshness, and ownership so the consumer can judge how much to trust the response. Omit this section when `workflow.provenance_footer` is `false`._
+
+- **Source tier:** `verified` (this VERIFICATION.md is the canonical artifact for the phase; sits at the same trust tier as a hand-checked review).
+- **Data freshness:** Verified at `{timestamp}` against repo HEAD `{git rev-parse HEAD}`. Tests, probes, and grep cites reflect that snapshot — subsequent commits invalidate specific rows.
+- **Owner:** `gsd-verifier` (Claude) — adversarial-validation lineage when `workflow.adversarial_validation` enabled (finder + critic + referee triangulation). Single-pass when disabled — note here.
+- **Known unknowns:** {anything the verifier could not check — visual rendering, real-time behavior, external service calls — explicitly named so the consumer does not treat the green outcome as covering them}.
+
+_The footer is defense-in-depth, not a silver bullet. A "verified, single-pass, freshness ~now" footer is the signal that the answer can be acted on without re-verification; a "verified, freshness 24h, known unknowns: visual rendering" footer is the signal to spot-check before forwarding._
+
+---
+
 _Verified: {timestamp}_
 _Verifier: Claude (gsd-verifier)_
 ```

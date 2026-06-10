@@ -400,6 +400,19 @@ The `files_reviewed_list` field is REQUIRED — it preserves the exact file scop
 
 ---
 
+### Provenance (workflow.provenance_footer)
+
+_Trust footer for the receipt downstream consumers act on. Names source tier, data freshness, and ownership so the consumer can judge how much to trust the response. Omit this section when `workflow.provenance_footer` is `false`._
+
+- **Source tier:** `reviewed` (this REVIEW.md represents a structured code review against the configured `code_quality` ruleset; sits between an automated lint pass and a hand-checked architectural review).
+- **Data freshness:** Reviewed at `{timestamp}` against repo HEAD `{git rev-parse HEAD}` and changeset `{git rev-parse HEAD~1..HEAD}` (or the spec-compliance baseline). Subsequent commits invalidate specific line cites.
+- **Owner:** `gsd-code-reviewer` (Claude) at depth `{depth}`. Two-stage review (spec compliance + code quality) when `workflow.two_stage_review` enabled; single-stage otherwise — note here.
+- **Known unknowns:** {anything outside review scope — performance characteristics under load, race conditions only visible at runtime, accessibility against actual assistive-tech — explicitly named so the consumer does not treat a clean review as covering them}.
+
+_The footer is defense-in-depth. A "reviewed, deep, freshness ~now" footer is a strong signal; a "reviewed, quick, freshness 24h, known unknowns: performance" footer is the signal to schedule a deeper pass before forwarding._
+
+---
+
 _Reviewed: {timestamp}_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: {depth}_

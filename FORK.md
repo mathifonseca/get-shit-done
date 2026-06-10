@@ -49,6 +49,7 @@ Fork patterns recorded against independently-published industry guidance so the 
 | **Agent discipline** | Trust agents to follow instructions | **Anti-rationalization engineering** — red flags lists and excuse/reality tables prevent agents from rationalizing shortcuts |
 | **Completion claims** | Self-check after SUMMARY | **Verification discipline** — agents must run commands and cite output before saying "done" or "tests pass" |
 | **Verification rubric** | Terminal outcomes (tests pass / artifacts present) | **Intermediate bets check** — `gsd-verifier` Step 7d (`workflow.intermediate_bets_check`) lists each plan's necessary-but-not-sufficient gates and verifies hit/miss, surfacing decision-quality signal alongside outcome. Non-blocking — a phase can pass terminal verification with a poor intermediate-bet trajectory, which becomes a retrospective-review flag. Pairs with SDLC §16 v1.2.9 Release-Readiness Completion Comment (Tolaria/Duke pattern) |
+| **Agent-output trust signal** | (not addressed) | **Provenance footer** — every fork-agent-generated artifact (`VERIFICATION.md`, `REVIEW.md`) carries a footer naming source tier (verified/reviewed/raw/synthesized), data freshness (timestamp + HEAD sha), ownership (which agent at which depth/mode), and known unknowns. Doesn't make the answer more correct — lets the consumer judge how much to trust it. Defense-in-depth, not a silver bullet (Anthropic self-service analytics, 2026-06-03) |
 | **Code review** | Single-pass review | **Two-stage review** — spec compliance (does it match PLAN.md?) then code quality (bugs, security, patterns) |
 | **Debugging** | General restart guidance | **3-fix architecture escalation** — after 3 failed fixes, agents must stop and surface an architectural concern |
 | **Design capture** | Decisions in CONTEXT.md only | **DESIGN.md artifact** — frozen design spec (architecture, components, contracts, NFRs) consumed by planner and researcher |
@@ -87,6 +88,7 @@ All default to `true` (opinionated — the upstream would likely default most to
 | `workflow.verification_discipline` | Require fresh evidence before completion claims |
 | `workflow.design_spec` | Generate DESIGN.md during discuss-phase for architectural phases |
 | `workflow.intermediate_bets_check` | Add intermediate-bets check (Step 7d) to `gsd-verifier` — lists each plan's necessary-but-not-sufficient gates and verifies hit/miss, separately from terminal outcome; non-blocking decision-quality signal |
+| `workflow.provenance_footer` | Append a Provenance footer to agent-generated artifacts (`VERIFICATION.md`, `REVIEW.md`) naming source tier, data freshness, ownership, and known unknowns — the consumer-side trust signal |
 
 ### Command naming
 
