@@ -480,7 +480,7 @@ In `--auto` mode, the discuss step MUST complete in a **single pass**. After wri
 
 Check the pass cap from config:
 ```bash
-MAX_PASSES=$(gsd-sdk query config-get workflow.max_discuss_passes 2>/dev/null || echo "3")
+MAX_PASSES=$(gsd_run query config-get workflow.max_discuss_passes 2>/dev/null || echo "3")
 ```
 
 If you have already written and committed CONTEXT.md, the discuss step is complete. Move on.
@@ -738,7 +738,7 @@ In `--auto` mode, the discuss step MUST complete in a **single pass**. After wri
 
 Check the pass cap from config:
 ```bash
-MAX_PASSES=$(gsd-sdk query config-get workflow.max_discuss_passes 2>/dev/null || echo "3")
+MAX_PASSES=$(gsd_run query config-get workflow.max_discuss_passes 2>/dev/null || echo "3")
 ```
 
 If you have already written and committed CONTEXT.md, the discuss step is complete. Move on.
