@@ -40,6 +40,7 @@ Fork patterns recorded against independently-published industry guidance so the 
 | **Discussion** | 4 questions per area, then ask to continue | **Exhaust all questions** per area before moving on (configurable via `workflow.questions_per_area`) |
 | **Visual verification** | Manual UAT | **Playwright tests as first-class** — screenshots as automated verification evidence |
 | **Shipping** | Manual PR creation | **Integrated PR workflow** — issue tracking, branch naming, preflight checks, auto PR creation |
+| **Solo trunk-based shipping** | (not addressed) | **Trunk-based with pre-push gate** — documented alternative to the PR workflow for solo AI-assisted work. Pre-push enforces the full check suite (build + tests + smoke + code-health ratchet) so quality lives in tooling, not reviewer ceremony. Pairs with `workflow.use_worktrees` and the existing preflight scaffold. Naming the alternative explicitly so solo users don't have to derive it (Tolaria AGENTS.md, 2026-04, treats trunk-based-with-pre-push-gate as the load-bearing solo discipline). |
 | **Project init** | Basic config questions | **Full project integration** — issue tracker, branch conventions, PR templates, CI commands, Makefile/pre-commit scaffolding |
 | **Phase completion** | Implicit "done" | **Definition of Done checklist** — tests, CI, CLAUDE.md, docs, issue tracker |
 | **During execution** | Single executor | **Edge Case Hunter** — parallel review agent catches boundary conditions and failure modes in real-time alongside executors |
