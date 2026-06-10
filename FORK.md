@@ -1,6 +1,6 @@
 # Fork: SDLC-Aligned GSD
 
-This is a personalized fork of [GET SHIT DONE](https://github.com/gsd-build/get-shit-done) by Lex Christopherson / TACHES.
+This is a personalized fork of GET SHIT DONE by Lex Christopherson / TÂCHES — originally hosted at [gsd-build/get-shit-done](https://github.com/gsd-build/get-shit-done) (retired 2026), now continued as **GSD Core** at [open-gsd/gsd-core](https://github.com/open-gsd/gsd-core). This fork tracks the active continuation.
 
 ## Why this fork exists
 
@@ -141,14 +141,18 @@ So in an installed fork you type the **hyphen** form even though the source (cor
 
 ## Upstream tracking
 
-This fork tracks the upstream repo at `gsd-build/get-shit-done`. The `upstream` remote is configured and the strategy is **merge with conflict resolution** — upstream releases are merged, conflicts are resolved by keeping both sides (upstream's new features plus fork additions).
+This fork tracks the active upstream at `open-gsd/gsd-core` (was `gsd-build/get-shit-done` until that repo was retired in 2026). The `upstream` remote is configured against the new repo. The new upstream uses a two-branch model: `main` is the stable release line (currently v1.4.x, latest tag `v1.4.3`); `next` is the integration branch (the repo's default). This fork tracks **`upstream/main`** — released versions only — matching the prior fork pattern of syncing to tagged releases.
+
+The version scheme reset at the upstream migration: the new upstream restarted at v1.0.0 (current latest is v1.4.3); the old upstream was at v1.43.0 / v1.42.x. Numeric semver comparison between pre-migration and post-migration versions is meaningless — `1.43.0 > 1.4.3` arithmetically but the new is the actual successor. The fork-aware statusline / check-update worker now polls the npm package `@opengsd/gsd-core` (was `get-shit-done-cc`).
+
+The strategy remains **merge with conflict resolution** — upstream releases are merged, conflicts are resolved by keeping both sides (upstream's new features plus fork additions).
 
 ### How to sync
 
 ```bash
 cd ~/code/get-shit-done
 git fetch upstream
-git log upstream/main --oneline -20    # Review what's new
+git log upstream/main --oneline -20    # Review what's new on stable line
 git merge upstream/main                # Merge (or cherry-pick specific commits)
 # Resolve conflicts: keep BOTH sides — upstream features + fork additions
 npm run build:hooks                    # Rebuild hooks to dist/
@@ -162,12 +166,13 @@ The installer copies hooks from `hooks/dist/`, not `hooks/`. Always run `npm run
 
 ### Update notifications
 
-The fork-aware statusline shows `⬆ upstream X.Y.Z available — cherry-pick from upstream` (cyan) instead of the standard `/gsd-update` prompt. Running `/gsd-update` is blocked — it would overwrite fork changes with the upstream npm package.
+The fork-aware statusline shows `⬆ upstream X.Y.Z available — cherry-pick from upstream` (cyan) instead of the standard `/gsd-update` prompt. The version shown is the latest published `@opengsd/gsd-core` release on npm. Running `/gsd-update` is blocked — it would overwrite fork changes with the upstream npm package.
 
 ### Sync history
 
 | Date | Upstream Version | Commit | Notes |
 |------|-----------------|--------|-------|
+| 2026-06-10 | upstream-migration | `03764dbc` | **Special event, not a routine sync.** Original upstream `gsd-build/get-shit-done` retired per its README (the README now redirects to GSD Core at `open-gsd/gsd-core`). `upstream` remote re-pointed at `https://github.com/open-gsd/gsd-core.git`. **Commit-history relationship:** common-history fork — merge-base resolves at `1a4e6df6` (the v1.43.0-rc1 sync point — PR #3557 / feat/3347-auto-update-knowledge-graph-after-main). New upstream's `next` (default) and `main` branches both share this ancestor, so a standard merge is feasible (no cherry-pick / rebase-onto required). **Branch model on new upstream:** `next` is the integration branch (758 commits past us); `main` is the stable release line (680 commits past us, latest tag `v1.4.3`). This fork tracks `upstream/main` going forward — matches the prior stable-only sync pattern. **Versioning:** new upstream reset to v1.0.0 series; current `1.4.3` succeeds our previously-installed `1.43.0-rc1` despite reading as numerically lower. **npm package:** renamed `get-shit-done-cc` → `@opengsd/gsd-core` (binary renamed `gsd` → `gsd-core`). Files updated this commit: `FORK.md` (this row + opening line + Upstream tracking section), `CLAUDE.md` (gh `--repo` flag → open-gsd/gsd-core), `hooks/gsd-check-update-worker.js` + `hooks/dist/gsd-check-update-worker.js` (npm package name), `bin/install.js` (clone URLs + install package name), `README.md` (badges + fork attribution + npm install command), `.release-monitor.sh` (REPO var + header comment). The actual sync (merging 680 commits from `upstream/main` HEAD) happens in the next row — this row is migration-only. |
 | 2026-04-06 | v1.32.0 | `06fd18d` | 8 conflicts resolved. Added: code review, global learnings, execution context profiles, /gsd-explore, /gsd-import, /gsd-undo, stall detection, prompt injection improvements, Node 24 minimum, /gsd: → /gsd- rename |
 | 2026-04-07 | v1.34.2 | `8bee55a` | 1 conflict resolved (CONFIGURATION.md). Added: gates taxonomy, reapply-patches verification, Node 22 restored, detectConfigDir fix, hooks packaging fix, backlog preserve fix, Windsurf config dir. Migrated remaining /gsd: refs to /gsd- in fork files |
 | 2026-04-15 | v1.36.0 | `d650d34` | 9 conflicts resolved across agents (executor, planner), config (config.cjs, config.json, CONFIGURATION.md), workflows (plan-phase, verify-work), and hooks (check-update, statusline). Added: `/gsd-graphify` knowledge graph, SDK Phase 1 (`gsd-sdk query`), TDD pipeline mode + `--tdd` flag, `gsd-pattern-mapper` agent, debug session manager + TDD gate, project skills awareness across 9 agents, seed scanning in new-milestone, `plan_bounce` + `cross_ai_execution` config, stale-hooks `.sh` false-positive fixes (#2209–#2241), worker-file refactor of gsd-check-update. Fork-specific: plan-bounce renumbered to 12.5 (Devil's Advocate moved to 12.6), `is_fork` detection ported into new worker, dev-install stale-hooks warning preserved for non-forks, TEXT_MODE fallback added to sdlc-audit.md |
@@ -182,7 +187,7 @@ The fork-aware statusline shows `⬆ upstream X.Y.Z available — cherry-pick fr
 
 ### Pending upstream (not yet merged)
 
-_None — fork is current as of v1.43.0-rc1 (latest tag as of 2026-05-15). Upstream main is 31 commits past the rc; next stable is v1.43.0._
+_Upstream migration completed 2026-06-10 (see migration row above). Next sync row will absorb `open-gsd/gsd-core` `upstream/main` HEAD (`03764dbc`, v1.4.3 + 1 hotfix merge — 680 commits past our last common ancestor)._
 
 ## Pending fork additions
 

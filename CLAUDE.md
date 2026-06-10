@@ -1,8 +1,9 @@
 ## GitHub access
 
 Use the configured GitHub CLI session for this checkout. Always pass
-`--repo gsd-build/get-shit-done` on `gh` commands so issue and PR operations
-stay scoped to the canonical repository.
+`--repo open-gsd/gsd-core` on `gh` commands so issue and PR operations
+stay scoped to the canonical upstream repository (was `gsd-build/get-shit-done`
+prior to the 2026-06-10 upstream migration).
 
 ---
 
@@ -10,7 +11,7 @@ stay scoped to the canonical repository.
 
 ### Issue tracker
 
-Issues live in GitHub Issues (`gsd-build/get-shit-done`). See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues (`open-gsd/gsd-core`). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

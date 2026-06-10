@@ -214,7 +214,7 @@ Please install a Linux-native Node.js inside WSL:
   curl -fsSL https://fnm.vercel.app/install | bash
   fnm install --lts
 
-Then re-run: npx get-shit-done-cc@latest
+Then re-run: npx @opengsd/gsd-core@latest
 `);
     process.exit(1);
   }
@@ -537,7 +537,7 @@ if (hasUninstall) {
 
 // Show help if requested
 if (hasHelp) {
-  console.log(`  ${yellow}Usage:${reset} npx get-shit-done-cc [options]\n\n  ${yellow}Options:${reset}\n    ${cyan}-g, --global${reset}              Install globally (to config directory)\n    ${cyan}-l, --local${reset}               Install locally (to current directory)\n    ${cyan}--claude${reset}                  Install for Claude Code only\n    ${cyan}--opencode${reset}                Install for OpenCode only\n    ${cyan}--gemini${reset}                  Install for Gemini only\n    ${cyan}--kilo${reset}                    Install for Kilo only\n    ${cyan}--codex${reset}                   Install for Codex only\n    ${cyan}--copilot${reset}                 Install for Copilot only\n    ${cyan}--antigravity${reset}             Install for Antigravity only\n    ${cyan}--cursor${reset}                  Install for Cursor only\n    ${cyan}--windsurf${reset}                Install for Windsurf only\n    ${cyan}--augment${reset}                 Install for Augment only\n    ${cyan}--trae${reset}                    Install for Trae only\n    ${cyan}--qwen${reset}                    Install for Qwen Code only\n    ${cyan}--hermes${reset}                  Install for Hermes Agent only\n    ${cyan}--cline${reset}                   Install for Cline only\n    ${cyan}--codebuddy${reset}              Install for CodeBuddy only\n    ${cyan}--all${reset}                     Install for all runtimes\n    ${cyan}-u, --uninstall${reset}           Uninstall GSD (remove all GSD files)\n    ${cyan}-c, --config-dir <path>${reset}   Specify custom config directory\n    ${cyan}-h, --help${reset}                Show this help message\n    ${cyan}--force-statusline${reset}        Replace existing statusline config\n    ${cyan}--portable-hooks${reset}          Emit \$HOME-relative hook paths in settings.json\n                              (for WSL/Docker bind-mount setups; also GSD_PORTABLE_HOOKS=1)\n    ${cyan}--profile=<name>${reset}         Install a named skill profile. Profiles:\n                              core     — 7 main-loop skills incl. phase (~130 desc tokens)\n                              standard — ~13 skills incl. phase, review, config (~700)\n                              full     — all 66 skills (default)\n                              Composable: --profile=core,audit installs union of closures.\n                              Profile is persisted and respected by \`gsd update\`.\n    ${cyan}--minimal${reset}                 Alias for --profile=core (back-compat).\n                              Cuts cold-start overhead from ~12k tokens to ~700.\n                              Alias: --core-only.\n\n  ${yellow}Examples:${reset}\n    ${dim}# Interactive install (prompts for runtime and location)${reset}\n    npx get-shit-done-cc\n\n    ${dim}# Install for Claude Code globally${reset}\n    npx get-shit-done-cc --claude --global\n\n    ${dim}# Install for Gemini globally${reset}\n    npx get-shit-done-cc --gemini --global\n\n    ${dim}# Install for Kilo globally${reset}\n    npx get-shit-done-cc --kilo --global\n\n    ${dim}# Install for Codex globally${reset}\n    npx get-shit-done-cc --codex --global\n\n    ${dim}# Install for Copilot globally${reset}\n    npx get-shit-done-cc --copilot --global\n\n    ${dim}# Install for Copilot locally${reset}\n    npx get-shit-done-cc --copilot --local\n\n    ${dim}# Install for Antigravity globally${reset}\n    npx get-shit-done-cc --antigravity --global\n\n    ${dim}# Install for Antigravity locally${reset}\n    npx get-shit-done-cc --antigravity --local\n\n    ${dim}# Install for Cursor globally${reset}\n    npx get-shit-done-cc --cursor --global\n\n    ${dim}# Install for Cursor locally${reset}\n    npx get-shit-done-cc --cursor --local\n\n    ${dim}# Install for Windsurf globally${reset}\n    npx get-shit-done-cc --windsurf --global\n\n    ${dim}# Install for Windsurf locally${reset}\n    npx get-shit-done-cc --windsurf --local\n\n    ${dim}# Install for Augment globally${reset}\n    npx get-shit-done-cc --augment --global\n\n    ${dim}# Install for Augment locally${reset}\n    npx get-shit-done-cc --augment --local\n\n    ${dim}# Install for Trae globally${reset}\n    npx get-shit-done-cc --trae --global\n\n    ${dim}# Install for Trae locally${reset}\n    npx get-shit-done-cc --trae --local\n\n    ${dim}# Install for Hermes Agent globally${reset}\n    npx get-shit-done-cc --hermes --global\n\n    ${dim}# Install for Hermes Agent locally${reset}\n    npx get-shit-done-cc --hermes --local\n\n    ${dim}# Install for Cline locally${reset}\n    npx get-shit-done-cc --cline --local\n\n    ${dim}# Install for CodeBuddy globally${reset}\n    npx get-shit-done-cc --codebuddy --global\n\n    ${dim}# Install for CodeBuddy locally${reset}\n    npx get-shit-done-cc --codebuddy --local\n\n    ${dim}# Install for all runtimes globally${reset}\n    npx get-shit-done-cc --all --global\n\n    ${dim}# Install to custom config directory${reset}\n    npx get-shit-done-cc --kilo --global --config-dir ~/.kilo-work\n\n    ${dim}# Install to current project only${reset}\n    npx get-shit-done-cc --claude --local\n\n    ${dim}# Uninstall GSD from Cursor globally${reset}\n    npx get-shit-done-cc --cursor --global --uninstall\n\n  ${yellow}Notes:${reset}\n    The --config-dir option is useful when you have multiple configurations.\n    It takes priority over CLAUDE_CONFIG_DIR / OPENCODE_CONFIG_DIR / GEMINI_CONFIG_DIR / KILO_CONFIG_DIR / CODEX_HOME / COPILOT_CONFIG_DIR / ANTIGRAVITY_CONFIG_DIR / CURSOR_CONFIG_DIR / WINDSURF_CONFIG_DIR / AUGMENT_CONFIG_DIR / TRAE_CONFIG_DIR / QWEN_CONFIG_DIR / HERMES_HOME / CLINE_CONFIG_DIR / CODEBUDDY_CONFIG_DIR environment variables.\n`);
+  console.log(`  ${yellow}Usage:${reset} npx @opengsd/gsd-core [options]\n\n  ${yellow}Options:${reset}\n    ${cyan}-g, --global${reset}              Install globally (to config directory)\n    ${cyan}-l, --local${reset}               Install locally (to current directory)\n    ${cyan}--claude${reset}                  Install for Claude Code only\n    ${cyan}--opencode${reset}                Install for OpenCode only\n    ${cyan}--gemini${reset}                  Install for Gemini only\n    ${cyan}--kilo${reset}                    Install for Kilo only\n    ${cyan}--codex${reset}                   Install for Codex only\n    ${cyan}--copilot${reset}                 Install for Copilot only\n    ${cyan}--antigravity${reset}             Install for Antigravity only\n    ${cyan}--cursor${reset}                  Install for Cursor only\n    ${cyan}--windsurf${reset}                Install for Windsurf only\n    ${cyan}--augment${reset}                 Install for Augment only\n    ${cyan}--trae${reset}                    Install for Trae only\n    ${cyan}--qwen${reset}                    Install for Qwen Code only\n    ${cyan}--hermes${reset}                  Install for Hermes Agent only\n    ${cyan}--cline${reset}                   Install for Cline only\n    ${cyan}--codebuddy${reset}              Install for CodeBuddy only\n    ${cyan}--all${reset}                     Install for all runtimes\n    ${cyan}-u, --uninstall${reset}           Uninstall GSD (remove all GSD files)\n    ${cyan}-c, --config-dir <path>${reset}   Specify custom config directory\n    ${cyan}-h, --help${reset}                Show this help message\n    ${cyan}--force-statusline${reset}        Replace existing statusline config\n    ${cyan}--portable-hooks${reset}          Emit \$HOME-relative hook paths in settings.json\n                              (for WSL/Docker bind-mount setups; also GSD_PORTABLE_HOOKS=1)\n    ${cyan}--profile=<name>${reset}         Install a named skill profile. Profiles:\n                              core     — 7 main-loop skills incl. phase (~130 desc tokens)\n                              standard — ~13 skills incl. phase, review, config (~700)\n                              full     — all 66 skills (default)\n                              Composable: --profile=core,audit installs union of closures.\n                              Profile is persisted and respected by \`gsd update\`.\n    ${cyan}--minimal${reset}                 Alias for --profile=core (back-compat).\n                              Cuts cold-start overhead from ~12k tokens to ~700.\n                              Alias: --core-only.\n\n  ${yellow}Examples:${reset}\n    ${dim}# Interactive install (prompts for runtime and location)${reset}\n    npx @opengsd/gsd-core\n\n    ${dim}# Install for Claude Code globally${reset}\n    npx @opengsd/gsd-core --claude --global\n\n    ${dim}# Install for Gemini globally${reset}\n    npx @opengsd/gsd-core --gemini --global\n\n    ${dim}# Install for Kilo globally${reset}\n    npx @opengsd/gsd-core --kilo --global\n\n    ${dim}# Install for Codex globally${reset}\n    npx @opengsd/gsd-core --codex --global\n\n    ${dim}# Install for Copilot globally${reset}\n    npx @opengsd/gsd-core --copilot --global\n\n    ${dim}# Install for Copilot locally${reset}\n    npx @opengsd/gsd-core --copilot --local\n\n    ${dim}# Install for Antigravity globally${reset}\n    npx @opengsd/gsd-core --antigravity --global\n\n    ${dim}# Install for Antigravity locally${reset}\n    npx @opengsd/gsd-core --antigravity --local\n\n    ${dim}# Install for Cursor globally${reset}\n    npx @opengsd/gsd-core --cursor --global\n\n    ${dim}# Install for Cursor locally${reset}\n    npx @opengsd/gsd-core --cursor --local\n\n    ${dim}# Install for Windsurf globally${reset}\n    npx @opengsd/gsd-core --windsurf --global\n\n    ${dim}# Install for Windsurf locally${reset}\n    npx @opengsd/gsd-core --windsurf --local\n\n    ${dim}# Install for Augment globally${reset}\n    npx @opengsd/gsd-core --augment --global\n\n    ${dim}# Install for Augment locally${reset}\n    npx @opengsd/gsd-core --augment --local\n\n    ${dim}# Install for Trae globally${reset}\n    npx @opengsd/gsd-core --trae --global\n\n    ${dim}# Install for Trae locally${reset}\n    npx @opengsd/gsd-core --trae --local\n\n    ${dim}# Install for Hermes Agent globally${reset}\n    npx @opengsd/gsd-core --hermes --global\n\n    ${dim}# Install for Hermes Agent locally${reset}\n    npx @opengsd/gsd-core --hermes --local\n\n    ${dim}# Install for Cline locally${reset}\n    npx @opengsd/gsd-core --cline --local\n\n    ${dim}# Install for CodeBuddy globally${reset}\n    npx @opengsd/gsd-core --codebuddy --global\n\n    ${dim}# Install for CodeBuddy locally${reset}\n    npx @opengsd/gsd-core --codebuddy --local\n\n    ${dim}# Install for all runtimes globally${reset}\n    npx @opengsd/gsd-core --all --global\n\n    ${dim}# Install to custom config directory${reset}\n    npx @opengsd/gsd-core --kilo --global --config-dir ~/.kilo-work\n\n    ${dim}# Install to current project only${reset}\n    npx @opengsd/gsd-core --claude --local\n\n    ${dim}# Uninstall GSD from Cursor globally${reset}\n    npx @opengsd/gsd-core --cursor --global --uninstall\n\n  ${yellow}Notes:${reset}\n    The --config-dir option is useful when you have multiple configurations.\n    It takes priority over CLAUDE_CONFIG_DIR / OPENCODE_CONFIG_DIR / GEMINI_CONFIG_DIR / KILO_CONFIG_DIR / CODEX_HOME / COPILOT_CONFIG_DIR / ANTIGRAVITY_CONFIG_DIR / CURSOR_CONFIG_DIR / WINDSURF_CONFIG_DIR / AUGMENT_CONFIG_DIR / TRAE_CONFIG_DIR / QWEN_CONFIG_DIR / HERMES_HOME / CLINE_CONFIG_DIR / CODEBUDDY_CONFIG_DIR environment variables.\n`);
   process.exit(0);
 }
 
@@ -8420,7 +8420,7 @@ function install(isGlobal, runtime = 'claude', options = {}) {
   // Copy agents to agents directory.
   // Skipped under --minimal: gsd-* subagent descriptions are eagerly loaded
   // into the runtime's Agent tool schema, costing ~6k tokens per turn even
-  // when no GSD workflow is active. See gsd-build/get-shit-done#2762.
+  // when no GSD workflow is active. See open-gsd/gsd-core#2762 (historically gsd-build/get-shit-done#2762).
   // Note: agentsSrc is declared as let before the enclosing try block so it
   // is accessible by installCodexConfig() in the Codex config section below.
   agentsSrc = _stageAgents(path.join(src, 'agents'));
@@ -10109,7 +10109,7 @@ function maybeSuggestPathExport(globalBin, homeDir) {
  * Verify the prebuilt SDK dist is present and the gsd-sdk shim is wired up.
  *
  * As of fix/2441-sdk-decouple, sdk/dist/ is shipped prebuilt inside the
- * get-shit-done-cc npm tarball. The parent package declares a bin entry
+ * @opengsd/gsd-core npm tarball (was @opengsd/gsd-core pre-2026-06-10 migration). The parent package declares a bin entry
  * "gsd-sdk": "bin/gsd-sdk.js" so npm chmods the shim correctly when
  * installing from a packed tarball — eliminating the mode-644 failure
  * (issue #2453) and the build-from-source failure modes (#2439, #2441).
@@ -10128,15 +10128,15 @@ function maybeSuggestPathExport(globalBin, homeDir) {
  * `sdk/dist/` is missing:
  *
  *   - `tarball` + `npxCache: true`
- *       User ran `npx get-shit-done-cc@latest`. sdk/ lives under
- *       `<npm-cache>/_npx/<hash>/node_modules/get-shit-done-cc/sdk` which
+ *       User ran `npx @opengsd/gsd-core@latest`. sdk/ lives under
+ *       `<npm-cache>/_npx/<hash>/node_modules/@opengsd/gsd-core/sdk` which
  *       is treated as read-only by npm/npx on Windows (#2649). We MUST
  *       NOT attempt a nested `npm install` there — it will fail with
  *       EACCES/EPERM and produce the misleading "Failed to npm install
  *       in sdk/" error the user reported. Point at the global upgrade.
  *
  *   - `tarball` + `npxCache: false`
- *       User ran a global install (`npm i -g get-shit-done-cc`). sdk/dist
+ *       User ran a global install (`npm i -g @opengsd/gsd-core`). sdk/dist
  *       ships in the published tarball; if it's missing, the published
  *       artifact itself is broken (see #2647). Same user-facing fix:
  *       upgrade to latest.
@@ -10199,7 +10199,7 @@ function classifySdkInstall(sdkDir) {
  *     context: 'npx-cache' | 'tarball' | 'dev-clone',
  *     missing_path: '<path>/sdk/dist/cli.js',
  *     missing_artifact: 'sdk/dist',
- *     fix_command: 'npm install -g get-shit-done-cc@latest' | 'cd sdk && npm install && npm run build',
+ *     fix_command: 'npm install -g @opengsd/gsd-core@latest' | 'cd sdk && npm install && npm run build',
  *     attempted_nested_install: false,         // contract: never true
  *   }
  */
@@ -10208,7 +10208,7 @@ function buildSdkFailFastReport(sdkDir, sdkCliPath) {
   let context, fix_command;
   if (ctx.mode === 'tarball') {
     context = ctx.npxCache ? 'npx-cache' : 'tarball';
-    fix_command = 'npm install -g get-shit-done-cc@latest';
+    fix_command = 'npm install -g @opengsd/gsd-core@latest';
   } else {
     context = 'dev-clone';
     fix_command = 'cd sdk && npm install && npm run build';
@@ -10245,16 +10245,16 @@ function renderSdkFailFastReport(ir) {
     console.error(`  Fix: install a version that ships sdk/dist/ globally:`);
     console.error(`    ${cyan}${ir.fix_command}${reset}`);
     console.error(`  Or, if you prefer a one-shot run, clear the npx cache first:`);
-    console.error(`    ${cyan}npx --yes get-shit-done-cc@latest${reset}`);
+    console.error(`    ${cyan}npx --yes @opengsd/gsd-core@latest${reset}`);
     console.error(`  Or build from source (git clone):`);
-    console.error(`    ${cyan}git clone https://github.com/gsd-build/get-shit-done && cd get-shit-done/sdk && npm install && npm run build${reset}`);
+    console.error(`    ${cyan}git clone https://github.com/open-gsd/gsd-core && cd gsd-core/sdk && npm install && npm run build${reset}`);
   } else if (ir.context === 'tarball') {
     console.error(`  The published tarball appears to be missing sdk/dist/ (see #2647).`);
     console.error('');
     console.error(`  Fix: install a version that ships sdk/dist/ globally:`);
     console.error(`    ${cyan}${ir.fix_command}${reset}`);
     console.error(`  Or build from source (git clone):`);
-    console.error(`    ${cyan}git clone https://github.com/gsd-build/get-shit-done && cd get-shit-done/sdk && npm install && npm run build${reset}`);
+    console.error(`    ${cyan}git clone https://github.com/open-gsd/gsd-core && cd gsd-core/sdk && npm install && npm run build${reset}`);
   } else {
     console.error(`  Running from a git clone — build the SDK first:`);
     console.error(`    ${cyan}${ir.fix_command}${reset}`);
@@ -10320,7 +10320,7 @@ function installSdkIfNeeded(opts) {
   }
 
   // #2775: do not assert "GSD SDK ready" until `gsd-sdk` actually resolves on
-  // PATH. `npx get-shit-done-cc` only links the package's primary bin; the
+  // PATH. `npx @opengsd/gsd-core` only links the package's primary bin; the
   // secondary `gsd-sdk` shim is left dangling under the npx cache and is NOT
   // callable as a bare command. The previous file-presence-only check was a
   // strictly weaker invariant than the one workflows depend on
@@ -10597,7 +10597,7 @@ function buildGsdSdkVersionMismatchReport(sdkPath, expectedVersion) {
     sdk_path: sdkPath,
     actual_version: actualVersion,
     expected_version: expectedVersion,
-    fix_command: 'npm install -g get-shit-done-cc@latest',
+    fix_command: 'npm install -g @opengsd/gsd-core@latest',
   };
 }
 

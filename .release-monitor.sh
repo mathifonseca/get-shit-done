@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Release monitor for gsd-build/get-shit-done
+# Release monitor for open-gsd/gsd-core (was gsd-build/get-shit-done until 2026-06-10 upstream migration)
 # Checks every 15 minutes, writes new release info to a signal file
 
-REPO="gsd-build/get-shit-done"
+REPO="open-gsd/gsd-core"
 SIGNAL_FILE="/tmp/gsd-new-release.json"
 STATE_FILE="/tmp/gsd-monitor-last-tag"
 LOG_FILE="/tmp/gsd-monitor.log"
