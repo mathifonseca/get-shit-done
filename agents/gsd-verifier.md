@@ -687,6 +687,54 @@ done
 | ----- | ------- | ------ | ------ |
 | `scripts/.../probe-name.sh` | `bash "$probe"` | exit code/output | PASS / FAILED / MISSING_PROBE |
 
+## Step 7-ADR: ADR Co-Commit Check (workflow.adr_co_commit)
+
+**Gate:** This step runs when `workflow.adr_co_commit` is `true` (default for the fork). Skip the step entirely when the knob is `false`.
+
+```bash
+ADR_CO_COMMIT=$(gsd_run query config-get workflow.adr_co_commit 2>/dev/null || echo "true")
+if [ "$ADR_CO_COMMIT" != "true" ]; then
+  # Skip Step 7-ADR — knob disabled
+  :
+fi
+```
+
+**Convention.**
+
+ADRs (Architectural Decision Records) are project-level decision records — distinct from per-phase DESIGN.md (`workflow.design_spec`), which is a frozen design spec scoped to one phase. ADRs live at `.planning/adrs/NNNN-kebab-case-title.md` with required frontmatter:
+
+```yaml
+---
+id: NNNN
+title: One-line decision (verb-led)
+status: proposed | accepted | superseded
+date: YYYY-MM-DD
+supersedes: NNNN  # if applicable
+superseded-by: NNNN  # set when this ADR is superseded by a newer one
+---
+```
+
+**Rules.**
+
+1. **Same-commit-as-motivating-code.** An ADR ships in the same commit (or same PR for trunk-based teams) as the code change it explains. Separating ADRs into a follow-up commit guarantees they never happen.
+2. **Supersede, don't edit.** Existing ADRs are immutable — when a decision changes, create a new ADR with `status: accepted`, `supersedes: <NNNN>` referencing the old, and update the old's `superseded-by` field. Decision history must be reconstructable from `.planning/adrs/`.
+3. **ADR-flagged tasks fail verification without a co-committed ADR.** A task in PLAN.md marked `requires-adr: true` in its frontmatter (or carrying an `<adr-needed/>` marker) MUST have a corresponding `.planning/adrs/NNNN-*.md` co-committed in the phase. Verifier fails the phase if the ADR is missing.
+
+**Source.** Tolaria AGENTS.md (Luca Rossi, 2026-04; raw#L46-L50) — "Co-commit ADRs with the code that motivated them; never edit existing ADRs — supersede with a new one."
+
+**What to check.**
+
+1. **Identify ADR-flagged tasks.** Scan every PLAN file in the phase for tasks with `requires-adr: true` in frontmatter or an explicit `<adr-needed/>` marker.
+2. **Match to co-committed ADRs.** For each ADR-flagged task, verify a `.planning/adrs/NNNN-*.md` file exists in the phase's commits. Match by either:
+   - The task explicitly names the ADR id (`requires-adr: NNNN`).
+   - The ADR's `motivating-task` frontmatter field references the task id.
+   - No explicit linkage — surface as AMBIGUOUS and ask the user to confirm.
+3. **Check supersede-don't-edit invariant.** Walk `git log -- .planning/adrs/` for the phase's commits. Any `M` (modify) of an existing ADR is a violation unless it's only updating the `superseded-by` field of a previous-ADR (in which case it must be co-committed with the new ADR that supersedes it).
+
+**Outcome.** ADR-flagged task without co-committed ADR → FAILED (status `gaps_found`). Existing ADR modified beyond a `superseded-by` cross-reference → FAILED. Surface results in VERIFICATION.md section below.
+
+**Reasoning trap to avoid:** Do not auto-create the missing ADR. The ADR's content (decision, alternatives, consequences) requires human judgment — the verifier flags the gap, the user authors the ADR.
+
 ## Step 7d: Intermediate Bets Check (workflow.intermediate_bets_check)
 
 **Gate:** This step runs when `workflow.intermediate_bets_check` is `true` (default for the fork). Skip the step entirely when the knob is `false`.
@@ -997,6 +1045,13 @@ _Checks: schema change without migration, migration without downgrade path_
 ### Ratchet Effect
 | Check | Status | Detail |
 |-------|--------|--------|
+
+### ADR Co-Commit (workflow.adr_co_commit)
+
+_Co-commit invariant: ADR-flagged tasks must ship the corresponding `.planning/adrs/NNNN-*.md` in the phase's commits. Existing ADRs are immutable except for `superseded-by` cross-references. FAILED rows block phase verification. Omit when `workflow.adr_co_commit` is `false`._
+
+| Task | ADR id | Co-committed? | Supersede rule honoured? | Status | Detail |
+|------|--------|---------------|--------------------------|--------|--------|
 
 ### Intermediate Bets (workflow.intermediate_bets_check)
 

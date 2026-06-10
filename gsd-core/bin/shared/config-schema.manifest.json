@@ -121,6 +121,7 @@
     "project.ci_commands",
     "workflow.intermediate_bets_check",
     "workflow.provenance_footer",
+    "workflow.adr_co_commit",
     "effort.default",
     "fast_mode.enabled",
     "plan_review.source_grounding",
