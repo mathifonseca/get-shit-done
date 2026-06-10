@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
-const REFS_DIR = path.join(__dirname, '..', 'get-shit-done', 'references', 'few-shot-examples');
+const REFS_DIR = path.join(__dirname, '..', 'gsd-core', 'references', 'few-shot-examples');
 const AGENTS_DIR = path.join(__dirname, '..', 'agents');
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -32,7 +32,7 @@ describe('few-shot calibration examples', () => {
   describe('frontmatter metadata', () => {
     test('plan-checker.md has version and component in frontmatter', () => {
       const content = readFile(path.join(REFS_DIR, 'plan-checker.md'));
-      assert.match(content, /^---\n/);
+      assert.match(content, /^---\r?\n/);
       assert.match(content, /component:\s*plan-checker/);
       assert.match(content, /version:\s*\d+/);
       assert.match(content, /last_calibrated:\s*\d{4}-\d{2}-\d{2}/);
@@ -40,7 +40,7 @@ describe('few-shot calibration examples', () => {
 
     test('verifier.md has version and component in frontmatter', () => {
       const content = readFile(path.join(REFS_DIR, 'verifier.md'));
-      assert.match(content, /^---\n/);
+      assert.match(content, /^---\r?\n/);
       assert.match(content, /component:\s*verifier/);
       assert.match(content, /version:\s*\d+/);
       assert.match(content, /last_calibrated:\s*\d{4}-\d{2}-\d{2}/);
@@ -109,12 +109,12 @@ describe('few-shot calibration examples', () => {
   describe('agent files reference few-shot examples', () => {
     test('gsd-plan-checker.md contains reference to plan-checker few-shot examples', () => {
       const content = readFile(path.join(AGENTS_DIR, 'gsd-plan-checker.md'));
-      assert.match(content, /@~\/\.claude\/get-shit-done\/references\/few-shot-examples\/plan-checker\.md/);
+      assert.match(content, /@~\/\.claude\/gsd-core\/references\/few-shot-examples\/plan-checker\.md/);
     });
 
     test('gsd-verifier.md contains reference to verifier few-shot examples', () => {
       const content = readFile(path.join(AGENTS_DIR, 'gsd-verifier.md'));
-      assert.match(content, /@~\/\.claude\/get-shit-done\/references\/few-shot-examples\/verifier\.md/);
+      assert.match(content, /@~\/\.claude\/gsd-core\/references\/few-shot-examples\/verifier\.md/);
     });
   });
 

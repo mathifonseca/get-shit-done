@@ -10,17 +10,19 @@
 
 'use strict';
 
-const { test, describe, before, after } = require('node:test');
+const { test, describe, before } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
 const INSTALL_PATH = path.join(__dirname, '..', 'bin', 'install.js');
+
+const isWindows = process.platform === 'win32';
 const PROJECTION_PATH = path.join(
   __dirname,
   '..',
-  'get-shit-done',
+  'gsd-core',
   'bin',
   'lib',
   'shell-command-projection.cjs',
@@ -37,10 +39,13 @@ function createTempHome() {
 }
 
 function cleanup(dir) {
+  // eslint-disable-next-line local/no-raw-rmsync-in-tests -- local cleanup predates helpers.cjs; name collision prevents import
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-describe('installer HOME-relative PATH detection (#2620)', () => {
+describe('installer HOME-relative PATH detection (#2620)',
+  { skip: isWindows ? 'POSIX-only: parses sh-style "export PATH=" rc files; Windows has no rc files and uses registry Path' : false },
+  () => {
   let installer;
   let projection;
   before(() => {

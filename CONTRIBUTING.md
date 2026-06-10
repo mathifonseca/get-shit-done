@@ -1,17 +1,34 @@
-# Contributing to GSD
+# Contributing to GSD Core
 
 ## Getting Started
 
 ```bash
 # Clone the repo
-git clone https://github.com/gsd-build/get-shit-done.git
-cd get-shit-done
+git clone https://github.com/open-gsd/gsd-core.git
+cd gsd-core
 
 # Install dependencies
 npm install
 
 # Run tests
 npm test
+```
+
+---
+
+## Bootstrap your environment
+
+For a step-by-step setup guide covering Node version managers, `npm ci`, the environment
+validator, daily commands, and troubleshooting, see:
+
+**[docs/contributing/bootstrap.md](docs/contributing/bootstrap.md)**
+
+Quick start:
+
+```bash
+nvm use           # activate the pinned Node version from .nvmrc
+npm run check:env # validate your environment
+npm ci            # install from lockfile
 ```
 
 ---
@@ -25,7 +42,7 @@ GSD accepts three types of contributions. Each type has a different process and 
 A fix corrects something that is broken, crashes, produces wrong output, or behaves contrary to documented behavior.
 
 **Process:**
-1. Open a [Bug Report issue](https://github.com/gsd-build/get-shit-done/issues/new?template=bug_report.yml) — fill it out completely.
+1. Open a [Bug Report issue](https://github.com/open-gsd/gsd-core/issues/new?template=bug_report.yml) — fill it out completely.
 2. Wait for a maintainer to confirm it is a bug (label: `confirmed-bug`). For obvious, reproducible bugs this is typically fast.
 3. Fix it. Write a test that would have caught the bug.
 4. Open a PR using the [Fix PR template](.github/PULL_REQUEST_TEMPLATE/fix.md) — link the confirmed issue.
@@ -41,7 +58,7 @@ An enhancement improves an existing feature — better output, faster execution,
 **The bar:** Enhancements must have a scoped written proposal approved by a maintainer before any code is written. A PR for an enhancement will be closed without review if the linked issue does not carry the `approved-enhancement` label.
 
 **Process:**
-1. Open an [Enhancement issue](https://github.com/gsd-build/get-shit-done/issues/new?template=enhancement.yml) with the full proposal.  The issue template requires: the problem being solved, the concrete benefit, the scope of changes, and alternatives considered.
+1. Open an [Enhancement issue](https://github.com/open-gsd/gsd-core/issues/new?template=enhancement.yml) with the full proposal.  The issue template requires: the problem being solved, the concrete benefit, the scope of changes, and alternatives considered.
 2. **Wait for maintainer approval.** A maintainer must label the issue `approved-enhancement` before you write a single line of code. Do not open a PR against an unapproved enhancement issue — it will be closed.
 3. Write the code. Keep the scope exactly as approved. If scope creep occurs, comment on the issue and get re-approval before continuing.
 4. Open a PR using the [Enhancement PR template](.github/PULL_REQUEST_TEMPLATE/enhancement.md) — link the approved issue.
@@ -57,8 +74,8 @@ A feature adds something new — a new command, a new workflow, a new concept, a
 **The bar:** Features require a complete written specification approved by a maintainer before any code is written. A PR for a feature will be closed without review if the linked issue does not carry the `approved-feature` label. Incomplete specs are closed, not revised by maintainers.
 
 **Process:**
-1. **Discuss first** — check [Discussions](https://github.com/gsd-build/get-shit-done/discussions) to see if the idea has been raised. If it has and was declined, don't open a new issue.
-2. Open a [Feature Request issue](https://github.com/gsd-build/get-shit-done/issues/new?template=feature_request.yml) with the complete spec. The template requires: the solo-developer problem being solved, what is being added, full scope of affected files and systems, user stories, acceptance criteria, and assessment of maintenance burden.
+1. **Discuss first** — check [Discussions](https://github.com/open-gsd/gsd-core/discussions) to see if the idea has been raised. If it has and was declined, don't open a new issue.
+2. Open a [Feature Request issue](https://github.com/open-gsd/gsd-core/issues/new?template=feature_request.yml) with the complete spec. The template requires: the solo-developer problem being solved, what is being added, full scope of affected files and systems, user stories, acceptance criteria, and assessment of maintenance burden.
 3. **Wait for maintainer approval.** A maintainer must label the issue `approved-feature` before you write a single line of code. Approval is not guaranteed — GSD is intentionally lean and many valid ideas are declined because they conflict with the project's design philosophy.
 4. Write the code. Implement exactly the approved spec. Changes to scope require re-approval.
 5. Open a PR using the [Feature PR template](.github/PULL_REQUEST_TEMPLATE/feature.md) — link the approved issue.
@@ -103,6 +120,46 @@ PRs that arrive without a properly-labeled linked issue are closed automatically
 
 ---
 
+## Where Do I Open My PR? (Branching Model)
+
+GSD uses two long-lived branches: `main` (production, what's on npm `@latest`)
+and `next` (integration for the upcoming release). **Almost every PR targets
+`next`.** Full guide: [`docs/branching.md`](docs/branching.md).
+
+| Your branch | PR target | Notes |
+|---|---|---|
+| `feat/NNN-slug` | `next` | Default for all new features |
+| `fix/NNN-slug` | `next` | Default for all bug fixes; ships in next minor or via hotfix cherry-pick |
+| `chore/`, `docs/`, `refactor/`, `test/`, `perf/`, `ci/`, `revert/` | `next` | All routine work |
+| `fix/critical-NNN-slug` | `main` | Production-down emergencies only; auto-back-merges to `next` |
+| `release/X.Y.0` | `main` | Created by `release.yml` — don't make these by hand |
+| `hotfix/X.Y.Z` | `main` | Created by `release.yml` (dispatch with a patch version X.Y.Z) — don't make these by hand |
+| Stabilization PR for an in-flight release | `release/X.Y.0` | Fix a regression found during the RC cycle |
+
+**Day-to-day commands:**
+
+```bash
+git fetch origin
+git checkout next
+git pull --ff-only origin next
+git checkout -b fix/3187-config-corruption
+# ... commit, push
+gh pr create --base next --repo open-gsd/gsd-core
+```
+
+If you target the wrong branch by accident, the `PR Target Validator`
+workflow will post a comment with the one-line fix (click "Edit" by the PR
+title and change the base branch — no need to recreate the PR).
+
+**Why this matters:** Under the old single-branch model, every PR required
+rebasing onto `main` because branch protection required "up-to-date before
+merging" and `main` moved on every merge. With `next` as the integration
+branch and that flag disabled on `next`, concurrent PRs can merge in any
+order as long as they don't conflict on the same lines. The rebase
+treadmill is gone for the 95% case.
+
+---
+
 ## Pull Request Guidelines
 
 ### Architecture & Domain Standards (Maintainer-Defined)
@@ -129,7 +186,8 @@ Contributor requirements (summary):
 - **Link with a closing keyword** — use `Closes #123`, `Fixes #123`, or `Resolves #123` in the PR body. The CI check will fail and the PR will be auto-closed if no valid issue reference is found.
 - **One concern per PR** — bug fixes, enhancements, and features must be separate PRs
 - **No drive-by formatting** — don't reformat code unrelated to your change
-- **CI must pass** — all matrix jobs (Ubuntu × Node 22, 24; macOS × Node 24) must be green
+- **Don't bundle test-fixture updates into `docs:` or unrelated commits** — when a production change makes an existing test assertion stale, the test correction MUST land as its own `test:` (or `fix:`) commit, not bundled into a `docs:` commit that also updates the explanation. The release-sdk hotfix cherry-pick filter routes by commit-subject prefix (`fix:`, `chore:`, `test:`); a test-fixture correction packed under a `docs:` prefix is invisible to the picker and ships a half-state to the hotfix branch — production code changed, test assertion stale. v1.42.3 hit this exact mode (#3621). The fix is upstream: keep the test-fixture commit separate.
+- **CI must pass** — all configured matrix jobs must be green. Node 22 remains the compatibility floor; Node 24 is the primary target; Node 26 compatibility must be preserved for code and tests even when a Node 26 CI lane is not yet available.
 - **Scope matches the approved issue** — if your PR does more than what the issue describes, the extra changes will be asked to be removed or moved to a new issue
 
 ## CHANGELOG Entries — Drop a Fragment
@@ -143,20 +201,77 @@ npm run changeset -- --type Fixed --pr <YOUR_PR_NUMBER> \
 
 This writes `.changeset/<adjective>-<noun>-<noun>.md`. Three random words → concurrent PRs never collide. Allowed `type:` values follow [Keep a Changelog](https://keepachangelog.com/): `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
 
-Fragments are consolidated into `CHANGELOG.md` at release time by the release workflow. See [`.changeset/README.md`](.changeset/README.md) for the format spec and [#2975](https://github.com/gsd-build/get-shit-done/issues/2975) for the rationale.
+Fragments are consolidated into `CHANGELOG.md` at release time by the release workflow. See [`.changeset/README.md`](.changeset/README.md) for the format spec and [#2975](https://github.com/open-gsd/gsd-core/issues/2975) for the rationale.
 
-**CI enforcement:** the `Changeset Required` workflow (`scripts/changeset/lint.cjs`) fails any PR that touches `bin/`, `get-shit-done/`, `agents/`, `commands/`, `hooks/`, or `sdk/src/` without a `.changeset/*.md` fragment.
+**CI enforcement:** the `Changeset Required` workflow (`scripts/changeset/lint.cjs`) fails any PR that touches `bin/`, `gsd-core/`, `agents/`, `commands/`, `hooks/`, or `sdk/src/` without a `.changeset/*.md` fragment.
 
 **Opt-out:** PRs with no user-facing impact (test refactors, lint config changes, CI tweaks, formatting-only changes) can add the `no-changelog` label. The lint honors it. When unsure whether a change is user-facing, **add the fragment**.
+
+### Release notes formatting
+
+GitHub release notes are generated automatically. The release and hotfix
+workflows first create the release with `gh release create --generate-notes`,
+then run `scripts/release-notes/format-github-release-notes.cjs --apply` to
+rewrite the body into the project's curated format: an **Install** block,
+followed by **What's Changed** grouped into **Feature** / **Enhancement** /
+**Fix** sections (classified by each PR's conventional-commit title prefix —
+`feat` → Feature, `fix` → Fix, everything else → Enhancement), then
+**New Contributors** and the **Full Changelog** link.
+
+To re-format an existing release by hand (e.g. backfilling an older release):
+
+```bash
+node scripts/release-notes/format-github-release-notes.cjs \
+  --tag vX.Y.Z --repo open-gsd/gsd-core --apply
+```
+
+Omit `--apply` to print the reformatted body to stdout for review without
+publishing.
+
+## Documentation Updates — Update the Relevant Docs
+
+If your PR adds, changes, deprecates, or removes user-visible behavior, you **must** update the relevant documentation in `docs/`. CI will fail any PR whose changeset fragment is typed `Added`, `Changed`, `Deprecated`, or `Removed` without also modifying at least one file under `docs/` ([#3213](https://github.com/open-gsd/gsd-core/issues/3213)).
+
+`Fixed` and `Security` fragments do not trigger this lint — bug fixes restore documented behavior, they do not introduce new behavior to document. (Edit the docs anyway if a fix corrects something the docs got wrong.)
+
+### Which docs to update
+
+| Change type | Required doc updates |
+|---|---|
+| New command or flag | `docs/COMMANDS.md`, `docs/FEATURES.md` |
+| Changed command behavior or output | `docs/USER-GUIDE.md`, `docs/COMMANDS.md` |
+| Configuration / schema change | `docs/CONFIGURATION.md` |
+| Architectural change | `docs/ARCHITECTURE.md`, `docs/adr/` |
+| Agent or skill change | `docs/AGENTS.md` |
+| Removed command, flag, or workflow | All docs that referenced it |
+
+### Language policy
+
+All content in `docs/` and the root `README.md` **must be written in English**. English is the canonical source. The translated READMEs (`README.pt-BR.md`, `README.zh-CN.md`, `README.ja-JP.md`, `README.ko-KR.md`) are community-maintained translations and do not need to be updated by every PR.
+
+### CI enforcement
+
+The `Docs Required` workflow (`scripts/lint-docs-required.cjs`) reads the changeset fragments touched in the PR diff. If any has type `Added` / `Changed` / `Deprecated` / `Removed`, it requires at least one file under `docs/` to also appear in the diff.
+
+### Opt-outs (with paper trail)
+
+When a change genuinely has no user-facing documentation impact (infrastructure rewrite, internal refactor, test-only addition, CI fix), use one of:
+
+- **Label:** add the `no-docs` label to the PR. Leave a comment explaining why no docs update was needed.
+- **Per-fragment marker:** add `<!-- docs-exempt: <reason> -->` **on its own line** inside the body of each triggering changeset fragment (typically at the end). The reason is **required and must be non-empty** — a bare `<!-- docs-exempt -->` or `<!-- docs-exempt: -->` is rejected (no audit trail = no exemption). The marker is extracted at parse time by `scripts/changeset/parse.cjs` and stripped from the body before the CHANGELOG.md and GitHub release-notes serializers see it — it leaves a paper trail in the source fragment without leaking into published release notes. Inline mentions of the marker syntax (e.g. inside backticks) are intentionally ignored; the parser only acts on a marker that occupies its own line. Both routes leave a paper trail; the label is global, the marker is per-fragment for mixed PRs.
+
+When unsure whether a change is user-facing, **update the docs**.
 
 ## Testing Standards
 
 All tests use Node.js built-in test runner (`node:test`) and assertion library (`node:assert`). **Do not use Jest, Mocha, Chai, or any external test framework.**
 
+> **Suite grouping.** Tests live in named suites (`unit`, `integration`, `install`, `security`, `slow`) selected by **filename suffix**: a file named `foo.security.test.cjs` belongs to the `security` suite; a file with no suffix (`foo.test.cjs`) belongs to `unit`. See [docs/TESTING-SUITES.md](docs/TESTING-SUITES.md) for the full policy, CI matrix, and per-suite scripts (`npm run test:unit`, `npm run test:security`, `npm run test:coverage:unit`, …). Default `npm test` still runs every test — backwards compatible.
+
 ### Required Imports
 
 ```javascript
-const { describe, it, test, beforeEach, afterEach, before, after } = require('node:test');
+const { describe, it, test, beforeEach, afterEach, before, after, mock } = require('node:test');
 const assert = require('node:assert/strict');
 ```
 
@@ -287,6 +402,131 @@ const content = `
 `;
 ```
 
+### QA Matrix Requirements
+
+Happy-path tests are not enough for code that accepts user input, reads project files, writes to disk, shells out, generates artifacts, or builds prompts. New tests for those areas must include adversarial inputs and negative proof that unsafe behavior did not happen.
+
+See [`TEST-EXAMPLES.md`](TEST-EXAMPLES.md) for concrete demo tests that show these requirements in practice.
+
+Use this matrix when it applies to the changed surface:
+
+1. Happy path
+2. Missing input
+3. Empty input
+4. Whitespace-only input
+5. Malformed input
+6. Out-of-range input
+7. Duplicate or conflicting input
+8. Hostile input
+9. Filesystem failure
+10. Concurrency or retry
+11. Cross-platform path/newline behavior
+12. Regression fixture from the linked issue
+
+You do not need all twelve cases for every PR. You do need to cover the cases that match the risk of the touched code. If a case is not applicable, the PR should make that obvious from the issue scope or test rationale.
+
+#### CLI and command routing
+
+Changes to CLI parsing, command dispatch, query dispatch, command routers, `gsd-tools`, or `gsd-sdk` must include a negative input matrix for the affected command family.
+
+Required cases where relevant:
+
+- Missing required arguments
+- Empty strings, for example `--phase ""`
+- Whitespace-only values
+- Duplicate flags, for example `--phase 1 --phase 2`
+- Conflicting flags, for example `--json --raw`
+- Malformed assignments, for example `--phase=` and `--phase==1`
+- Unknown subcommands at the touched command depth
+- Values that look like flags, for example `--name --weird`
+- Very long values and Unicode values
+- Shell metacharacters in values, for example `;`, `&&`, `$()`, backticks, and quotes
+
+CLI tests must assert on the full command contract:
+
+- Exit status
+- Structured `--json` result when the command supports JSON
+- Filesystem mutation or absence of mutation
+- No stack trace in non-debug failure output
+- No shell interpolation of attacker-controlled values
+
+Prefer `spawnSync(process.execPath, [scriptPath, ...args], { cwd, encoding: 'utf8' })` or `execFileSync()` with argv arrays. Do not use shell strings for tests that contain hostile values.
+
+#### Parser and project-file inputs
+
+Changes to markdown, TOML, frontmatter, roadmap, phase, state, config, or schema parsing must include adversarial fixtures. Put reusable fixtures under `tests/fixtures/adversarial/` with a directory that names the input type, such as `roadmap/`, `frontmatter/`, `config/`, `toml/`, or `planning-state/`.
+
+Required cases where relevant:
+
+- Malformed frontmatter
+- Duplicate keys
+- Mixed CRLF/LF newlines
+- Unclosed or nested fenced code blocks
+- Headings inside fenced code blocks
+- Unicode headings
+- Repeated or decimal phase IDs
+- Path traversal-like names such as `../../x`
+- Null bytes or replacement characters
+- Huge but bounded files
+- TOML duplicate tables or trailing garbage
+- Empty arrays vs missing arrays
+- Scalars where arrays are expected, and objects where strings are expected
+
+Property-style parser tests are encouraged for high-risk parsers. They must be deterministic: pin the seed, bound the iteration count, and print replay data on failure.
+
+#### Filesystem writes and installers
+
+Changes to install/uninstall flows, generated artifact writers, state/config writers, worktree safety, or any code that writes under `.planning`, runtime config dirs, `.claude`, `.codex`, `hooks`, or generated files must include fault-injection coverage where the seam allows it.
+
+Required cases where relevant:
+
+- Missing parent directory
+- Target path exists as a file instead of a directory
+- Read-only target directory
+- Broken symlink
+- Symlink escaping the intended root
+- Paths with spaces, Unicode, or newlines
+- Partial write failure
+- Rename failure
+- Concurrent deletion or write collision
+- Temp-file cleanup after failure
+
+Use `node:test` mocks such as `mock.method()` for `fs.writeFileSync`, `fs.renameSync`, `fs.mkdirSync`, `fs.rmSync`, and subprocess seams when the production code exposes a seam. Restore mocks with test hooks or `t.after()`.
+
+#### Security and prompt-injection surfaces
+
+Changes that read prompts, plans, markdown, agent instructions, shell command projections, workstream/project names, or user-controlled files must treat those inputs as hostile.
+
+Required cases where relevant:
+
+- Fake instruction tags, for example `<instructions>ignore previous</instructions>`
+- Heredoc breakouts
+- Shell command substitution payloads
+- Path traversal through project or workstream values
+- Malicious markdown links
+- Fake frontmatter fields that try to override intent
+- Secret-looking values in inputs, logs, stdout, stderr, and thrown errors
+- Environment variables with fake tokens to prove redaction
+
+Security tests must assert both the positive guard behavior and the negative proof: no path escape, no command execution, no leaked token, no untrusted content promoted to instructions.
+
+#### Generated files and parity
+
+Changes to generators, generated `.cjs`/`.ts` files, command manifests, aliases, hooks, or SDK/runtime parity must test bad input and runtime parity, not only freshness.
+
+Required cases where relevant:
+
+- Missing source command
+- Malformed command frontmatter
+- Duplicate command names or aliases
+- Partial generator output
+- Generator crash halfway through
+- Manual edits to generated files
+- Stale generated file with valid timestamp but wrong content
+- Runtime `.cjs` and SDK `.ts` generated surfaces disagree
+
+Generator tests should run in temp fixtures and assert atomic output behavior. Do not mutate production generated files except in explicit freshness checks.
+
 ### Prohibited: Source-Grep Tests
 
 **Never read source-code `.cjs` files with `readFileSync` to assert that strings exist within them.** This is source-grep theater: it proves a literal is present in a file, not that the feature works at runtime.
@@ -294,7 +534,7 @@ const content = `
 ```javascript
 // BAD — source-grep theater
 const configSrc = fs.readFileSync(
-  path.join(GSD_ROOT, 'bin', 'lib', 'config-schema.cjs'), 'utf-8'
+  path.join(GSD_ROOT, 'gsd-core', 'bin', 'lib', 'config-schema.cjs'), 'utf-8'
 );
 assert.ok(
   configSrc.includes("'workflow.plan_bounce'"),
@@ -325,7 +565,7 @@ This single test covers key registration in `VALID_CONFIG_KEYS`, the key's names
 
 **Why this pattern broke at scale:** Commit `990c3e64` in this repo updated 5 source-grep tests in one pass when `VALID_CONFIG_KEYS` moved between files. Zero of those tests were testing behavior. If they had been behavioral tests, the migration would have been invisible.
 
-**CI enforcement:** A linter (`scripts/lint-no-source-grep.cjs`, run as `npm run lint:tests`) detects violations. Any test file that calls `readFileSync` on a `.cjs` path in a source directory without the exemption annotation below will fail the `lint-tests` CI job.
+**CI enforcement:** The `local/no-source-grep` ESLint rule (`eslint-rules/no-source-grep.cjs`, wired in `eslint.config.mjs`) detects violations. Any test file that calls `readFileSync` on a `.cjs` path in a source directory without the exemption annotation below is flagged by `npx eslint .` (the `Lint — ESLint` CI step).
 
 ### Exception: `allow-test-rule: <reason>`
 
@@ -396,11 +636,9 @@ Concretely: for any system-under-test that produces text output (a file renderer
 | Error / status / reason | A frozen enum (`Object.freeze({ FAIL_X: 'fail_x', ... })`) | `assert.equal(result.reason, REASON.FAIL_X)` |
 | File presence after a write | `fs.statSync().isFile()`, `.size > 0`, `.mtimeMs` advances | Filesystem facts; never read the file content back |
 
-#### Concrete examples from this repo
+#### Concrete example from this repo
 
-`buildWindowsShimTriple(shimSrc)` in `bin/install.js` is the canonical IR pattern: pure function, no I/O, returns `{ invocation, eol, fileNames, render }`. `trySelfLinkGsdSdkWindows` calls it and writes `triple.render[kind]()` to disk. Tests assert on `triple.invocation.target`, `triple.eol.cmd`, `Object.keys(triple).sort()` — never on the rendered text. Filesystem-level tests assert `fs.statSync(target).size === Buffer.byteLength(triple.render.cmd())` to prove the writer writes what the renderer produces, **without comparing content**.
-
-`scripts/verify-reapply-patches.cjs` exposes a frozen `REASON` enum and emits it through `--json`. Tests assert `report.results[0].reason === REASON.FAIL_USER_LINES_MISSING`. The human formatter exists for operator console output only — tests must not depend on its prose. Adding a new reason code requires updating the `REASON` enum, the `--json` output, AND the test that locks `Object.keys(REASON).sort()` — three coordinated changes that prevent the code surface from drifting from the test surface.
+`gsd-core/bin/verify-reapply-patches.cjs` exposes a frozen `REASON` enum and emits it through `--json`. Tests assert `report.results[0].reason === REASON.FAIL_USER_LINES_MISSING` rather than regex-matching the human-readable prose. The human formatter exists for operator console output only — tests must not depend on it. Adding a new reason code requires updating the `REASON` enum, the `--json` output, AND the test that locks `Object.keys(REASON).sort()` — three coordinated changes that keep the code surface from drifting from the test surface. A pure builder that returns the IR (no I/O) and a writer that consumes it — `fs.statSync(target).size === Buffer.byteLength(render())` to prove the writer writes what the renderer produces, **without comparing content** — is the same pattern applied to rendered files.
 
 #### Hiding grep behind a function is still grep
 
@@ -415,17 +653,17 @@ There are exactly two cases where text content is the legitimate object of a tes
 
 For everything else, if a test reaches for `.includes()` / `.startsWith()` / `assert.match(text, /…/)`, the production code is missing a typed surface. **Add the typed surface; do not work around it.**
 
-**CI enforcement:** `scripts/lint-no-source-grep.cjs` is being extended (see issue tracker for the latest scope) to flag `String#includes`/`String#startsWith`/`String#endsWith`/`assert.match` on `readFileSync` results and on `cp.spawnSync` stdout/stderr in test files, with the same `// allow-test-rule:` exemption mechanism.
+**CI enforcement:** the `local/no-source-grep` ESLint rule (`eslint-rules/no-source-grep.cjs`) is being extended (see issue tracker for the latest scope) to flag `String#includes`/`String#startsWith`/`String#endsWith`/`assert.match` on `readFileSync` results and on `cp.spawnSync` stdout/stderr in test files, with the same `// allow-test-rule:` exemption mechanism.
 
 ### Node.js Version Compatibility
 
-**Node 22 is the minimum supported version.** Node 24 is the primary CI target. All tests must pass on both.
+**Node 22 is the minimum supported version.** Node 24 is the primary CI target. Node 26 is the forward-compatibility target: do not add tests or production code that depend on deprecated behavior likely to fail there.
 
 | Version | Status |
 |---------|--------|
 | **Node 22** | Minimum required — Active LTS until October 2026, Maintenance LTS until April 2027 |
 | **Node 24** | Primary CI target — current Active LTS, all tests must pass |
-| Node 26 | Forward-compatible target — avoid deprecated APIs |
+| Node 26 | Forward-compatible target — avoid deprecated APIs and exact runtime-error prose |
 
 Do not use:
 - Deprecated APIs
@@ -436,6 +674,7 @@ Safe to use:
 - `describe`/`it`/`test` — all supported
 - `beforeEach`/`afterEach`/`before`/`after` — all supported
 - `t.after()` — per-test cleanup
+- `mock.method()` — approved for scoped filesystem/subprocess fault injection
 - `t.plan()` — fully supported
 - Snapshot testing — fully supported
 
@@ -466,6 +705,17 @@ node --test tests/core.test.cjs
 npm run test:coverage
 ```
 
+For examples of required negative matrices, parser fixtures, filesystem fault injection, security abuse tests, generated-file checks, and runtime/SDK parity tests, see [`TEST-EXAMPLES.md`](./TEST-EXAMPLES.md).
+
+### Preferred local benchmark runner (before PR)
+
+When you can, run the local test bench harness before opening a PR — especially for Windows-sensitive changes.
+
+- Setup guide: [gsd-test-runner getting started](https://github.com/open-gsd/gsd-test-runner/blob/main/docs/getting-started.md)
+- Preferred PR evidence: include the bench results summary (or artifact link) in your PR body.
+
+This gives maintainers a faster, higher-confidence signal than CI-only validation.
+
 ### Pre-PR Seam Checks (Manifest/Alias Routing)
 
 If you touched any of the command-manifest or generated alias files, run:
@@ -485,7 +735,7 @@ cat > .githooks/pre-commit <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-if git diff --cached --name-only | grep -Eq "^sdk/src/query/command-manifest\.|^sdk/src/query/command-aliases\.generated\.ts$|^get-shit-done/bin/lib/command-aliases\.generated\.cjs$|^sdk/scripts/gen-command-aliases\.ts$"; then
+if git diff --cached --name-only | grep -Eq "^sdk/src/query/command-manifest\.|^sdk/src/query/command-aliases\.generated\.ts$|^gsd-core/bin/lib/command-aliases\.generated\.cjs$|^sdk/scripts/gen-command-aliases\.ts$"; then
   npm run check:alias-drift
 fi
 EOF
@@ -539,11 +789,9 @@ The following checks run on every PR in addition to the test suite:
 
 | Job | What it checks | How to pass |
 |-----|----------------|-------------|
-| `lint-tests` | No source-grep tests (see above) | Replace with `runGsdTools()` behavioral tests, or add `// allow-test-rule: <reason>` |
+| `Lint — ESLint` | No source-grep tests (see above), via the `local/no-source-grep` rule | Replace with `runGsdTools()` behavioral tests, or add `// allow-test-rule: <reason>` |
 
-Run locally before pushing: `npm run lint:tests`
-
-### Test Requirements by Contribution Type
+Run locally before pushing: `npm run lint` (or `npx eslint .`)
 
 ### Architecture-Aware Testing Requirements
 
@@ -553,15 +801,17 @@ When work touches architecture, routing, policy, registry assembly, or command s
 - Ensure tests validate canonical behavior through the defined seam (for example: structured result contracts, canonical command metadata, and adapter parity), not source-text coupling.
 - If ADRs define expected behavior, tests should assert those expectations directly.
 
+### Test Requirements by Contribution Type
+
 The required tests differ depending on what you are contributing:
 
-**Bug Fix:** A regression test is required. Write the test first — it must demonstrate the original failure before your fix is applied, then pass after the fix. A PR that fixes a bug without a regression test will be asked to add one. "Tests pass" does not prove correctness; it proves the bug isn't present in the tests that exist.
+**Bug Fix:** A regression test is required. Write the test first — it must demonstrate the original failure before your fix is applied, then pass after the fix. A PR that fixes a bug without a regression test will be asked to add one. If the bug involves CLI input, parsers, filesystem writes, security/prompt surfaces, generated files, or SDK/runtime parity, the regression test must use the relevant QA matrix above and include negative proof that the bad behavior no longer happens. "Tests pass" does not prove correctness; it proves the bug isn't present in the tests that exist.
 
-**Enhancement:** Tests covering the enhanced behavior are required. Update any existing tests that test the area you changed. Do not leave tests that pass but no longer accurately describe the behavior.
+**Enhancement:** Tests covering the enhanced behavior are required. Update any existing tests that test the area you changed. If the enhancement expands accepted input, changes command routing, broadens parser behavior, changes generated output, or touches installer/write paths, add the relevant adversarial cases from the QA matrix above. Do not leave tests that pass but no longer accurately describe the behavior.
 
-**Feature:** Tests are required for the primary success path and at minimum one failure scenario. Leaving gaps in test coverage for a new feature is a rejection reason.
+**Feature:** Tests are required for the primary success path and enough failure scenarios to cover the relevant QA matrix above. At minimum, every feature must cover one failure scenario; features that expose CLI input, parse user files, write files, generate artifacts, call subprocesses, or build prompts must cover the relevant negative/hostile cases. Leaving gaps in test coverage for a new feature is a rejection reason.
 
-**Behavior Change:** If your change modifies existing behavior, the existing tests covering that behavior must be updated or replaced. Leaving passing-but-incorrect tests in the suite is not acceptable — a test that passes but asserts the old (now wrong) behavior makes the suite less useful than no test at all.
+**Behavior Change:** If your change modifies existing behavior, the existing tests covering that behavior must be updated or replaced. For high-risk surfaces, update the adversarial tests as well as the happy path. Leaving passing-but-incorrect tests in the suite is not acceptable — a test that passes but asserts the old (now wrong) behavior makes the suite less useful than no test at all.
 
 ### Reviewer Standards
 
@@ -574,6 +824,12 @@ Reviewers do not rely solely on CI to verify correctness. Before approving a PR,
 
 **"Tests pass in CI" is not sufficient for merge.** The implementation must correctly solve the problem described in the linked issue.
 
+## Code Review Lessons
+
+### Input validation: check shape, not just type
+
+Defensive normalization at trust boundaries must validate both the value's type and its semantic shape. A `typeof === 'string'` check is necessary but insufficient when the field's contract requires a specific format (UUID v4, semver, file path, etc.). See [ADR 227](docs/adr/227-input-validation-shape-not-just-type.md) for the architectural standard and concrete cases.
+
 ## Code Style
 
 - **CommonJS** (`.cjs`) — the project uses `require()`, not ESM `import`
@@ -584,7 +840,7 @@ Reviewers do not rely solely on CI to verify correctness. Before approving a PR,
 
 ```
 bin/install.js          — Installer (multi-runtime)
-get-shit-done/
+gsd-core/
   bin/lib/              — Core library modules (.cjs)
   workflows/            — Workflow definitions (.md)
                           Large workflows split per progressive-disclosure

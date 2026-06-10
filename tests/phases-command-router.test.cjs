@@ -1,9 +1,20 @@
 'use strict';
 
-const { describe, test } = require('node:test');
+const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { routePhasesCommand } = require('../get-shit-done/bin/lib/phases-command-router.cjs');
+const { routePhasesCommand } = require('../gsd-core/bin/lib/phases-command-router.cjs');
+
+// These tests exercise router dispatch with a deterministic runtime context.
+let _prevWorkstream;
+before(() => {
+  _prevWorkstream = process.env.GSD_WORKSTREAM;
+  process.env.GSD_WORKSTREAM = 'test-unit';
+});
+after(() => {
+  if (_prevWorkstream === undefined) delete process.env.GSD_WORKSTREAM;
+  else process.env.GSD_WORKSTREAM = _prevWorkstream;
+});
 
 describe('phases-command-router', () => {
   test('routes phases list with parsed options', () => {

@@ -16,7 +16,7 @@ const { createTempDir, cleanup } = require('./helpers.cjs');
 
 // Lazy-loaded so tests can fail clearly when the export doesn't exist yet.
 function getPruneOrphanedWorktrees() {
-  const { pruneOrphanedWorktrees } = require('../get-shit-done/bin/lib/core.cjs');
+  const { pruneOrphanedWorktrees } = require('../gsd-core/bin/lib/core.cjs');
   return pruneOrphanedWorktrees;
 }
 
@@ -171,22 +171,27 @@ describe('pruneOrphanedWorktrees', () => {
     execSync('git worktree add "' + worktreeDir + '" -b fix/stale-ref', { cwd: repoDir, stdio: 'pipe' });
     assert.ok(fs.existsSync(worktreeDir), 'worktree dir should exist before manual deletion');
 
-    // Verify it appears in git worktree list
-    const beforeList = execSync('git worktree list --porcelain', { cwd: repoDir, encoding: 'utf8' });
-    assert.ok(beforeList.includes(worktreeDir), 'worktree should appear in list before deletion');
+    // Use the canonicalPath helper so Windows 8.3 short-name (RUNNER~1) vs
+    // long-form (runneradmin) and slash-direction differences both collapse
+    // to the same key before comparison. git stores the long-form path in
+    // its administrative files; substring matching on the raw path fails.
+    // Capture the canonical key BEFORE deletion since canonicalPath calls
+    // realpathSync.native which fails on missing paths.
+    const wantedKey = canonicalPath(worktreeDir);
+    assert.ok(listedWorktreePaths(repoDir).has(wantedKey), 'worktree should appear in list before deletion');
 
     // Manually delete the worktree directory (simulate orphan)
+    // eslint-disable-next-line local/no-raw-rmsync-in-tests -- mid-test fault injection: simulates an orphaned worktree dir that git still references
     fs.rmSync(worktreeDir, { recursive: true, force: true });
 
     // Act
     const pruneOrphanedWorktrees = getPruneOrphanedWorktrees();
     pruneOrphanedWorktrees(repoDir);
 
-    // Assert: git worktree list no longer shows the stale entry
-    const afterList = execSync('git worktree list --porcelain', { cwd: repoDir, encoding: 'utf8' });
+    // Assert: git worktree list no longer shows the stale entry.
     assert.ok(
-      !afterList.includes(worktreeDir),
-      'git worktree list still shows stale entry after prune:\n' + afterList
+      !listedWorktreePaths(repoDir).has(wantedKey),
+      'git worktree list still shows stale entry after prune'
     );
   });
 });

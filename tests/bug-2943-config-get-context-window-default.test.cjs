@@ -25,8 +25,9 @@ const path = require('node:path');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 
-const GSD_TOOLS = path.join(__dirname, '..', 'get-shit-done', 'bin', 'gsd-tools.cjs');
-const { ERROR_REASON } = require(path.join(__dirname, '..', 'get-shit-done', 'bin', 'lib', 'core.cjs'));
+const GSD_TOOLS = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
+const { ERROR_REASON } = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'core.cjs'));
+const { cleanup } = require('./helpers.cjs');
 
 describe('bug-2943: config-get returns schema default for context_window', () => {
   let tmpDir;
@@ -39,7 +40,7 @@ describe('bug-2943: config-get returns schema default for context_window', () =>
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    cleanup(tmpDir);
   });
 
   /**
@@ -52,10 +53,13 @@ describe('bug-2943: config-get returns schema default for context_window', () =>
     let stderr = '';
     let exitCode = 0;
     try {
+      // Windows/Node 22 under --test-concurrency=4 can starve subprocess slots when
+      // sharing a wave with bug-2760-codex-install (8–15s install subtests). 15s covers
+      // observed worst case (13.5s) with headroom.
       stdout = execFileSync(process.execPath, args, {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 5000,
+        timeout: 15000,
       });
     } catch (err) {
       exitCode = err.status ?? 1;

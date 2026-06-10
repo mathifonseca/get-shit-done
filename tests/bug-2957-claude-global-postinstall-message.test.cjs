@@ -15,8 +15,10 @@ process.env.GSD_TEST_MODE = '1';
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const os = require('node:os');
 
 const ROOT = path.join(__dirname, '..');
+const SETTINGS_PATH = path.join(os.tmpdir(), `gsd-test-settings-${process.pid}.json`);
 const installModule = require(path.join(ROOT, 'bin', 'install.js'));
 
 function captureFinishInstallOutput(runtime, isGlobal) {
@@ -25,7 +27,7 @@ function captureFinishInstallOutput(runtime, isGlobal) {
   console.log = (...args) => { lines.push(args.join(' ')); };
   try {
     installModule.finishInstall(
-      '/tmp/gsd-test-settings.json',
+      SETTINGS_PATH,
       {},
       null,
       false,
@@ -37,6 +39,7 @@ function captureFinishInstallOutput(runtime, isGlobal) {
     console.log = original;
   }
   // Strip ANSI color escapes so message-content assertions don't couple to colors.
+  // eslint-disable-next-line no-control-regex -- \x1b (ESC) is the required leading byte of ANSI SGR color sequences; matching it is the purpose of stripping ANSI codes from captured CLI/console output
   return lines.join('\n').replace(/\x1B\[[0-9;]*m/g, '');
 }
 

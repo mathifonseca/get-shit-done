@@ -37,7 +37,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 const INSTALL = require(path.join(__dirname, '..', 'bin', 'install.js'));
-const projection = require(path.join(__dirname, '..', 'get-shit-done', 'bin', 'lib', 'shell-command-projection.cjs'));
+const projection = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'shell-command-projection.cjs'));
 const { buildCodexHookBlock, rewriteLegacyCodexHookBlock, resolveNodeRunner } = INSTALL;
 const { projectCodexHookTomlCommand } = projection;
 
@@ -124,8 +124,14 @@ describe('Bug #3017: buildCodexHookBlock emits absolute node runner', () => {
     // pass — e.g. '/Users/x/notnode/foo'.
     assert.equal(unescapeRunner(parsed.runner), expectedRunnerPath,
       `parsed runner must equal supplied absolute path: got ${parsed.runner}, want ${expectedRunnerPath}`);
-    assert.equal(parsed.hookPath, '/tmp/codex-test/.codex/hooks/gsd-check-update.js',
-      `hook path equality, got: ${parsed.hookPath}`);
+    // On Windows, path.resolve prepends the current drive letter ("D:") to
+    // the POSIX-shaped fixture path. Accept either form.
+    const expectedHookSuffix = '/tmp/codex-test/.codex/hooks/gsd-check-update.js';
+    assert.ok(
+      parsed.hookPath === expectedHookSuffix ||
+        parsed.hookPath.replace(/^[A-Za-z]:/, '') === expectedHookSuffix,
+      `hook path equality, got: ${parsed.hookPath}, want suffix: ${expectedHookSuffix}`,
+    );
   });
 
   test('returns null when absoluteRunner is null (caller skips registration)', () => {

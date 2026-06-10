@@ -1,7 +1,13 @@
-// allow-test-rule: pending-migration-to-typed-ir [#2974]
-// Tracked in #2974 for migration to typed-IR assertions per CONTRIBUTING.md
-// "Prohibited: Raw Text Matching on Test Outputs". Per-file review may
-// reclassify some entries as source-text-is-the-product during migration.
+// allow-test-rule: source-text-is-the-product
+// Workflow .md / agent .md / command .md / reference .md files — their text
+// IS what the runtime loads. Testing text content tests the deployed contract.
+// Per CONTRIBUTING.md exception matrix.
+// Migrated (#455): tests parse JSON output and assert on typed fields
+// (output.status, error/warning/info codes). The single message.includes()
+// at W001 checks the canonical section name '## Core Value' which is the
+// product contract for PROJECT.md; stateContent.includes('# Session State')
+// checks the canonical header of a generated file — both are
+// source-text-is-the-product assertions, not output-grep violations.
 
 /**
  * GSD Tools Tests - Validate Health Command
@@ -68,6 +74,7 @@ describe('validate health command', () => {
 
   test("returns 'broken' when .planning directory is missing", () => {
     // createTempProject creates .planning/phases — remove it entirely
+    // eslint-disable-next-line local/no-raw-rmsync-in-tests -- mid-test SUT setup: removes .planning/ to simulate missing dir condition
     fs.rmSync(path.join(tmpDir, '.planning'), { recursive: true, force: true });
 
     const result = runGsdTools('validate health', tmpDir);
@@ -199,6 +206,63 @@ describe('validate health command', () => {
     const w002 = output.warnings.find(w => w.code === 'W002');
     assert.ok(w002, `Expected W002 in warnings: ${JSON.stringify(output.warnings)}`);
     assert.strictEqual(w002.repairable, false, 'W002 should not be auto-repairable');
+  });
+
+  // Regression: #3652 — after /gsd:complete-milestone, phase dirs move into
+  // milestones/vX.Y-phases/ and their `#### Phase N:` headings in ROADMAP.md
+  // get collapsed inside <details> blocks. The heading-scan regex misses
+  // collapsed phases and collectDiskPhases() only walks the active archive,
+  // so W002 used to fire for every historical phase number mentioned in
+  // STATE.md's narrative body. Cross-referencing every milestone archive
+  // suppresses the false positive.
+  test('does not warn W002 for phase refs that live in any milestones archive (#3652)', () => {
+    writeMinimalProjectMd(tmpDir);
+    writeValidConfigJson(tmpDir);
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '23-current'), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'milestones', 'v1.3a-phases', '12-old-phase'), { recursive: true });
+    for (const n of ['19-alpha', '20-beta', '21-gamma', '22-delta']) {
+      fs.mkdirSync(path.join(tmpDir, '.planning', 'milestones', 'v1.3b-phases', n), { recursive: true });
+    }
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap', '',
+        '<details><summary>v1.3a: Shipped</summary>', '',
+        '- Phase 12: archived', '',
+        '</details>', '',
+        '<details><summary>v1.3b: Shipped</summary>', '',
+        '- Phase 19, 20, 21, 22: archived', '',
+        '</details>', '',
+        '## v1.4: Current', '',
+        '### Phase 23: Current work', '',
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '---', 'milestone: v1.4', 'milestone_name: Current', 'status: executing', '---', '',
+        '# State', '',
+        '**Current Phase:** 23', '',
+        '## Recent', '- Phase 19 shipped', '- Phase 20 shipped', '- Phase 21 shipped', '- Phase 22 shipped',
+        '', '## Decisions', '- Decision from Phase 12 still applies',
+      ].join('\n')
+    );
+
+    const result = runGsdTools('validate health', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const w002s = (output.warnings || []).filter(w => w.code === 'W002');
+    assert.strictEqual(w002s.length, 0, `Did not expect W002s for archived phases: ${JSON.stringify(w002s)}`);
+    // Also no W006 for the archived phases — extractCurrentMilestone strips
+    // shipped milestones before the Check 8 heading scan in the CJS path,
+    // so archived phase numbers never reach `roadmapPhases`. Pins the
+    // assumption that drove the decision NOT to mirror the W002 archive
+    // union into Check 8 on the CJS side.
+    const w006s = (output.warnings || []).filter(w =>
+      w.code === 'W006' && /Phase (?:12|19|20|21|22)\b/.test(String(w.message)),
+    );
+    assert.strictEqual(w006s.length, 0, `Did not expect W006s for archived phases: ${JSON.stringify(w006s)}`);
   });
 
   // ─── Check 5: config.json valid JSON + valid schema ───────────────────────
@@ -774,6 +838,153 @@ describe('validate health --repair command', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Regression: CJS bundle drift — W005/W006/I001 false positives (#3806)
+// PR #3479 fixed these in sdk/src/query/validate.ts but never propagated to
+// gsd-core/bin/lib/verify.cjs. These tests fail on old verify.cjs and
+// pass on the fixed version.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('validate health — #3806 CJS bundle drift regressions', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  // W005 regression: \d{2} → \d{2,} so 999.1-foo is accepted (#3806)
+  test('does not emit W005 for a phase directory with a 3-digit prefix (999.1-foo)', () => {
+    writeMinimalProjectMd(tmpDir);
+    // Roadmap with no phases to avoid spurious W006
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\nNo phases yet.\n'
+    );
+    writeMinimalStateMd(tmpDir, '# Session State\n\nNo phase refs.\n');
+    writeValidConfigJson(tmpDir);
+    // 999.1-foo should be valid under the widened \d{2,} pattern
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '999.1-foo'), { recursive: true });
+
+    const result = runGsdTools('validate health', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const w005s = output.warnings.filter(w => w.code === 'W005');
+    assert.strictEqual(
+      w005s.length, 0,
+      `W005 must not fire for "999.1-foo" (3-digit prefix is valid under \\d{2,}), got: ${JSON.stringify(w005s)}`
+    );
+  });
+
+  // W005 regression: additional multi-digit variants
+  test('does not emit W005 for phase directories with 4-digit and 2-digit prefixes', () => {
+    writeMinimalProjectMd(tmpDir);
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\nNo phases yet.\n'
+    );
+    writeMinimalStateMd(tmpDir, '# Session State\n\nNo phase refs.\n');
+    writeValidConfigJson(tmpDir);
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '1000-backlog'), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '99-done'), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '100.2-feature'), { recursive: true });
+
+    const result = runGsdTools('validate health', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const w005s = output.warnings.filter(w => w.code === 'W005');
+    assert.strictEqual(
+      w005s.length, 0,
+      `W005 must not fire for multi-digit prefix dirs (\\d{2,} pattern), got: ${JSON.stringify(w005s)}`
+    );
+  });
+
+  // W006 regression: archived phases in milestones/*-phases/ must not trigger W006 (#3806)
+  test('does not emit W006 for a ROADMAP phase whose directory lives in a milestone archive', () => {
+    writeMinimalProjectMd(tmpDir);
+    // ROADMAP references Phase 1 in the current section
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '## v1.0.0',
+        '',
+        '### Phase 1: Setup',
+        '',
+      ].join('\n')
+    );
+    writeMinimalStateMd(tmpDir, '# Session State\n\nPhase 1 complete.\n');
+    writeValidConfigJson(tmpDir);
+    // Phase 1 directory is in a milestone archive, NOT in the flat phases/ dir
+    const archiveDir = path.join(tmpDir, '.planning', 'milestones', 'v1.0.0-phases');
+    fs.mkdirSync(path.join(archiveDir, '01-setup'), { recursive: true });
+    // Ensure flat phases dir exists but does NOT contain phase 1
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases'), { recursive: true });
+
+    const result = runGsdTools('validate health', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const w006s = output.warnings.filter(w => w.code === 'W006');
+    assert.strictEqual(
+      w006s.length, 0,
+      `W006 must not fire for Phase 1 when its directory is in a milestone archive, got: ${JSON.stringify(w006s)}`
+    );
+  });
+
+  // I001 regression: FOO-PLAN.md + FOO-SUMMARY.md must match via canonicalPlanStem (#3806)
+  // e.g. 68-01-scaffolding-PLAN.md should match 68-01-SUMMARY.md (canonical stem = "68-01")
+  test('does not emit I001 when PLAN name has a descriptor suffix but SUMMARY uses canonical stem', () => {
+    writeMinimalProjectMd(tmpDir);
+    writeMinimalRoadmap(tmpDir, ['1']);
+    writeMinimalStateMd(tmpDir, '# Session State\n\nPhase 1 in progress.\n');
+    writeValidConfigJson(tmpDir);
+    // Create phase dir with descriptor-named PLAN and canonical-named SUMMARY
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    // PLAN has a descriptor suffix; SUMMARY uses the canonical stem only
+    fs.writeFileSync(path.join(phaseDir, '01-01-scaffolding-PLAN.md'), '# Plan\n');
+    fs.writeFileSync(path.join(phaseDir, '01-01-SUMMARY.md'), '# Summary\n');
+
+    const result = runGsdTools('validate health', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const i001s = output.info.filter(i => i.code === 'I001');
+    assert.strictEqual(
+      i001s.length, 0,
+      `I001 must not fire when SUMMARY stem (01-01) matches the canonical base of PLAN (01-01-scaffolding → 01-01), got: ${JSON.stringify(i001s)}`
+    );
+  });
+
+  // Confirm I001 still fires for a genuinely orphaned plan (no summary at all)
+  test('still emits I001 for a PLAN with no matching SUMMARY at all', () => {
+    writeMinimalProjectMd(tmpDir);
+    writeMinimalRoadmap(tmpDir, ['1']);
+    writeMinimalStateMd(tmpDir, '# Session State\n\nPhase 1 in progress.\n');
+    writeValidConfigJson(tmpDir);
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, '01-01-PLAN.md'), '# Plan\n');
+    // No SUMMARY file at all
+
+    const result = runGsdTools('validate health', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.ok(
+      output.info.some(i => i.code === 'I001'),
+      `I001 must still fire for an orphaned PLAN (no SUMMARY exists), got: ${JSON.stringify(output.info)}`
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Graceful degradation when phasesDir is missing (#1973)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -798,6 +1009,7 @@ describe('validate health — missing phasesDir', () => {
     // Remove the phases directory if it exists
     const phasesDir = path.join(tmpDir, '.planning', 'phases');
     if (fs.existsSync(phasesDir)) {
+      // eslint-disable-next-line local/no-raw-rmsync-in-tests -- mid-test SUT setup: removes phases/ to simulate missing phasesDir condition
       fs.rmSync(phasesDir, { recursive: true, force: true });
     }
 

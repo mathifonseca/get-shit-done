@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if git diff --cached --name-only | grep -Eq "^sdk/src/query/command-manifest\.|^sdk/src/query/command-aliases\.generated\.ts$|^get-shit-done/bin/lib/command-aliases\.generated\.cjs$|^sdk/scripts/gen-command-aliases\.ts$"; then
-  npm run check:alias-drift
-fi
+# GIT_OVERRIDE / NPM_OVERRIDE: optional test-injection seams (default to bare commands).
+# Hooks remain production-equivalent when these are unset.
+GIT_CMD="${GIT_OVERRIDE:-git}"
+NPM_CMD="${NPM_OVERRIDE:-npm}"
 
-if git diff --cached --name-only | grep -Eq "^sdk/src/query/state-document\.|^get-shit-done/bin/lib/state-document\.generated\.cjs$|^sdk/scripts/gen-state-document\.ts$|^sdk/scripts/check-state-document-fresh\.mjs$"; then
-  npm run check:state-document-fresh
-fi
+# The hook gates on legacy SDK paths (sdk/src/...) that were retired in the
+# 2026-06-10 upstream migration (open-gsd/gsd-core v1.4.x). The drift-check
+# scripts that gated those paths (check:state-document-fresh,
+# check:configuration-fresh, check:workstream-inventory-builder-fresh,
+# check:project-root-fresh, check:plan-scan-fresh, check:secrets-fresh,
+# check:schema-detect-fresh, check:decisions-fresh,
+# check:workstream-name-policy-fresh) no longer exist in package.json.
+#
+# Only the alias-drift guard remains active — it gates against gsd-core's
+# generated command-aliases.cjs going out of sync with the TypeScript
+# source under src/. The other guards were removed because their generators
+# / inputs were retired upstream along with the SDK; re-add a guard here
+# only when a corresponding `check:*` npm script exists.
 
-if git diff --cached --name-only | grep -Eq "^sdk/src/configuration/|^sdk/shared/config-(defaults|schema)\.manifest\.json$|^get-shit-done/bin/lib/configuration\.generated\.cjs$|^sdk/scripts/gen-configuration\.mjs$"; then
-  npm run check:configuration-fresh
-fi
-
-if git diff --cached --name-only | grep -Eq "^sdk/src/workstream-inventory/|^get-shit-done/bin/lib/workstream-inventory-builder\.generated\.cjs$|^sdk/scripts/gen-workstream-inventory-builder\.mjs$|^sdk/scripts/check-workstream-inventory-builder-fresh\.mjs$"; then
-  npm run check:workstream-inventory-builder-fresh
-fi
-
-if git diff --cached --name-only | grep -Eq "^sdk/src/project-root/|^get-shit-done/bin/lib/project-root\.generated\.cjs$|^sdk/scripts/gen-project-root\.mjs$|^sdk/scripts/check-project-root-fresh\.mjs$"; then
-  npm run check:project-root-fresh
+if "$GIT_CMD" diff --cached --name-only | grep -Eq "^src/command-aliases\.cts$|^gsd-core/bin/lib/command-aliases\.cjs$|^scripts/check-alias-drift\.cjs$"; then
+  "$NPM_CMD" run check:alias-drift
 fi

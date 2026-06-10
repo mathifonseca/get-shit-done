@@ -17,7 +17,7 @@ Select the template that matches your PR:
 - If it **corrects broken behavior** → Fix
 - If it **improves existing behavior** without adding new commands or concepts → Enhancement
 - If it **adds something that doesn't exist today** → Feature
-- If you are not sure → open a [Discussion](https://github.com/gsd-build/get-shit-done/discussions) first
+- If you are not sure → open a [Discussion](https://github.com/open-gsd/gsd-core/discussions) first
 
 ---
 
@@ -35,6 +35,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full process.
 
 ---
 
-<!-- If you believe your PR genuinely does not fit any of the above categories (e.g., CI/tooling changes,
-     dependency updates, or doc-only fixes with no linked issue), delete this file and describe your PR below.
-     Add a note explaining why none of the typed templates apply. -->
+<!-- CI/tooling, dependency, and doc-only PRs are auto-detected from the changed file paths — no template
+     needed. For other cross-cutting exempt PRs, paste the line below into your PR body with a non-empty reason:
+     <!-- pr-template-exempt: <reason> -->
+

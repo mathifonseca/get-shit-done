@@ -2,11 +2,12 @@
  * GSD Tools Test Helpers
  */
 
-const { execSync, execFileSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { createFixture } = require('./fixtures/index.cjs');
 
-const TOOLS_PATH = path.join(__dirname, '..', 'get-shit-done', 'bin', 'gsd-tools.cjs');
+const TOOLS_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 const TEST_ENV_BASE = {
   GSD_SESSION_KEY: '',
   CODEX_THREAD_ID: '',
@@ -60,12 +61,21 @@ function runGsdTools(args, cwd = process.cwd(), env = {}) {
         env: childEnv,
       });
     }
-    return { success: true, output: result.trim() };
+    return { success: true, output: result.trim(), exitCode: 0 };
   } catch (err) {
+    const stderrRaw = err.stderr?.toString().trim() || '';
+    // Prefer actual stderr content; fall back to err.message (which contains
+    // the command invocation). If stderr is empty, append a note so CI logs
+    // show "stderr: (empty)" rather than silently losing the fact that the
+    // child process produced no error output — empty stderr with a non-zero
+    // exit code is a signal of OS-level crash (OOM kill, worker thread fatal
+    // error) rather than a gsd-tools application error.
+    const error = stderrRaw || `${err.message} [stderr: (empty) exit:${err.status ?? 1}]`;
     return {
       success: false,
       output: err.stdout?.toString().trim() || '',
-      error: err.stderr?.toString().trim() || err.message,
+      error,
+      exitCode: err.status ?? 1,
     };
   }
 }
@@ -77,34 +87,28 @@ function createTempDir(prefix = 'gsd-test-') {
 
 // Create temp directory structure
 function createTempProject(prefix = 'gsd-test-') {
-  const tmpDir = fs.mkdtempSync(path.join(require('os').tmpdir(), prefix));
-  fs.mkdirSync(path.join(tmpDir, '.planning', 'phases'), { recursive: true });
-  return tmpDir;
+  return createFixture({ prefix, planning: true, git: false });
 }
 
 // Create temp directory with initialized git repo and at least one commit
 function createTempGitProject(prefix = 'gsd-test-') {
-  const tmpDir = fs.mkdtempSync(path.join(require('os').tmpdir(), prefix));
-  fs.mkdirSync(path.join(tmpDir, '.planning', 'phases'), { recursive: true });
-
-  execSync('git init', { cwd: tmpDir, stdio: 'pipe' });
-  execSync('git config user.email "test@test.com"', { cwd: tmpDir, stdio: 'pipe' });
-  execSync('git config user.name "Test"', { cwd: tmpDir, stdio: 'pipe' });
-  execSync('git config commit.gpgsign false', { cwd: tmpDir, stdio: 'pipe' });
-
-  fs.writeFileSync(
-    path.join(tmpDir, '.planning', 'PROJECT.md'),
-    '# Project\n\nTest project.\n'
-  );
-
-  execSync('git add -A', { cwd: tmpDir, stdio: 'pipe' });
-  execSync('git commit -m "initial commit"', { cwd: tmpDir, stdio: 'pipe' });
-
-  return tmpDir;
+  return createFixture({ prefix, planning: true, git: true, projectDoc: true });
 }
 
 function cleanup(tmpDir) {
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  if (typeof tmpDir !== 'string' || tmpDir.length === 0) return;
+  const target = path.resolve(tmpDir);
+  const cwd = path.resolve(process.cwd());
+  if (cwd === target || cwd.startsWith(`${target}${path.sep}`)) {
+    // Windows cannot remove a directory that is the current working directory.
+    process.chdir(path.dirname(target));
+  }
+  // maxRetries/retryDelay absorbs transient Windows EBUSY where AV scanners,
+  // file-indexers, or just-exited child processes still hold handles when
+  // teardown runs. On POSIX the retry loop is a no-op (rmSync succeeds first try).
+  // Budget: 20 × 250ms = 5s total — Windows Defender's deferred scan can hold
+  // newly-written files for several seconds on cold runners.
+  fs.rmSync(target, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 }
 
 /**
@@ -170,4 +174,192 @@ function isUsageOutput(text) {
   return /Usage:\s*gsd-tools/.test(text) && /Commands:/.test(text);
 }
 
-module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, parseFrontmatter, isUsageOutput, TOOLS_PATH };
+/**
+ * Isolated HOME directory used by runNpm() for the lifetime of this process.
+ *
+ * npm reads $HOME/.npmrc (user config) and writes to $HOME/.npm (default cache)
+ * when these paths are not overridden. On Docker hosts the running user's HOME
+ * may be uninitialized, unwritable, or contain stale state from a prior run —
+ * any of which causes `npm pack` / `npm install -g` to fail. Fix: create a
+ * fresh temp directory once per process, redirect HOME + cache + userconfig into
+ * it, and clean up on process exit. This makes runNpm() independent of the
+ * caller's environment. (#131)
+ */
+const _npmIsolatedHome = fs.mkdtempSync(path.join(require('os').tmpdir(), 'npm-home-'));
+process.on('exit', () => {
+  try { fs.rmSync(_npmIsolatedHome, { recursive: true, force: true }); } catch (_) { /* best-effort */ }
+});
+
+/**
+ * Run `fn` with console.log/warn/error captured, returning {stdout, stderr}
+ * with ANSI colors stripped. Re-throws any exception fn threw AFTER restoring
+ * the real console so the caller's assertion path sees the failure (without
+ * this, a fn that crashes before printing would falsely pass !hasReady-style
+ * assertions). #2775 CR follow-up established this exact contract.
+ *
+ * Previously duplicated in bug-2775, bug-2829, bug-3033, bug-3211, bug-3231,
+ * bug-3359, and installer-migration-install-integration.
+ */
+function captureConsole(fn) {
+  const stdout = [];
+  const stderr = [];
+  const origLog = console.log;
+  const origWarn = console.warn;
+  const origError = console.error;
+  console.log = (...a) => stdout.push(a.join(' '));
+  console.warn = (...a) => stderr.push(a.join(' '));
+  console.error = (...a) => stderr.push(a.join(' '));
+  let threw = null;
+  try {
+    fn();
+  } catch (e) {
+    threw = e;
+  } finally {
+    console.log = origLog;
+    console.warn = origWarn;
+    console.error = origError;
+  }
+  if (threw) throw threw;
+  const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  return {
+    stdout: stdout.map(strip).join('\n'),
+    stderr: stderr.map(strip).join('\n'),
+  };
+}
+
+/**
+ * Normalize platform path separators to POSIX forward slashes. Use for
+ * cross-platform path comparisons in test assertions where the runtime
+ * emits the platform-native separator (\ on Windows) but the test
+ * fixture or expected literal is POSIX. Returns the input unchanged if
+ * null/undefined so it composes safely with optional chaining.
+ */
+function toPosixPath(p) {
+  return p == null ? p : p.split(path.sep).join('/');
+}
+
+/**
+ * Run an npm command via execFileSync with cross-platform portability.
+ *
+ * Handles the Windows `npm.cmd` vs POSIX `npm` distinction and the
+ * `shell: true` requirement on Windows so tests do not need to
+ * re-implement platform detection inline.
+ *
+ * @param {string[]} args - npm subcommand and flags (e.g. ['pack', '--pack-destination', dir]).
+ * @param {object} [options] - execFileSync options merged with platform defaults.
+ *   `cwd`, `encoding`, `timeout`, and `env` are the commonly overridden keys.
+ * @returns {string} trimmed stdout string (encoding: 'utf-8').
+ * @throws {Error} re-throws the execFileSync error on non-zero exit so callers
+ *   get the full stderr in the error message.
+ */
+function runNpm(args, options = {}) {
+  const isWindows = process.platform === 'win32';
+  const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+  // Inject an isolated HOME so npm never reads from or writes to the caller's
+  // $HOME. This prevents failures on Docker hosts where HOME is unwritable or
+  // uninitialized. The caller may still pass { env: {...} } in options to
+  // further override specific variables — those overrides win because they are
+  // applied after the isolated env below (via the spread in the merge). (#131)
+  const isolatedEnv = {
+    ...process.env,
+    HOME: _npmIsolatedHome,
+    npm_config_cache: path.join(_npmIsolatedHome, '.npm'),
+    npm_config_userconfig: path.join(_npmIsolatedHome, '.npmrc'),
+  };
+  const defaults = {
+    encoding: 'utf-8',
+    shell: isWindows,
+    timeout: 180000,
+    env: isolatedEnv,
+  };
+  // Merge options; if caller passes their own env, merge it on top of isolatedEnv
+  // so the isolation is preserved unless the caller explicitly overrides HOME.
+  const { env: callerEnv, ...otherOptions } = options;
+  const mergedEnv = callerEnv ? { ...isolatedEnv, ...callerEnv } : isolatedEnv;
+  return execFileSync(npmCmd, args, { ...defaults, ...otherOptions, env: mergedEnv }).trim();
+}
+
+/**
+ * Returns the isolated npm environment dict used by runNpm().
+ *
+ * Callers (e.g. runSmoke()) can spread this into a spawnSync env so that npm
+ * never reads from or writes to the caller's $HOME — the same guarantee
+ * runNpm() already provides. (#131)
+ *
+ * @returns {object} env dict with HOME, npm_config_cache, npm_config_userconfig
+ *   pointing into a process-scoped temp directory.
+ */
+function isolatedNpmEnv() {
+  return {
+    ...process.env,
+    HOME: _npmIsolatedHome,
+    npm_config_cache: path.join(_npmIsolatedHome, '.npm'),
+    npm_config_userconfig: path.join(_npmIsolatedHome, '.npmrc'),
+  };
+}
+
+/**
+ * Run a callback with process-level state isolation.
+ * Restores cwd, exitCode, and process.env after callback returns or throws.
+ *
+ * @template T
+ * @param {() => T} fn
+ * @returns {T}
+ */
+function withIsolatedProcessState(fn) {
+  const originalCwd = process.cwd();
+  const originalExitCode = process.exitCode;
+  const originalEnv = { ...process.env };
+
+  try {
+    return fn();
+  } finally {
+    if (process.cwd() !== originalCwd) {
+      process.chdir(originalCwd);
+    }
+    process.exitCode = originalExitCode;
+
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+    }
+    for (const [key, value] of Object.entries(originalEnv)) {
+      process.env[key] = value;
+    }
+  }
+}
+
+/**
+ * Async delay — yields the event loop for `ms` ms without a synchronous block.
+ * Replaces raw setTimeout / Atomics.wait sleeps in tests. `ms` is an identifier
+ * and the Promise is not awaited inline, so it does not trip the no-magic-sleep
+ * / no-restricted-syntax test rules (which only scan *.test.cjs anyway).
+ */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Poll `predicate` until it returns truthy or the deadline elapses — the approved
+ * poll-for-condition pattern for cross-process test synchronization. Returns the
+ * predicate's truthy value; throws Error(message) on timeout.
+ *
+ * `predicate` must return a boolean or truthy value when ready; any falsy result
+ * (including `0` or `''`) is treated as "not ready yet". Do not use predicates
+ * whose meaningful result can be falsy.
+ *
+ * `predicate` should not throw — exceptions propagate out of `waitFor` uncaught
+ * and are NOT retried. If the readiness check can throw on a transient state
+ * (e.g. parsing a partially-written file), guard inside the predicate and return
+ * `false` instead.
+ */
+async function waitFor(predicate, { timeoutMs = 10000, stepMs = 25, message = 'waitFor timed out' } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = predicate();
+    if (value) return value;
+    if (Date.now() >= deadline) throw new Error(message);
+    await delay(stepMs);
+  }
+}
+
+module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, TOOLS_PATH };

@@ -133,6 +133,7 @@ function withSdkDistPresent(fn) {
 }
 
 function stripAnsi(value) {
+  // eslint-disable-next-line no-control-regex -- \x1b (ESC) is the required leading byte of ANSI SGR color sequences; matching it is the purpose of stripping ANSI codes from captured CLI/console output
   return value.replace(/\x1b\[[0-9;]*m/g, '');
 }
 
@@ -174,25 +175,17 @@ function assertHasGsdDirectory(root, relPath) {
   );
 }
 
-function assertNoGsdDirectoryEntries(root, relPath) {
-  assert.equal(
-    listDirNames(root, relPath).some((name) => name.startsWith('gsd-')),
-    false,
-    `${relPath} should not contain generated GSD entries`
-  );
-}
-
 function assertFreshInstallContract(runtime, targetDir) {
   const contract = RUNTIME_INSTALL_CONTRACTS[runtime];
   assert.ok(contract, `missing runtime install contract for ${runtime}`);
 
   assert.equal(
-    fs.readFileSync(path.join(targetDir, 'get-shit-done', 'VERSION'), 'utf8'),
+    fs.readFileSync(path.join(targetDir, 'gsd-core', 'VERSION'), 'utf8'),
     pkg.version,
     `${runtime} should install the package VERSION`
   );
   assert.ok(
-    fs.existsSync(path.join(targetDir, 'get-shit-done', 'bin', 'gsd-tools.cjs')),
+    fs.existsSync(path.join(targetDir, 'gsd-core', 'bin', 'gsd-tools.cjs')),
     `${runtime} should install the GSD tool payload`
   );
   assert.ok(
@@ -204,18 +197,26 @@ function assertFreshInstallContract(runtime, targetDir) {
   assert.equal(manifest.version, pkg.version, `${runtime} manifest should record the package version`);
   assert.equal(manifest.mode, 'full', `${runtime} manifest should record a full install`);
   assert.ok(
-    manifest.files['get-shit-done/VERSION'],
+    manifest.files['gsd-core/VERSION'],
     `${runtime} manifest should track the installed VERSION file`
   );
 
   if (contract.surface === 'flat-skills') {
-    if (runtime === 'codex') {
-      assertNoGsdDirectoryEntries(targetDir, 'skills');
-    } else {
-      assertHasGsdDirectory(targetDir, 'skills');
-    }
+    // Pre-#3562: codex was special-cased to expect zero gsd-* skill dirs
+    // (assumption: Codex auto-discovers from workflows). That assumption
+    // does not hold for Codex CLI 0.130.0 — fresh installs now materialize
+    // the same flat-skills surface as the other runtimes.
+    assertHasGsdDirectory(targetDir, 'skills');
   } else if (contract.surface === 'hermes-skills') {
-    assertHasGsdDirectory(targetDir, path.join('skills', 'gsd'));
+    // Hermes layout uses prefix: '' — skill dirs have bare stem names (no gsd- prefix).
+    // Assert that the category dir contains at least one skill dir with SKILL.md.
+    const hermesGsdDir = path.join(targetDir, 'skills', 'gsd');
+    const hermesSkillCount = fs.existsSync(hermesGsdDir)
+      ? fs.readdirSync(hermesGsdDir, { withFileTypes: true })
+          .filter(e => e.isDirectory() && fs.existsSync(path.join(hermesGsdDir, e.name, 'SKILL.md')))
+          .length
+      : 0;
+    assert.ok(hermesSkillCount > 0, `skills/gsd should contain generated GSD entries (got ${hermesSkillCount})`);
     assert.ok(
       fs.existsSync(path.join(targetDir, 'skills', 'gsd', 'DESCRIPTION.md')),
       'Hermes should install the nested GSD category description'
@@ -231,10 +232,11 @@ function assertFreshInstallContract(runtime, targetDir) {
       `${runtime} should install commands/gsd entries`
     );
   } else if (contract.surface === 'clinerules') {
+    // #787: Cline now uses the .clinerules/ directory form (rules at gsd.md).
     assert.match(
-      fs.readFileSync(path.join(targetDir, '.clinerules'), 'utf8'),
-      /GSD workflows live in `get-shit-done\/workflows\/`/,
-      'Cline should install root .clinerules guidance'
+      fs.readFileSync(path.join(targetDir, '.clinerules', 'gsd.md'), 'utf8'),
+      /GSD workflows live in `gsd-core\/workflows\/`/,
+      'Cline should install .clinerules/gsd.md guidance'
     );
   }
 
@@ -299,14 +301,14 @@ describe('installer migration install integration', { concurrency: false }, () =
     assert.match(plainOutput, /Installer migrations/);
     assert.match(plainOutput, /removed\s+hooks\/statusline\.js/);
     assert.ok(
-      plainOutput.indexOf('Installer migrations') < plainOutput.indexOf('Installed get-shit-done'),
+      plainOutput.indexOf('Installer migrations') < plainOutput.indexOf('Installed workflow assets'),
       'migration report should appear before package materialization'
     );
     assert.equal(fs.existsSync(path.join(codexHome, 'hooks/statusline.js')), false);
   });
 
   test('blocks install before materialization when baseline needs explicit user choice', () => {
-    writeFile(codexHome, 'hooks/gsd-retired-hook.js', 'old gsd hook\n');
+    writeFile(codexHome, 'hooks/gsd-retired-hook.txt', 'old gsd hook\n');
 
     assert.throws(
       () => captureConsole(() =>
@@ -315,9 +317,9 @@ describe('installer migration install integration', { concurrency: false }, () =
       /installer migration blocked/
     );
 
-    assert.equal(fs.readFileSync(path.join(codexHome, 'hooks/gsd-retired-hook.js'), 'utf8'), 'old gsd hook\n');
+    assert.equal(fs.readFileSync(path.join(codexHome, 'hooks/gsd-retired-hook.txt'), 'utf8'), 'old gsd hook\n');
     assert.equal(fs.existsSync(path.join(codexHome, 'skills')), false);
-    assert.equal(fs.existsSync(path.join(codexHome, 'get-shit-done', 'VERSION')), false);
+    assert.equal(fs.existsSync(path.join(codexHome, 'gsd-core', 'VERSION')), false);
   });
 
   test('rolls back applied migrations when package materialization fails for non-Codex installs', () => {
@@ -331,7 +333,7 @@ describe('installer migration install integration', { concurrency: false }, () =
     assert.throws(
       () => captureConsole(() =>
         withEnv('CLAUDE_CONFIG_DIR', claudeHome, () =>
-          withWriteFailure(path.join(claudeHome, 'get-shit-done', 'VERSION'), () => install(true, 'claude'))
+          withWriteFailure(path.join(claudeHome, 'gsd-core', 'VERSION'), () => install(true, 'claude'))
         )
       ),
       /injected write failure for VERSION/
@@ -389,7 +391,7 @@ describe('installer migration install integration', { concurrency: false }, () =
       () => captureConsole(() =>
         withEnv('CLAUDE_CONFIG_DIR', claudeHome, () =>
           withEnv('CODEX_HOME', codexHome, () =>
-            withWriteFailure(path.join(codexHome, 'get-shit-done', 'VERSION'), () =>
+            withWriteFailure(path.join(codexHome, 'gsd-core', 'VERSION'), () =>
               installModule.installAllRuntimes(['claude', 'codex'], true, false)
             )
           )
@@ -426,7 +428,7 @@ describe('installer migration install integration', { concurrency: false }, () =
       assert.match(output, /Installing for /);
       assert.match(output, /Installer migrations/);
       assert.match(output, /removed\s+hooks\/statusline\.js/);
-      assert.match(output, /Installed get-shit-done/);
+      assert.match(output, /Installed workflow assets/);
       assert.match(output, /Done!/);
       assert.equal(fs.existsSync(path.join(targetDir, 'hooks/statusline.js')), false);
 
@@ -463,20 +465,20 @@ describe('installer migration install integration', { concurrency: false }, () =
     test(`blocks ambiguous GSD-looking user-choice artifacts for ${runtime}`, () => {
       const targetDir = path.join(tmpRoot, `.${runtime}-blocked`);
       fs.mkdirSync(targetDir, { recursive: true });
-      writeFile(targetDir, 'get-shit-done/gsd-retired-tool.cjs', 'old ambiguous artifact\n');
+      writeFile(targetDir, 'gsd-core/gsd-retired-tool.cjs', 'old ambiguous artifact\n');
 
       const result = runInstallerCli(runtime, targetDir);
 
       assert.notEqual(result.status, 0, 'install should fail before materialization');
       const output = stripAnsi(`${result.stdout}\n${result.stderr}`);
       assert.match(output, /Installer migrations/);
-      assert.match(output, /blocked\s+get-shit-done\/gsd-retired-tool\.cjs/);
+      assert.match(output, /blocked\s+gsd-core\/gsd-retired-tool\.cjs/);
       assert.match(output, /installer migration blocked/);
       assert.equal(
-        fs.readFileSync(path.join(targetDir, 'get-shit-done/gsd-retired-tool.cjs'), 'utf8'),
+        fs.readFileSync(path.join(targetDir, 'gsd-core/gsd-retired-tool.cjs'), 'utf8'),
         'old ambiguous artifact\n'
       );
-      assert.equal(fs.existsSync(path.join(targetDir, 'get-shit-done', 'VERSION')), false);
+      assert.equal(fs.existsSync(path.join(targetDir, 'gsd-core', 'VERSION')), false);
     });
   }
 });

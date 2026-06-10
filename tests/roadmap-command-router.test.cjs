@@ -1,9 +1,20 @@
 'use strict';
 
-const { describe, test } = require('node:test');
+const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { routeRoadmapCommand } = require('../get-shit-done/bin/lib/roadmap-command-router.cjs');
+const { routeRoadmapCommand } = require('../gsd-core/bin/lib/roadmap-command-router.cjs');
+
+// These tests exercise router dispatch with a deterministic runtime context.
+let _prevWorkstream;
+before(() => {
+  _prevWorkstream = process.env.GSD_WORKSTREAM;
+  process.env.GSD_WORKSTREAM = 'test-unit';
+});
+after(() => {
+  if (_prevWorkstream === undefined) delete process.env.GSD_WORKSTREAM;
+  else process.env.GSD_WORKSTREAM = _prevWorkstream;
+});
 
 describe('roadmap-command-router', () => {
   test('routes roadmap analyze', () => {
@@ -71,6 +82,6 @@ describe('roadmap-command-router', () => {
       },
     });
 
-    assert.equal(message, 'Unknown roadmap subcommand. Available: analyze, get-phase, update-plan-progress, annotate-dependencies');
+    assert.equal(message, 'Unknown roadmap subcommand. Available: analyze, get-phase, update-plan-progress, annotate-dependencies, validate, upgrade');
   });
 });

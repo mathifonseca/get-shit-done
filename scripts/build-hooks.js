@@ -26,18 +26,38 @@ const STAGE_DIR = path.join(HOOKS_DIR, `.dist-staging-${process.pid}`);
 const HOOKS_TO_COPY = [
   'gsd-check-update-worker.js',
   'gsd-check-update.js',
+  // Required by gsd-check-update-worker.js at runtime — must ship alongside it
+  // so require('./managed-hooks-registry.cjs') resolves in the installed hooks/ dir.
+  'managed-hooks-registry.cjs',
   'gsd-context-monitor.js',
+  // Cursor lifecycle hooks (issue #777): sessionStart context injection + postToolUse monitor
+  'gsd-cursor-session-start.js',
+  'gsd-cursor-post-tool.js',
+  // Claude Code FileChanged hook (#770) — hot-reloads gsd config when
+  // .planning/config.json changes mid-session. Must ship to dist so the
+  // installer can copy it to the target hooks/ dir and register FileChanged.
+  'gsd-config-reload.js',
   'gsd-prompt-guard.js',
   'gsd-read-guard.js',
   'gsd-read-injection-scanner.js',
   'gsd-statusline.js',
   'gsd-update-banner.js',
   'gsd-workflow-guard.js',
+  'gsd-worktree-path-guard.js',
   // Community hooks (bash, opt-in via .planning/config.json hooks.community)
   'gsd-session-state.sh',
   'gsd-validate-commit.sh',
-  'gsd-phase-boundary.sh'
+  'gsd-phase-boundary.sh',
+  // Graphify auto-update hook (#3347 / PR #3557 / #3579). Opt-in via
+  // .planning/config.json graphify.auto_update; off by default.
+  'gsd-graphify-update.sh'
 ];
+
+// Subdirectories under hooks/ whose contents must also ship to dist. Each
+// entry is copied as `hooks/<dir>/*` → `hooks/dist/<dir>/*` so detached
+// helpers (e.g. hooks/lib/gsd-graphify-rebuild.sh) resolve from the hook's
+// installed runtime path. See #3579.
+const HOOKS_SUBDIRS_TO_COPY = ['lib'];
 
 // Sync millisecond sleep using Atomics.wait on a throwaway SharedArrayBuffer.
 // Used between Windows rename retries; this script is sync end-to-end so
@@ -169,6 +189,37 @@ function build() {
     renameAtomicWithRetry(stagedDest, dest, hook);
   }
 
+  // Copy whitelisted hook subdirectories (e.g. hooks/lib/) into dist so the
+  // installer's readdir-and-isFile loop in bin/install.js sees them and
+  // detached hook helpers resolve from the installed runtime path (#3579).
+  for (const subdir of HOOKS_SUBDIRS_TO_COPY) {
+    const srcDir = path.join(HOOKS_DIR, subdir);
+    if (!fs.existsSync(srcDir)) continue;
+    const destDir = path.join(DIST_DIR, subdir);
+    fs.mkdirSync(destDir, { recursive: true });
+    const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+    for (const ent of entries) {
+      if (!ent.isFile()) continue;
+      const srcFile = path.join(srcDir, ent.name);
+      const destFile = path.join(destDir, ent.name);
+      if (ent.name.endsWith('.js')) {
+        const syntaxError = validateSyntax(srcFile);
+        if (syntaxError) {
+          console.error(`\x1b[31m✗ ${subdir}/${ent.name}: SyntaxError — ${syntaxError}\x1b[0m`);
+          hasErrors = true;
+          continue;
+        }
+      }
+      console.log(`\x1b[32m✓\x1b[0m Copying ${subdir}/${ent.name}...`);
+      const stagedDest = path.join(STAGE_DIR, `${subdir}__${ent.name}.${Date.now()}`);
+      fs.copyFileSync(srcFile, stagedDest);
+      if (ent.name.endsWith('.sh')) {
+        try { fs.chmodSync(stagedDest, 0o755); } catch (e) { /* Windows */ }
+      }
+      renameAtomicWithRetry(stagedDest, destFile, `${subdir}/${ent.name}`);
+    }
+  }
+
   // Best-effort cleanup of this process's own staging dir. Since STAGE_DIR
   // is per-PID (`.dist-staging-<pid>/`), no other builder touches it — so
   // rmSync with recursive:true is safe and leaves no race window.
@@ -184,4 +235,13 @@ function build() {
   console.log('\nBuild complete.');
 }
 
-build();
+// Export HOOKS_TO_COPY so tests can require() this file and assert against
+// the typed value instead of regex-parsing the source text (retires
+// pending-migration-to-typed-ir for orphaned-hooks.test.cjs, per #455).
+// Guard the build() call so requiring this file as a module does not trigger
+// a full build run (which copies files and writes to disk).
+if (require.main === module) {
+  build();
+}
+
+module.exports = { HOOKS_TO_COPY, HOOKS_SUBDIRS_TO_COPY };

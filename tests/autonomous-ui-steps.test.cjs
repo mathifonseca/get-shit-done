@@ -6,12 +6,12 @@
  * for phases with frontend indicators.
  */
 
-const { describe, it, test, beforeEach } = require('node:test');
+const { describe, test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
-const WORKFLOW_PATH = path.join(__dirname, '..', 'get-shit-done', 'workflows', 'autonomous.md');
+const WORKFLOW_PATH = path.join(__dirname, '..', 'gsd-core', 'workflows', 'autonomous.md');
 
 describe('autonomous workflow ui-phase and ui-review integration (#1375)', () => {
   let content;
@@ -29,11 +29,18 @@ describe('autonomous workflow ui-phase and ui-review integration (#1375)', () =>
       );
     });
 
-    test('UI design contract step detects frontend indicators via grep pattern', () => {
-      // Same grep pattern as plan-phase step 5.6
+    test('UI design contract step detects frontend indicators via shell-free Node gate (#3718)', () => {
+      // After #3718: the gate is implemented in bin/lib/ui-safety-gate.cjs (Node.js)
+      // piped from stdin, avoiding silent failure on Windows PowerShell and ARG_MAX.
+      // After #448: the helper is resolved against the GSD install dir (RUNTIME_DIR),
+      // not the consuming project's git root, so it is actually found at runtime.
       assert.ok(
-        content.includes('grep -iE "UI|interface|frontend|component|layout|page|screen|view|form|dashboard|widget"'),
-        'should use the same frontend detection grep pattern as plan-phase step 5.6'
+        content.includes('ui-safety-gate.cjs'),
+        'should invoke shell-free Node gate for cross-platform portability (#3718)'
+      );
+      assert.ok(
+        content.includes('RUNTIME_DIR'),
+        'should resolve the gate helper against the GSD install dir (RUNTIME_DIR), not the consuming project root (#448)'
       );
     });
 

@@ -14,18 +14,18 @@ const path = require('path');
 const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
 
 const AGENTS_DIR_NAME = 'agents';
-const MODEL_PROFILES = require('../get-shit-done/bin/lib/model-profiles.cjs').MODEL_PROFILES;
+const MODEL_PROFILES = require('../gsd-core/bin/lib/model-profiles.cjs').MODEL_PROFILES;
 const EXPECTED_AGENTS = Object.keys(MODEL_PROFILES);
 
 /**
  * Create a fake GSD install directory structure that mirrors what the installer
- * produces. gsd-tools.cjs lives at <configDir>/get-shit-done/bin/gsd-tools.cjs,
+ * produces. gsd-tools.cjs lives at <configDir>/gsd-core/bin/gsd-tools.cjs,
  * so the agents dir is at <configDir>/agents/.
  *
  * We use --cwd to point at the project, and GSD_INSTALL_DIR env to override
  * the agents directory location for testing.
  */
-function createAgentsDir(configDir, agentNames = []) {
+function _createAgentsDir(configDir, agentNames = []) {
   const agentsDir = path.join(configDir, AGENTS_DIR_NAME);
   fs.mkdirSync(agentsDir, { recursive: true });
   for (const name of agentNames) {
@@ -50,34 +50,35 @@ describe('init commands: agents_installed field (#1371)', () => {
     cleanup(tmpDir);
   });
 
+  // Point the SDK at the repo's agents/ dir (sibling of gsd-core/) via the
+  // GSD_AGENTS_DIR override. The SDK side of init resolves agents from
+  // GSD_AGENTS_DIR or the runtime config dir (~/.claude/agents for Claude); it
+  // does NOT walk up from cwd like the CJS-era code did. Without this override
+  // these tests would only pass on a dev machine with ~/.claude/agents/
+  // populated — which masked the divergence on Linux CI where that path is
+  // absent. See sdk/src/query/QUERY-HANDLERS.md ("subprocess vs in-process
+  // path resolution") and sdk/src/query/helpers.ts:resolveAgentsDir.
+  const REPO_AGENTS_DIR = path.resolve(__dirname, '..', 'agents');
+
   test('init execute-phase includes agents_installed=true when agents exist', () => {
-    // Create phase dir for init
     const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
     fs.mkdirSync(phaseDir, { recursive: true });
 
-    // Create agents dir as sibling of get-shit-done/ (the installed layout)
-    // gsd-tools.cjs resolves agents from GSD_INSTALL_DIR or __dirname/../../agents
-    const gsdInstallDir = path.resolve(__dirname, '..', 'get-shit-done', 'bin');
-    const configDir = path.resolve(gsdInstallDir, '..', '..');
-    const agentsDir = path.join(configDir, 'agents');
-
-    // Agents already exist in the repo root /agents/ dir which is sibling to get-shit-done/
-    const result = runGsdTools('init execute-phase 1 --raw', tmpDir);
+    const result = runGsdTools('init execute-phase 1 --raw', tmpDir, { GSD_AGENTS_DIR: REPO_AGENTS_DIR });
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
     assert.strictEqual(typeof output.agents_installed, 'boolean',
       'init execute-phase must include agents_installed field');
-    // The repo has agents/ dir with all gsd-*.md files, so this should be true
     assert.strictEqual(output.agents_installed, true,
-      'agents_installed should be true when agents directory has gsd-*.md files');
+      'agents_installed should be true when GSD_AGENTS_DIR has gsd-*.md files');
   });
 
   test('init plan-phase includes agents_installed=true when agents exist', () => {
     const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
     fs.mkdirSync(phaseDir, { recursive: true });
 
-    const result = runGsdTools('init plan-phase 1 --raw', tmpDir);
+    const result = runGsdTools('init plan-phase 1 --raw', tmpDir, { GSD_AGENTS_DIR: REPO_AGENTS_DIR });
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
@@ -144,7 +145,7 @@ describe('validate health: agent installation check W010 (#1371)', () => {
   });
 
   test('health check reports healthy when agents are installed (repo layout)', () => {
-    // In the repo, agents/ exists as a sibling of get-shit-done/, so the
+    // In the repo, agents/ exists as a sibling of gsd-core/, so the
     // health check should find them via the gsd-tools.cjs path resolution
     const result = runGsdTools('validate health --raw', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
@@ -233,6 +234,26 @@ describe('checkAgentsInstalled: Copilot .agent.md format (#1512)', () => {
       'agents_installed must be true when Copilot .agent.md files are present');
     assert.deepStrictEqual(output.missing_agents, [],
       'missing_agents must be empty when all .agent.md files are present');
+  });
+
+  test('agents_installed=true when agents exist as .toml (Codex format) (#278)', () => {
+    const agentsDir = path.join(tmpDir, 'codex-agents');
+    fs.mkdirSync(agentsDir, { recursive: true });
+    for (const name of EXPECTED_AGENTS) {
+      fs.writeFileSync(
+        path.join(agentsDir, `${name}.toml`),
+        `name = "${name}"\ndescription = "Test agent"\n`
+      );
+    }
+
+    const result = runGsdTools('validate agents --raw', tmpDir, { GSD_AGENTS_DIR: agentsDir });
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.agents_found, true,
+      'agents_found must be true when agents exist as .toml (Codex format)');
+    assert.deepStrictEqual(output.missing, [],
+      'missing must be empty when all agents exist as .toml');
   });
 
   test('GSD_AGENTS_DIR env var overrides default agents directory', () => {

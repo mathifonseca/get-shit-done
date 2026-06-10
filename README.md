@@ -1,45 +1,19 @@
 <div align="center">
 
-# GET SHIT DONE
+# GSD Core
+
+**Git. Ship. Done.**
 
 **English** · [Português](README.pt-BR.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [한국어](README.ko-KR.md)
 
 **A light-weight meta-prompting, context engineering, and spec-driven development system for Claude Code, OpenCode, Gemini CLI, Kilo, Codex, Copilot, Cursor, Windsurf, and more.**
 
-**Solves context rot — the quality degradation that happens as your AI fills its context window.**
-
 [![npm version](https://img.shields.io/npm/v/%40opengsd%2Fgsd-core?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/@opengsd/gsd-core)
 [![npm downloads](https://img.shields.io/npm/dm/%40opengsd%2Fgsd-core?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/@opengsd/gsd-core)
 [![Tests](https://img.shields.io/github/actions/workflow/status/open-gsd/gsd-core/test.yml?branch=main&style=for-the-badge&logo=github&label=Tests)](https://github.com/open-gsd/gsd-core/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/mYgfVNfA2r)
-[![X (Twitter)](https://img.shields.io/badge/X-@gsd__foundation-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/gsd_foundation)
-[![$GSD Token](https://img.shields.io/badge/$GSD-Dexscreener-1C1C1C?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIgZmlsbD0iIzAwRkYwMCIvPjwvc3ZnPg==&logoColor=00FF00)](https://dexscreener.com/solana/dwudwjvan7bzkw9zwlbyv6kspdlvhwzrqy6ebk8xzxkv)
 [![GitHub stars](https://img.shields.io/github/stars/open-gsd/gsd-core?style=for-the-badge&logo=github&color=181717)](https://github.com/open-gsd/gsd-core)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
-
-<br>
-
-```bash
-npx @opengsd/gsd-core@latest
-```
-
-**Works on Mac, Windows, and Linux.**
-
-<br>
-
-![GSD Install](assets/terminal.svg)
-
-<br>
-
-*"If you know clearly what you want, this WILL build it for you. No bs."*
-
-*"I've done SpecKit, OpenSpec and Taskmaster — this has produced the best results for me."*
-
-*"By far the most powerful addition to my Claude Code. Nothing over-engineered. Literally just gets shit done."*
-
-<br>
-
-**Trusted by engineers at Amazon, Google, Shopify, and Webflow.**
 
 </div>
 
@@ -131,32 +105,35 @@ Use `--fix` to auto-scaffold missing items.
 
 ---
 
-> [!IMPORTANT]
-> **Returning to GSD?**
->
-> Run `/gsd-map-codebase` to re-index your codebase, then `/gsd-new-project` to rebuild GSD's planning context. Your code is fine — GSD just needs its context rebuilt. See the [CHANGELOG](CHANGELOG.md) for what's new.
+## What is GSD Core
+
+GSD Core is a context-engineering and spec-driven development framework that drives AI coding agents (Claude Code, Codex, Gemini CLI, Copilot, Cursor, and more) through a disciplined phase loop. It solves [context rot](docs/explanation/context-engineering.md) — the quality degradation that accumulates as an AI fills its context window — by running all heavy research, planning, and execution work in fresh-context subagents while keeping your main session lean.
 
 ---
 
-## Why I Built This
+## How it works
 
-I'm a solo developer. I don't write code — Claude Code does.
+Each milestone repeats the same five-step loop, one phase at a time:
 
-Other spec-driven tools exist, but they're all built for 50-person engineering orgs — sprint ceremonies, story points, stakeholder syncs, Jira workflows. I'm not that. I'm a creative person trying to build great things consistently.
-
-So I built GSD. The complexity is in the system, not in your workflow. Behind the scenes: context engineering, XML prompt formatting, subagent orchestration, state management. What you see: a few commands that just work.
-
-The system gives Claude everything it needs to do the work *and* verify it. I trust the workflow. It just does a good job.
-
-— **TÂCHES**
+1. **Discuss** — capture implementation decisions before anything is planned
+2. **Plan** — research, decompose, and verify the plan fits a fresh context window
+3. **Execute** — run plans in parallel waves; each executor starts with a clean 200k-token context
+4. **Verify** — walk through what was built; diagnose and fix before declaring done
+5. **Ship** — create the PR, archive the phase, repeat for the next one
 
 ---
 
-## How It Works
+## Quickstart
 
-The loop is six commands. Each one does exactly one thing.
+```bash
+npx @opengsd/gsd-core@latest
+```
 
-### 1. Initialize
+The installer prompts for your runtime (Claude Code, OpenCode, Gemini CLI, Kilo, Codex, Copilot, Cursor, Windsurf, and more) and whether to install globally or locally. The installer is required for cross-runtime compatibility — do not copy files from `agents/` or `commands/` directly.
+
+On another runtime or without Node.js? See [Install on your runtime](docs/how-to/install-on-your-runtime.md).
+
+Once installed, start your first project:
 
 ```bash
 /gsd-new-project
@@ -165,6 +142,8 @@ The loop is six commands. Each one does exactly one thing.
 Questions → research → requirements → roadmap. You approve it, then you're ready to build.
 
 > **Already have code?** Run `/gsd-map-codebase` first. It analyzes your stack, architecture, and conventions so `/gsd-new-project` asks the right questions.
+
+> New to GSD? See [Your first project](docs/tutorials/your-first-project.md) for an upstream-authored guided walkthrough.
 
 ### 2. Discuss
 
@@ -382,21 +361,33 @@ At milestone completion, GSD offers squash merge (recommended) or merge with his
 
 ## Documentation
 
-| Doc | What's in it |
-|-----|-------------|
-| [User Guide](docs/USER-GUIDE.md) | End-to-end walkthrough, install options, all runtime flags, configuration reference |
-| [Commands](docs/COMMANDS.md) | Every command with flags and examples |
-| [Configuration](docs/CONFIGURATION.md) | Full config schema, model profiles, git branching |
-| [Architecture](docs/ARCHITECTURE.md) | How the multi-agent orchestration works |
-| [CLI Tools](docs/CLI-TOOLS.md) | `gsd-sdk query` and programmatic SDK dispatch seams |
-| [Features](docs/FEATURES.md) | Complete feature index |
-| [Changelog](CHANGELOG.md) | What changed in each release |
+**Tutorials** — learning by doing:
+- [Your first project](docs/tutorials/your-first-project.md)
+- [Onboarding an existing codebase](docs/tutorials/onboarding-an-existing-codebase.md)
+
+**How-to guides** — task-focused recipes:
+- [Install on your runtime](docs/how-to/install-on-your-runtime.md)
+- [Plan a phase](docs/how-to/plan-a-phase.md)
+- [Verify and ship](docs/how-to/verify-and-ship.md)
+- … [see all how-to guides](docs/README.md#how-to-guides)
+
+**Reference** — authoritative facts:
+- [Commands](docs/COMMANDS.md)
+- [Configuration](docs/CONFIGURATION.md)
+- [CLI tools](docs/CLI-TOOLS.md)
+
+**Explanation** — concepts and design decisions:
+- [Context engineering](docs/explanation/context-engineering.md)
+- [The phase loop](docs/explanation/the-phase-loop.md)
+- [Architecture](docs/ARCHITECTURE.md)
+
+Full index: [docs/README.md](docs/README.md). Other languages: [日本語](README.ja-JP.md) · [한국어](README.ko-KR.md) · [Português](README.pt-BR.md) · [简体中文](README.zh-CN.md).
 
 ---
 
-## Troubleshooting
+## Why it works
 
-**Commands not showing up?** Restart your runtime after install. GSD installs to `~/.claude/skills/gsd-*/` (Claude Code), `~/.codex/skills/gsd-*/` (Codex), or the equivalent for your runtime.
+Most AI-coding setups fail at scale because context bloat silently degrades output quality, there is no shared memory between sessions, and nothing verifies that code actually works. GSD Core solves all three: heavy work runs in fresh subagents, structured artifacts like `STATE.md` and `CONTEXT.md` survive session boundaries, and the verify step walks through what was built and generates fix plans before a phase is declared done. See [docs/explanation/context-engineering.md](docs/explanation/context-engineering.md) for the full reasoning.
 
 **Something broken?** Re-run the installer — it's idempotent:
 ```bash
@@ -408,7 +399,7 @@ npx @opengsd/gsd-core@latest
 CLAUDE_CONFIG_DIR=/home/youruser/.claude npx @opengsd/gsd-core --global
 ```
 
-Full troubleshooting and uninstall instructions in **[docs/USER-GUIDE.md](docs/USER-GUIDE.md#troubleshooting)**.
+Full troubleshooting and uninstall instructions in **[docs/USER-GUIDE.md](docs/USER-GUIDE.md#troubleshooting)**. Upstream also maintains [docs/how-to/recover-and-troubleshoot.md](docs/how-to/recover-and-troubleshoot.md).
 
 ---
 
@@ -441,6 +432,6 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 <div align="center">
 
-**Claude Code is powerful. GSD makes it reliable.**
+**Claude Code is powerful. GSD Core makes it reliable.**
 
 </div>

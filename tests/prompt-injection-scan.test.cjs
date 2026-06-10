@@ -29,7 +29,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
-const { scanForInjection, INJECTION_PATTERNS } = require('../get-shit-done/bin/lib/security.cjs');
+const { scanForInjection } = require('../gsd-core/bin/lib/security.cjs');
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -39,8 +39,8 @@ const PROJECT_ROOT = path.join(__dirname, '..');
 const SCAN_DIRS = [
   'agents',
   'commands',
-  'get-shit-done/workflows',
-  'get-shit-done/bin/lib',
+  'gsd-core/workflows',
+  'gsd-core/bin/lib',
   'hooks',
 ];
 
@@ -50,15 +50,24 @@ const SCAN_EXTS = new Set(['.md', '.cjs', '.js', '.json']);
 // Files that legitimately reference injection patterns (e.g., security docs, this test)
 // or exceed the 50K size threshold due to legitimate workflow complexity
 const ALLOWLIST = new Set([
-  'get-shit-done/bin/lib/security.cjs',        // The security module itself
-  'get-shit-done/workflows/discuss-phase.md',  // Large workflow (~50K) with power mode + i18n
-  'get-shit-done/workflows/new-project.md',     // Large workflow (~50K) — agent install, runtime detect, brownfield map, #3491 worktree gating
-  'get-shit-done/workflows/execute-phase.md',  // Large orchestration workflow (~51K) with wave execution + code-review gate
-  'get-shit-done/workflows/plan-phase.md',      // Large orchestration workflow (~51K) with TDD mode integration
+  'gsd-core/bin/lib/security.cjs',        // The security module itself
+  'gsd-core/workflows/discuss-phase.md',  // Large workflow (~50K) with power mode + i18n
+  'gsd-core/workflows/new-project.md',     // Large workflow (~50K) — agent install, runtime detect, brownfield map, #3491 worktree gating
+  'gsd-core/workflows/execute-phase.md',  // Large orchestration workflow (~51K) with wave execution + code-review gate
+  'gsd-core/workflows/plan-phase.md',      // Large orchestration workflow (~51K) with TDD mode integration
   'hooks/gsd-prompt-guard.js',                  // The prompt guard hook
   'hooks/gsd-read-injection-scanner.js',        // The read injection scanner (contains patterns)
   'tests/security.test.cjs',                    // Security tests
   'tests/prompt-injection-scan.test.cjs',       // This file
+]);
+
+// Workflows that exceed the 50K strict-mode size threshold due to legitimate
+// complexity, but must still pass all injection pattern checks. These receive
+// a size-finding exemption only — every other security check still runs.
+// Do NOT add files here that legitimately reference injection patterns (those
+// belong in ALLOWLIST). Only add files that are large but otherwise clean.
+const SIZE_ONLY_WORKFLOWS = new Set([
+  'gsd-core/workflows/docs-update.md',  // ~51K after fix-loop truncation guard (#571)
 ]);
 
 // ─── Scanner ────────────────────────────────────────────────────────────────
@@ -101,7 +110,10 @@ describe('codebase prompt injection scan', () => {
     const findings = [];
 
     for (const file of agentFiles) {
-      const relPath = path.relative(PROJECT_ROOT, file);
+      // Normalize to POSIX separators so ALLOWLIST.has() works on Windows
+      // (path.relative returns 'gsd-core\bin\...' on win32; allowlist
+      // keys are POSIX 'gsd-core/bin/...').
+      const relPath = path.relative(PROJECT_ROOT, file).replace(/\\/g, '/');
       if (ALLOWLIST.has(relPath)) continue;
 
       const content = fs.readFileSync(file, 'utf-8');
@@ -131,7 +143,10 @@ describe('codebase prompt injection scan', () => {
     const oversized = [];
 
     for (const file of agentFiles) {
-      const relPath = path.relative(PROJECT_ROOT, file);
+      // Normalize to POSIX separators so ALLOWLIST.has() works on Windows
+      // (path.relative returns 'gsd-core\bin\...' on win32; allowlist
+      // keys are POSIX 'gsd-core/bin/...').
+      const relPath = path.relative(PROJECT_ROOT, file).replace(/\\/g, '/');
       if (ALLOWLIST.has(relPath)) continue;
 
       const content = fs.readFileSync(file, 'utf-8');
@@ -152,14 +167,23 @@ describe('codebase prompt injection scan', () => {
     const findings = [];
 
     for (const file of workflowFiles) {
-      const relPath = path.relative(PROJECT_ROOT, file);
+      // Normalize to POSIX separators so ALLOWLIST.has() works on Windows
+      // (path.relative returns 'gsd-core\bin\...' on win32; allowlist
+      // keys are POSIX 'gsd-core/bin/...').
+      const relPath = path.relative(PROJECT_ROOT, file).replace(/\\/g, '/');
       if (ALLOWLIST.has(relPath)) continue;
 
       const content = fs.readFileSync(file, 'utf-8');
       const result = scanForInjection(content, { strict: true });
 
-      if (!result.clean) {
-        findings.push({ file: relPath, issues: result.findings });
+      // SIZE_ONLY_WORKFLOWS entries still run injection scanning but are exempt
+      // from the 50K size threshold — filter out only the size finding for them.
+      const activeFindings = SIZE_ONLY_WORKFLOWS.has(relPath)
+        ? result.findings.filter(f => !f.startsWith('Suspicious text length:'))
+        : result.findings;
+
+      if (activeFindings.length > 0) {
+        findings.push({ file: relPath, issues: activeFindings });
       }
     }
 
@@ -175,7 +199,10 @@ describe('codebase prompt injection scan', () => {
     const findings = [];
 
     for (const file of commandFiles) {
-      const relPath = path.relative(PROJECT_ROOT, file);
+      // Normalize to POSIX separators so ALLOWLIST.has() works on Windows
+      // (path.relative returns 'gsd-core\bin\...' on win32; allowlist
+      // keys are POSIX 'gsd-core/bin/...').
+      const relPath = path.relative(PROJECT_ROOT, file).replace(/\\/g, '/');
       if (ALLOWLIST.has(relPath)) continue;
 
       const content = fs.readFileSync(file, 'utf-8');
@@ -198,7 +225,10 @@ describe('codebase prompt injection scan', () => {
     const findings = [];
 
     for (const file of hookFiles) {
-      const relPath = path.relative(PROJECT_ROOT, file);
+      // Normalize to POSIX separators so ALLOWLIST.has() works on Windows
+      // (path.relative returns 'gsd-core\bin\...' on win32; allowlist
+      // keys are POSIX 'gsd-core/bin/...').
+      const relPath = path.relative(PROJECT_ROOT, file).replace(/\\/g, '/');
       if (ALLOWLIST.has(relPath)) continue;
 
       const content = fs.readFileSync(file, 'utf-8');
@@ -221,7 +251,10 @@ describe('codebase prompt injection scan', () => {
     const findings = [];
 
     for (const file of libFiles) {
-      const relPath = path.relative(PROJECT_ROOT, file);
+      // Normalize to POSIX separators so ALLOWLIST.has() works on Windows
+      // (path.relative returns 'gsd-core\bin\...' on win32; allowlist
+      // keys are POSIX 'gsd-core/bin/...').
+      const relPath = path.relative(PROJECT_ROOT, file).replace(/\\/g, '/');
       if (ALLOWLIST.has(relPath)) continue;
 
       const content = fs.readFileSync(file, 'utf-8');
@@ -244,7 +277,10 @@ describe('codebase prompt injection scan', () => {
     const invisiblePattern = /[\u200B-\u200F\u2028-\u202F\uFEFF\u00AD]/;
 
     for (const file of allFiles) {
-      const relPath = path.relative(PROJECT_ROOT, file);
+      // Normalize to POSIX separators so ALLOWLIST.has() works on Windows
+      // (path.relative returns 'gsd-core\bin\...' on win32; allowlist
+      // keys are POSIX 'gsd-core/bin/...').
+      const relPath = path.relative(PROJECT_ROOT, file).replace(/\\/g, '/');
       if (ALLOWLIST.has(relPath)) continue;
 
       const content = fs.readFileSync(file, 'utf-8');
@@ -273,7 +309,10 @@ describe('codebase prompt injection scan', () => {
     const boundaryPattern = /<\/?(?:system|assistant|human)>/i;
 
     for (const file of allFiles) {
-      const relPath = path.relative(PROJECT_ROOT, file);
+      // Normalize to POSIX separators so ALLOWLIST.has() works on Windows
+      // (path.relative returns 'gsd-core\bin\...' on win32; allowlist
+      // keys are POSIX 'gsd-core/bin/...').
+      const relPath = path.relative(PROJECT_ROOT, file).replace(/\\/g, '/');
       if (ALLOWLIST.has(relPath)) continue;
       // Allow .md files to use common tags in examples/docs
       // But flag .js/.cjs files that embed these

@@ -17,7 +17,8 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+
+const isWindows = process.platform === 'win32';
 
 const {
   readGsdEffectiveModelOverrides,
@@ -26,36 +27,41 @@ const {
   getCodexSkillAdapterHeader,
 } = require('../bin/install.js');
 
-function makeTmp(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2256-${prefix}-`));
-}
+const { createTempDir, cleanup } = require('./helpers.cjs');
+const makeTmp = (prefix) => createTempDir(`gsd-2256-${prefix}-`);
 
 function writeJson(p, obj) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(obj, null, 2));
 }
 
-function rmr(p) {
-  try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* noop */ }
-}
-
 describe('bug #2256 — readGsdEffectiveModelOverrides', () => {
   let projectDir;
   let homeDir;
   let origHome;
+  let origUserProfile;
 
   beforeEach(() => {
     projectDir = makeTmp('proj');
     homeDir = makeTmp('home');
     origHome = process.env.HOME;
+    // On Windows, os.homedir() reads USERPROFILE (not HOME). Tests that
+    // need to redirect ~ must override both — otherwise the SUT reads
+    // the real user's home and the fixture is invisible.
+    origUserProfile = process.env.USERPROFILE;
     process.env.HOME = homeDir;
+    if (isWindows) process.env.USERPROFILE = homeDir;
   });
 
   afterEach(() => {
     if (origHome === undefined) delete process.env.HOME;
     else process.env.HOME = origHome;
-    rmr(projectDir);
-    rmr(homeDir);
+    if (isWindows) {
+      if (origUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = origUserProfile;
+    }
+    cleanup(projectDir);
+    cleanup(homeDir);
   });
 
   test('returns null when neither source defines model_overrides', () => {

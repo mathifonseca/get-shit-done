@@ -40,9 +40,14 @@ describe('generate-claude-md', () => {
     const claudePath = path.join(tmpDir, 'CLAUDE.md');
     const content = fs.readFileSync(claudePath, 'utf-8');
     assert.ok(content.includes('## GSD Workflow Enforcement'));
-    assert.ok(content.includes('/gsd:quick'));
-    assert.ok(content.includes('/gsd:debug'));
-    assert.ok(content.includes('/gsd:execute-phase'));
+    // #3584: generated CLAUDE.md must emit the runtime-routable hyphen-form
+    // (Claude/Cursor/OpenCode/Kilo etc.); the legacy colon form is no longer
+    // dispatched by current skill installs.
+    assert.ok(content.includes('/gsd-quick'));
+    assert.ok(content.includes('/gsd-debug'));
+    assert.ok(content.includes('/gsd-execute-phase'));
+    assert.ok(!content.includes('/gsd:quick'));
+    assert.ok(!content.includes('/gsd:execute-phase'));
     assert.ok(content.includes('Do not make direct repo edits outside a GSD workflow'));
   });
 
@@ -66,7 +71,7 @@ describe('generate-claude-md', () => {
 });
 
 describe('new-project workflow includes CLAUDE.md generation', () => {
-  const workflowPath = path.join(__dirname, '..', 'get-shit-done', 'workflows', 'new-project.md');
+  const workflowPath = path.join(__dirname, '..', 'gsd-core', 'workflows', 'new-project.md');
   const commandsPath = path.join(__dirname, '..', 'docs', 'COMMANDS.md');
 
   test('new-project workflow generates instruction file before final commit', () => {
@@ -164,9 +169,9 @@ describe('generate-claude-md skills section', () => {
     );
 
     const homeDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'gsd-claude-skills-home-'));
-    fs.mkdirSync(path.join(homeDir, '.claude', 'get-shit-done', 'skills', 'import-only'), { recursive: true });
+    fs.mkdirSync(path.join(homeDir, '.claude', 'gsd-core', 'skills', 'import-only'), { recursive: true });
     fs.writeFileSync(
-      path.join(homeDir, '.claude', 'get-shit-done', 'skills', 'import-only', 'SKILL.md'),
+      path.join(homeDir, '.claude', 'gsd-core', 'skills', 'import-only', 'SKILL.md'),
       '---\nname: import-only\ndescription: Deprecated import-only skill.\n---\n'
     );
 

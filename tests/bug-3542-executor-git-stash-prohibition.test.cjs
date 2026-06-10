@@ -35,6 +35,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execSync } = require('node:child_process');
+const { cleanup } = require('./helpers.cjs');
 
 const EXECUTOR_PATH = path.join(__dirname, '..', 'agents', 'gsd-executor.md');
 
@@ -160,7 +161,10 @@ test('bug-3542: stash pushed in main checkout is visible inside a linked worktre
     // not just visibility. We pop into a clean working tree on a
     // different branch, so any applied content is the contamination.
     execSync('git stash pop -q', { cwd: linkedWorktree, stdio: 'pipe' });
-    const popped = fs.readFileSync(path.join(linkedWorktree, 'a.txt'), 'utf-8');
+    // On Windows autocrlf=true, git rewrites stashed content with CRLF on
+    // checkout. Strip \r before content compare — the test pins git's
+    // shared-stash behavior, not line endings.
+    const popped = fs.readFileSync(path.join(linkedWorktree, 'a.txt'), 'utf-8').replace(/\r\n/g, '\n');
     assert.strictEqual(
       popped,
       'wip in main\n',
@@ -169,6 +173,6 @@ test('bug-3542: stash pushed in main checkout is visible inside a linked worktre
         'contamination the executor prohibition exists to prevent.',
     );
   } finally {
-    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    cleanup(tmpRoot);
   }
 });

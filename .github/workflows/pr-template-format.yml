@@ -4,6 +4,10 @@ on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize, ready_for_review]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   issues: write
@@ -18,11 +22,23 @@ jobs:
       - name: Check out policy from base branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
+      - name: Get changed files
+        id: changed_files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          files=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json files --jq '.files[].path' | tr '\n' '\n')
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$files" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
       - name: Evaluate PR template format
         id: policy
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          CHANGED_FILES: ${{ steps.changed_files.outputs.files }}
         run: node scripts/pr-template-policy.cjs
 
       - name: Warn trusted contributor about missing template
@@ -58,7 +74,7 @@ jobs:
             }
             core.warning(policy.reason);
 
-      - name: Comment, close, and fail untrusted malformed PR
+      - name: Comment and fail untrusted malformed PR
         if: steps.policy.outputs.action == 'close'
         uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
         with:
@@ -80,11 +96,11 @@ jobs:
                 issue_number: pr.number,
                 body: [
                   marker,
-                  '## PR template required - PR auto-closed',
+                  '## PR template required',
                   '',
                   'This PR does not follow one of the required pull request templates from the contribution guidelines.',
                   '',
-                  'Please reopen with the correct typed template:',
+                  'Please update the PR description to use the correct typed template:',
                   '',
                   `- [Fix PR template](${repoUrl}/blob/main/.github/PULL_REQUEST_TEMPLATE/fix.md)`,
                   `- [Enhancement PR template](${repoUrl}/blob/main/.github/PULL_REQUEST_TEMPLATE/enhancement.md)`,
@@ -96,10 +112,4 @@ jobs:
                 ].join('\n'),
               });
             }
-            await github.rest.pulls.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: pr.number,
-              state: 'closed',
-            });
             core.setFailed(policy.reason);

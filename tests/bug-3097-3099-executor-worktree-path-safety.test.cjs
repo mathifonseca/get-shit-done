@@ -24,7 +24,7 @@ const executorSrc = fs.readFileSync(
   path.join(ROOT, 'agents', 'gsd-executor.md'), 'utf8',
 );
 const executePhaseSrc = fs.readFileSync(
-  path.join(ROOT, 'get-shit-done', 'workflows', 'execute-phase.md'), 'utf8',
+  path.join(ROOT, 'gsd-core', 'workflows', 'execute-phase.md'), 'utf8',
 );
 
 describe('bug #3097: cwd-drift sentinel in gsd-executor.md', () => {
@@ -84,16 +84,30 @@ describe('bug #3099: absolute-path safety guidance in gsd-executor.md', () => {
     );
   });
 
+  test('execute-phase prompt anchors subagent file paths to project_root before files_to_read (#280)', () => {
+    const filesIdx = executePhaseSrc.indexOf('<files_to_read>');
+    assert.ok(filesIdx !== -1, 'files_to_read block not found in execute-phase.md');
+    const dispatchSnippet = executePhaseSrc.slice(filesIdx, filesIdx + 1800);
+    assert.ok(
+      dispatchSnippet.includes('PROJECT_ROOT=$(git rev-parse --show-toplevel'),
+      'executor dispatch must compute PROJECT_ROOT in the prompt before file reads',
+    );
+    assert.ok(
+      dispatchSnippet.includes('${PROJECT_ROOT}/'),
+      'executor files_to_read paths must be anchored to ${PROJECT_ROOT}/',
+    );
+  });
+
   test('worktree-path-safety.md reference file exists', () => {
     assert.ok(
-      fs.existsSync(path.join(ROOT, 'get-shit-done', 'references', 'worktree-path-safety.md')),
-      'get-shit-done/references/worktree-path-safety.md does not exist',
+      fs.existsSync(path.join(ROOT, 'gsd-core', 'references', 'worktree-path-safety.md')),
+      'gsd-core/references/worktree-path-safety.md does not exist',
     );
   });
 
   test('worktree-path-safety.md contains cwd-drift and absolute-path guards', () => {
     const safetySrc = fs.readFileSync(
-      path.join(ROOT, 'get-shit-done', 'references', 'worktree-path-safety.md'), 'utf8',
+      path.join(ROOT, 'gsd-core', 'references', 'worktree-path-safety.md'), 'utf8',
     );
     assert.ok(safetySrc.includes('gsd-spawn-toplevel') || safetySrc.includes('cwd-drift'),
       'worktree-path-safety.md missing cwd-drift sentinel content');
