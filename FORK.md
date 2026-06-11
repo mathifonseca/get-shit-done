@@ -357,6 +357,25 @@ Designed but not yet implemented. Recorded here so the design intent is visible 
 
 **Status.** Designed, not implemented. Tracked in `lifeos-work` `wiki/topics/sdlc-gsd-pending-updates.md` GSD item 11. Lower-risk than the plan-review — recommend implementing first to validate the multi-lens-with-disagreement mechanism before moving it upstream to plan time.
 
+### `codify` as an explicit phase in the GSD chain (designed 2026-06-11)
+
+**Intent.** Add `codify` as the named final phase of the GSD workflow chain: `discuss → plan → execute → verify → codify`. The phase asks "what did this work teach us, and which surface should encode it?" and routes the answer to the right artifact — a rules-file note, a new skill, an MCP tool, or a hook — rather than letting the learning evaporate at session end.
+
+**Source.** Shah Rahman (Meta), "A Practical Guide to Becoming an AI-Native Engineer" (ByteByteGo, 2026-06-02) — the six-phase ADLC ends with an explicit "Codify" phase, and frames MCP tools/skills (not just rules files) as codification targets. Landed SDLC-side in `~/.claude/sdlc.md` v1.2.12 (§3 "Codify (Compound Engineering)"); this is the GSD-fork implementation follow-up named there.
+
+**Why now.** The fork already *does* per-phase codification via `gsd-extract-learnings` (CLAUDE.md / `.claude/rules/` updates), and the milestone-retro entry above closes a "find → learn → codify loop." But codify isn't named at the phase-chain level, so it reads as a side effect of verify rather than a first-class step the user can see, skip, or configure. Naming it makes the step auditable and lets the four-surface routing (rules / skills / MCP / hooks) become explicit guidance instead of defaulting to "append to a rules file."
+
+**Sketch.**
+
+1. Add `workflow.codify_phase` config knob (default: `false`, opt-in until validated — the existing `gsd-extract-learnings` behavior is the no-knob baseline).
+2. Run after `gsd-verify-work` passes. Consumes the phase's deviation log, REVIEW.md, VERIFICATION.md, and any ADRs as input — the same artifacts the milestone retro mines, but phase-scoped and forward-routing rather than retrospective.
+3. For each candidate learning, classify the *surface*: convention/example → rules file; repeatable procedure → skill; reliable system access → MCP tool; must-always-fire step → hook. Emit proposals, not auto-writes — surface routing is a taste decision (human-in-the-loop, consistent with `gsd-skill-audit` and kill-criteria).
+4. Relationship to `gsd-extract-learnings`: codify is the *superset* — extract-learnings handles the rules-file surface; codify adds the skill/MCP/hook surfaces and the routing decision. Recommended: fold extract-learnings into the codify phase rather than run both.
+
+**Open design question.** Whether `codify` is a new phase (own skill, own knob) or an extension of the existing verify→extract-learnings tail. Recommended: extension first (lower risk, reuses the artifact-mining), promote to a named phase only if the four-surface routing proves it earns its own step.
+
+**Status.** Designed, not implemented. Tracked in `lifeos-work` `wiki/topics/sdlc-gsd-pending-updates.md` **SDLC item 10** (distinct from the GSD-section items above). Pairs with the milestone-retro entry — retro is milestone-scoped backward-looking; codify is phase-scoped forward-routing.
+
 ### "Don't shell out to `claude -p`" anti-pattern (recorded 2026-05-26)
 
 Surfaced in the Tharlq thread: Tyler Laprade argued 5 of the 9 skill categories should be scripts that invoke `claude -p` rather than skills that invoke scripts. Tharlq pushed back — invoking `claude -p` from inside an existing agentic loop is the wrong shape; the right primitive for context control inside an agentic loop is **subagents**, not a fresh Claude session.
