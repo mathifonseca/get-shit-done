@@ -365,16 +365,61 @@ Designed but not yet implemented. Recorded here so the design intent is visible 
 
 **Why now.** The fork already *does* per-phase codification via `gsd-extract-learnings` (CLAUDE.md / `.claude/rules/` updates), and the milestone-retro entry above closes a "find → learn → codify loop." But codify isn't named at the phase-chain level, so it reads as a side effect of verify rather than a first-class step the user can see, skip, or configure. Naming it makes the step auditable and lets the four-surface routing (rules / skills / MCP / hooks) become explicit guidance instead of defaulting to "append to a rules file."
 
-**Sketch.**
+**Implementation plan (parked — execute in a focused fork pass).** Build order is bottom-up: knob → command + workflow → phase-tail wiring → verifier nudge → docs → tests. `codify` is the *superset* of `gsd-extract-learnings`: extract-learnings owns the rules-file surface; codify reuses it and adds the skill / MCP-tool / hook surfaces plus the routing decision. All file paths below are real as of the v1.4.3 sync — re-verify against the tree before editing, and **rebuild before install** (see "Important: build before install" above) since the `bin/lib/*.cjs` adapters are generated from the manifests.
 
-1. Add `workflow.codify_phase` config knob (default: `false`, opt-in until validated — the existing `gsd-extract-learnings` behavior is the no-knob baseline).
-2. Run after `gsd-verify-work` passes. Consumes the phase's deviation log, REVIEW.md, VERIFICATION.md, and any ADRs as input — the same artifacts the milestone retro mines, but phase-scoped and forward-routing rather than retrospective.
-3. For each candidate learning, classify the *surface*: convention/example → rules file; repeatable procedure → skill; reliable system access → MCP tool; must-always-fire step → hook. Emit proposals, not auto-writes — surface routing is a taste decision (human-in-the-loop, consistent with `gsd-skill-audit` and kill-criteria).
-4. Relationship to `gsd-extract-learnings`: codify is the *superset* — extract-learnings handles the rules-file surface; codify adds the skill/MCP/hook surfaces and the routing decision. Recommended: fold extract-learnings into the codify phase rather than run both.
+1. **Register the config knob `workflow.codify_phase` (default `true`).** Single source of truth is the manifests; the `.cjs` adapters read from them.
+   - `gsd-core/bin/shared/config-schema.manifest.json` — add `"workflow.codify_phase"` to the `validKeys[]` array (mirrors how `workflow.verifier` / `workflow.design_spec` appear).
+   - `gsd-core/bin/shared/config-defaults.manifest.json` — add `"codify_phase": true` inside the `workflow` object.
+   - `gsd-core/templates/config.json` — add `"codify_phase": true` under `workflow` (the fork-specific default shipped to new projects).
+   - Rebuild so `gsd-core/bin/lib/configuration.cjs` regenerates; do not hand-edit the `.cjs`.
 
-**Open design question.** Whether `codify` is a new phase (own skill, own knob) or an extension of the existing verify→extract-learnings tail. Recommended: extension first (lower risk, reuses the artifact-mining), promote to a named phase only if the four-surface routing proves it earns its own step.
+2. **Create the command `commands/gsd/codify-phase.md`** (auto-discovered by `bin/install.js` — no registry edit). Frontmatter mirrors `commands/gsd/extract-learnings.md`:
+   ```yaml
+   ---
+   name: gsd:codify-phase
+   description: Route each learning from a completed phase to the right surface — rules, skills, MCP tools, or hooks — and emit CODIFY.md proposals
+   argument-hint: <phase-number>
+   allowed-tools: [Read, Write, Bash, Grep, Glob, Agent]
+   type: prompt
+   requires: [phase]
+   ---
+   ```
+   Body references the workflow: `@~/.claude/gsd-core/workflows/codify-phase.md`.
 
-**Status.** Designed, not implemented. Tracked in `lifeos-work` `wiki/topics/sdlc-gsd-pending-updates.md` **SDLC item 10** (distinct from the GSD-section items above). Pairs with the milestone-retro entry — retro is milestone-scoped backward-looking; codify is phase-scoped forward-routing.
+3. **Create the workflow `gsd-core/workflows/codify-phase.md`.**
+   - **Gate:** `CODIFY=$(gsd_run query config-get workflow.codify_phase)`; silent no-op unless `true`.
+   - **Input (read-only):** the extract-learnings input set — `${PHASE_DIR}/*-PLAN.md`, `*-SUMMARY.md`, `*-VERIFICATION.md`, `*-UAT.md`, `${PHASE_DIR}/${PADDED_PHASE}-LEARNINGS.md` (if extract-learnings already ran), this phase's `.planning/adrs/*`, and `.planning/STATE.md`.
+   - **Step A — rules surface:** if `${PADDED_PHASE}-LEARNINGS.md` is absent, invoke `gsd-extract-learnings {phase}` first (it owns the CLAUDE.md / `.claude/rules/` surface). Do not duplicate its logic.
+   - **Step B — surface routing:** for each candidate learning, classify into exactly one surface and emit a *proposal* (never an auto-write): convention/invariant/worked-example → rules file; repeatable multi-step procedure → new skill (`.claude/skills/<name>/` scaffold); reliable system access the agent had to hand-roll → MCP tool (name the server + tool shape); a "must-always-fire" step that was easy to skip → hook (PreToolUse/PostToolUse stub).
+   - **Output:** `${PHASE_DIR}/${PADDED_PHASE}-CODIFY.md` — a proposals table (`learning · surface · target path · rationale · draft`) — plus a STATE.md timestamp. Proposals apply only on explicit human approval (taste-decision stance, consistent with `gsd-skill-audit` and kill-criteria).
+
+4. **Wire into the phase tail (two opt-in integration points).**
+   - **Manual:** document `/gsd-codify-phase N` as the step after `/gsd-verify-work N`.
+   - **Autonomous:** in `gsd-core/workflows/autonomous.md`, after execute/verify and *before* the `transition` advance (`gsd-core/workflows/transition.md`), add a conditional `Skill(gsd:codify-phase)` gated on `workflow.codify_phase`. Mirror the existing discuss→plan→execute sequencing. **Non-blocking** — an empty or failed codify must never block phase transition.
+
+5. **Optional verifier nudge — `agents/gsd-verifier.md` "Step 7e — Codify readiness."** Mirror the existing Step 7-ADR (line ~690) / Step 7d (line ~734) pattern:
+   ```bash
+   CODIFY=$(gsd_run query config-get workflow.codify_phase)
+   if [[ "$CODIFY" == "true" ]]; then
+     # If the phase produced LEARNINGS but no <phase>-CODIFY.md, add a
+     # WARNING (non-blocking) to VERIFICATION.md gaps[] — never a BLOCKER.
+   fi
+   ```
+   Codify is a forward-routing convenience, not a correctness gate — WARNING only.
+
+6. **Docs — add a Workflow Toggles row to `docs/CONFIGURATION.md`** (table starts ~line 230, mirror the `design_spec` row):
+   ```markdown
+   | `workflow.codify_phase` | boolean | `true` | After verification, route each phase learning to the right surface (rules / skills / MCP tools / hooks) and emit <phase>-CODIFY.md proposals. Supersets gsd-extract-learnings. |
+   ```
+   Add a "What's different" row to this FORK.md once implemented, and move this entry out of "Pending fork additions."
+
+7. **Tests / counts.** A new command counts against the BYTES-based budget in `tests/workflow-size-budget.test.cjs` and the command/workflow roster in `ARCHITECTURE.md` (currently ~82 commands / ~79 workflows) — bump those counts and keep `codify-phase.md` within its size tier.
+
+**Recommended sequencing (de-risk the first pass).** Ship an **MVP** = steps 1–3 only (knob + command + workflow doing Step A and Step B-as-proposals). That is three files plus the manifest edits, fully reversible, and validates whether the four-surface routing produces useful proposals on 2–3 real phases. Only after that add the autonomous-loop call (step 4) and the verifier nudge (step 5).
+
+**One decision to make before building — extract-learnings relationship.** Options: codify *calls* extract-learnings (recommended — no duplication, standalone command stays for users who only want the rules surface); codify *folds it in* and deprecates the standalone; or both run *beside* each other (rejected — double-writes the rules surface). The MVP assumes "calls."
+
+**Status.** Designed, not implemented — **parked with the plan above.** Tracked in `lifeos-work` `wiki/topics/sdlc-gsd-pending-updates.md` **SDLC item 10** (distinct from the GSD-section items above). Pairs with the milestone-retro entry — retro is milestone-scoped backward-looking; codify is phase-scoped forward-routing.
 
 ### "Don't shell out to `claude -p`" anti-pattern (recorded 2026-05-26)
 
