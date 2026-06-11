@@ -101,31 +101,36 @@ describe('LENS-AGENT: gsd-lens.md structural contract (AC-3, AC-5, AC-8)', () =>
     );
   });
 
-  test('gsd-lens.md documents schema field: identity', () => {
+  // The schema fields must be documented as rows of the `## Lens-Config Schema`
+  // table — not merely appear somewhere in prose. Anchor each assertion to the
+  // table-row shape `| \`field\` |` so deleting the schema table (or demoting a
+  // field to incidental prose) turns the test RED. (IN-02: substring `includes`
+  // over-matched role text / isolation contract / example table.)
+  test('gsd-lens.md documents schema field: identity (as a schema table row)', () => {
     assert.ok(
-      content.includes('identity'),
-      'gsd-lens.md must document lens-config schema field "identity" (AC-5, D-08)'
+      /\|\s*`identity`\s*\|/.test(content),
+      'gsd-lens.md must document lens-config schema field "identity" as a `## Lens-Config Schema` table row (AC-5, D-08)'
     );
   });
 
-  test('gsd-lens.md documents schema field: artifacts-to-mine', () => {
+  test('gsd-lens.md documents schema field: artifacts-to-mine (as a schema table row)', () => {
     assert.ok(
-      content.includes('artifacts-to-mine'),
-      'gsd-lens.md must document lens-config schema field "artifacts-to-mine" (AC-5, D-08)'
+      /\|\s*`artifacts-to-mine`\s*\|/.test(content),
+      'gsd-lens.md must document lens-config schema field "artifacts-to-mine" as a `## Lens-Config Schema` table row (AC-5, D-08)'
     );
   });
 
-  test('gsd-lens.md documents schema field: output-contract', () => {
+  test('gsd-lens.md documents schema field: output-contract (as a schema table row)', () => {
     assert.ok(
-      content.includes('output-contract'),
-      'gsd-lens.md must document lens-config schema field "output-contract" (AC-5, D-08)'
+      /\|\s*`output-contract`\s*\|/.test(content),
+      'gsd-lens.md must document lens-config schema field "output-contract" as a `## Lens-Config Schema` table row (AC-5, D-08)'
     );
   });
 
-  test('gsd-lens.md documents schema field: isolation', () => {
+  test('gsd-lens.md documents schema field: isolation (as a schema table row)', () => {
     assert.ok(
-      content.includes('isolation'),
-      'gsd-lens.md must document lens-config schema field "isolation" (AC-5, D-08)'
+      /\|\s*`isolation`\s*\|/.test(content),
+      'gsd-lens.md must document lens-config schema field "isolation" as a `## Lens-Config Schema` table row (AC-5, D-08)'
     );
   });
 
@@ -136,31 +141,37 @@ describe('LENS-AGENT: gsd-lens.md structural contract (AC-3, AC-5, AC-8)', () =>
     );
   });
 
-  test('gsd-lens.md enumerates lens identity: planner', () => {
+  // The four example lens identities must be enumerated as `\`identity\`` cells of
+  // the `## Example: Retro Lens Set` table — not just appear as incidental tokens
+  // in prose (`scope`/`planner`/`executor`/`reviewer` recur throughout role text,
+  // the isolation contract, and other tables). Anchor each to the backticked
+  // identity-cell shape so deleting the example table turns the test RED.
+  // (IN-02: substring `includes` over-matched prose.)
+  test('gsd-lens.md enumerates lens identity: planner (as an example table identity cell)', () => {
     assert.ok(
-      content.includes('planner'),
-      'gsd-lens.md must enumerate "planner" lens identity as an example (AC-5, RETRO-03)'
+      /\|\s*`planner`\s*\|/.test(content),
+      'gsd-lens.md must enumerate "planner" lens identity in the `## Example: Retro Lens Set` table (AC-5, RETRO-03)'
     );
   });
 
-  test('gsd-lens.md enumerates lens identity: executor', () => {
+  test('gsd-lens.md enumerates lens identity: executor (as an example table identity cell)', () => {
     assert.ok(
-      content.includes('executor'),
-      'gsd-lens.md must enumerate "executor" lens identity as an example (AC-5, RETRO-03)'
+      /\|\s*`executor`\s*\|/.test(content),
+      'gsd-lens.md must enumerate "executor" lens identity in the `## Example: Retro Lens Set` table (AC-5, RETRO-03)'
     );
   });
 
-  test('gsd-lens.md enumerates lens identity: reviewer', () => {
+  test('gsd-lens.md enumerates lens identity: reviewer-qa (as an example table identity cell)', () => {
     assert.ok(
-      content.includes('reviewer'),
-      'gsd-lens.md must enumerate "reviewer" (reviewer-qa) lens identity as an example (AC-5, RETRO-03)'
+      /\|\s*`reviewer-qa`\s*\|/.test(content),
+      'gsd-lens.md must enumerate "reviewer-qa" lens identity in the `## Example: Retro Lens Set` table (AC-5, RETRO-03)'
     );
   });
 
-  test('gsd-lens.md enumerates lens identity: scope', () => {
+  test('gsd-lens.md enumerates lens identity: scope-ceo (as an example table identity cell)', () => {
     assert.ok(
-      content.includes('scope'),
-      'gsd-lens.md must enumerate "scope" (scope-ceo) lens identity as an example (AC-5, RETRO-03)'
+      /\|\s*`scope-ceo`\s*\|/.test(content),
+      'gsd-lens.md must enumerate "scope-ceo" lens identity in the `## Example: Retro Lens Set` table (AC-5, RETRO-03)'
     );
   });
 
@@ -277,17 +288,34 @@ describe('LENS-FIXTURE: canned-position fixture smoke check (AC-6, D-10)', () =>
 
   test('expected-tensions.md preserves both lens positions separately (planner not collapsed into executor)', () => {
     const expected = fs.readFileSync(path.join(FIXTURE_DIR, 'expected-tensions.md'), 'utf-8');
-    // Both identities must appear as distinct bullet lines — neither collapsed into the other.
+    // The no-blend invariant requires each lens to stake a *distinct* position with its
+    // evidence citation. Assert the contract shape precisely rather than a loose prefix:
+    //   - bullets match `- <lens>'s-eye: ... (evidence: ...)` (the canonical shape from
+    //     gsd-lens-synthesizer.md), which rejects malformed bullets like "- planneresque note"
+    //   - the two named identities (planner's-eye, executor's-eye) each appear as such a bullet
+    //   - they appear inside >=2 distinct `### T{n}` tension blocks
     const lines = expected.split('\n');
-    const plannerLine = lines.some(l => l.trim().startsWith('- planner'));
-    const executorLine = lines.some(l => l.trim().startsWith('- executor'));
+    // Canonical disagreement-preserving bullet: "- <lens>'s-eye: <prose> (evidence: ...)"
+    const eyeBullets = lines.filter(l => /^- [a-z-]+'s-eye: .+\(evidence: .+\)/.test(l.trim()));
     assert.ok(
-      plannerLine,
-      'expected-tensions.md must have a bullet starting with "- planner" (positions preserved, not blended)'
+      eyeBullets.length >= 2,
+      `expected-tensions.md must have >=2 "- <lens>'s-eye: ... (evidence: ...)" bullets, got ${eyeBullets.length} (no-blend invariant, D-06/D-09)`
+    );
+    const hasPlanner = eyeBullets.some(l => l.trim().startsWith("- planner's-eye:"));
+    const hasExecutor = eyeBullets.some(l => l.trim().startsWith("- executor's-eye:"));
+    assert.ok(
+      hasPlanner,
+      'expected-tensions.md must preserve a distinct "- planner\'s-eye: ... (evidence: ...)" bullet (positions preserved, not blended)'
     );
     assert.ok(
-      executorLine,
-      'expected-tensions.md must have a bullet starting with "- executor" (positions preserved, not blended)'
+      hasExecutor,
+      'expected-tensions.md must preserve a distinct "- executor\'s-eye: ... (evidence: ...)" bullet (positions preserved, not blended)'
+    );
+    // Distinct positions must span >=2 tension blocks, not collapse into one.
+    const tensionBlocks = expected.match(/^### T\d+/gm);
+    assert.ok(
+      tensionBlocks && tensionBlocks.length >= 2,
+      `expected-tensions.md must have >=2 distinct "### T{n}" blocks carrying preserved positions, got ${tensionBlocks?.length ?? 0} (D-06/D-09)`
     );
   });
 });
