@@ -7,7 +7,7 @@
 - Candidate change: add ambiguity gate at plan-phase requiring explicit failure-signal → action mapping for retry paths
 
 ### T2 — Was the deviation logged at the right granularity?
-- planner's-eye: deviation log 03-02 is too vague to enable retrospective learning; should cite the specific bet that was deviated from
-- executor's-eye: log granularity was appropriate for the execution context; retrospective refinement is a tooling gap, not an execution fault
+- planner's-eye: deviation log 03-02 is too vague to enable retrospective learning; should cite the specific bet that was deviated from (evidence: deviation log 03-02)
+- executor's-eye: log granularity was appropriate for the execution context; retrospective refinement is a tooling gap, not an execution fault (evidence: deviation log 03-02)
 - Disagreement: deviation log authoring standards vs. retrospective tooling adequacy
 - Candidate change: update the deviation log template to require a "bet deviated from: {bet-id}" field
