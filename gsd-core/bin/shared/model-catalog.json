@@ -117,6 +117,8 @@
     "gsd-phase-researcher":       { "golden": "opus",   "balanced": "sonnet", "budget": "haiku",  "phaseType": "research",     "routingTier": "standard" },
     "gsd-project-researcher":     { "golden": "opus",   "balanced": "sonnet", "budget": "haiku",  "phaseType": "research",     "routingTier": "standard" },
     "gsd-research-synthesizer":   { "golden": "sonnet", "balanced": "sonnet", "budget": "haiku",  "phaseType": "research",     "routingTier": "light" },
+    "gsd-lens":                   { "golden": "opus",   "balanced": "sonnet", "budget": "haiku",  "phaseType": "research",     "routingTier": "standard" },
+    "gsd-lens-synthesizer":       { "golden": "sonnet", "balanced": "sonnet", "budget": "haiku",  "phaseType": "research",     "routingTier": "light" },
     "gsd-debugger":               { "golden": "opus",   "balanced": "sonnet", "budget": "sonnet", "phaseType": "execution",    "routingTier": "heavy" },
     "gsd-codebase-mapper":        { "golden": "sonnet", "balanced": "haiku",  "budget": "haiku",  "phaseType": "research",     "routingTier": "light" },
     "gsd-verifier":               { "golden": "sonnet", "balanced": "sonnet", "budget": "haiku",  "phaseType": "verification", "routingTier": "standard" },
