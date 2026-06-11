@@ -307,6 +307,55 @@ Designed but not yet implemented. Recorded here so the design intent is visible 
 
 **Status.** Designed, not implemented. Tracked in `lifeos-work` `wiki/topics/sdlc-gsd-pending-updates.md` GSD item 7. Lowest-risk of the three structural items — mostly documentation and a config knob.
 
+### Multi-lens negotiated plan review at plan-phase (designed 2026-06-11)
+
+**Intent.** Replace the single Devil's-Advocate skeptic at plan time with a panel of 2-4 *position-staking* review lenses that generate independently, surface their conflicts explicitly, negotiate one rebuttal round, and escalate only the irreducible value tradeoffs to the user as final tiebreaker. Produces a plan plus a durable plan-rationale record (positions, conflicts, resolutions, human decisions).
+
+**Source.** Garry Tan, gstack (github.com/garrytan/gstack, ingested 2026-06-11) — its `/autoplan` runs CEO → design → eng → devex review as named role-lenses before any code. Adapted *away* from gstack's org-chart personas toward failure-class lenses, and hardened with the fork's adversarial-referee and verification-discipline stances.
+
+**Why now.** `workflow.adversarial_validation` already runs a finder+critic+referee trio at *verification* and a lone Devil's Advocate at *planning*. A single planning skeptic is perspective-redundant (one lens, harder); a panel is perspective-diverse (different failure classes — the maintainability lens catches what the feasibility lens is blind to). Moving the referee-with-competing-incentives pattern upstream to plan time is where conflict is cheapest to resolve.
+
+**Sketch.**
+
+1. Add `workflow.multi_lens_plan_review` config knob (default: `false`).
+2. Lenses tie to **failure classes, not job titles**: **scope/value** (right thing, right size — should it shrink or die?), **feasibility/architecture** (will it work, hidden coupling), **maintainability/cost** (what the next dev pays, context pollution). A **product/UX** lens spawns only for frontend phases (gated on the same detection as `workflow.design_spec`).
+3. **Isolated generation** — each lens runs as a separate `gsd-planner`-class subagent and stakes a verdict *before* seeing the others. Borrow gstack's forced scope modes (Expand / Hold / Reduce); a lens that says "looks fine" failed its job. Isolation is the load-bearing anti-mode-collapse mechanism — parallel personas sharing one context collapse into sycophantic consensus.
+4. **One rebuttal round, then synthesize** — lenses see each other's positions, get one rebuttal each, then a synthesizer emits the plan plus an explicit residual-disagreements table (never a blended mush).
+5. **Conflict routing by type** — *factual* disagreements ("this'll be slow") resolve by running a probe / reading the code (verification discipline: cite output, don't vote). *Value/priority* tradeoffs ("ship the wedge now" vs "build it right") escalate to the user via `AskUserQuestion` — the only conflicts a human sees, which keeps decision fatigue bounded.
+6. **Artifact** — the negotiation leaves a plan-rationale block (positions / conflicts / resolutions / human decisions), co-committed like an ADR and carrying the fork's provenance footer.
+
+**Open design questions.**
+
+- Consensus vs. dissent: does the synthesized plan absorb all positions, or preserve a documented minority report? Recommended: minority report when a value tradeoff was decided *against* a lens — the dissent is signal for the retro (below).
+- Cost discipline: N lens-subagents + a rebuttal round per phase is not free (the tests-at-the-bottleneck stance applies to plan tokens too). Default negotiation depth = 1 rebuttal; lenses scale to phase type; the whole pass is opt-in.
+- Relationship to `plan-review-convergence` (cross-AI loop): that loop *converges* one plan across external AIs; this *diverges* positions within one plan. They compose (diverge → negotiate → converge), but the ordering and whether they share the rationale artifact needs its own design pass.
+
+**Pairs naturally with the kill-criteria artifact** (above, designed 2026-06-09) — the scope/value lens is the live agent that *checks* the pre-committed kill criteria at plan time, rather than waiting for `gsd-verifier` at phase end. The lens asks "should this shrink or die?"; `KILL-CRITERIA.md` is the pre-written answer it reasons against.
+
+**Status.** Designed, not implemented. Tracked in `lifeos-work` `wiki/topics/sdlc-gsd-pending-updates.md` GSD item 10. Higher-value, higher-risk than the retro below — recommend shipping the retro first as the lower-stakes proving ground for the multi-lens-with-disagreement mechanism.
+
+### Multi-perspective milestone retro in complete-milestone (designed 2026-06-11)
+
+**Intent.** Add a multi-lens retrospective step to `gsd-complete-milestone` that reflects on the just-finished milestone from several vantage points, surfaces where those vantages *disagree about what the lesson was*, and feeds the disagreements into `gsd-extract-learnings` as candidate process changes.
+
+**Source.** Garry Tan, gstack — its `/retro` is a team-aware retrospective with per-role breakdowns. Adapted: gstack's retro is metrics-flavored (shipping streaks, test-health trends); this version is failure-class-flavored and built on artifact-mining rather than re-interviewing.
+
+**Why now.** The fork logs everything a retro needs — deviation logs (`gsd-executor`), `REVIEW.md`, `VERIFICATION.md`, the intermediate-bets check, ADRs — but never re-reads them through distinct lenses to extract *what each role would have done differently*. `gsd-extract-learnings` runs per-phase and undifferentiated; a milestone-scoped multi-perspective pass catches cross-phase patterns a single lens misses.
+
+**Retro ≠ audit — keep them distinct.** `gsd-audit-milestone` asks *"did we deliver what we promised?"* (backward-looking compliance, produces a verdict). The retro asks *"what would we change?"* (forward-looking improvement, produces learnings). Bolting the retro onto the audit lets the verdict-seeking frame poison the learning frame.
+
+**Sketch.**
+
+1. Add `workflow.milestone_retro` config knob (default: `false`).
+2. Run inside `gsd-complete-milestone`, *after* `gsd-audit-milestone`. The retro consumes the audit's verdict as input but is **not gated** by it — a failed audit produces a *richer* retro, not a skipped one.
+3. Lenses mine existing artifacts (read-only, no re-interview): **planner's-eye** (PLAN.md + intermediate-bets — were the bets right? where did decomposition break?), **executor's-eye** (deviation logs + commits — where did we deviate and why?), **reviewer/QA-eye** (`REVIEW.md` + `VERIFICATION.md` — what bug *classes* slipped through?), **scope/CEO-eye** (ADRs + kill-criteria — did we build the right thing at the right size?).
+4. **Surface disagreement, don't resolve it** — the gold is when executor-eye says "the spec was too vague" and planner-eye says "the spec was fine, execution over-engineered." Emit a `RETRO.md` with a tensions table; the tensions *are* the candidate process changes.
+5. Feed `RETRO.md` into `gsd-extract-learnings` → CLAUDE.md / `.claude/rules/` updates. Closes the find → learn → codify loop.
+
+**Why milestone-scoped, not per-phase.** Per-phase learnings already exist via `gsd-extract-learnings`; the multi-perspective version is expensive (4 artifact-mining subagents) and most valuable across a whole milestone where cross-phase patterns emerge. Running it once per milestone amortizes the cost — unlike the plan-review above, this one doesn't need aggressive penny-pinching.
+
+**Status.** Designed, not implemented. Tracked in `lifeos-work` `wiki/topics/sdlc-gsd-pending-updates.md` GSD item 11. Lower-risk than the plan-review — recommend implementing first to validate the multi-lens-with-disagreement mechanism before moving it upstream to plan time.
+
 ### "Don't shell out to `claude -p`" anti-pattern (recorded 2026-05-26)
 
 Surfaced in the Tharlq thread: Tyler Laprade argued 5 of the 9 skill categories should be scripts that invoke `claude -p` rather than skills that invoke scripts. Tharlq pushed back — invoking `claude -p` from inside an existing agentic loop is the wrong shape; the right primitive for context control inside an agentic loop is **subagents**, not a fresh Claude session.
@@ -317,6 +366,20 @@ This aligns with the fork's existing anti-rationalization-engineering stance (se
 - DON'T: shell out to `claude -p ...` from a skill, hook, or workflow step. If a skill needs to do "fresh Claude work," that's a signal the skill should be restructured as a subagent invocation instead.
 
 Source: Tharlq vs Laprade exchange — `wiki/sources/trq212-lessons-from-building-claude-code-how-we-use-skills.md` in lifeos-work.
+
+### "Boil the Ocean" considered and rejected (recorded 2026-06-11)
+
+gstack's `ETHOS.md` leads with **"Boil the Ocean"**: under AI, completeness is cheap, so the complete implementation should beat the shortcut — tests, edge cases, and full error paths are "boilable lakes" en route to comprehensive coverage (`wiki/sources/github-garrytan-gstack.md` in lifeos-work). It is recorded here as a *deliberate rejection*, not an oversight, because it contradicts the fork's load-bearing lineage:
+
+- Michael Nygard, "AI versus Throughput" (Theory of Constraints): agents raise the *coding* station's capacity, but the bottleneck just moves downstream to verification / review / build / deploy. Generating more code and more tests faster is overproducing **inventory**, not throughput, unless the V&V pipeline is elevated too.
+- The fork's own tests-at-the-bottleneck stance: test code is not free, cheapest-test-first, never ratchet coverage as a target (Goodhart).
+
+"Boil the Ocean" optimizes for *generation* throughput; the fork optimizes for the *verification* bottleneck. The two are not reconcilable at the philosophy layer — so the fork keeps the bottleneck framing and explicitly declines the ethos.
+
+- DO: spec the outcome, write the cheapest test that proves it, let V&V capacity set the work-in-progress limit.
+- DON'T: treat "completeness is cheap" as license to generate exhaustive code/tests ahead of the pipeline's ability to verify them. Comprehensiveness that outruns verification is inventory, not progress.
+
+Source: gstack `ETHOS.md` — `wiki/sources/github-garrytan-gstack.md` in lifeos-work; counter-framing from `wiki/sources/michaelnygard-blog-2026-05-ai-versus-throughput.md`.
 
 ## Divergence point
 
