@@ -1,5 +1,5 @@
 {
-  "generated": "2026-06-07",
+  "generated": "2026-06-11",
   "families": {
     "agents": [
       "gsd-advisor-researcher",
@@ -21,6 +21,8 @@
       "gsd-framework-selector",
       "gsd-integration-checker",
       "gsd-intel-updater",
+      "gsd-lens",
+      "gsd-lens-synthesizer",
       "gsd-nyquist-auditor",
       "gsd-pattern-mapper",
       "gsd-phase-researcher",

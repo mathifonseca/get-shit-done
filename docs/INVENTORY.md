@@ -12,7 +12,7 @@ This is the authoritative roster of every shipped GSD Core surface. See the [doc
 
 ---
 
-## Agents (33 shipped)
+## Agents (35 shipped)
 
 Full roster at `agents/gsd-*.md`. The "Primary doc" column flags whether [`docs/AGENTS.md`](AGENTS.md) carries a full role card (*primary*), a short stub in the "Advanced and Specialized Agents" section (*advanced stub*), or no coverage (*inventory only*).
 
@@ -51,8 +51,10 @@ Full roster at `agents/gsd-*.md`. The "Primary doc" column flags whether [`docs/
 | gsd-intel-updater | Writes structured intel files (`.planning/intel/*.json`) used as a queryable codebase knowledge base. | `/gsd-map-codebase --query` | advanced stub |
 | gsd-doc-classifier | Classifies a single planning document as ADR, PRD, SPEC, DOC, or UNKNOWN; spawned in parallel to process the doc corpus. | `/gsd-ingest-docs` | advanced stub |
 | gsd-doc-synthesizer | Synthesizes classified planning docs into a single consolidated context with precedence rules, cycle detection, and three-bucket conflicts report. | `/gsd-ingest-docs` | advanced stub |
+| gsd-lens | Generic per-spawn-parameterized isolated lens: mines caller-specified artifacts (read-only) and stakes a position; reusable across milestone-retro and the deferred plan-review item (CON-lens-generic). | milestone retro (Phase 2; gated by `workflow.milestone_retro`) | inventory only |
+| gsd-lens-synthesizer | Collects parallel lens positions into a disagreement-preserving Tensions output (mirrors gsd-research-synthesizer, but preserves disagreement rather than blending). | milestone retro (Phase 2; gated by `workflow.milestone_retro`) | inventory only |
 
-**Coverage note.** `docs/AGENTS.md` gives full role cards for 21 primary agents plus concise stubs for the 12 advanced agents. The Agent Tool Permissions Summary in that file covers only the primary 21 agents; the advanced agents' tool lists are captured in their per-agent frontmatter in `agents/gsd-*.md`.
+**Coverage note.** `docs/AGENTS.md` gives full role cards for 21 primary agents plus concise stubs for the 12 advanced agents. The Agent Tool Permissions Summary in that file covers only the primary 21 agents; the advanced agents' tool lists are captured in their per-agent frontmatter in `agents/gsd-*.md`. The 2 newest agents (`gsd-lens`, `gsd-lens-synthesizer`) are inventory-only pending their Phase 2 retro wiring.
 
 ---
 
