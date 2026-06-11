@@ -1,4 +1,4 @@
-# Tensions
+## Tensions
 
 ### T1 — Was the retry path sufficiently specified?
 - planner's-eye: spec was adequate; bet 2 stated bounded retries explicitly (evidence: PLAN.md bet 2)
