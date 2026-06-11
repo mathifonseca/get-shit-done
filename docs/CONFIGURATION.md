@@ -229,7 +229,7 @@ Example:
 
 ## Workflow Toggles
 
-All workflow toggles follow the **absent = enabled** pattern. If a key is missing from config, it defaults to `true`.
+Most workflow toggles follow the **absent = enabled** pattern: if a key is missing from config, it defaults to `true`. The exception is opt-in toggles whose row marks `Default false` — e.g. `auto_advance`, `plan_bounce`, `worktree_skip_hooks`, and `milestone_retro` — which default to `false` and must be set explicitly to enable.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
