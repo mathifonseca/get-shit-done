@@ -139,7 +139,7 @@ OUTPUT_CONTRACT:
 
   IMPORTANT — no-leak guard: the audit verdict (if present) is context only.
   Do NOT reproduce its pass/fail verdict framing. Do NOT write 'requirement X was
-  satisfied/unsatisfied' or use no verdict language. Phrase everything as 'what I'd change'
+  satisfied/unsatisfied' or use verdict language. Phrase everything as 'what I'd change'
   and lessons only.
 
 OUTPUT_PATH: ${SCRATCH_DIR}/position-executor.md

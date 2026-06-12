@@ -355,7 +355,7 @@ Designed but not yet implemented. Recorded here so the design intent is visible 
 
 **Why milestone-scoped, not per-phase.** Per-phase learnings already exist via `gsd-extract-learnings`; the multi-perspective version is expensive (4 artifact-mining subagents) and most valuable across a whole milestone where cross-phase patterns emerge. Running it once per milestone amortizes the cost — unlike the plan-review above, this one doesn't need aggressive penny-pinching.
 
-**Status.** Designed, not implemented. Tracked in `lifeos-work` `wiki/topics/sdlc-gsd-pending-updates.md` GSD item 11. Lower-risk than the plan-review — recommend implementing first to validate the multi-lens-with-disagreement mechanism before moving it upstream to plan time.
+**Status.** ✅ Implemented (Phase 2 — `gsd-core/workflows/retro.md`, invoked from the `write_retrospective` step of `complete-milestone.md`, knob-gated by `workflow.milestone_retro`). Per ADR `DEC-retro-integration`, the shipped design **overrode the sketch above** at two points: (4) the Tensions output is written into the existing `.planning/RETROSPECTIVE.md` milestone entry as a `### Tensions` subsection — **no new `RETRO.md`**; (5) feed-forward routes through the existing **`graduation`** path (Candidate-change lines → next-transition graduation HITL), **not** `gsd-extract-learnings`. Originally tracked as GSD item 11.
 
 ### `codify` as an explicit phase in the GSD chain (designed 2026-06-11)
 

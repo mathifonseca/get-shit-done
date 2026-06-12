@@ -620,7 +620,7 @@ MILESTONE_RETRO=$(gsd_run query config-get workflow.milestone_retro 2>/dev/null 
 If `MILESTONE_RETRO` is `true`:
 
 1. Set `SCRATCH_DIR=".planning/tmp/retro-v${VERSION}"`
-2. Invoke `gsd-core/workflows/retro.md` via Agent(), passing VERSION, SCRATCH_DIR, ARTIFACT_BASE (resolved via the same dual-probe as above), and AUDIT_FILE
+2. Invoke `gsd-core/workflows/retro.md` via Agent(), passing VERSION and SCRATCH_DIR; `retro.md` resolves `ARTIFACT_BASE` (dynamic: `.planning/phases` if present, else `.planning/milestones/v${VERSION}-phases`) and `AUDIT_FILE` (dual-probe) itself in its Step 2
 3. Read the returned Tensions markdown from `${SCRATCH_DIR}/tensions.md` into `TENSIONS_BLOCK`
 4. If `retro.md` returns nothing or `${SCRATCH_DIR}/tensions.md` is empty, log a warning and set `TENSIONS_BLOCK=""` (do not abort — the entry is still written)
 
