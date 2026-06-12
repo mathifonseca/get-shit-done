@@ -54,7 +54,10 @@
     "post_planning_gaps": true,
     "security_enforcement": true,
     "security_asvs_level": 1,
-    "security_block_on": "high"
+    "security_block_on": "high",
+    "milestone_retro": false,
+    "teach_phase": false,
+    "plan_lens_review": false
   },
   "planning": {
     "commit_docs": true,

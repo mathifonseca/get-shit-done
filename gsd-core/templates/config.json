@@ -35,7 +35,9 @@
     "cross_ai_execution": false,
     "cross_ai_command": "",
     "cross_ai_timeout": 300,
-    "milestone_retro": false
+    "milestone_retro": false,
+    "teach_phase": false,
+    "plan_lens_review": false
   },
   "project": {
     "issue_tracker": null,
