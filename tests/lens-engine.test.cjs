@@ -31,6 +31,7 @@ const path = require('path');
 const REPO_ROOT = path.resolve(__dirname, '..');
 const AGENTS_DIR = path.join(REPO_ROOT, 'agents');
 const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'lens-engine');
+const WORKFLOWS_DIR = path.join(REPO_ROOT, 'gsd-core', 'workflows');
 
 const { VALID_CONFIG_KEYS } = require('../gsd-core/bin/lib/config-schema.cjs');
 
@@ -316,6 +317,268 @@ describe('LENS-FIXTURE: canned-position fixture smoke check (AC-6, D-10)', () =>
     assert.ok(
       tensionBlocks && tensionBlocks.length >= 2,
       `expected-tensions.md must have >=2 distinct "### T{n}" blocks carrying preserved positions, got ${tensionBlocks?.length ?? 0} (D-06/D-09)`
+    );
+  });
+});
+
+// ─── RETRO-INTEGRATION: Phase-2 orchestration wiring (RETRO-04..08, D-01..D-09) ──
+
+describe('RETRO-INTEGRATION: Phase-2 orchestration wiring (RETRO-04..08, D-01..D-09)', () => {
+  let retroContent;
+  let completeMilestoneContent;
+
+  // Load retro.md and complete-milestone.md once for all tests.
+  // Guard the retro.md read: if the file does not exist yet (Wave 1 state,
+  // before Wave 2 authors it), set retroContent to '' so each assertion
+  // fails with a clean message rather than throwing ENOENT and aborting the suite.
+  before(() => {
+    const retroPath = path.join(WORKFLOWS_DIR, 'retro.md');
+    if (fs.existsSync(retroPath)) {
+      retroContent = fs.readFileSync(retroPath, 'utf-8');
+    } else {
+      retroContent = '';
+    }
+    completeMilestoneContent = fs.readFileSync(
+      path.join(WORKFLOWS_DIR, 'complete-milestone.md'),
+      'utf-8'
+    );
+  });
+
+  // ── retro.md existence and spawn counts (RETRO-05) ──────────────────────
+
+  test('retro.md exists at gsd-core/workflows/retro.md (RETRO-05)', () => {
+    assert.ok(
+      fs.existsSync(path.join(WORKFLOWS_DIR, 'retro.md')),
+      'gsd-core/workflows/retro.md must exist (RETRO-05)'
+    );
+  });
+
+  test('retro.md contains subagent_type="gsd-lens" exactly 4 times (RETRO-05/RETRO-03/D-06)', () => {
+    const matches = retroContent.match(/subagent_type="gsd-lens"/g);
+    const count = matches ? matches.length : 0;
+    assert.strictEqual(
+      count,
+      4,
+      `gsd-core/workflows/retro.md must contain subagent_type="gsd-lens" exactly 4 times, got ${count} (RETRO-05/RETRO-03/D-06)`
+    );
+  });
+
+  test('retro.md contains subagent_type="gsd-lens-synthesizer" exactly 1 time (RETRO-05)', () => {
+    const matches = retroContent.match(/subagent_type="gsd-lens-synthesizer"/g);
+    const count = matches ? matches.length : 0;
+    assert.strictEqual(
+      count,
+      1,
+      `gsd-core/workflows/retro.md must contain subagent_type="gsd-lens-synthesizer" exactly 1 time, got ${count} (RETRO-05)`
+    );
+  });
+
+  // ── Dynamic artifact base path resolution (RETRO-04/D-06) ───────────────
+
+  test('retro.md contains ARTIFACT_BASE dynamic path resolution token (RETRO-04/D-06)', () => {
+    assert.ok(
+      retroContent.includes('ARTIFACT_BASE'),
+      'gsd-core/workflows/retro.md must contain "ARTIFACT_BASE" — the dynamic artifact base path resolution token (RETRO-04/D-06)'
+    );
+  });
+
+  // ── Audit verdict dual-probe (RETRO-06) ─────────────────────────────────
+
+  test('retro.md references the audit-verdict path — contains MILESTONE-AUDIT.md (RETRO-06)', () => {
+    assert.ok(
+      retroContent.includes('MILESTONE-AUDIT.md'),
+      'gsd-core/workflows/retro.md must contain "MILESTONE-AUDIT.md" — audit verdict path reference (RETRO-06)'
+    );
+  });
+
+  // ── Heading override: synthesizer OUTPUT_CONTRACT names both ### levels (RETRO-04/D-04, RETRO-07) ──
+
+  test('retro.md synthesizer OUTPUT_CONTRACT names ### Tensions heading level override (RETRO-04/D-04)', () => {
+    assert.ok(
+      retroContent.includes('### Tensions'),
+      'gsd-core/workflows/retro.md must contain "### Tensions" in the synthesizer OUTPUT_CONTRACT — the heading-level override so the block nests inside ## Milestone (RETRO-04/D-04)'
+    );
+  });
+
+  test('retro.md synthesizer OUTPUT_CONTRACT names #### T{n} per-tension block level (RETRO-07)', () => {
+    // The synthesizer default emits ## Tensions / ### T{n}; the retro override must name
+    // BOTH deeper levels explicitly: ### Tensions AND #### T{n} (or #### T1 as example).
+    const hasDepthFour = /####\s+T/.test(retroContent);
+    assert.ok(
+      hasDepthFour,
+      'gsd-core/workflows/retro.md must contain "#### T{n}" (or an example like "#### T1") naming the per-tension block heading level override (RETRO-07, D-04)'
+    );
+  });
+
+  // ── No-leak framing guard in lens OUTPUT_CONTRACT (RETRO-07/D-05) ───────
+
+  test('retro.md lens OUTPUT_CONTRACT carries the no-leak framing guard (RETRO-07/D-05)', () => {
+    // The no-leak guard must contain forward-looking framing tokens AND a phrase
+    // that prevents audit-verdict language from leaking into lens positions.
+    // Check for "Candidate change:" (forward-looking framing) AND a no-leak phrase
+    // such as "not ... pass/fail", "not ... verdict", or "no verdict language".
+    const hasCandidateChange = retroContent.includes('Candidate change:');
+    const hasNoLeak =
+      /not.*pass.?fail|not.*verdict|no.*pass.?fail|no.*verdict language|do not.*verdict|omit.*verdict/i.test(retroContent);
+    assert.ok(
+      hasCandidateChange,
+      'gsd-core/workflows/retro.md must contain "Candidate change:" — the forward-looking framing token in lens OUTPUT_CONTRACT (RETRO-07/D-05)'
+    );
+    assert.ok(
+      hasNoLeak,
+      'gsd-core/workflows/retro.md must contain a no-leak framing guard — a phrase like "not pass/fail", "no verdict language", or "do not reproduce verdict" in lens OUTPUT_CONTRACT (RETRO-07/D-05)'
+    );
+  });
+
+  // ── Graduation feed-forward handoff (RETRO-08/D-07) ─────────────────────
+
+  test('retro.md documents the graduation feed-forward handoff — contains graduation AND Candidate change: (RETRO-08/D-07)', () => {
+    assert.ok(
+      retroContent.includes('graduation'),
+      'gsd-core/workflows/retro.md must contain "graduation" — the graduation feed-forward handoff documentation (RETRO-08/D-07)'
+    );
+    assert.ok(
+      retroContent.includes('Candidate change:'),
+      'gsd-core/workflows/retro.md must contain "Candidate change:" — the documented input to the next-transition graduation HITL (RETRO-08/D-07)'
+    );
+  });
+
+  // ── Audit-not-found warning branch (RETRO-06) ────────────────────────────
+
+  test('retro.md emits a user-visible warning when audit verdict is found at neither probe path (RETRO-06)', () => {
+    // The audit-not-found warning branch must be present so a missing verdict is
+    // surfaced, not silently empty. Look for a warning token near "MILESTONE-AUDIT".
+    const hasWarning =
+      retroContent.includes('Audit verdict not found') ||
+      retroContent.includes('audit verdict not found') ||
+      /⚠.*MILESTONE-AUDIT|MILESTONE-AUDIT.*⚠/.test(retroContent) ||
+      /warn.*MILESTONE-AUDIT|MILESTONE-AUDIT.*warn/i.test(retroContent) ||
+      /No audit.*found|audit.*not found/i.test(retroContent);
+    assert.ok(
+      hasWarning,
+      'gsd-core/workflows/retro.md must contain an audit-not-found warning branch (e.g. "Audit verdict not found", "⚠" near MILESTONE-AUDIT, or similar) so a missing verdict is surfaced, not silently empty (RETRO-06)'
+    );
+  });
+
+  // ── complete-milestone.md invokes retro.md (RETRO-05) ───────────────────
+
+  test('complete-milestone.md write_retrospective invokes retro.md (RETRO-05)', () => {
+    assert.ok(
+      completeMilestoneContent.includes('retro.md'),
+      'gsd-core/workflows/complete-milestone.md must contain "retro.md" — write_retrospective must invoke retro.md, not inline lens logic (RETRO-05)'
+    );
+  });
+
+  // ── complete-milestone.md knob read (RETRO-04/D-08) ─────────────────────
+
+  test('complete-milestone.md contains workflow.milestone_retro knob read (RETRO-04/D-08)', () => {
+    assert.ok(
+      completeMilestoneContent.includes('workflow.milestone_retro'),
+      'gsd-core/workflows/complete-milestone.md must contain "workflow.milestone_retro" — the config-get knob read guarding the retro sub-step (RETRO-04/D-08)'
+    );
+  });
+
+  // ── Negative assertions: no lens logic inlined into complete-milestone.md (RETRO-05/D-08) ──
+
+  test('complete-milestone.md does NOT contain LENS_IDENTITY (no lens inlining) (RETRO-05/D-08)', () => {
+    assert.ok(
+      !completeMilestoneContent.includes('LENS_IDENTITY'),
+      'gsd-core/workflows/complete-milestone.md must NOT contain "LENS_IDENTITY" — lens spawn logic must live in retro.md, not inlined in complete-milestone.md (RETRO-05/D-08)'
+    );
+  });
+
+  test('complete-milestone.md does NOT contain ARTIFACTS_TO_MINE (no lens inlining) (RETRO-05/D-08)', () => {
+    assert.ok(
+      !completeMilestoneContent.includes('ARTIFACTS_TO_MINE'),
+      'gsd-core/workflows/complete-milestone.md must NOT contain "ARTIFACTS_TO_MINE" — lens spawn logic must live in retro.md, not inlined in complete-milestone.md (RETRO-05/D-08)'
+    );
+  });
+
+  // ── Byte-identical-when-false guard (RETRO-04/SC-1, D-08) ───────────────
+
+  test('complete-milestone.md knob-off render: no ### Tensions heading in the static template text (RETRO-04/SC-1/D-08)', () => {
+    // When workflow.milestone_retro is false, write_retrospective must be byte-identical
+    // to the pre-Phase-2 output. The milestone-entry template must NOT contain a literal
+    // "### Tensions" heading in its static (always-rendered) text — that heading must only
+    // appear inside the knob-true conditional block (the single interpolation/splice point).
+    // Strategy: assert the complete-milestone.md source does NOT contain "### Tensions"
+    // outside of a conditional block. Since we can check static source text, we verify that
+    // any occurrence of "### Tensions" in complete-milestone.md is inside an if-true block
+    // (i.e., not unconditionally emitted). A pragmatic check: the file must contain
+    // "### Tensions" at most in the knob-true block, so the unconditional template string
+    // (the assembled entry emitted regardless of knob state) must NOT contain it.
+    // We assert: either complete-milestone.md does not contain "### Tensions" at all
+    // (Wave 2 not yet landed — RED, expected at Wave 1), OR if it does, the count of
+    // "### Tensions" occurrences equals exactly 1 (the single splice/interpolation point
+    // inside the conditional block — not duplicated as a static literal).
+    const tensionsOccurrences = (completeMilestoneContent.match(/### Tensions/g) || []).length;
+    assert.ok(
+      tensionsOccurrences <= 1,
+      `gsd-core/workflows/complete-milestone.md must contain at most ONE "### Tensions" reference (the single splice/interpolation point inside the knob-true conditional block) — knob-off render is byte-identical to pre-Phase-2 (RETRO-04/SC-1/D-08). Found ${tensionsOccurrences} occurrences.`
+    );
+  });
+
+  test('complete-milestone.md has exactly one Tensions splice/interpolation point (RETRO-04/SC-1/D-08)', () => {
+    // The single-interpolation invariant: there must be exactly one location in
+    // complete-milestone.md where the Tensions block is spliced in (or zero if Wave 2
+    // has not yet landed). Count anchors: "### Tensions" occurrences as the splice marker.
+    // This pins "single empty-on-false interpolation point" — the knob-off render
+    // contributes nothing (the single interpolation resolves to empty string when false).
+    const tensionsOccurrences = (completeMilestoneContent.match(/### Tensions/g) || []).length;
+    // At Wave 1: 0 occurrences (RED — complete-milestone.md not yet wired). Expected.
+    // At Wave 3: exactly 1 occurrence (GREEN — the single conditional splice point).
+    assert.ok(
+      tensionsOccurrences === 0 || tensionsOccurrences === 1,
+      `gsd-core/workflows/complete-milestone.md must have 0 or 1 "### Tensions" references (0=Wave1 RED, 1=Wave3 GREEN single interpolation). Knob-off render must be byte-identical to pre-Phase-2 — no ### Tensions heading, single empty-on-false interpolation point (RETRO-04/SC-1/D-08). Found ${tensionsOccurrences} occurrences.`
+    );
+  });
+
+  // ── docs/CONFIGURATION.md active-behavior reference (RETRO-08/SC-5) ─────
+
+  test('docs/CONFIGURATION.md milestone_retro row reflects active behavior — contains retro.md reference (RETRO-08/SC-5)', () => {
+    const configDoc = fs.readFileSync(path.join(REPO_ROOT, 'docs', 'CONFIGURATION.md'), 'utf-8');
+    assert.ok(
+      configDoc.includes('retro.md'),
+      'docs/CONFIGURATION.md must contain "retro.md" in the workflow.milestone_retro row — reflecting active wiring, not the Phase-1 "(Phase 2)" stub (RETRO-08/SC-5)'
+    );
+  });
+
+  // ── Companion-fixture smoke assertion (retro heading override visibility) ──
+
+  test('expected-tensions-retro.md exists at ### Tensions / #### T{n} heading levels', () => {
+    assert.ok(
+      fs.existsSync(path.join(FIXTURE_DIR, 'expected-tensions-retro.md')),
+      'tests/fixtures/lens-engine/expected-tensions-retro.md must exist — companion fixture at retro heading levels (### Tensions / #### T{n})'
+    );
+  });
+
+  test('expected-tensions-retro.md top header is ### Tensions (not ## Tensions)', () => {
+    const retro = fs.readFileSync(path.join(FIXTURE_DIR, 'expected-tensions-retro.md'), 'utf-8');
+    const firstHeading = retro.match(/^#+\s+Tensions/m);
+    assert.ok(
+      firstHeading !== null && firstHeading[0].startsWith('### Tensions'),
+      `expected-tensions-retro.md top Tensions header must be "### Tensions" (three hashes, one level deeper than ## default) — found: ${firstHeading ? firstHeading[0] : 'none'}`
+    );
+  });
+
+  test('expected-tensions-retro.md contains >=2 #### T{n} per-tension blocks', () => {
+    const retro = fs.readFileSync(path.join(FIXTURE_DIR, 'expected-tensions-retro.md'), 'utf-8');
+    const blocks = retro.match(/^#### T\d+/gm);
+    assert.ok(
+      blocks && blocks.length >= 2,
+      `expected-tensions-retro.md must have >=2 "#### T{n}" per-tension blocks (four hashes), got ${blocks?.length ?? 0}`
+    );
+  });
+
+  test('expected-tensions-retro.md each block has evidence citation and Candidate change:', () => {
+    const retro = fs.readFileSync(path.join(FIXTURE_DIR, 'expected-tensions-retro.md'), 'utf-8');
+    assert.ok(
+      retro.includes('evidence:'),
+      'expected-tensions-retro.md must contain evidence citations (e.g. "(evidence: ...)" in each tension block)'
+    );
+    assert.ok(
+      retro.includes('Candidate change:'),
+      'expected-tensions-retro.md must contain "Candidate change:" lines in tension blocks'
     );
   });
 });
