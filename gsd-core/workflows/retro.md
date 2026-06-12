@@ -65,6 +65,8 @@ mkdir -p "${SCRATCH_DIR}"
 
 ## Step 3: Spawn 4 Isolated gsd-lens Agents in Parallel
 
+> ◆ Spawning 4 lens agents + synthesizer (runs in a subagent — no output until they return, ~2–5 min; expected, not a freeze)
+
 Each lens receives its own prompt block with: `LENS_IDENTITY`, `ARTIFACTS_TO_MINE` (concrete
 `${ARTIFACT_BASE}` glob forms — never prose as a path), `OUTPUT_CONTRACT` (forward-looking
 framing + no-leak guard), and `OUTPUT_PATH` in the scratch dir.

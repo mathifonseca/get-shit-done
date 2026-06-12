@@ -603,6 +603,35 @@ Then proceed to the manual retrospective questions with this data as context.
 4. From git log: Count commits, calculate timeline
 5. From the milestone work: Reflect on what worked and what didn't
 
+**Multi-lens retrospective (opt-in — populate TENSIONS_BLOCK before writing the entry):**
+
+<!-- D-08 reconciliation: D-08 specified the integration as "a sub-step appended at the END; every
+     line above untouched". However, pure append-after-commit and single-commit-nested-Tensions (D-03)
+     are incompatible — appending after the commit means a second commit, which violates D-03. The
+     reconciliation honors D-08's *acceptance* (byte-identical output when false, via empty
+     TENSIONS_BLOCK) and D-03 (single commit) via inline injection: TENSIONS_BLOCK is populated
+     here, BEFORE the entry template is assembled, so the one existing commit below covers Tensions.
+     The "guarded sub-step" IS this block that populates TENSIONS_BLOCK. -->
+
+```bash
+MILESTONE_RETRO=$(gsd_run query config-get workflow.milestone_retro 2>/dev/null || echo "false")
+```
+
+If `MILESTONE_RETRO` is `true`:
+
+1. Set `SCRATCH_DIR=".planning/tmp/retro-v${VERSION}"`
+2. Invoke `gsd-core/workflows/retro.md` via Agent(), passing VERSION, SCRATCH_DIR, ARTIFACT_BASE (resolved via the same dual-probe as above), and AUDIT_FILE
+3. Read the returned Tensions markdown from `${SCRATCH_DIR}/tensions.md` into `TENSIONS_BLOCK`
+4. If `retro.md` returns nothing or `${SCRATCH_DIR}/tensions.md` is empty, log a warning and set `TENSIONS_BLOCK=""` (do not abort — the entry is still written)
+
+If `MILESTONE_RETRO` is `false` (or absent):
+
+```bash
+TENSIONS_BLOCK=""
+```
+
+`TENSIONS_BLOCK` is now ready for inline interpolation in the entry template below. When empty, it renders as nothing — no Tensions heading, no whitespace artifact — so the milestone entry is byte-for-byte identical to the pre-Phase-2 output (RETRO-04/SC-1, D-08 acceptance).
+
 **Write the milestone section (includes both automated and manual data):**
 
 ```markdown
@@ -642,7 +671,7 @@ Then proceed to the manual retrospective questions with this data as context.
 
 ### Key Lessons
 {Specific, actionable takeaways — informed by the automated data and trends}
-
+${TENSIONS_BLOCK}
 ### Cost Observations
 - Model mix: {X}% opus, {Y}% sonnet, {Z}% haiku
 - Sessions: {count}
@@ -653,10 +682,19 @@ Then proceed to the manual retrospective questions with this data as context.
 
 If the "## Cross-Milestone Trends" section exists, update the tables with new data from this milestone. Include the automated metrics (verification pass rates, gap counts, deviation totals) in the cross-milestone comparison tables so trends are visible across milestones.
 
-**Commit:**
+**Commit (single commit — covers entry including Tensions when the knob is true, D-03):**
 ```bash
 gsd_run query commit "docs: update retrospective for v${VERSION}" --files .planning/RETROSPECTIVE.md
 ```
+
+**Success-gated scratch dir cleanup (D-02):**
+
+After the commit succeeds and only if `MILESTONE_RETRO` was `true`:
+```bash
+rm -rf "${SCRATCH_DIR}"
+```
+
+The `rm -rf` target is exactly `${SCRATCH_DIR}` (= `.planning/tmp/retro-v${VERSION}`) — a namespaced path disjoint from real planning artifacts. If the commit failed, leave the scratch dir in place for debugging.
 
 </step>
 
