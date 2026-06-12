@@ -92,6 +92,8 @@ All default to `true` (opinionated — the upstream would likely default most to
 | `workflow.provenance_footer` | Append a Provenance footer to agent-generated artifacts (`VERIFICATION.md`, `REVIEW.md`) naming source tier, data freshness, ownership, and known unknowns — the consumer-side trust signal |
 | `workflow.adr_co_commit` | Enforce ADR co-commit invariant in `gsd-verifier` (Step 7-ADR): ADR-flagged tasks must ship a co-committed `.planning/adrs/NNNN-*.md`; existing ADRs are immutable except for `superseded-by` cross-references |
 | `workflow.milestone_retro` | Enable multi-lens milestone retro (default `false`; opt-in). When `true`, `write_retrospective` invokes `retro.md` — spawning 4 isolated lens subagents + synthesizer — and splices a `### Tensions` subsection into the `.planning/RETROSPECTIVE.md` milestone entry. `Candidate change:` lines feed the next-transition `graduation` HITL (documented handoff; no `graduation.md` change). |
+| `workflow.teach_phase` | Route each phase learning to the right surface (rules / skill / MCP tool / hook); emit `NN-TEACH.md` proposals (default `false`; opt-in). Calls `gsd-extract-learnings`; does not auto-write any surface. |
+| `workflow.plan_lens_review` | Advisory negotiated plan review at plan-phase using the frozen lens engine (default `false`; opt-in). 2–4 lens spawns + synthesizer; fact-conflicts probed inline; value-tradeoffs escalate to human via `AskUserQuestion`. Produces `NN-PLAN-RATIONALE.md` + `NN-KILL-CRITERIA.md`. Validates CON-lens-generic. |
 
 ### Command naming
 
