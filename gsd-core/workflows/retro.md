@@ -63,6 +63,28 @@ mkdir -p "${SCRATCH_DIR}"
 
 ---
 
+## Step 2b: Resolve Model Tiers
+
+Resolve the researcher and synthesizer model tiers before spawning any lens agents. This
+block is self-contained so retro.md can be invoked via Agent() without the caller
+pre-substituting model placeholders.
+
+```bash
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "$HOME/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="$HOME/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi
+researcher_model=$(node -e "try{const r=JSON.parse(require('child_process').execSync('$(which node) $(echo $GSD_TOOLS) query resolve-model gsd-project-researcher 2>/dev/null',{encoding:'utf8'})||'{}');process.stdout.write(r.model||'')}catch(e){}" 2>/dev/null || true)
+if [ -z "$researcher_model" ]; then
+  researcher_model=$(node -e "try{const r=JSON.parse(require('child_process').execSync('$(which node) $(echo $GSD_TOOLS) query resolve-model gsd-lens 2>/dev/null',{encoding:'utf8'})||'{}');process.stdout.write(r.model||'')}catch(e){}" 2>/dev/null || true)
+fi
+if [ -z "$researcher_model" ]; then researcher_model="sonnet"; fi
+synthesizer_model=$(node -e "try{const r=JSON.parse(require('child_process').execSync('$(which node) $(echo $GSD_TOOLS) query resolve-model gsd-research-synthesizer 2>/dev/null',{encoding:'utf8'})||'{}');process.stdout.write(r.model||'')}catch(e){}" 2>/dev/null || true)
+if [ -z "$synthesizer_model" ]; then
+  synthesizer_model=$(node -e "try{const r=JSON.parse(require('child_process').execSync('$(which node) $(echo $GSD_TOOLS) query resolve-model gsd-lens-synthesizer 2>/dev/null',{encoding:'utf8'})||'{}');process.stdout.write(r.model||'')}catch(e){}" 2>/dev/null || true)
+fi
+if [ -z "$synthesizer_model" ]; then synthesizer_model="${researcher_model}"; fi
+```
+
+---
+
 ## Step 3: Spawn 4 Isolated gsd-lens Agents in Parallel
 
 > ◆ Spawning 4 lens agents + synthesizer (runs in a subagent — no output until they return, ~2–5 min; expected, not a freeze)
@@ -105,7 +127,7 @@ OUTPUT_CONTRACT:
   and lessons only.
 
 OUTPUT_PATH: ${SCRATCH_DIR}/position-planner.md
-", subagent_type="gsd-lens", model="{researcher_model}", description="Planner lens")
+", subagent_type="gsd-lens", model="${researcher_model}", description="Planner lens")
 ```
 
 ---
@@ -143,7 +165,7 @@ OUTPUT_CONTRACT:
   and lessons only.
 
 OUTPUT_PATH: ${SCRATCH_DIR}/position-executor.md
-", subagent_type="gsd-lens", model="{researcher_model}", description="Executor lens")
+", subagent_type="gsd-lens", model="${researcher_model}", description="Executor lens")
 ```
 
 ---
@@ -179,7 +201,7 @@ OUTPUT_CONTRACT:
   and lessons only.
 
 OUTPUT_PATH: ${SCRATCH_DIR}/position-reviewer-qa.md
-", subagent_type="gsd-lens", model="{researcher_model}", description="Reviewer-QA lens")
+", subagent_type="gsd-lens", model="${researcher_model}", description="Reviewer-QA lens")
 ```
 
 ---
@@ -216,7 +238,7 @@ OUTPUT_CONTRACT:
   and lessons only.
 
 OUTPUT_PATH: ${SCRATCH_DIR}/position-scope-ceo.md
-", subagent_type="gsd-lens", model="{researcher_model}", description="Scope-CEO lens")
+", subagent_type="gsd-lens", model="${researcher_model}", description="Scope-CEO lens")
 ```
 
 ---
@@ -268,7 +290,7 @@ is a flagged signal.
 OUTPUT_PATH: ${SCRATCH_DIR}/tensions.md
 
 DO NOT commit. The caller (write_retrospective) owns the single splice + commit.
-", subagent_type="gsd-lens-synthesizer", model="{synthesizer_model}", description="Synthesize lens tensions")
+", subagent_type="gsd-lens-synthesizer", model="${synthesizer_model}", description="Synthesize lens tensions")
 ```
 
 ---
