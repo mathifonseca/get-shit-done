@@ -91,7 +91,7 @@ All default to `true` (opinionated — the upstream would likely default most to
 | `workflow.intermediate_bets_check` | Add intermediate-bets check (Step 7d) to `gsd-verifier` — lists each plan's necessary-but-not-sufficient gates and verifies hit/miss, separately from terminal outcome; non-blocking decision-quality signal |
 | `workflow.provenance_footer` | Append a Provenance footer to agent-generated artifacts (`VERIFICATION.md`, `REVIEW.md`) naming source tier, data freshness, ownership, and known unknowns — the consumer-side trust signal |
 | `workflow.adr_co_commit` | Enforce ADR co-commit invariant in `gsd-verifier` (Step 7-ADR): ADR-flagged tasks must ship a co-committed `.planning/adrs/NNNN-*.md`; existing ADRs are immutable except for `superseded-by` cross-references |
-| `workflow.milestone_retro` | Enable multi-lens milestone retro (default `false`; opt-in). Four isolated failure-class lens subagents + synthesizer run from `write_retrospective`, emitting a Tensions section into `.planning/RETROSPECTIVE.md`. |
+| `workflow.milestone_retro` | Enable multi-lens milestone retro (default `false`; opt-in). When `true`, `write_retrospective` invokes `retro.md` — spawning 4 isolated lens subagents + synthesizer — and splices a `### Tensions` subsection into the `.planning/RETROSPECTIVE.md` milestone entry. `Candidate change:` lines feed the next-transition `graduation` HITL (documented handoff; no `graduation.md` change). |
 
 ### Command naming
 
