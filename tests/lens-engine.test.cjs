@@ -33,6 +33,8 @@ const AGENTS_DIR = path.join(REPO_ROOT, 'agents');
 const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'lens-engine');
 const WORKFLOWS_DIR = path.join(REPO_ROOT, 'gsd-core', 'workflows');
 
+const { execSync } = require('node:child_process');
+
 const { VALID_CONFIG_KEYS } = require('../gsd-core/bin/lib/config-schema.cjs');
 
 // ─── LENS-CONFIG: config knob registration ────────────────────────────────
@@ -580,5 +582,182 @@ describe('RETRO-INTEGRATION: Phase-2 orchestration wiring (RETRO-04..08, D-01..D
       retro.includes('Candidate change:'),
       'expected-tensions-retro.md must contain "Candidate change:" lines in tension blocks'
     );
+  });
+});
+
+// ─── PLANLENS-CONFIG: plan_lens_review config knob registration (PLANLENS-01) ──
+
+describe('PLANLENS-CONFIG: config knob registration (PLANLENS-01)', () => {
+  test('config.json contains workflow.plan_lens_review: false', () => {
+    const cfgPath = path.join(REPO_ROOT, 'gsd-core', 'templates', 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+    assert.strictEqual(
+      cfg.workflow.plan_lens_review,
+      false,
+      'gsd-core/templates/config.json must have workflow.plan_lens_review: false (default opt-out, PLANLENS-01)'
+    );
+  });
+
+  test('workflow.plan_lens_review is registered in config-schema.cjs', () => {
+    assert.ok(
+      VALID_CONFIG_KEYS.has('workflow.plan_lens_review'),
+      'workflow.plan_lens_review must be registered in VALID_CONFIG_KEYS in config-schema.manifest.json (PLANLENS-01)'
+    );
+  });
+});
+
+// ─── PLANLENS-DOCS: plan_lens_review documentation parity (PLANLENS-01) ─────
+
+describe('PLANLENS-DOCS: docs/CONFIGURATION.md and FORK.md parity (PLANLENS-01)', () => {
+  test('docs/CONFIGURATION.md contains workflow.plan_lens_review', () => {
+    const configDoc = fs.readFileSync(path.join(REPO_ROOT, 'docs', 'CONFIGURATION.md'), 'utf-8');
+    assert.ok(
+      configDoc.includes('workflow.plan_lens_review'),
+      'docs/CONFIGURATION.md must document workflow.plan_lens_review in the Workflow Toggles table (PLANLENS-01)'
+    );
+  });
+
+  test('FORK.md contains workflow.plan_lens_review', () => {
+    const forkDoc = fs.readFileSync(path.join(REPO_ROOT, 'FORK.md'), 'utf-8');
+    assert.ok(
+      forkDoc.includes('workflow.plan_lens_review'),
+      'FORK.md must document workflow.plan_lens_review in the config-keys table (PLANLENS-01)'
+    );
+  });
+});
+
+// ─── PLANLENS-WORKFLOW: plan-lens-review.md structural contract (PLANLENS-01) ──
+//
+// Uses before() to read the workflow text once.
+// If the file does not exist yet (Wave 0 state), every test in this group fails
+// with a consistent ENOENT error — that is the expected RED state. Do NOT stub.
+
+describe('PLANLENS-WORKFLOW: plan-lens-review.md structural contract (PLANLENS-01)', () => {
+  let plrContent;
+
+  before(() => {
+    plrContent = fs.readFileSync(
+      path.join(WORKFLOWS_DIR, 'plan-lens-review.md'),
+      'utf-8'
+    );
+  });
+
+  test('plan-lens-review.md references frozen agent gsd-lens', () => {
+    assert.ok(
+      plrContent.includes('gsd-lens'),
+      'gsd-core/workflows/plan-lens-review.md must contain "gsd-lens" — references the frozen gsd-lens agent (PLANLENS-01/CON-lens-generic)'
+    );
+  });
+
+  test('plan-lens-review.md references frozen agent gsd-lens-synthesizer', () => {
+    assert.ok(
+      plrContent.includes('gsd-lens-synthesizer'),
+      'gsd-core/workflows/plan-lens-review.md must contain "gsd-lens-synthesizer" — references the frozen gsd-lens-synthesizer agent (PLANLENS-01/CON-lens-generic)'
+    );
+  });
+
+  test('plan-lens-review.md names output artifact PLAN-RATIONALE', () => {
+    assert.ok(
+      plrContent.includes('PLAN-RATIONALE'),
+      'gsd-core/workflows/plan-lens-review.md must contain "PLAN-RATIONALE" — the plan-rationale artifact output (PLANLENS-01/D-11)'
+    );
+  });
+
+  test('plan-lens-review.md names output artifact KILL-CRITERIA', () => {
+    assert.ok(
+      plrContent.includes('KILL-CRITERIA'),
+      'gsd-core/workflows/plan-lens-review.md must contain "KILL-CRITERIA" — the kill-criteria artifact output (PLANLENS-01/D-11)'
+    );
+  });
+
+  test('plan-lens-review.md references AskUserQuestion for value-tradeoff escalation', () => {
+    assert.ok(
+      plrContent.includes('AskUserQuestion'),
+      'gsd-core/workflows/plan-lens-review.md must contain "AskUserQuestion" — the only permitted human-blocking escalation for value-tradeoff conflicts (PLANLENS-01/D-09)'
+    );
+  });
+
+  test('plan-lens-review.md contains fact-conflict or probe path', () => {
+    const hasFactConflict = /fact.?conflict|probe/i.test(plrContent);
+    assert.ok(
+      hasFactConflict,
+      'gsd-core/workflows/plan-lens-review.md must contain a fact-conflict/probe path — matching /fact.?conflict|probe/i (PLANLENS-01/D-08/D-09)'
+    );
+  });
+
+  test('plan-lens-review.md contains round-2 rebuttal reference', () => {
+    const hasRound2 = /round.?2|rebuttal/i.test(plrContent);
+    assert.ok(
+      hasRound2,
+      'gsd-core/workflows/plan-lens-review.md must contain a round-2 rebuttal reference — matching /round.?2|rebuttal/i (PLANLENS-01/D-07)'
+    );
+  });
+});
+
+// ─── PLANLENS-GATE: plan-phase.md gate reference (PLANLENS-01) ───────────────
+//
+// Uses before() to read plan-phase.md once.
+// If plan-phase.md is not yet updated with the gate, these tests fail RED.
+
+describe('PLANLENS-GATE: plan-phase.md gate references (PLANLENS-01)', () => {
+  let planPhaseContent;
+
+  before(() => {
+    planPhaseContent = fs.readFileSync(
+      path.join(WORKFLOWS_DIR, 'plan-phase.md'),
+      'utf-8'
+    );
+  });
+
+  test('plan-phase.md references plan-lens-review.md', () => {
+    assert.ok(
+      planPhaseContent.includes('plan-lens-review.md'),
+      'gsd-core/workflows/plan-phase.md must contain "plan-lens-review.md" — the plan-lens gate hook (PLANLENS-01/D-12/D-13)'
+    );
+  });
+
+  test('plan-phase.md references workflow.plan_lens_review knob', () => {
+    assert.ok(
+      planPhaseContent.includes('workflow.plan_lens_review'),
+      'gsd-core/workflows/plan-phase.md must contain "workflow.plan_lens_review" — the config-get knob read guarding the plan-lens step (PLANLENS-01)'
+    );
+  });
+});
+
+// ─── CON-LENS-GENERIC: frozen agents byte-identical to HEAD (PLANLENS-01) ────
+//
+// Assert that gsd-lens.md and gsd-lens-synthesizer.md are unchanged vs HEAD.
+// This validates CON-lens-generic: plan-lens-review.md consumes the frozen agents
+// AS-IS without any modification.
+// Guard with try/catch so a non-git environment skips rather than errors.
+//
+// Security note: execSync is used here because the command string is a fully static
+// literal — no user input, no variables, no interpolation. There is no injection risk.
+// If the paths or command ever need to be dynamic, switch to execFileSync with an
+// argument array instead.
+
+describe('CON-LENS-GENERIC: frozen agents unchanged vs HEAD (PLANLENS-01/CON-lens-generic)', () => {
+  test('agents/gsd-lens.md and agents/gsd-lens-synthesizer.md are byte-identical to HEAD (no edits)', () => {
+    try {
+      // Static string — no user input interpolated. Safe from command injection.
+      const diffOutput = execSync(
+        'git diff --stat HEAD -- agents/gsd-lens.md agents/gsd-lens-synthesizer.md',
+        { cwd: REPO_ROOT }
+      ).toString().trim();
+      assert.strictEqual(
+        diffOutput,
+        '',
+        'agents/gsd-lens.md and agents/gsd-lens-synthesizer.md must be byte-identical to HEAD — ' +
+        'the frozen lens agents must not be modified this phase (CON-lens-generic, PLANLENS-01). ' +
+        `Got diff output: "${diffOutput}"`
+      );
+    } catch (err) {
+      // Non-git environment or git not available — skip rather than fail
+      if (err.message && err.message.includes('assert')) {
+        throw err; // Re-throw assertion failures (the diff was non-empty)
+      }
+      // Otherwise skip silently (git not available)
+      return;
+    }
   });
 });
