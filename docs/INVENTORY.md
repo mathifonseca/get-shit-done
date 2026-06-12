@@ -169,7 +169,7 @@ These six routers are descriptor-only entries that the model picks first; the bo
 
 ---
 
-## Workflows (89 shipped)
+## Workflows (90 shipped)
 
 Full roster at `gsd-core/workflows/*.md`. Workflows are thin orchestrators that commands reference internally; most are not read directly by end users. Rows below map each workflow file to its role (derived from the `<purpose>` block) and, where applicable, to the command that invokes it.
 
@@ -237,6 +237,7 @@ Full roster at `gsd-core/workflows/*.md`. Workflows are thin orchestrators that 
 | `remove-phase.md` | Remove a future phase from the roadmap and renumber subsequent phases. | `/gsd-phase --remove` |
 | `remove-workspace.md` | Remove a GSD workspace and clean up worktrees. | `/gsd-workspace --remove` |
 | `resume-project.md` | Resume work — restore full context from STATE.md, HANDOFF.json, and artifacts. | `/gsd-resume-work` |
+| `retro.md` | Multi-lens retro orchestration — spawns 4 gsd-lens + synthesizer for the milestone retrospective. | `write_retrospective` in `complete-milestone.md` (gated by `workflow.milestone_retro`) |
 | `review.md` | Cross-AI plan review via external CLIs; produces REVIEWS.md. | `/gsd-review` |
 | `scan.md` | Rapid single-focus codebase scan — lightweight alternative to map-codebase. | `/gsd-map-codebase --fast` |
 | `sdlc-audit.md` | Audit project against SDLC checklist; shows what's set up, what's missing, what's next. | `/gsd-sdlc-audit` |
