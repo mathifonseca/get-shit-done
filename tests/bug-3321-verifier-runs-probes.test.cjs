@@ -10,9 +10,14 @@ const VERIFIER_AGENT = path.join(REPO_ROOT, 'agents', 'gsd-verifier.md');
 
 function verifierProbeContract(content) {
   const sectionStart = content.indexOf('## Step 7c: Probe Execution');
-  const sectionEnd = content.indexOf('## Step 8:', sectionStart);
   assert.notEqual(sectionStart, -1, 'verifier must define Step 7c');
-  assert.notEqual(sectionEnd, -1, 'verifier must close Step 7c before Step 8');
+  // Bound the section to the NEXT '## ' heading, not all the way to Step 8.
+  // Sections legitimately added between 7c and 8 (Step 7-ADR, intermediate
+  // bets) carry their own numbered lists; scanning to Step 8 swept those into
+  // the executionSteps assertion. Scope to just the Step 7c heading so the
+  // contract asserts only Step 7c's own content (#3321).
+  const nextHeading = content.indexOf('\n## ', sectionStart + 1);
+  const sectionEnd = nextHeading === -1 ? content.length : nextHeading;
 
   const section = content.slice(sectionStart, sectionEnd);
   const codeBlocks = [...section.matchAll(/```bash\r?\n([\s\S]*?)\r?\n```/g)].map((match) => match[1].split(/\r?\n/).join('\n'));
