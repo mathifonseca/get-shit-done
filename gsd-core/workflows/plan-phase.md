@@ -1528,14 +1528,10 @@ Plan bounce complete: {survived}/{total} plans refined
 
 <step name="devils_advocate">
 
-```bash
-ADVERSARIAL=$(gsd_run query config-get workflow.adversarial_validation 2>/dev/null || echo "true")
-if [ "$ADVERSARIAL" = "true" ]; then
-  # Read and execute the Devil's Advocate review body
-  # (invoke target: gsd-core/workflows/plan-devils-advocate.md)
-  @gsd-core/workflows/plan-devils-advocate.md
-fi
-```
+Read and execute `gsd-core/workflows/plan-devils-advocate.md` end-to-end, then return here.
+That workflow self-guards on `workflow.adversarial_validation` (it skips itself when the
+knob is `false`), so it is the single source of truth for the gate — do not also wrap the
+invocation in a bash `if`. (#WR-02)
 
 </step>
 
@@ -1685,15 +1681,11 @@ This operation is idempotent: if wave headers or cross-cutting constraints alrea
 After NN-PLAN.md files are finalized and ROADMAP is annotated (§13c), optionally run an
 advisory plan-lens review before the commit. Mirrors the §13a gate shape.
 
-```bash
-PLAN_LENS=$(gsd_run query config-get workflow.plan_lens_review 2>/dev/null || echo "false")
-if [ "$PLAN_LENS" = "true" ]; then
-  # Read and execute the plan-lens-review orchestrator
-  # (invoke target: gsd-core/workflows/plan-lens-review.md)
-  # Passes: PADDED_PHASE, PHASE_DIR, list of NN-PLAN.md files, commit_docs
-  @gsd-core/workflows/plan-lens-review.md
-fi
-```
+Read and execute `gsd-core/workflows/plan-lens-review.md` end-to-end — passing `PADDED_PHASE`,
+`PHASE_DIR`, the list of `NN-PLAN.md` files, and `commit_docs` — then return here. That
+workflow self-guards on `workflow.plan_lens_review` (it exits when the knob is not `true`),
+so it is the single source of truth for the gate — do not also wrap the invocation in a
+bash `if`. (#WR-02)
 
 The review is advisory and does NOT rewrite NN-PLAN.md files. When the knob is false,
 plan-phase behavior is byte-for-byte unchanged (no review, no artifacts, gate skipped).

@@ -43,17 +43,16 @@ TEXT_MODE=$(gsd_run query config-get workflow.text_mode 2>/dev/null || echo "fal
 ## Step 2: Resolve Model Tiers and Scratch Directory
 
 ```bash
-researcher_model=$(node -e "try{const r=JSON.parse(require('child_process').execSync('$(which node) $(echo $GSD_TOOLS) query resolve-model gsd-project-researcher 2>/dev/null',{encoding:'utf8'})||'{}');process.stdout.write(r.model||'')}catch(e){}" 2>/dev/null || true)
-if [ -z "$researcher_model" ]; then
-  researcher_model=$(node -e "try{const r=JSON.parse(require('child_process').execSync('$(which node) $(echo $GSD_TOOLS) query resolve-model gsd-lens 2>/dev/null',{encoding:'utf8'})||'{}');process.stdout.write(r.model||'')}catch(e){}" 2>/dev/null || true)
-fi
-if [ -z "$researcher_model" ]; then researcher_model="sonnet"; fi
-
-synthesizer_model=$(node -e "try{const r=JSON.parse(require('child_process').execSync('$(which node) $(echo $GSD_TOOLS) query resolve-model gsd-research-synthesizer 2>/dev/null',{encoding:'utf8'})||'{}');process.stdout.write(r.model||'')}catch(e){}" 2>/dev/null || true)
-if [ -z "$synthesizer_model" ]; then
-  synthesizer_model=$(node -e "try{const r=JSON.parse(require('child_process').execSync('$(which node) $(echo $GSD_TOOLS) query resolve-model gsd-lens-synthesizer 2>/dev/null',{encoding:'utf8'})||'{}');process.stdout.write(r.model||'')}catch(e){}" 2>/dev/null || true)
-fi
-if [ -z "$synthesizer_model" ]; then synthesizer_model="${researcher_model}"; fi
+# Resolve via the portable gsd_run shim (above) — args passed by argv, JSON parsed from
+# stdin. Avoids interpolating $GSD_TOOLS into an execSync `sh -c` string, which word-splits
+# on paths containing spaces and silently falls back to the default tier. (#WR-01)
+_resolve_model() { gsd_run query resolve-model "$1" 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write((JSON.parse(s||'{}').model)||'')}catch(e){}})"; }
+researcher_model=$(_resolve_model gsd-project-researcher)
+[ -n "$researcher_model" ] || researcher_model=$(_resolve_model gsd-lens)
+[ -n "$researcher_model" ] || researcher_model="sonnet"
+synthesizer_model=$(_resolve_model gsd-research-synthesizer)
+[ -n "$synthesizer_model" ] || synthesizer_model=$(_resolve_model gsd-lens-synthesizer)
+[ -n "$synthesizer_model" ] || synthesizer_model="${researcher_model}"
 
 SCRATCH_DIR=".planning/tmp/plan-lens-${PADDED_PHASE}"
 mkdir -p "${SCRATCH_DIR}/round1" "${SCRATCH_DIR}/round2"

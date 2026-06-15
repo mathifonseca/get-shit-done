@@ -8,7 +8,6 @@ allowed-tools:
   - Bash
   - Grep
   - Glob
-  - Agent
 type: prompt
 requires: [phase]
 ---

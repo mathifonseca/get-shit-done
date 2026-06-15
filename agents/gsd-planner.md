@@ -251,7 +251,7 @@ Every task has four required fields:
 
 Read the config:
 ```bash
-GSD_TOOLS="$(git rev-parse --show-toplevel 2>/dev/null)/gsd-core/bin/gsd-tools.cjs"; [ -f "$GSD_TOOLS" ] || GSD_TOOLS="${HOME}/.claude/gsd-core/bin/gsd-tools.cjs"; gsd_run() { node "$GSD_TOOLS" "$@"; }
+_GSD_R="$(git rev-parse --show-toplevel 2>/dev/null)"; for _d in "$_GSD_R/gsd-core" "$_GSD_R/.claude/gsd-core" "${HOME}/.claude/gsd-core"; do [ -f "$_d/bin/gsd-tools.cjs" ] && { GSD_TOOLS="$_d/bin/gsd-tools.cjs"; break; }; done; command -v gsd-tools >/dev/null 2>&1 && [ -z "$GSD_TOOLS" ] && GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { node "$GSD_TOOLS" "$@"; }
 SPEC_OUTCOME=$(gsd_run query config-get workflow.spec_outcome_enforcement 2>/dev/null || echo "true")
 ```
 
