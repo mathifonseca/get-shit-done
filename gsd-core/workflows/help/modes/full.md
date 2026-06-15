@@ -603,6 +603,7 @@ The commands above cover the most common day-to-day flows. Every command listed 
 - **`/gsd:undo --last N | --phase NN | --plan NN-MM`** — Safe git revert. Roll back phase or plan commits using the phase manifest with dependency checks.
 - **`/gsd:docs-update [--force] [--verify-only]`** — Generate or update project documentation verified against the codebase.
 - **`/gsd:extract-learnings <phase>`** — Extract decisions, lessons, patterns, and surprises from completed phase artifacts.
+- **`/gsd:teach-phase <phase>`** — Codify phase learnings as HITL proposals (rules / skill / MCP tool / hook) via NN-TEACH.md.
 
 ### Knowledge & Context
 

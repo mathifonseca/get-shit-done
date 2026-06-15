@@ -17,6 +17,11 @@ Read the `workflow.adversarial_validation` knob using the portable shim:
 
 ```bash
 ADVERSARIAL=$(gsd_run query config-get workflow.adversarial_validation 2>/dev/null || echo "true")
+TEXT_MODE=$(gsd_run query config-get workflow.text_mode 2>/dev/null || echo "false")
+# When TEXT_MODE is true, replace every AskUserQuestion call with a plain-text
+# numbered list and ask the user to type their choice number instead. This ensures
+# non-Claude runtimes (OpenAI Codex, Gemini, etc.) can handle RISK review questions
+# without stalling on an unexecuted TUI tool call (#2012).
 ```
 
 Skip this entire file if `ADVERSARIAL` is `"false"`.

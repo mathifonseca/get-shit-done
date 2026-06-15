@@ -1,6 +1,6 @@
 ---
 name: gsd:teach-phase
-description: Route each learning from a completed phase to the right durable surface — rules, skill, MCP tool, or hook — and emit NN-TEACH.md proposals
+description: Codify phase learnings as HITL proposals (rules / skill / MCP tool / hook) via NN-TEACH.md
 argument-hint: <phase-number>
 allowed-tools:
   - Read

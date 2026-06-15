@@ -30,6 +30,12 @@ if [ "$PLAN_LENS" != "true" ]; then
   echo "workflow.plan_lens_review is false — skipping plan lens review."
   exit 0
 fi
+
+TEXT_MODE=$(gsd_run query config-get workflow.text_mode 2>/dev/null || echo "false")
+# When TEXT_MODE is true, replace every AskUserQuestion call with a plain-text
+# numbered list and ask the user to type their choice number instead. This ensures
+# non-Claude runtimes (OpenAI Codex, Gemini, etc.) can handle value-tradeoff
+# questions without stalling on an unexecuted TUI tool call (#2012).
 ```
 
 ---
@@ -86,7 +92,7 @@ The review always runs at least 2 lenses and at most 4. The 4 named lenses are:
 
 ## Step 4: Round 1 — Isolated Position Staking
 
-> ◆ Spawning 2–4 lens agents in Round 1 (isolated — no shared context between spawns; ~2–4 min; expected, not a freeze)
+> ◆ Spawning 2–4 lens agents in Round 1 — each runs in a subagent (isolated; no shared context; ~2–4 min; expected, not a freeze)
 
 Each lens receives its own LENS_IDENTITY, a set of ARTIFACTS_TO_MINE (plan files + relevant
 context), an OUTPUT_CONTRACT instructing it to stake an advisory position with evidence
@@ -249,7 +255,7 @@ Only the spawn inputs differ — the agents themselves are unchanged. This is th
 proof of CON-lens-generic: the frozen gsd-lens agent handles the rebuttal round without
 modification.
 
-> ◆ Spawning Round 2 rebuttal lenses (each reads Round 1 sibling positions; ~2–4 min)
+> ◆ Spawning Round 2 rebuttal lenses — each runs in a subagent (reads Round 1 sibling positions; ~2–4 min)
 
 ---
 

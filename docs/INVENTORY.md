@@ -58,7 +58,7 @@ Full roster at `agents/gsd-*.md`. The "Primary doc" column flags whether [`docs/
 
 ---
 
-## Commands (68 shipped)
+## Commands (69 shipped)
 
 Full roster at `commands/gsd/*.md`. The groupings below mirror `docs/COMMANDS.md` section order; each row carries the command name, a one-line role derived from the command's frontmatter `description:`, and a link to the source file. `tests/command-count-sync.test.cjs` locks the count against the filesystem.
 
@@ -140,6 +140,7 @@ These six routers are descriptor-only entries that the model picks first; the bo
 | `/gsd-map-codebase` | Analyze codebase with parallel mapper agents; use `--fast` for lightweight scan or `--query` for intel queries. | [commands/gsd/map-codebase.md](../commands/gsd/map-codebase.md) |
 | `/gsd-graphify` | Build, query, and inspect the project knowledge graph in `.planning/graphs/`. | [commands/gsd/graphify.md](../commands/gsd/graphify.md) |
 | `/gsd-extract-learnings` | Extract decisions, lessons, patterns, and surprises from completed phase artifacts. | [commands/gsd/extract-learnings.md](../commands/gsd/extract-learnings.md) |
+| `/gsd-teach-phase` | Route phase learnings to the right durable surface as HITL proposals (rules / skill / MCP tool / hook). | [commands/gsd/teach-phase.md](../commands/gsd/teach-phase.md) |
 
 ### Review, Debug & Recovery
 
@@ -169,7 +170,7 @@ These six routers are descriptor-only entries that the model picks first; the bo
 
 ---
 
-## Workflows (90 shipped)
+## Workflows (93 shipped)
 
 Full roster at `gsd-core/workflows/*.md`. Workflows are thin orchestrators that commands reference internally; most are not read directly by end users. Rows below map each workflow file to its role (derived from the `<purpose>` block) and, where applicable, to the command that invokes it.
 
@@ -226,6 +227,8 @@ Full roster at `gsd-core/workflows/*.md`. Workflows are thin orchestrators that 
 | `node-repair.md` | Autonomous repair operator for failed task verification; invoked by `execute-plan`. | `execute-plan.md` (recovery) |
 | `note.md` | Zero-friction idea capture — one Write call, one confirmation line. | `/gsd-capture --note` |
 | `pause-work.md` | Create structured `.planning/HANDOFF.json` and `.continue-here.md` handoff files. | `/gsd-pause-work` |
+| `plan-devils-advocate.md` | Devil's Advocate Review — challenges execution plans to surface BLOCKERs, RISKs, and SUGGESTIONs before execution begins. | `plan-phase.md` §12.6 (when `workflow.adversarial_validation` is true) |
+| `plan-lens-review.md` | Advisory negotiated plan-quality review — Round 1 position staking + Round 2 rebuttal via isolated gsd-lens agents, producing NN-PLAN-RATIONALE.md + NN-KILL-CRITERIA.md. | `plan-phase.md` §13c.5 (when `workflow.plan_lens_review` is true) |
 | `plan-phase.md` | Create executable PLAN.md files with integrated research and verification loop. | `/gsd-plan-phase`, `/gsd-quick` |
 | `plan-review-convergence.md` | Cross-AI plan convergence loop — replan with review feedback until no HIGH concerns remain. | `/gsd-plan-review-convergence` |
 | `plant-seed.md` | Capture a forward-looking idea as a structured seed file with trigger conditions. | `/gsd-capture --seed` |
@@ -254,6 +257,7 @@ Full roster at `gsd-core/workflows/*.md`. Workflows are thin orchestrators that 
 | `spike-wrap-up.md` | Curate spike findings and package them as a persistent `spike-findings-[project]` skill. | `/gsd-spike --wrap-up` |
 | `stats.md` | Project statistics rendering — phases, plans, requirements, git metrics. | `/gsd-stats` |
 | `sync-skills.md` | Cross-runtime GSD skill sync — diff and apply `gsd-*` skill directories across runtime roots. | `/gsd-update --sync` |
+| `teach-phase.md` | Knob-gated codify orchestrator — routes candidate phase learnings to exactly one durable surface (hook / MCP tool / skill / rules) and emits NN-TEACH.md HITL proposals. | `/gsd-teach-phase` (gated by `workflow.teach_phase`) |
 | `transition.md` | Phase-boundary transition workflow — workstream checks, state advancement. | `execute-phase.md`, `/gsd-progress --next` |
 | `ui-phase.md` | Generate UI-SPEC.md design contract via gsd-ui-researcher. | `/gsd-ui-phase` |
 | `ui-review.md` | Retroactive 6-pillar visual audit via gsd-ui-auditor. | `/gsd-ui-review` |

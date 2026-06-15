@@ -1,5 +1,5 @@
 {
-  "generated": "2026-06-11",
+  "generated": "2026-06-15",
   "families": {
     "agents": [
       "gsd-advisor-researcher",
@@ -97,6 +97,7 @@
       "/gsd-spike",
       "/gsd-stats",
       "/gsd-surface",
+      "/gsd-teach-phase",
       "/gsd-thread",
       "/gsd-ui-phase",
       "/gsd-ui-review",
@@ -160,6 +161,8 @@
       "node-repair.md",
       "note.md",
       "pause-work.md",
+      "plan-devils-advocate.md",
+      "plan-lens-review.md",
       "plan-milestone-gaps.md",
       "plan-phase.md",
       "plan-review-convergence.md",
@@ -189,6 +192,7 @@
       "spike.md",
       "stats.md",
       "sync-skills.md",
+      "teach-phase.md",
       "thread.md",
       "transition.md",
       "ui-phase.md",
