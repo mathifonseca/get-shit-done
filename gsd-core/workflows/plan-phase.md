@@ -1680,15 +1680,33 @@ gsd_run query roadmap.annotate-dependencies "${PHASE_NUMBER}"
 
 This operation is idempotent: if wave headers or cross-cutting constraints already exist in the ROADMAP phase section, the command returns without modifying the file. Skip this step if `plan_count` is 0.
 
-## 13d. Commit Plans if commit_docs is true
+## 13c.5. Plan-Lens Review (optional, knob-gated)
 
-If `commit_docs` is true (from the init JSON parsed in step 1), commit the generated plan artifacts (including any ROADMAP.md annotations from step 13c):
+After NN-PLAN.md files are finalized and ROADMAP is annotated (§13c), optionally run an
+advisory plan-lens review before the commit. Mirrors the §13a gate shape.
 
 ```bash
-gsd_run query commit "docs(${PADDED_PHASE}): create phase plan" --files "${PHASE_DIR}"/*-PLAN.md .planning/STATE.md .planning/ROADMAP.md
+PLAN_LENS=$(gsd_run query config-get workflow.plan_lens_review 2>/dev/null || echo "false")
+if [ "$PLAN_LENS" = "true" ]; then
+  # Read and execute the plan-lens-review orchestrator
+  # (invoke target: gsd-core/workflows/plan-lens-review.md)
+  # Passes: PADDED_PHASE, PHASE_DIR, list of NN-PLAN.md files, commit_docs
+  @gsd-core/workflows/plan-lens-review.md
+fi
 ```
 
-This commits all PLAN.md files for the phase plus the updated STATE.md and ROADMAP.md to version-control the planning artifacts. Skip this step if `commit_docs` is false.
+The review is advisory and does NOT rewrite NN-PLAN.md files. When the knob is false,
+plan-phase behavior is byte-for-byte unchanged (no review, no artifacts, gate skipped).
+
+## 13d. Commit Plans if commit_docs is true
+
+If `commit_docs` is true (from the init JSON parsed in step 1), commit the generated plan artifacts (including any ROADMAP.md annotations from step 13c and any plan-lens artifacts from step 13c.5):
+
+```bash
+gsd_run query commit "docs(${PADDED_PHASE}): create phase plan" --files "${PHASE_DIR}"/*-PLAN.md "${PHASE_DIR}"/*-PLAN-RATIONALE.md "${PHASE_DIR}"/*-KILL-CRITERIA.md .planning/STATE.md .planning/ROADMAP.md
+```
+
+This commits all PLAN.md files for the phase plus the updated STATE.md and ROADMAP.md to version-control the planning artifacts. The `*-PLAN-RATIONALE.md` and `*-KILL-CRITERIA.md` globs are safe — when the knob is false they expand to nothing, leaving the knob-off path unchanged. Skip this step if `commit_docs` is false.
 
 ## 13e. Post-Planning Gap Analysis
 
