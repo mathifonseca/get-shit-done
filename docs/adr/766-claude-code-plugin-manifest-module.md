@@ -34,6 +34,8 @@ The hook projection is the load-bearing part of this Module, because of the exte
 
 The interface of this Module is therefore a **conformance contract**, validated two ways: `claude plugin validate --strict` (the external tool's view) and an in-repo drift-guard test (`tests/issue-766-plugin-manifest.test.cjs`) that locks the identity mapping, the version sync, the always-on hook contract, and the absence of opt-in hooks. Manifest component paths are resolved relative to the **plugin root** (the directory containing `.claude-plugin/`), which is the repository root.
 
+> **Known tolerated warning (claude CLI version drift).** Newer `claude` CLIs (observed in 2.1.177) emit a `--strict` warning — *"CLAUDE.md at the plugin root is not loaded as project context"* — because the plugin root coincides with the repo root, where `CLAUDE.md` lives as **project** context for contributors. It is not plugin context (`plugin.json` never references it), and relocating it would break contributor context; the CLI offers no per-warning suppression. The drift-guard test therefore tolerates **this one exact warning** (and still fails on any other warning or hard error), so manifest schema/identity regressions remain caught. The test also skips entirely when `claude` is absent from PATH (CI).
+
 This is **additive**. The file-copy path — Runtime Artifact Layout Module, Runtime Install Policy Module, Installer Module — is unchanged. The plugin manifest is a parallel Adapter, the fallback for users on older Claude Code versions that predate the plugin contract.
 
 ## What stays OUTSIDE this Module

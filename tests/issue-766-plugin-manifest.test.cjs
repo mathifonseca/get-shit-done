@@ -229,6 +229,19 @@ describe('C: claude plugin validate (CLI integration)', () => {
     }
   })();
 
+  // Known, intentional, design-level warning emitted by newer claude CLIs
+  // (observed in 2.1.177): the repo keeps CLAUDE.md at the plugin root as
+  // *project* context for contributors, but the CLI's plugin validator notes
+  // it is "not loaded as project context" for a plugin install and suggests
+  // shipping plugin context as a skill. CLAUDE.md is NOT plugin context here
+  // (plugin.json never references it), and ADR-766 fixes the plugin root at
+  // the repo root, so this warning cannot be cleared without relocating
+  // CLAUDE.md (which would break contributor project-context). --strict has no
+  // per-warning suppression flag, so we scope this test to tolerate ONLY this
+  // exact warning while still failing on any other warning or hard error.
+  const KNOWN_ROOT_CLAUDEMD_WARNING =
+    'CLAUDE.md at the plugin root is not loaded as project context';
+
   test(
     'claude plugin validate . --strict exits 0 (skip if claude not on PATH)',
     { skip: !claudeAvailable ? 'claude binary not available on PATH' : false },
@@ -238,10 +251,23 @@ describe('C: claude plugin validate (CLI integration)', () => {
         encoding: 'utf-8',
         timeout: 15000,
       });
-      assert.equal(
-        result.status,
-        0,
-        `claude plugin validate . --strict exited with ${result.status}.\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+      if (result.status === 0) return; // clean pass — no warnings or errors
+
+      // Non-zero exit: tolerate ONLY when the sole cause is the known
+      // root-CLAUDE.md warning. Any hard error, or any additional warning,
+      // still fails the gate so manifest schema/identity regressions surface.
+      const out = `${result.stdout || ''}${result.stderr || ''}`;
+      const onlyKnownWarning =
+        out.includes(KNOWN_ROOT_CLAUDEMD_WARNING) &&
+        /Found 1 warning\b/.test(out) &&
+        out.includes('--strict treats warnings as errors') &&
+        !/Found \d+ error/.test(out);
+
+      assert.ok(
+        onlyKnownWarning,
+        `claude plugin validate . --strict exited with ${result.status} for a reason ` +
+        `other than the known root-CLAUDE.md warning (see ADR-766).\n` +
+        `stdout: ${result.stdout}\nstderr: ${result.stderr}`
       );
     }
   );
