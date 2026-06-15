@@ -9,6 +9,12 @@ This workflow is invoked by the `write_retrospective` step in `gsd-core/workflow
 when `workflow.milestone_retro: true`. The caller passes VERSION, SCRATCH_DIR, ARTIFACT_BASE, and
 AUDIT_FILE. This workflow may also resolve those values itself (Steps 1–2) if any are absent.
 
+<available_agent_types>
+Valid GSD subagent types (use exact names — do not fall back to 'general-purpose'):
+- gsd-lens — Isolated artifact-mining lens, spawned 4× in parallel (planner, executor, reviewer-QA, scope-CEO)
+- gsd-lens-synthesizer — Collects the 4 lens positions into a disagreement-preserving Tensions block
+</available_agent_types>
+
 ---
 
 ## Step 1: Resolve Inputs

@@ -10,6 +10,12 @@ CON-lens-generic without modifying either frozen agent.
 This workflow is invoked from `gsd-core/workflows/plan-phase.md` when `workflow.plan_lens_review: true`.
 The caller passes PADDED_PHASE, PHASE_DIR, and the list of NN-PLAN.md files to review.
 
+<available_agent_types>
+Valid GSD subagent types (use exact names — do not fall back to 'general-purpose'):
+- gsd-lens — Isolated artifact-mining lens, spawned 2–4× per round (scope/value, feasibility, maintainability, conditional UX)
+- gsd-lens-synthesizer — Collects the Round-2 lens positions into a disagreement-preserving tensions output
+</available_agent_types>
+
 ---
 
 ## Step 1: Resolve Inputs and Set Up Shim
