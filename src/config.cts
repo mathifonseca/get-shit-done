@@ -24,7 +24,7 @@ import configSchema = require('./config-schema.cjs');
 const { VALID_CONFIG_KEYS, isValidConfigKey } = configSchema;
 import { isSecretKey, maskSecret } from './secrets.cjs';
 import { normalizeConfiguredDefaultReviewers } from './review-reviewer-selection.cjs';
-import { migrateOnDisk, CONFIG_DEFAULTS as CANONICAL_CONFIG_DEFAULTS } from './configuration.cjs';
+import { migrateOnDisk } from './configuration.cjs';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -79,23 +79,6 @@ const SCHEMA_DEFAULTS: Record<string, unknown> = {
   'executor.stall_threshold_minutes': 10,
   'git.create_tag': true,
 };
-
-/**
- * Traverse CANONICAL_CONFIG_DEFAULTS (nested manifest shape) using a dot-notation
- * key path. Returns the default value when found, or `undefined` when the path is
- * absent. This allows opt-in workflow knobs registered in config-defaults.manifest.json
- * to be returned by config-get when the key is absent from the project config.
- */
-function getConfigDefault(kp: string): { found: true; value: unknown } | { found: false } {
-  const keys = kp.split('.');
-  let current: unknown = CANONICAL_CONFIG_DEFAULTS;
-  for (const key of keys) {
-    if (current === undefined || current === null || typeof current !== 'object') return { found: false };
-    current = (current as Record<string, unknown>)[key];
-  }
-  if (current === undefined) return { found: false };
-  return { found: true, value: current };
-}
 
 // ─── Validation helpers ───────────────────────────────────────────────────────
 
@@ -677,8 +660,6 @@ function cmdConfigGet(cwd: string, keyPath: string | undefined, raw: boolean, de
       output(def, raw, String(def));
       return;
     } else {
-      const cfgDefault = getConfigDefault(kp);
-      if (cfgDefault.found) { output(cfgDefault.value, raw, String(cfgDefault.value)); return; }
       error('No config.json found at ' + configPath, ERROR_REASON.CONFIG_NO_FILE);
     }
   } catch (err) {
@@ -698,8 +679,6 @@ function cmdConfigGet(cwd: string, keyPath: string | undefined, raw: boolean, de
         output(def, raw, String(def));
         return;
       }
-      const cfgDefault = getConfigDefault(kp);
-      if (cfgDefault.found) { output(cfgDefault.value, raw, String(cfgDefault.value)); return; }
       error(`Key not found: ${kp}`, ERROR_REASON.CONFIG_KEY_NOT_FOUND);
     }
     current = (current as Record<string, unknown>)[key];
@@ -713,8 +692,6 @@ function cmdConfigGet(cwd: string, keyPath: string | undefined, raw: boolean, de
       output(def, raw, String(def));
       return;
     }
-    const cfgDefault = getConfigDefault(kp);
-    if (cfgDefault.found) { output(cfgDefault.value, raw, String(cfgDefault.value)); return; }
     error(`Key not found: ${kp}`, ERROR_REASON.CONFIG_KEY_NOT_FOUND);
   }
 
