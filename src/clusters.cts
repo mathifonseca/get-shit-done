@@ -133,6 +133,7 @@ export const CLUSTERS: ClusterMap = Object.freeze({
     'review-backlog',
     'debug',
     'extract-learnings',
+    'teach-phase',
     'surface',
   ]),
 });
