@@ -497,7 +497,7 @@ All tests passed. Phase {phase} marked complete.
 **Adversarial Validation Gate** (optional — runs when `workflow.adversarial_validation` is enabled)
 
 ```bash
-ADVERSARIAL=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.adversarial_validation 2>/dev/null || echo "false")
+ADVERSARIAL=$(gsd_run config-get workflow.adversarial_validation 2>/dev/null || echo "false")
 ```
 
 Skip this step if `ADVERSARIAL` is `"false"`.

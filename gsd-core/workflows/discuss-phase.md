@@ -489,7 +489,7 @@ If you have already written and committed CONTEXT.md, the discuss step is comple
 
 Read the questions-per-area config:
 ```bash
-QUESTIONS_PER_AREA=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.questions_per_area 2>/dev/null || echo "all")
+QUESTIONS_PER_AREA=$(gsd_run config-get workflow.questions_per_area 2>/dev/null || echo "all")
 ```
 
 **For each area:**
@@ -905,7 +905,7 @@ Write the file.
 **Optional Design Spec Generation:**
 
 ```bash
-DESIGN_SPEC=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.design_spec 2>/dev/null || echo "true")
+DESIGN_SPEC=$(gsd_run config-get workflow.design_spec 2>/dev/null || echo "true")
 ```
 
 **Skip this step if:**

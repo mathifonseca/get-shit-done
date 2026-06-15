@@ -709,7 +709,7 @@ increases monotonically across waves. `{status}` is `complete` (success),
 **Edge Case Hunter** (runs in parallel with execution when `workflow.adversarial_validation` is enabled)
 
 ```bash
-ADVERSARIAL=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.adversarial_validation 2>/dev/null || echo "true")
+ADVERSARIAL=$(gsd_run config-get workflow.adversarial_validation 2>/dev/null || echo "true")
 ```
 
 Skip this step if `ADVERSARIAL` is `"false"`.
@@ -1447,7 +1447,7 @@ If `TEXT_MODE` is true, present as a plain-text numbered list. Otherwise use Ask
 **Playwright Verification** (optional — runs when `workflow.playwright_verification` is enabled)
 
 ```bash
-PLAYWRIGHT_VERIFY=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.playwright_verification 2>/dev/null || echo "false")
+PLAYWRIGHT_VERIFY=$(gsd_run config-get workflow.playwright_verification 2>/dev/null || echo "false")
 ```
 
 Skip this step if `PLAYWRIGHT_VERIFY` is `"false"`.
@@ -1653,7 +1653,7 @@ Gap closure cycle: `/gsd:plan-phase {X} --gaps ${GSD_WS}` reads VERIFICATION.md 
 **Definition of Done Checklist** (when `workflow.definition_of_done` is enabled)
 
 ```bash
-DOD_ENABLED=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.definition_of_done 2>/dev/null || echo "true")
+DOD_ENABLED=$(gsd_run config-get workflow.definition_of_done 2>/dev/null || echo "true")
 ```
 
 Skip this step if `DOD_ENABLED` is `"false"`.
@@ -1675,14 +1675,14 @@ Use AskUserQuestion for each unchecked item:
 
 2. **CI pre-check** — Changes won't fail CI
    ```bash
-   CI_COMMANDS=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get project.ci_commands 2>/dev/null || echo "null")
+   CI_COMMANDS=$(gsd_run config-get project.ci_commands 2>/dev/null || echo "null")
    ```
    - If `CI_COMMANDS` configured: suggest running them
    - If not: remind user to verify CI will pass
 
 3. **CLAUDE.md updated** — Project guide reflects new state
    ```bash
-   UPDATE_CLAUDE=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.update_claude_md_on_complete 2>/dev/null || echo "true")
+   UPDATE_CLAUDE=$(gsd_run config-get workflow.update_claude_md_on_complete 2>/dev/null || echo "true")
    ```
    - If enabled: check if CLAUDE.md was modified in this phase's commits
    - If not modified: WARN "CLAUDE.md not updated — review if new patterns, commands, or conventions were introduced"
@@ -1693,7 +1693,7 @@ Use AskUserQuestion for each unchecked item:
 
 5. **Issue tracker** — Relevant issues updated
    ```bash
-   ISSUE_TRACKER=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get project.issue_tracker 2>/dev/null || echo "null")
+   ISSUE_TRACKER=$(gsd_run config-get project.issue_tracker 2>/dev/null || echo "null")
    ```
    - If configured: remind user to update issue status
    - If not: skip
@@ -1842,7 +1842,7 @@ This ensures decisions made during execution (not just planning) are captured fo
 8. If changes were made, commit:
 
 ```bash
-node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" commit "docs(phase-{X}): propagate execution decisions to CLAUDE.md" --files CLAUDE.md
+gsd_run commit "docs(phase-{X}): propagate execution decisions to CLAUDE.md" --files CLAUDE.md
 ```
 
 **Skip this step if** CLAUDE.md does not exist in the project root.
@@ -1852,12 +1852,12 @@ node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" commit "docs(phase-{X}): propaga
 **PR Creation** (when issue tracker is configured)
 
 ```bash
-ISSUE_TRACKER=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get project.issue_tracker 2>/dev/null || echo "null")
-ISSUE_PREFIX=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get project.issue_prefix 2>/dev/null || echo "null")
-PR_TITLE_TEMPLATE=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get project.pr_title_template 2>/dev/null || echo "null")
-PR_BODY_REQUIRES_ISSUE=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get project.pr_body_requires_issue 2>/dev/null || echo "false")
-BRANCHING=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get git.branching_strategy 2>/dev/null || echo "none")
-PREFLIGHT_ON_VERIFY=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.preflight_on_verify 2>/dev/null || echo "false")
+ISSUE_TRACKER=$(gsd_run config-get project.issue_tracker 2>/dev/null || echo "null")
+ISSUE_PREFIX=$(gsd_run config-get project.issue_prefix 2>/dev/null || echo "null")
+PR_TITLE_TEMPLATE=$(gsd_run config-get project.pr_title_template 2>/dev/null || echo "null")
+PR_BODY_REQUIRES_ISSUE=$(gsd_run config-get project.pr_body_requires_issue 2>/dev/null || echo "false")
+BRANCHING=$(gsd_run config-get git.branching_strategy 2>/dev/null || echo "none")
+PREFLIGHT_ON_VERIFY=$(gsd_run config-get workflow.preflight_on_verify 2>/dev/null || echo "false")
 ```
 
 Skip this step if `BRANCHING` is `"none"` (no feature branch to create PR from).

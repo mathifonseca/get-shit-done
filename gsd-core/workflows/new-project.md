@@ -884,7 +884,7 @@ If "Yes":
   Commit the scaffolded file:
 
   ```bash
-  node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" commit "chore: scaffold preflight checklist" --files .claude/preflight.yaml
+  gsd_run commit "chore: scaffold preflight checklist" --files .claude/preflight.yaml
   ```
 
 - header: "Rules"
@@ -1003,7 +1003,7 @@ If "Yes":
   Commit the scaffolded files:
 
   ```bash
-  node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" commit "chore: scaffold .claude/rules/" --files .claude/rules/
+  gsd_run commit "chore: scaffold .claude/rules/" --files .claude/rules/
   ```
 
 **PR body onboarding:** Ask which optional PRD-style sections `/gsd:ship` should append to generated PR bodies. Use the same `ship.pr_body_sections` mapping as Step 2a: selected sections get `enabled: true`, seeded-but-unselected sections get `enabled: false`, and selecting none writes an empty list. Prefer lean/agile PRD sections that make user value, acceptance criteria, Definition of Done, and stakeholder traceability explicit.

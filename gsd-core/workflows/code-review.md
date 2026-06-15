@@ -417,7 +417,7 @@ done
 
 Check two-stage review config and collect PLAN.md files if enabled:
 ```bash
-TWO_STAGE=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.two_stage_review 2>/dev/null || echo "true")
+TWO_STAGE=$(gsd_run config-get workflow.two_stage_review 2>/dev/null || echo "true")
 PLAN_FILES_CONFIG=""
 PLAN_FILES_TO_READ=""
 if [ "$TWO_STAGE" = "true" ]; then

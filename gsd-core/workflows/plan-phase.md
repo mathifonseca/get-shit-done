@@ -477,7 +477,7 @@ fi
 
 Check config to determine if research should auto-select:
 ```bash
-RESEARCH_CFG=$(node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" config-get workflow.research 2>/dev/null || echo "true")
+RESEARCH_CFG=$(gsd_run config-get workflow.research 2>/dev/null || echo "true")
 ```
 
 **If `RESEARCH_CFG` is `"true"` (default):** Skip the question — auto-select "Research first" and proceed to research. Display: `Research enabled (workflow.research=true) — researching before planning.`
