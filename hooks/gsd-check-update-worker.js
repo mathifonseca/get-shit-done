@@ -86,7 +86,7 @@ if (configDir) {
 
 // Fork detection (fork-specific): if FORK.md exists at the canonical fork checkout, this is a fork.
 // Still check npm for upstream updates (user wants to know), but flag as fork so the
-// statusline surfaces "cherry-pick from upstream" instead of "run /gsd-update".
+// statusline surfaces "cherry-pick from upstream" instead of "run /gsd:update".
 // Adopted upstream's checkLatestVersion() adapter (#498) below — PACKAGE_NAME is
 // now sourced from the package-identity seam, not hardcoded in this worker.
 let isFork = false;
