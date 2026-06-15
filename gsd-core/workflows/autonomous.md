@@ -537,6 +537,32 @@ Display the review result summary (score from UI-REVIEW.md if produced). Continu
 
 **If `UI_SPEC_FILE` is empty OR `UI_REVIEW_CFG` is `false`:** Skip silently to iterate step.
 
+**3d.6. Teach Phase (Codify)**
+
+> Run after any successful execution routing (passed, human_needed accepted, or gaps deferred/accepted) — after UI review, before the iterate/transition step (CODIFY-03).
+
+Check whether teach is enabled (opt-in, off by default):
+
+```bash
+TEACH_CFG=$(gsd_run query config-get workflow.teach_phase 2>/dev/null || echo "false")
+```
+
+**If `TEACH_CFG` is `true`:**
+
+Display:
+
+```
+Phase ${PHASE_NUM}: teach enabled — routing learnings to codify surfaces...
+```
+
+```
+Skill(skill="gsd-teach-phase", args="${PHASE_NUM}")
+```
+
+Teach is **non-blocking**: it emits HITL `${PHASE}-TEACH.md` proposals only and never writes a surface itself. An empty candidate set (no learnings to codify) or a failed teach run must **never** block the transition — continue to the iterate step regardless of teach's outcome.
+
+**If `TEACH_CFG` is not `true`:** Skip silently to iterate step.
+
 </step>
 
 <step name="smart_discuss">

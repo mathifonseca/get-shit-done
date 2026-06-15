@@ -194,3 +194,55 @@ describe('TEACH-COMMAND: command frontmatter (CODIFY-04)', () => {
     );
   });
 });
+
+describe('TEACH-WIRING: phase-tail wiring + verifier nudge + docs (CODIFY-03)', () => {
+  const AGENTS_DIR = path.join(REPO_ROOT, 'agents');
+
+  test('autonomous.md invokes gsd-teach-phase, knob-gated and non-blocking', () => {
+    const text = fs.readFileSync(path.join(WORKFLOWS_DIR, 'autonomous.md'), 'utf-8');
+    assert.ok(
+      text.includes('Skill(skill="gsd-teach-phase"'),
+      'autonomous.md must invoke Skill(skill="gsd-teach-phase", ...) in the phase tail'
+    );
+    assert.ok(
+      text.includes('workflow.teach_phase'),
+      'autonomous.md teach step must gate on workflow.teach_phase'
+    );
+    assert.ok(
+      /non-blocking/i.test(text),
+      'autonomous.md teach step must be documented as non-blocking'
+    );
+  });
+
+  test('autonomous.md runs teach BEFORE the iterate/transition step', () => {
+    const text = fs.readFileSync(path.join(WORKFLOWS_DIR, 'autonomous.md'), 'utf-8');
+    const teachIdx = text.indexOf('Skill(skill="gsd-teach-phase"');
+    const iterateIdx = text.indexOf('<step name="iterate">');
+    assert.ok(teachIdx !== -1 && iterateIdx !== -1, 'both teach call and iterate step must exist');
+    assert.ok(
+      teachIdx < iterateIdx,
+      'teach must run before the iterate/transition step (CODIFY-03: after execute/verify, before transition)'
+    );
+  });
+
+  test('gsd-verifier.md has a knob-gated Step 7e teach-readiness nudge', () => {
+    const text = fs.readFileSync(path.join(AGENTS_DIR, 'gsd-verifier.md'), 'utf-8');
+    assert.ok(text.includes('Step 7e'), 'gsd-verifier.md must define Step 7e');
+    assert.ok(
+      text.includes('workflow.teach_phase'),
+      'Step 7e must gate on workflow.teach_phase'
+    );
+    assert.ok(
+      text.includes('/gsd:teach-phase'),
+      'Step 7e nudge must point at /gsd:teach-phase'
+    );
+  });
+
+  test('verify-work.md documents /gsd:teach-phase as a next step', () => {
+    const text = fs.readFileSync(path.join(WORKFLOWS_DIR, 'verify-work.md'), 'utf-8');
+    assert.ok(
+      text.includes('/gsd:teach-phase'),
+      'verify-work.md next-step routing must list /gsd:teach-phase (the codify step after verify-work)'
+    );
+  });
+});

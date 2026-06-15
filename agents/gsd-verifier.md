@@ -773,6 +773,26 @@ For each plan in the phase, build the list of intermediate bets the plan committ
 
 **Reasoning trap to avoid:** Do not classify a bet as HIT just because the terminal outcome is green. The intermediate bet may have been *skipped* (not hit, not missed — never run) and the terminal outcome may have passed *despite* the skip. Mark such cases as MISSED with a "skipped, terminal outcome green anyway" note — the gap is real even when the result is acceptable.
 
+## Step 7e: Teach Readiness Nudge (workflow.teach_phase)
+
+**Gate:** This step runs when `workflow.teach_phase` is `true` (opt-in; off by default). Skip the step entirely when the knob is `false` or absent.
+
+```bash
+TEACH_PHASE=$(gsd_run query config-get workflow.teach_phase 2>/dev/null || echo "false")
+if [ "$TEACH_PHASE" != "true" ]; then
+  # Skip Step 7e — knob disabled
+  :
+fi
+```
+
+**Why this step exists.** Verification confirms the phase delivered (terminal outcome). The compound-engineering loop (`discuss → plan → execute → verify → teach`, SDLC §3) isn't closed until the learning from shipping is codified to a surface a future agent will load automatically. This step is the nudge at the seam: once a phase passes, surface that there are likely codifiable learnings and point at the command that routes them.
+
+**What to do.** This step does **not** classify learnings or write proposals — that is `/gsd:teach-phase`'s job. It only adds a one-line readiness nudge to the VERIFICATION.md routing/next-steps output:
+
+> **Teach readiness:** Phase passed with `workflow.teach_phase` on. Run `/gsd:teach-phase {N}` to route this phase's learnings (conventions → rules, procedures → skills, system access → MCP tools, must-always-fire steps → hooks) into HITL `${PHASE}-TEACH.md` proposals.
+
+**Outcome.** Advisory only — never BLOCKS verification. A phase with no codifiable learnings is a valid no-op (teach-phase guards on a zero-candidate set). Record the nudge in VERIFICATION.md when the knob is on; omit it entirely when off.
+
 ## Step 8: Identify Human Verification Needs
 
 **Always needs human:** Visual appearance, user flow completion, real-time behavior, external service integration, performance feel, error message clarity.

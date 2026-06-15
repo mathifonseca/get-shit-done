@@ -462,6 +462,7 @@ Run before advancing to the next phase.
 All tests passed. Ready to continue.
 
 - `/gsd:secure-phase {phase}` — security review (required before advancing)
+- `/gsd:teach-phase {phase}` — codify this phase's learnings to rules/skills/MCP/hooks (if `workflow.teach_phase` enabled)
 - `/gsd:plan-phase {next}` — Plan next phase
 - `/gsd:execute-phase {next}` — Execute next phase
 - `/gsd:ui-review {phase}` — visual quality audit (if frontend files were modified)
@@ -486,6 +487,7 @@ After transition completes, present next-step options to the user:
 ```
 All tests passed. Phase {phase} marked complete.
 
+- `/gsd:teach-phase {phase}` — codify this phase's learnings to rules/skills/MCP/hooks (if `workflow.teach_phase` enabled)
 - `/gsd:plan-phase {next}` — Plan next phase
 - `/gsd:execute-phase {next}` — Execute next phase
 - `/gsd:secure-phase {phase}` — security review
