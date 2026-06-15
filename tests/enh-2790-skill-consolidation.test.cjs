@@ -60,6 +60,7 @@ const KNOWN_SKILLS = new Set([
   'resume-work.md',
   'review-backlog.md',
   'review.md',
+  'sdlc-audit.md', // fork addition (FORK.md) — SDLC checklist audit command
   'secure-phase.md',
   'settings.md',
   'ship.md',
@@ -68,6 +69,7 @@ const KNOWN_SKILLS = new Set([
   'spike.md',
   'stats.md',
   'surface.md',
+  'teach-phase.md', // fork addition — milestone item 11 CODIFY-02 (knob-gated codify/teach command)
   'thread.md',
   'ui-phase.md',
   'ui-review.md',
