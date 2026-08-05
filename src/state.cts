@@ -958,14 +958,27 @@ function buildStateFrontmatter(bodyContent: string, cwd: string | undefined): Re
           const phaseDirs = [...seenPhaseNums.values()];
 
           let diskTotalPlans = 0;
-          let diskTotalSummaries = 0;
+          let diskCompletedPlans = 0;
           let diskCompletedPhases = 0;
 
           for (const dir of phaseDirs) {
             const phaseDir = path.join(phasesDir, dir);
             const { planCount, summaryCount, completed } = scanPhasePlans(phaseDir);
             diskTotalPlans += planCount;
-            diskTotalSummaries += summaryCount;
+            // A plan counts as COMPLETED when it has a SUMMARY, so a phase can
+            // contribute at most its own `planCount` — clamp per phase.
+            //
+            // Summaries legitimately OUTNUMBER plans: brief-driven gap closures
+            // ship a SUMMARY with no PLAN (approved with the brief AS the plan),
+            // and `scanPhasePlans` already models that asymmetry in `completed`
+            // (`summaryCount >= planCount`). Summing raw summary counts into
+            // `completed_plans` while `total_plans` sums plan counts therefore
+            // produced completed > total — measured 64 > 59 on a project whose
+            // phase held 14 summaries against 9 plans. That is an incoherent
+            // frontmatter the `state-check` coherence gate rejects outright, so
+            // every write through here corrupted STATE.md and had to be
+            // hand-repaired.
+            diskCompletedPlans += Math.min(summaryCount, planCount);
             if (completed) diskCompletedPhases++;
           }
           // Count phase headings from ROADMAP using a digit-containing pattern
@@ -996,7 +1009,7 @@ function buildStateFrontmatter(bodyContent: string, cwd: string | undefined): Re
               : phaseDirs.length,
             completedPhases: diskCompletedPhases,
             totalPlans: diskTotalPlans,
-            completedPlans: diskTotalSummaries,
+            completedPlans: diskCompletedPlans,
           };
           _diskScanCache.set(cwd, cached);
         }
