@@ -889,13 +889,13 @@ describe('SECURE: ASVS level scaling (#1627)', () => {
     });
 
     // Fork ratchet: gsd-planner is XL-tier on this fork (see XL_CAP in
-    // tests/agent-size-budget.test.cjs — 76800). This is the third copy of the
+    // tests/agent-size-budget.test.cjs — 71680). This is the third copy of the
     // same bound; re-based so all three agree instead of contradicting.
-    test('planner is under the 76800-char cap', () => {
+    test('planner is under the 71680-char cap', () => {
       const content = fs.readFileSync(plannerPath, 'utf-8').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
       assert.ok(
-        content.length < 76800,
-        `gsd-planner.md must be < 76800 chars (LF-normalized); got ${content.length}`
+        content.length < 71680,
+        `gsd-planner.md must be < 71680 chars (LF-normalized); got ${content.length}`
       );
     });
   });

@@ -813,11 +813,6 @@ increases monotonically across waves. `{status}` is `complete` (success),
 
    When worktrees are disabled for a plan (per-plan or project-level), that plan's executor runs on the main working tree. If **any** plan in the current wave dropped to sequential mode, execute the affected plan(s) **one at a time** to avoid concurrent writes to the main working tree — plans in the same wave that retained worktree isolation can still run in parallel alongside the sequential ones, but two non-worktree plans in the same wave must serialize. When the project-level `USE_WORKTREES=false`, all plans in the wave serialize regardless of the `PARALLELIZATION` setting.
 
-<step name="edge_case_hunter">
-Read and execute `gsd-core/workflows/execute-phase/steps/edge-case-hunter.md`.
-It self-guards on `workflow.adversarial_validation` and is a silent no-op when the knob is off.
-</step>
-
 4. **Wait for all agents in wave to complete.**
 
    **Plan-complete heartbeat (#2410):** as each executor returns (or is verified
@@ -1285,11 +1280,6 @@ Resolve and re-run /gsd execute-phase, or override with /gsd execute-phase {phas
 If `section_manifest` is `null` or `"gap-closure-artifacts"` is in its `included` list: read and execute `gsd-core/workflows/execute-phase/steps/gap-closure-artifacts.md`. Otherwise skip — do not read the file.
 <!-- /gsd:section -->
 
-<step name="playwright_verification">
-Read and execute `gsd-core/workflows/execute-phase/steps/playwright-verification.md`.
-Self-guards on `workflow.playwright_verification`; silent no-op when off.
-</step>
-
 <!-- gsd:section id="regression-gate" when="state:has-prior-phases" -->
 If `section_manifest` is `null` or `"regression-gate"` is in its `included` list: read and execute `gsd-core/workflows/execute-phase/steps/regression-gate.md`. Otherwise skip — do not read the file.
 <!-- /gsd:section -->
@@ -1436,11 +1426,6 @@ Also: `/gsd:verify-work {X} ${GSD_WS}` — manual testing first
 ```
 
 Gap closure cycle: `/gsd:plan-phase {X} --gaps ${GSD_WS}` reads VERIFICATION.md → creates gap plans with `gap_closure: true` → user runs `/gsd:execute-phase {X} --gaps-only ${GSD_WS}` → verifier re-runs.
-</step>
-
-<step name="definition_of_done">
-Read and execute `gsd-core/workflows/execute-phase/steps/definition-of-done.md`.
-Self-guards on `workflow.definition_of_done`; silent no-op when off.
 </step>
 
 <step name="update_roadmap">

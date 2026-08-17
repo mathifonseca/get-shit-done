@@ -89,23 +89,20 @@ const WORKFLOWS_DIR = path.join(__dirname, '..', 'gsd-core', 'workflows');
 // only as the outer bound where the correct response is lazy extraction, never
 // a raise. Each sits above its tier's current high-water mark with real
 // headroom (vs the old GRACE=3000 hug):
-//   XL     108 KiB — high-water execute-phase.md 104,097 → ~6.3 KB headroom
-//   LARGE   64 KiB — high-water discuss-phase.md 62,240 → ~3.2 KB headroom
+//   XL      96 KiB — high-water execute-phase.md 94,250 → ~4.0 KB headroom
+//   LARGE   60 KiB — high-water discuss-phase.md 60,024 → ~1.4 KB headroom
 //   DEFAULT 40 KiB — high-water verify-phase.md 40,931 → ~0 KB headroom
 // (DEFAULT is deliberately the tightest: a single-purpose workflow approaching
 // 40 KiB is the strongest extraction signal of the three.)
 //
-// **Fork ratchet (SDLC-aligned).** execute-phase / plan-phase / new-project /
-// discuss-phase carry opinionated blocks upstream does not ship (test_contracts,
-// adversarial_validation, dead_code_scan, playwright_verification,
-// definition_of_done, design_spec, Round 3 project integration + Round 4
-// scaffolding). XL and LARGE are each raised once here to bound the merged fork
-// sizes at v1.10.0. Tighten-only from this point — these are red lines, not
-// budgets. Follow-up: extract fork-added blocks via the `*/steps/` +
-// `discuss-phase/modes/` progressive-disclosure precedent and shrink back toward
-// upstream's ceilings.
-const XL_CAP = 110592;      // 108 KiB (fork: raised from upstream's 96 KiB)
-const LARGE_CAP = 65536;    // 64 KiB  (fork: raised from upstream's 60 KiB)
+// **Fork note.** These were briefly raised (XL 108 KiB / LARGE 64 KiB) at the
+// v1.10.0 sync to bound fork blocks that were still inlined in the host loops.
+// Both are back at upstream's values: the fork's optional feature logic now
+// lives in capability packages (capabilities/{playwright,definition-of-done,
+// adversarial-validation,design-spec}/) dispatched via the ADR-857 loop
+// extension points, so the host loops no longer carry it.
+const XL_CAP = 98304;       // 96 KiB (back to upstream)
+const LARGE_CAP = 61440;    // 60 KiB (back to upstream)
 const DEFAULT_CAP = 40960;  // 40 KiB
 
 
@@ -113,8 +110,8 @@ const DEFAULT_CAP = 40960;  // 40 KiB
 // Grandfathered at current sizes — see the discuss-phase/modes split (#717) for the progressive-disclosure
 // pattern that future shrinks should follow. Byte counts noted for reference.
 const XL_WORKFLOWS = new Set([
-  'execute-phase',  // 104097 bytes on the fork (tier high-water; + test_contracts, adversarial_validation, dead_code_scan, playwright_verification)
-  'plan-phase',     // 91988 bytes on the fork (+ §12.6 Devil's Advocate, §13c.5 plan-lens review, design_spec)
+  'execute-phase',  // 94250 bytes on the fork (tier high-water)
+  'plan-phase',     // 92063 bytes on the fork (+ §12.6 Devil's Advocate, §13c.5 plan-lens review)
   'new-project',    // 66780 bytes on the fork (+ Round 3 Project Integration, Round 4 Scaffolding)
 ]);
 
@@ -217,10 +214,11 @@ describe('SIZE: discuss-phase progressive disclosure (#717 byte budget)', () => 
   // same pattern.
   // Target raised from 30000 to 32000 in #891 (launcher shim expansion added 17 runtime home arms,
   // adding ~960 bytes to the preamble; the thin-dispatcher intent is preserved — actual=30935).
-  // Fork ratchet: upstream targets 32000; the fork's discuss-phase carries the
-  // design_spec + SDLC-checkpoint blocks. Actual 62240 → ceiling 64000.
-  // Follow-up: extract the fork blocks via discuss-phase/modes/ and shrink.
-  const DISCUSS_PHASE_TARGET = 64000;
+  // Fork ratchet: upstream targets 32000; the fork's discuss-phase still carries
+  // the SDLC checkpoint and questions_per_area behaviour. design_spec moved out to
+  // the design-spec capability at the v1.10.0 sync (62240 → 60024), so this
+  // tightens 64000 → 61000. Tighten-only from here.
+  const DISCUSS_PHASE_TARGET = 61000;
   test(`discuss-phase.md is under ${DISCUSS_PHASE_TARGET} bytes (#717 byte budget)`, () => {
     const filePath = path.join(WORKFLOWS_DIR, 'discuss-phase.md');
     const bytes = byteCount(filePath);

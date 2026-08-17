@@ -7,6 +7,64 @@
  */
 
 const capabilities = {
+  "adversarial-validation": {
+    "id": "adversarial-validation",
+    "role": "feature",
+    "version": "1.10.0",
+    "title": "Adversarial validation (Edge Case Hunter)",
+    "description": "Runs an Edge Case Hunter alongside each execution wave — boundary conditions, error paths and security holes reviewed in parallel with the executor, findings triaged CRITICAL/HIGH/MEDIUM rather than deferred silently.",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.6.0"
+    },
+    "runtimeCompat": {
+      "supported": [
+        "*"
+      ],
+      "unsupported": []
+    },
+    "skills": [],
+    "agents": [],
+    "hooks": [],
+    "config": {
+      "workflow.adversarial_validation": {
+        "type": "boolean",
+        "default": true,
+        "description": "Run adversarial review (Edge Case Hunter) in parallel with execution waves."
+      }
+    },
+    "steps": [],
+    "contributions": [
+      {
+        "point": "execute:wave:post",
+        "into": "executor",
+        "fragment": {
+          "path": "fragments/execute-wave-post.md",
+          "inline": "# Contribution: Adversarial validation (Edge Case Hunter) (execute:wave:post -> executor)\n\nFork capability (SDLC-aligned). Gated by `workflow.adversarial_validation`; the capability layer\nresolves the knob, so this fragment never reads it inline.\n\n**Edge Case Hunter** (runs in parallel with execution when `workflow.adversarial_validation` is enabled)\n\nWhen enabled, spawn a parallel review agent alongside each execution wave. The hunter reviews code AS IT'S BEING WRITTEN, not after the fact.\n\n**For each wave of execution**, after spawning executor agents, also spawn an Edge Case Hunter agent (general-purpose) with this prompt:\n\n```\nYou are an Edge Case Hunter reviewing code changes in real-time for Phase {phase_num}, Wave {wave_num}.\n\nYour job is to find edge cases, boundary conditions, and failure modes that the executor might miss. You are NOT blocking execution — you run in parallel and report findings.\n\nReview these plan files to understand what's being built:\n{list of PLAN.md files for this wave}\n\nThen continuously monitor the files being modified (from the plan's files_modified list):\n{files_modified list}\n\nFor each file, analyze:\n\n1. **Input boundaries:** What happens with null, empty, negative, very large, unicode, special characters?\n2. **State transitions:** What happens if operations are interrupted mid-way? Race conditions?\n3. **Error paths:** Are all error cases handled? What happens on network failure, timeout, permission denied?\n4. **Type edge cases:** Optional fields that could be undefined? Array that could be empty? Number that could be NaN?\n5. **Security boundaries:** User input that could be malicious? Auth checks that could be bypassed?\n6. **Integration seams:** What happens if the API returns unexpected shapes? If the database query returns no rows?\n\nReport format — for each finding:\n- File and line number (or function name)\n- The edge case scenario\n- Severity: CRITICAL (will crash/corrupt) / HIGH (wrong behavior) / MEDIUM (poor UX) / LOW (cosmetic)\n- Suggested fix (one line)\n\nBe thorough but pragmatic. Don't flag theoretical issues that can't happen given the constraints. Focus on things that WILL bite users in production.\n```\n\n**Process hunter results:**\n\nAfter the wave's executor agents complete, check the hunter's findings:\n\n1. **CRITICAL findings:** Add as tasks to a gap-closure plan. These MUST be fixed before proceeding to the next wave.\n2. **HIGH findings:** Present to user via AskUserQuestion — \"Edge Case Hunter found {N} issues. Fix now or defer?\"\n   - If \"Fix now\" → add to current wave as fix tasks\n   - If \"Defer\" → log to `deferred-items.md` in the phase directory\n3. **MEDIUM/LOW findings:** Log to `deferred-items.md` for future phases.\n\n**Integration with verification:**\nInclude the hunter's findings summary in the phase's SUMMARY.md so the verifier and adversarial validation agents have context on what was already caught and addressed during execution.\n\n```markdown\n## Edge Case Hunter Findings (Wave {N})\n- Found: {total} ({critical} critical, {high} high, {medium} medium, {low} low)\n- Fixed during execution: {fixed_count}\n- Deferred: {deferred_count}\n```\n"
+        },
+        "produces": [],
+        "consumes": [],
+        "when": "workflow.adversarial_validation",
+        "onError": "skip"
+      },
+      {
+        "point": "verify:post",
+        "into": "orchestrator",
+        "fragment": {
+          "path": "fragments/verify-post.md",
+          "inline": "# Contribution: adversarial validation gate (verify:post -> orchestrator)\n\nFork capability (SDLC-aligned). Gated by `workflow.adversarial_validation`; the\ncapability layer resolves the knob, so this fragment never reads it inline.\n\n**Adversarial Validation Gate** (optional — runs when `workflow.adversarial_validation` is enabled)\n\nWhen enabled, spawn three competing agents to cross-validate the phase's work. This is especially valuable for security-sensitive, financial, or data-integrity code.\n\n**Agent 1: Finder** (biased toward finding issues)\nSpawn a general-purpose agent with this prompt:\n```\nYou are a code auditor tasked with finding EVERY possible issue in the phase {phase_num} implementation.\n\nScore: +1 for low-impact findings, +5 for medium-impact, +10 for critical findings.\n\nReview all files modified in this phase (from SUMMARY.md) and report:\n- Security vulnerabilities (injection, auth bypass, data exposure)\n- Logic errors (incorrect conditions, off-by-one, race conditions)\n- Missing edge cases (null handling, empty states, error paths)\n- Contract violations (does the code do what the tests/specs say?)\n- Data integrity issues (missing validation, constraint violations)\n\nBe thorough. Over-reporting is better than missing real issues.\nFiles to review: {list from SUMMARY.md}\n```\n\n**Agent 2: Critic** (biased toward disproving the finder)\nAfter Finder completes, spawn with the finder's results:\n```\nYou are a code defense attorney. The Finder agent reported {N} issues.\n\nScore: +{N} for each finding you can disprove with evidence. But -2{N} if you incorrectly dismiss a real issue.\n\nFor each finding, determine:\n- FALSE POSITIVE: The finding is wrong (explain why with code evidence)\n- VALID: The finding is real (acknowledge it)\n- DISPUTED: Reasonable people could disagree (state both sides)\n\nBe skeptical of the findings but honest about real issues.\nFindings to review: {finder_output}\nFiles: {same file list}\n```\n\n**Agent 3: Referee** (final judgment)\nAfter Critic completes, spawn with both outputs:\n```\nYou are the final arbiter. You have the ground truth and will be scored on accuracy.\n\nThe Finder reported {N} issues. The Critic disputed {M} of them.\n\nFor each finding, make a final call:\n- CONFIRMED: Real issue that needs fixing before shipping\n- DISMISSED: False positive, safe to ignore\n- DEFERRED: Real but low-priority, can be addressed later\n\nProvide a severity rating for confirmed issues: CRITICAL / HIGH / MEDIUM / LOW\n\nFinder's report: {finder_output}\nCritic's response: {critic_output}\n```\n\n**Process the referee's output:**\n- CRITICAL/HIGH confirmed issues → add to gaps, block completion\n- MEDIUM confirmed issues → add as warnings in VERIFICATION.md\n- LOW/DEFERRED → note in VERIFICATION.md for future reference\n- Update the overall verification status if any CRITICAL/HIGH issues found\n\n**Append adversarial results to VERIFICATION.md:**\n```markdown\n## Adversarial Validation\n\n### Findings Summary\n| # | Finding | Finder | Critic | Referee | Severity |\n|---|---------|--------|--------|---------|----------|\n| 1 | {desc}  | Found  | Valid  | CONFIRMED | HIGH  |\n| 2 | {desc}  | Found  | False Positive | DISMISSED | - |\n\n### Confirmed Issues\n{details of confirmed findings with file:line references}\n\n### Dismissed Findings\n{brief list of false positives for transparency}\n```\n\nIf any CRITICAL or HIGH issues are confirmed, update the verification status to `gaps_found` and include the adversarial findings in the gaps frontmatter.\n"
+        },
+        "produces": [],
+        "consumes": [
+          "SUMMARY.md"
+        ],
+        "when": "workflow.adversarial_validation",
+        "onError": "skip"
+      }
+    ],
+    "gates": []
+  },
   "ai-integration": {
     "id": "ai-integration",
     "role": "feature",
@@ -433,7 +491,7 @@ const capabilities = {
     "role": "feature",
     "version": "1.10.0",
     "title": "Broken-windows ledger",
-    "description": "Cross-phase defect register accumulating stubs, TODOs, skipped tests, unrun verifies, and unmet truths into .planning/WINDOWS.md. When enforcement is enabled, it blocks /gsd-ship while any window is open unless explicitly waived with a recorded reason. Operationalizes GSD's no-defer discipline as a tracked artifact (issue #1950).",
+    "description": "Cross-phase defect register accumulating stubs, TODOs, skipped tests, unrun verifies, and unmet truths into .planning/WINDOWS.md. When enforcement is enabled, it blocks /gsd-ship while any window is open unless explicitly waived with a recorded reason. Operationalizes GSD's no-defer discipline as a tracked artifact (issue #1950). Fork addition: the verifier's dead-code scan feeds this ledger as `lint-warning` entries instead of maintaining a parallel per-phase report.",
     "tier": "full",
     "requires": [],
     "engines": {
@@ -453,6 +511,11 @@ const capabilities = {
         "type": "boolean",
         "default": false,
         "description": "Enable the blocking ship:pre gate for the broken-windows ledger. When true (opt-in), /gsd-ship blocks while .planning/WINDOWS.md has any open entry. When false (default), windows are still tracked (the executor and verifier still populate WINDOWS.md via gsd-tools windows append) but ship does not block — teams can adopt tracking before enforcement. Issue #1950."
+      },
+      "workflow.dead_code_scan": {
+        "type": "boolean",
+        "default": true,
+        "description": "Scan phase-modified files for context pollution (commented-out code, dead feature flags, orphaned exports, parallel implementations) and record findings in the broken-windows ledger as lint-warning entries."
       }
     },
     "steps": [],
@@ -1376,6 +1439,98 @@ const capabilities = {
       "modelConfigKey": null,
       "handler": null
     }
+  },
+  "definition-of-done": {
+    "id": "definition-of-done",
+    "role": "feature",
+    "version": "1.10.0",
+    "title": "Definition of Done",
+    "description": "Runs the fork's Definition of Done checklist after each execution wave so a phase cannot be called complete on task-completion alone.",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.6.0"
+    },
+    "runtimeCompat": {
+      "supported": [
+        "*"
+      ],
+      "unsupported": []
+    },
+    "skills": [],
+    "agents": [],
+    "hooks": [],
+    "config": {
+      "workflow.definition_of_done": {
+        "type": "boolean",
+        "default": true,
+        "description": "Run the Definition of Done checklist before a phase is considered complete."
+      }
+    },
+    "steps": [],
+    "contributions": [
+      {
+        "point": "execute:wave:post",
+        "into": "verifier",
+        "fragment": {
+          "path": "fragments/execute-wave-post.md",
+          "inline": "# Contribution: Definition of Done (execute:wave:post -> verifier)\n\nFork capability (SDLC-aligned). Gated by `workflow.definition_of_done`; the capability layer\nresolves the knob, so this fragment never reads it inline.\n\n**Definition of Done Checklist** (when `workflow.definition_of_done` is enabled)\n\nWhen enabled, present the Definition of Done checklist to the user before marking the phase as complete:\n\n```\n## Definition of Done — Phase {phase_num}\n\nReview this checklist before closing the phase:\n```\n\nUse AskUserQuestion for each unchecked item:\n\n1. **Tests written** — New functionality has corresponding test coverage\n   - Auto-check: Look for new/modified test files in the phase's SUMMARY.md\n   - If test files found: auto-PASS\n   - If no test files: WARN \"No test files modified in this phase\"\n\n2. **CI pre-check** — Changes won't fail CI\n   ```bash\n   CI_COMMANDS=$(gsd_run config-get project.ci_commands 2>/dev/null || echo \"null\")\n   ```\n   - If `CI_COMMANDS` configured: suggest running them\n   - If not: remind user to verify CI will pass\n\n3. **CLAUDE.md updated** — Project guide reflects new state\n   ```bash\n   ```\n   - If enabled: check if CLAUDE.md was modified in this phase's commits\n   - If not modified: WARN \"CLAUDE.md not updated — review if new patterns, commands, or conventions were introduced\"\n\n4. **Documentation updated** — README, docs site, API collection current\n   - Auto-check: If API route files changed, check if doc files also changed\n   - If docs unchanged but API changed: WARN\n\n5. **Issue tracker** — Relevant issues updated\n   ```bash\n   ISSUE_TRACKER=$(gsd_run config-get project.issue_tracker 2>/dev/null || echo \"null\")\n   ```\n   - If configured: remind user to update issue status\n   - If not: skip\n\nPresent summary:\n```\nDoD Summary: {PASS_COUNT} auto-verified | {WARN_COUNT} need attention | {SKIP_COUNT} skipped\n\n{list any WARN items}\n```\n\nDoD warnings do NOT block phase completion — they are reminders. The user can acknowledge and proceed.\n"
+        },
+        "produces": [],
+        "consumes": [],
+        "when": "workflow.definition_of_done",
+        "onError": "skip"
+      }
+    ],
+    "gates": []
+  },
+  "design-spec": {
+    "id": "design-spec",
+    "role": "feature",
+    "version": "1.10.0",
+    "title": "Frozen design spec",
+    "description": "Emits a frozen DESIGN.md after discuss when the phase produced enough architecturally-weighted locked decisions, so planning builds against a fixed contract instead of re-deriving structure.",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.6.0"
+    },
+    "runtimeCompat": {
+      "supported": [
+        "*"
+      ],
+      "unsupported": []
+    },
+    "skills": [],
+    "agents": [],
+    "hooks": [],
+    "config": {
+      "workflow.design_spec": {
+        "type": "boolean",
+        "default": true,
+        "description": "Generate a frozen DESIGN.md from discuss-phase locked decisions."
+      }
+    },
+    "steps": [],
+    "contributions": [
+      {
+        "point": "discuss:post",
+        "into": "orchestrator",
+        "fragment": {
+          "path": "fragments/discuss-post.md",
+          "inline": "# Contribution: frozen design spec (discuss:post -> orchestrator)\n\nFork capability (SDLC-aligned). Gated by `workflow.design_spec`; the capability\nlayer resolves the knob, so this fragment never reads it inline.\n\n**Optional Design Spec Generation:**\n\n```bash\nDESIGN_SPEC=$(gsd_run config-get workflow.design_spec 2>/dev/null || echo \"true\")\n```\n\n**Skip this step if:**\n- `DESIGN_SPEC` is `\"false\"`\n- The discussion produced fewer than 3 locked decisions with architectural weight (technology choices, data flow decisions, component structure decisions, key contracts)\n- The phase is purely configuration, documentation, or trivial cleanup\n\n**When generating:** Create `${phase_dir}/${padded_phase}-DESIGN.md` using the Write tool:\n\n```markdown\n---\nphase: XX-name\ngenerated: YYYY-MM-DDTHH:MM:SSZ\nstatus: frozen\n---\n\n# Phase [X]: [Name] — Design Spec\n\n**Status:** Frozen — do not modify after planning begins\n\n## Goal\n\n[One-sentence phase goal from ROADMAP.md]\n\n## Architecture Overview\n\n[High-level description of how this phase's components relate to each other\nand to existing codebase. Derived from locked decisions and discussion context.\nKeep to 3-5 sentences.]\n\n## Module / Component Structure\n\n[For each major component or module decided during discussion:]\n\n### [Component Name]\n- **Purpose:** [What it does]\n- **Inputs:** [What it receives — data, props, API calls]\n- **Outputs:** [What it produces — rendered UI, API responses, side effects]\n- **Constraints:** [From locked decisions — D-XX references]\n\n### [Component Name]\n...\n\n## Key Contracts\n\n[Interfaces, API shapes, data structures, or protocols decided during discussion.\nOnly include contracts that were explicitly discussed — don't invent new ones.]\n\n- **[Contract name]:** [Description, including shape if discussed]\n\n## Non-Functional Requirements\n\n[Performance, security, accessibility, or other quality constraints\nthat emerged during discussion. Omit section if none discussed.]\n\n- [NFR 1]\n- [NFR 2]\n\n---\n*Phase: XX-name*\n*Design frozen: [date]*\n```\n\n**Substance check before writing:** Count locked decisions (D-XX entries) that involve technology choices, data flow, component structure, or API contracts. If fewer than 3, skip DESIGN.md generation and display: \"Phase has limited architectural decisions — skipping DESIGN.md.\"\n\nThe DESIGN.md will be committed alongside CONTEXT.md in the git commit step.\n"
+        },
+        "produces": [
+          "DESIGN.md"
+        ],
+        "consumes": [
+          "CONTEXT.md"
+        ],
+        "when": "workflow.design_spec",
+        "onError": "skip"
+      }
+    ],
+    "gates": []
   },
   "drift": {
     "id": "drift",
@@ -2826,6 +2981,50 @@ const capabilities = {
       }
     }
   },
+  "playwright": {
+    "id": "playwright",
+    "role": "feature",
+    "version": "1.10.0",
+    "title": "Playwright verification",
+    "description": "Runs the project's Playwright suite after each execution wave and folds screenshot/pass-fail evidence into verification, auto-verifying the UAT items Playwright already covered so manual UAT is the fallback rather than the default.",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.6.0"
+    },
+    "runtimeCompat": {
+      "supported": [
+        "*"
+      ],
+      "unsupported": []
+    },
+    "skills": [],
+    "agents": [],
+    "hooks": [],
+    "config": {
+      "workflow.playwright_verification": {
+        "type": "boolean",
+        "default": true,
+        "description": "Run Playwright tests after each execution wave and treat screenshots as verification evidence."
+      }
+    },
+    "steps": [],
+    "contributions": [
+      {
+        "point": "execute:wave:post",
+        "into": "verifier",
+        "fragment": {
+          "path": "fragments/execute-wave-post.md",
+          "inline": "# Contribution: playwright verification (execute:wave:post -> verifier)\n\nFork capability (SDLC-aligned). Gated by `workflow.playwright_verification`;\nthe capability layer resolves the knob, so this fragment never reads it inline.\n\n**Playwright Verification** (optional — runs when `workflow.playwright_verification` is enabled)\n\nWhen enabled, and the project has a Playwright configuration (`playwright.config.ts` or `playwright.config.js`):\n\n1. **Detect Playwright setup:**\n   ```bash\n   PLAYWRIGHT_CONFIG=$(ls playwright.config.{ts,js} 2>/dev/null | head -1)\n   ```\n   If no config found, skip with note: `[playwright] No playwright.config found, skipping visual verification.`\n\n2. **Run relevant Playwright tests:**\n   ```bash\n   # Run tests tagged for this phase, or all tests if no tagging\n   npx playwright test --reporter=list 2>&1 || true\n   ```\n\n3. **Capture screenshots:**\n   Playwright's default config captures screenshots on failure. Ensure screenshots are saved:\n   ```bash\n   SCREENSHOT_DIR=$(ls -d test-results/ playwright-report/ 2>/dev/null | head -1)\n   ```\n\n4. **Include in verification context:**\n   If screenshots or test results exist, include them as evidence in the verifier's context:\n   - List all captured screenshots with their test names\n   - Report pass/fail counts\n   - Any visual regression failures become verification gaps\n\n5. **Reduce manual UAT:**\n   For each test that passes with screenshots, mark the corresponding UAT item as `auto-verified (playwright)` — the user doesn't need to manually check what Playwright already validated.\n\n**Integration with VERIFICATION.md:**\nAdd a section to the verification report:\n```markdown\n## Playwright Verification\n- Tests run: {N}\n- Passed: {P}\n- Failed: {F}\n- Screenshots: {screenshot_dir}\n\n### Auto-Verified Behaviors\n{List of UAT items verified by Playwright tests}\n```\n"
+        },
+        "produces": [],
+        "consumes": [],
+        "when": "workflow.playwright_verification",
+        "onError": "skip"
+      }
+    ],
+    "gates": []
+  },
   "profile-pipeline": {
     "id": "profile-pipeline",
     "role": "feature",
@@ -3289,6 +3488,39 @@ const capabilities = {
       }
     ]
   },
+  "teach": {
+    "id": "teach",
+    "role": "feature",
+    "version": "1.10.0",
+    "title": "Teach phase (codify learnings)",
+    "description": "Routes a completed phase's learnings to the right durable surface — rules, skill, MCP tool or hook — as HITL proposals in NN-TEACH.md. Never auto-writes a surface; silent no-op when the knob is off or no candidate matches a surface signal.",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.6.0"
+    },
+    "runtimeCompat": {
+      "supported": [
+        "*"
+      ],
+      "unsupported": []
+    },
+    "skills": [
+      "teach-phase"
+    ],
+    "agents": [],
+    "hooks": [],
+    "config": {
+      "workflow.teach_phase": {
+        "type": "boolean",
+        "default": false,
+        "description": "Codify phase learnings as HITL proposals (rules / skill / MCP tool / hook) via NN-TEACH.md."
+      }
+    },
+    "steps": [],
+    "contributions": [],
+    "gates": []
+  },
   "trae": {
     "id": "trae",
     "role": "runtime",
@@ -3735,6 +3967,7 @@ const bySkill = {
   "validate-phase": "nyquist",
   "profile-user": "profile-pipeline",
   "secure-phase": "security",
+  "teach-phase": "teach",
   "ui-phase": "ui",
   "ui-review": "ui"
 };
@@ -3792,7 +4025,25 @@ const byLoopPoint = {
         "onError": "skip"
       }
     ],
-    "contributions": [],
+    "contributions": [
+      {
+        "capId": "design-spec",
+        "point": "discuss:post",
+        "into": "orchestrator",
+        "fragment": {
+          "path": "fragments/discuss-post.md",
+          "inline": "# Contribution: frozen design spec (discuss:post -> orchestrator)\n\nFork capability (SDLC-aligned). Gated by `workflow.design_spec`; the capability\nlayer resolves the knob, so this fragment never reads it inline.\n\n**Optional Design Spec Generation:**\n\n```bash\nDESIGN_SPEC=$(gsd_run config-get workflow.design_spec 2>/dev/null || echo \"true\")\n```\n\n**Skip this step if:**\n- `DESIGN_SPEC` is `\"false\"`\n- The discussion produced fewer than 3 locked decisions with architectural weight (technology choices, data flow decisions, component structure decisions, key contracts)\n- The phase is purely configuration, documentation, or trivial cleanup\n\n**When generating:** Create `${phase_dir}/${padded_phase}-DESIGN.md` using the Write tool:\n\n```markdown\n---\nphase: XX-name\ngenerated: YYYY-MM-DDTHH:MM:SSZ\nstatus: frozen\n---\n\n# Phase [X]: [Name] — Design Spec\n\n**Status:** Frozen — do not modify after planning begins\n\n## Goal\n\n[One-sentence phase goal from ROADMAP.md]\n\n## Architecture Overview\n\n[High-level description of how this phase's components relate to each other\nand to existing codebase. Derived from locked decisions and discussion context.\nKeep to 3-5 sentences.]\n\n## Module / Component Structure\n\n[For each major component or module decided during discussion:]\n\n### [Component Name]\n- **Purpose:** [What it does]\n- **Inputs:** [What it receives — data, props, API calls]\n- **Outputs:** [What it produces — rendered UI, API responses, side effects]\n- **Constraints:** [From locked decisions — D-XX references]\n\n### [Component Name]\n...\n\n## Key Contracts\n\n[Interfaces, API shapes, data structures, or protocols decided during discussion.\nOnly include contracts that were explicitly discussed — don't invent new ones.]\n\n- **[Contract name]:** [Description, including shape if discussed]\n\n## Non-Functional Requirements\n\n[Performance, security, accessibility, or other quality constraints\nthat emerged during discussion. Omit section if none discussed.]\n\n- [NFR 1]\n- [NFR 2]\n\n---\n*Phase: XX-name*\n*Design frozen: [date]*\n```\n\n**Substance check before writing:** Count locked decisions (D-XX entries) that involve technology choices, data flow, component structure, or API contracts. If fewer than 3, skip DESIGN.md generation and display: \"Phase has limited architectural decisions — skipping DESIGN.md.\"\n\nThe DESIGN.md will be committed alongside CONTEXT.md in the git commit step.\n"
+        },
+        "produces": [
+          "DESIGN.md"
+        ],
+        "consumes": [
+          "CONTEXT.md"
+        ],
+        "when": "workflow.design_spec",
+        "onError": "skip"
+      }
+    ],
     "gates": []
   },
   "plan:pre": {
@@ -4084,6 +4335,32 @@ const byLoopPoint = {
     "steps": [],
     "contributions": [
       {
+        "capId": "adversarial-validation",
+        "point": "execute:wave:post",
+        "into": "executor",
+        "fragment": {
+          "path": "fragments/execute-wave-post.md",
+          "inline": "# Contribution: Adversarial validation (Edge Case Hunter) (execute:wave:post -> executor)\n\nFork capability (SDLC-aligned). Gated by `workflow.adversarial_validation`; the capability layer\nresolves the knob, so this fragment never reads it inline.\n\n**Edge Case Hunter** (runs in parallel with execution when `workflow.adversarial_validation` is enabled)\n\nWhen enabled, spawn a parallel review agent alongside each execution wave. The hunter reviews code AS IT'S BEING WRITTEN, not after the fact.\n\n**For each wave of execution**, after spawning executor agents, also spawn an Edge Case Hunter agent (general-purpose) with this prompt:\n\n```\nYou are an Edge Case Hunter reviewing code changes in real-time for Phase {phase_num}, Wave {wave_num}.\n\nYour job is to find edge cases, boundary conditions, and failure modes that the executor might miss. You are NOT blocking execution — you run in parallel and report findings.\n\nReview these plan files to understand what's being built:\n{list of PLAN.md files for this wave}\n\nThen continuously monitor the files being modified (from the plan's files_modified list):\n{files_modified list}\n\nFor each file, analyze:\n\n1. **Input boundaries:** What happens with null, empty, negative, very large, unicode, special characters?\n2. **State transitions:** What happens if operations are interrupted mid-way? Race conditions?\n3. **Error paths:** Are all error cases handled? What happens on network failure, timeout, permission denied?\n4. **Type edge cases:** Optional fields that could be undefined? Array that could be empty? Number that could be NaN?\n5. **Security boundaries:** User input that could be malicious? Auth checks that could be bypassed?\n6. **Integration seams:** What happens if the API returns unexpected shapes? If the database query returns no rows?\n\nReport format — for each finding:\n- File and line number (or function name)\n- The edge case scenario\n- Severity: CRITICAL (will crash/corrupt) / HIGH (wrong behavior) / MEDIUM (poor UX) / LOW (cosmetic)\n- Suggested fix (one line)\n\nBe thorough but pragmatic. Don't flag theoretical issues that can't happen given the constraints. Focus on things that WILL bite users in production.\n```\n\n**Process hunter results:**\n\nAfter the wave's executor agents complete, check the hunter's findings:\n\n1. **CRITICAL findings:** Add as tasks to a gap-closure plan. These MUST be fixed before proceeding to the next wave.\n2. **HIGH findings:** Present to user via AskUserQuestion — \"Edge Case Hunter found {N} issues. Fix now or defer?\"\n   - If \"Fix now\" → add to current wave as fix tasks\n   - If \"Defer\" → log to `deferred-items.md` in the phase directory\n3. **MEDIUM/LOW findings:** Log to `deferred-items.md` for future phases.\n\n**Integration with verification:**\nInclude the hunter's findings summary in the phase's SUMMARY.md so the verifier and adversarial validation agents have context on what was already caught and addressed during execution.\n\n```markdown\n## Edge Case Hunter Findings (Wave {N})\n- Found: {total} ({critical} critical, {high} high, {medium} medium, {low} low)\n- Fixed during execution: {fixed_count}\n- Deferred: {deferred_count}\n```\n"
+        },
+        "produces": [],
+        "consumes": [],
+        "when": "workflow.adversarial_validation",
+        "onError": "skip"
+      },
+      {
+        "capId": "definition-of-done",
+        "point": "execute:wave:post",
+        "into": "verifier",
+        "fragment": {
+          "path": "fragments/execute-wave-post.md",
+          "inline": "# Contribution: Definition of Done (execute:wave:post -> verifier)\n\nFork capability (SDLC-aligned). Gated by `workflow.definition_of_done`; the capability layer\nresolves the knob, so this fragment never reads it inline.\n\n**Definition of Done Checklist** (when `workflow.definition_of_done` is enabled)\n\nWhen enabled, present the Definition of Done checklist to the user before marking the phase as complete:\n\n```\n## Definition of Done — Phase {phase_num}\n\nReview this checklist before closing the phase:\n```\n\nUse AskUserQuestion for each unchecked item:\n\n1. **Tests written** — New functionality has corresponding test coverage\n   - Auto-check: Look for new/modified test files in the phase's SUMMARY.md\n   - If test files found: auto-PASS\n   - If no test files: WARN \"No test files modified in this phase\"\n\n2. **CI pre-check** — Changes won't fail CI\n   ```bash\n   CI_COMMANDS=$(gsd_run config-get project.ci_commands 2>/dev/null || echo \"null\")\n   ```\n   - If `CI_COMMANDS` configured: suggest running them\n   - If not: remind user to verify CI will pass\n\n3. **CLAUDE.md updated** — Project guide reflects new state\n   ```bash\n   ```\n   - If enabled: check if CLAUDE.md was modified in this phase's commits\n   - If not modified: WARN \"CLAUDE.md not updated — review if new patterns, commands, or conventions were introduced\"\n\n4. **Documentation updated** — README, docs site, API collection current\n   - Auto-check: If API route files changed, check if doc files also changed\n   - If docs unchanged but API changed: WARN\n\n5. **Issue tracker** — Relevant issues updated\n   ```bash\n   ISSUE_TRACKER=$(gsd_run config-get project.issue_tracker 2>/dev/null || echo \"null\")\n   ```\n   - If configured: remind user to update issue status\n   - If not: skip\n\nPresent summary:\n```\nDoD Summary: {PASS_COUNT} auto-verified | {WARN_COUNT} need attention | {SKIP_COUNT} skipped\n\n{list any WARN items}\n```\n\nDoD warnings do NOT block phase completion — they are reminders. The user can acknowledge and proceed.\n"
+        },
+        "produces": [],
+        "consumes": [],
+        "when": "workflow.definition_of_done",
+        "onError": "skip"
+      },
+      {
         "capId": "external-job",
         "point": "execute:wave:post",
         "into": "executor",
@@ -4111,6 +4388,19 @@ const byLoopPoint = {
         "produces": [],
         "consumes": [],
         "when": "mempalace.enabled",
+        "onError": "skip"
+      },
+      {
+        "capId": "playwright",
+        "point": "execute:wave:post",
+        "into": "verifier",
+        "fragment": {
+          "path": "fragments/execute-wave-post.md",
+          "inline": "# Contribution: playwright verification (execute:wave:post -> verifier)\n\nFork capability (SDLC-aligned). Gated by `workflow.playwright_verification`;\nthe capability layer resolves the knob, so this fragment never reads it inline.\n\n**Playwright Verification** (optional — runs when `workflow.playwright_verification` is enabled)\n\nWhen enabled, and the project has a Playwright configuration (`playwright.config.ts` or `playwright.config.js`):\n\n1. **Detect Playwright setup:**\n   ```bash\n   PLAYWRIGHT_CONFIG=$(ls playwright.config.{ts,js} 2>/dev/null | head -1)\n   ```\n   If no config found, skip with note: `[playwright] No playwright.config found, skipping visual verification.`\n\n2. **Run relevant Playwright tests:**\n   ```bash\n   # Run tests tagged for this phase, or all tests if no tagging\n   npx playwright test --reporter=list 2>&1 || true\n   ```\n\n3. **Capture screenshots:**\n   Playwright's default config captures screenshots on failure. Ensure screenshots are saved:\n   ```bash\n   SCREENSHOT_DIR=$(ls -d test-results/ playwright-report/ 2>/dev/null | head -1)\n   ```\n\n4. **Include in verification context:**\n   If screenshots or test results exist, include them as evidence in the verifier's context:\n   - List all captured screenshots with their test names\n   - Report pass/fail counts\n   - Any visual regression failures become verification gaps\n\n5. **Reduce manual UAT:**\n   For each test that passes with screenshots, mark the corresponding UAT item as `auto-verified (playwright)` — the user doesn't need to manually check what Playwright already validated.\n\n**Integration with VERIFICATION.md:**\nAdd a section to the verification report:\n```markdown\n## Playwright Verification\n- Tests run: {N}\n- Passed: {P}\n- Failed: {F}\n- Screenshots: {screenshot_dir}\n\n### Auto-Verified Behaviors\n{List of UAT items verified by Playwright tests}\n```\n"
+        },
+        "produces": [],
+        "consumes": [],
+        "when": "workflow.playwright_verification",
         "onError": "skip"
       }
     ],
@@ -4256,7 +4546,23 @@ const byLoopPoint = {
         "onError": "skip"
       }
     ],
-    "contributions": [],
+    "contributions": [
+      {
+        "capId": "adversarial-validation",
+        "point": "verify:post",
+        "into": "orchestrator",
+        "fragment": {
+          "path": "fragments/verify-post.md",
+          "inline": "# Contribution: adversarial validation gate (verify:post -> orchestrator)\n\nFork capability (SDLC-aligned). Gated by `workflow.adversarial_validation`; the\ncapability layer resolves the knob, so this fragment never reads it inline.\n\n**Adversarial Validation Gate** (optional — runs when `workflow.adversarial_validation` is enabled)\n\nWhen enabled, spawn three competing agents to cross-validate the phase's work. This is especially valuable for security-sensitive, financial, or data-integrity code.\n\n**Agent 1: Finder** (biased toward finding issues)\nSpawn a general-purpose agent with this prompt:\n```\nYou are a code auditor tasked with finding EVERY possible issue in the phase {phase_num} implementation.\n\nScore: +1 for low-impact findings, +5 for medium-impact, +10 for critical findings.\n\nReview all files modified in this phase (from SUMMARY.md) and report:\n- Security vulnerabilities (injection, auth bypass, data exposure)\n- Logic errors (incorrect conditions, off-by-one, race conditions)\n- Missing edge cases (null handling, empty states, error paths)\n- Contract violations (does the code do what the tests/specs say?)\n- Data integrity issues (missing validation, constraint violations)\n\nBe thorough. Over-reporting is better than missing real issues.\nFiles to review: {list from SUMMARY.md}\n```\n\n**Agent 2: Critic** (biased toward disproving the finder)\nAfter Finder completes, spawn with the finder's results:\n```\nYou are a code defense attorney. The Finder agent reported {N} issues.\n\nScore: +{N} for each finding you can disprove with evidence. But -2{N} if you incorrectly dismiss a real issue.\n\nFor each finding, determine:\n- FALSE POSITIVE: The finding is wrong (explain why with code evidence)\n- VALID: The finding is real (acknowledge it)\n- DISPUTED: Reasonable people could disagree (state both sides)\n\nBe skeptical of the findings but honest about real issues.\nFindings to review: {finder_output}\nFiles: {same file list}\n```\n\n**Agent 3: Referee** (final judgment)\nAfter Critic completes, spawn with both outputs:\n```\nYou are the final arbiter. You have the ground truth and will be scored on accuracy.\n\nThe Finder reported {N} issues. The Critic disputed {M} of them.\n\nFor each finding, make a final call:\n- CONFIRMED: Real issue that needs fixing before shipping\n- DISMISSED: False positive, safe to ignore\n- DEFERRED: Real but low-priority, can be addressed later\n\nProvide a severity rating for confirmed issues: CRITICAL / HIGH / MEDIUM / LOW\n\nFinder's report: {finder_output}\nCritic's response: {critic_output}\n```\n\n**Process the referee's output:**\n- CRITICAL/HIGH confirmed issues → add to gaps, block completion\n- MEDIUM confirmed issues → add as warnings in VERIFICATION.md\n- LOW/DEFERRED → note in VERIFICATION.md for future reference\n- Update the overall verification status if any CRITICAL/HIGH issues found\n\n**Append adversarial results to VERIFICATION.md:**\n```markdown\n## Adversarial Validation\n\n### Findings Summary\n| # | Finding | Finder | Critic | Referee | Severity |\n|---|---------|--------|--------|---------|----------|\n| 1 | {desc}  | Found  | Valid  | CONFIRMED | HIGH  |\n| 2 | {desc}  | Found  | False Positive | DISMISSED | - |\n\n### Confirmed Issues\n{details of confirmed findings with file:line references}\n\n### Dismissed Findings\n{brief list of false positives for transparency}\n```\n\nIf any CRITICAL or HIGH issues are confirmed, update the verification status to `gaps_found` and include the adversarial findings in the gaps frontmatter.\n"
+        },
+        "produces": [],
+        "consumes": [
+          "SUMMARY.md"
+        ],
+        "when": "workflow.adversarial_validation",
+        "onError": "skip"
+      }
+    ],
     "gates": []
   },
   "ship:pre": {
@@ -4317,11 +4623,13 @@ const byLoopPoint = {
 };
 
 const configKeys = {
+  "workflow.adversarial_validation": "adversarial-validation",
   "workflow.ai_integration_phase": "ai-integration",
   "workflow.api_coverage_gate": "ai-integration",
   "review.models.agy": "antigravity",
   "workflow.assumption_delta": "assumption-delta",
   "workflow.windows_enforce": "broken-windows",
+  "workflow.dead_code_scan": "broken-windows",
   "review.models.claude": "claude",
   "claude_orchestration.enabled": "claude-orchestration",
   "claude_orchestration.execution_backend": "claude-orchestration",
@@ -4329,6 +4637,8 @@ const configKeys = {
   "workflow.code_review": "code-review",
   "workflow.code_review_depth": "code-review",
   "review.models.codex": "codex",
+  "workflow.definition_of_done": "definition-of-done",
+  "workflow.design_spec": "design-spec",
   "workflow.drift_threshold": "drift",
   "workflow.drift_action": "drift",
   "workflow.schema_drift_gate": "drift",
@@ -4365,6 +4675,7 @@ const configKeys = {
   "review.max_prompt_tokens_per_reviewer.ollama": "ollama",
   "review.models.opencode": "opencode",
   "workflow.pattern_mapper": "pattern-mapper",
+  "workflow.playwright_verification": "playwright",
   "profile-pipeline.enabled": "profile-pipeline",
   "workflow.research": "research",
   "workflow.schema_push_detection": "schema-gate",
@@ -4372,12 +4683,19 @@ const configKeys = {
   "workflow.security_asvs_level": "security",
   "workflow.security_block_on": "security",
   "workflow.tdd_mode": "tdd",
+  "workflow.teach_phase": "teach",
   "workflow.ui_phase": "ui",
   "workflow.ui_review": "ui",
   "workflow.ui_safety_gate": "ui"
 };
 
 const configSchema = {
+  "workflow.adversarial_validation": {
+    "owner": "adversarial-validation",
+    "type": "boolean",
+    "default": true,
+    "description": "Run adversarial review (Edge Case Hunter) in parallel with execution waves."
+  },
   "workflow.ai_integration_phase": {
     "owner": "ai-integration",
     "type": "boolean",
@@ -4407,6 +4725,12 @@ const configSchema = {
     "type": "boolean",
     "default": false,
     "description": "Enable the blocking ship:pre gate for the broken-windows ledger. When true (opt-in), /gsd-ship blocks while .planning/WINDOWS.md has any open entry. When false (default), windows are still tracked (the executor and verifier still populate WINDOWS.md via gsd-tools windows append) but ship does not block — teams can adopt tracking before enforcement. Issue #1950."
+  },
+  "workflow.dead_code_scan": {
+    "owner": "broken-windows",
+    "type": "boolean",
+    "default": true,
+    "description": "Scan phase-modified files for context pollution (commented-out code, dead feature flags, orphaned exports, parallel implementations) and record findings in the broken-windows ledger as lint-warning entries."
   },
   "review.models.claude": {
     "owner": "claude",
@@ -4459,6 +4783,18 @@ const configSchema = {
     "type": "string",
     "default": "",
     "description": "Model passed to the Codex reviewer lane."
+  },
+  "workflow.definition_of_done": {
+    "owner": "definition-of-done",
+    "type": "boolean",
+    "default": true,
+    "description": "Run the Definition of Done checklist before a phase is considered complete."
+  },
+  "workflow.design_spec": {
+    "owner": "design-spec",
+    "type": "boolean",
+    "default": true,
+    "description": "Generate a frozen DESIGN.md from discuss-phase locked decisions."
   },
   "workflow.drift_threshold": {
     "owner": "drift",
@@ -4688,6 +5024,12 @@ const configSchema = {
     "default": true,
     "description": "Run the pattern mapper before planning when context or research is available."
   },
+  "workflow.playwright_verification": {
+    "owner": "playwright",
+    "type": "boolean",
+    "default": true,
+    "description": "Run Playwright tests after each execution wave and treat screenshots as verification evidence."
+  },
   "profile-pipeline.enabled": {
     "owner": "profile-pipeline",
     "type": "boolean",
@@ -4736,6 +5078,12 @@ const configSchema = {
     "type": "boolean",
     "default": false,
     "description": "Enable TDD mode: planner annotates eligible tasks type:tdd and executor enforces RED/GREEN/REFACTOR gate sequence."
+  },
+  "workflow.teach_phase": {
+    "owner": "teach",
+    "type": "boolean",
+    "default": false,
+    "description": "Codify phase learnings as HITL proposals (rules / skill / MCP tool / hook) via NN-TEACH.md."
   },
   "workflow.ui_phase": {
     "owner": "ui",
@@ -6944,6 +7292,9 @@ const capabilityClusters = {
   "security": [
     "secure-phase"
   ],
+  "teach": [
+    "teach-phase"
+  ],
   "ui": [
     "ui-phase",
     "ui-review"
@@ -6993,6 +7344,12 @@ const profileMembership = {
       "full"
     ]
   },
+  "teach": {
+    "tier": "full",
+    "profiles": [
+      "full"
+    ]
+  },
   "ui": {
     "tier": "full",
     "profiles": [
@@ -7002,6 +7359,7 @@ const profileMembership = {
 };
 
 const _requiresGraph = {
+  "adversarial-validation": [],
   "ai-integration": [],
   "antigravity": [],
   "assumption-delta": [],
@@ -7017,6 +7375,8 @@ const _requiresGraph = {
   "codex": [],
   "copilot": [],
   "cursor": [],
+  "definition-of-done": [],
+  "design-spec": [],
   "drift": [],
   "external-job": [],
   "gap-analysis": [],
@@ -7037,12 +7397,14 @@ const _requiresGraph = {
     "research"
   ],
   "pi": [],
+  "playwright": [],
   "profile-pipeline": [],
   "qwen": [],
   "research": [],
   "schema-gate": [],
   "security": [],
   "tdd": [],
+  "teach": [],
   "trae": [],
   "ui": [],
   "vscode": [],

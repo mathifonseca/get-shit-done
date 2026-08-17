@@ -44,7 +44,7 @@ Core package and are stamped with the package version at release (per
 ADR-1244 D6). They are not subject to the consent or integrity-pin flow applied
 to third-party capabilities.
 
-### Feature capabilities (role: feature) — 20
+### Feature capabilities (role: feature) — 25
 
 Feature capabilities extend what the loop does — contributing research,
 planning, execution, verification, or ship artefacts at the loop extension
@@ -52,12 +52,15 @@ points.
 
 | id | role | tier | engines.gsd | extension points | hook kinds | source |
 |---|---|---|---|---|---|---|
+| `adversarial-validation` | feature | full | `>=1.6.0` | `execute:wave:post`, `verify:post` | contribution | first-party |
 | `ai-integration` | feature | full | `>=1.6.0` | `plan:pre`, `verify:pre` | step, contribution, gate | first-party |
 | `assumption-delta` | feature | full | `>=1.6.0` | `plan:pre` | contribution | first-party |
 | `audit` | feature | full | `>=1.6.0` | — | — | first-party |
 | `broken-windows` | feature | full | `>=1.7.0` | `ship:pre` | gate | first-party |
 | `claude-orchestration` | feature | full | `>=1.7.0` | `plan:post`, `execute:wave:pre` | contribution | first-party |
 | `code-review` | feature | full | `>=1.6.0` | `execute:post` | step | first-party |
+| `definition-of-done` | feature | full | `>=1.6.0` | `execute:wave:post` | contribution | first-party |
+| `design-spec` | feature | full | `>=1.6.0` | `discuss:post` | contribution | first-party |
 | `drift` | feature | full | `>=1.6.0` | `plan:pre`, `execute:wave:post` | gate | first-party |
 | `external-job` | feature | full | `>=1.7.0` | `plan:post`, `execute:wave:post` | contribution | first-party |
 | `gap-analysis` | feature | standard | `>=1.6.0` | `plan:post` | gate | first-party |
@@ -66,11 +69,13 @@ points.
 | `mempalace` | feature | full | `>=1.6.0` | `discuss:pre`, `discuss:post`, `plan:pre`, `plan:post`, `execute:wave:post`, `verify:post`, `ship:post` | step, contribution | first-party |
 | `nyquist` | feature | full | `>=1.6.0` | `verify:post` | step | first-party |
 | `pattern-mapper` | feature | full | `>=1.6.0` | `plan:pre` | step | first-party |
+| `playwright` | feature | full | `>=1.6.0` | `execute:wave:post` | contribution | first-party |
 | `profile-pipeline` | feature | full | `>=1.6.0` | — | — | first-party |
 | `research` | feature | standard | `>=1.6.0` | `plan:pre` | step | first-party |
 | `schema-gate` | feature | full | `>=1.6.0` | `plan:pre` | contribution | first-party |
 | `security` | feature | full | `>=1.6.0` | `plan:pre`, `verify:post`, `ship:pre` | step, contribution, gate | first-party |
 | `tdd` | feature | full | `>=1.6.0` | `plan:pre`, `execute:post` | contribution, gate | first-party |
+| `teach` | feature | full | `>=1.6.0` | — | — | first-party |
 | `ui` | feature | full | `>=1.6.0` | `plan:pre`, `execute:wave:post`, `verify:post` | step, gate | first-party |
 
 ### Runtime capabilities (role: runtime) — 19

@@ -33,8 +33,8 @@ const RATINGS = ['reversible', 'costly', 'one-way'];
 /** Agent-file hard red line (tests/agent-size-budget.test.cjs).
  *  gsd-planner is XL-tier on this fork — it carries the outcome-focused task-spec
  *  and tracer-bullet slice-ordering blocks upstream does not ship — so this mirror
- *  tracks XL_CAP (76800), not PLANNER_CAP. Crossing it still means EXTRACT, not bump. */
-const PLANNER_CAP = 76800;
+ *  tracks XL_CAP (71680), not PLANNER_CAP. Crossing it still means EXTRACT, not bump. */
+const PLANNER_CAP = 71680;
 
 function read(file) {
   return fs.readFileSync(file, 'utf-8').replace(/\r\n/g, '\n').replace(/\r/g, '\n');

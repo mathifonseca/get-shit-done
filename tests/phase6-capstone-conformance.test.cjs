@@ -220,7 +220,7 @@ describe('ADR-857 Phase 6 capstone conformance (#1139)', () => {
     // here; the structural fix is migrating the fork steps to capability
     // packages (capabilities/*/capability.json steps at execute:wave:post),
     // after which this can return to upstream's number.
-    const PRE_PHASE6 = { 'plan-phase.md': 94519, 'execute-phase.md': 95000 };
+    const PRE_PHASE6 = { 'plan-phase.md': 94519, 'execute-phase.md': 94600 };
     const notShrunk = [];
     for (const [file, frozen] of Object.entries(PRE_PHASE6)) {
       const now = lfByteCount(path.join(ROOT, 'gsd-core', 'workflows', file));

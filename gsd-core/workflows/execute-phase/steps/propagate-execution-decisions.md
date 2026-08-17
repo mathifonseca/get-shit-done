@@ -4,6 +4,9 @@ Fork-added step (SDLC-aligned). Extracted from the execute-phase host loop per
 ADR-857 phase 6 (#1168): optional feature logic lives in a progressively-disclosed
 fragment, not the host loop body. Gated by `workflow.update_claude_md_on_complete`.
 
+Not a capability contribution: this is an orchestrator tail procedure, not prompt
+text injected into an agent role (execute:post agentRoles are executor/verifier).
+
 **Key Decisions from Execution:**
 
 During execution, the executor may have made architectural decisions via deviation rules or implementation choices. Check the phase's SUMMARY.md files for:

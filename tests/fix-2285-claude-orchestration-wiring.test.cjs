@@ -646,8 +646,8 @@ describe('H. the execute:wave:pre fragment documents concrete manifest construct
     // tests/phase6-capstone-conformance.test.cjs, re-based there with full rationale).
     // The fork's optional feature logic IS extracted into execute-phase/steps/*.md;
     // the inline residue is dispatch stubs + the TEXT_MODE argument contract.
-    assert.ok(bytes < 95000, `execute-phase.md must stay below the fork pre-phase-6 ceiling (95000); got ${bytes}`);
-    assert.ok(bytes <= 94900, `execute-phase.md should carry a comfortable margin (<=94900) so minor future edits don't re-trip the gate; got ${bytes}`);
+    assert.ok(bytes < 94600, `execute-phase.md must stay below the fork pre-phase-6 ceiling (94600); got ${bytes}`);
+    assert.ok(bytes <= 94500, `execute-phase.md should carry a comfortable margin (<=94500) so minor future edits don't re-trip the gate; got ${bytes}`);
   });
 });
 

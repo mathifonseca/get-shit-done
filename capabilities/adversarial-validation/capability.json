@@ -1,0 +1,56 @@
+{
+  "id": "adversarial-validation",
+  "role": "feature",
+  "version": "1.10.0",
+  "title": "Adversarial validation (Edge Case Hunter)",
+  "description": "Runs an Edge Case Hunter alongside each execution wave \u2014 boundary conditions, error paths and security holes reviewed in parallel with the executor, findings triaged CRITICAL/HIGH/MEDIUM rather than deferred silently.",
+  "tier": "full",
+  "requires": [],
+  "engines": {
+    "gsd": ">=1.6.0"
+  },
+  "runtimeCompat": {
+    "supported": [
+      "*"
+    ],
+    "unsupported": []
+  },
+  "skills": [],
+  "agents": [],
+  "hooks": [],
+  "config": {
+    "workflow.adversarial_validation": {
+      "type": "boolean",
+      "default": true,
+      "description": "Run adversarial review (Edge Case Hunter) in parallel with execution waves."
+    }
+  },
+  "steps": [],
+  "contributions": [
+    {
+      "point": "execute:wave:post",
+      "into": "executor",
+      "fragment": {
+        "path": "fragments/execute-wave-post.md"
+      },
+      "produces": [],
+      "consumes": [],
+      "when": "workflow.adversarial_validation",
+      "onError": "skip"
+    },
+    {
+      "point": "verify:post",
+      "into": "orchestrator",
+      "fragment": {
+        "path": "fragments/verify-post.md"
+      },
+      "produces": [],
+      "consumes": [
+        "SUMMARY.md"
+      ],
+      "when": "workflow.adversarial_validation",
+      "onError": "skip"
+    }
+  ],
+  "gates": []
+}

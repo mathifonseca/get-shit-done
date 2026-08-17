@@ -52,7 +52,7 @@ const isGsdAgent = (f) => f.startsWith('gsd-');
 // Tier HARD CAPS (#1074, bytes) — absolute red lines, not high-water-hugging
 // ceilings. Day-to-day creep is caught per-agent by the baseline guard below;
 // these sit above each tier's current high-water with real headroom:
-//   XL      75 KiB — high-water gsd-verifier 71,215 → ~5.6 KB headroom
+//   XL      70 KiB — high-water gsd-verifier 68,028 → ~3.6 KB headroom
 //   LARGE   48 KiB — high-water gsd-plan-checker 46,876 → ~2.2 KB headroom
 //   DEFAULT 24 KiB — high-water gsd-ui-researcher 21,086 → ~3.4 KB headroom
 //
@@ -61,7 +61,7 @@ const isGsdAgent = (f) => f.startsWith('gsd-');
 // ratchet-effect enforcement, test-contract rules, Edge Case Hunter). Tier membership
 // absorbs most of that (see promotions below); XL's cap is raised once here to bound
 // gsd-verifier. Tighten-only from this point — this is a red line, not a budget.
-const XL_CAP = 76800;       // 75 KiB (fork: raised from upstream's 56 KiB)
+const XL_CAP = 71680;       // 70 KiB (fork: raised from upstream's 56 KiB; tightened at the capability migration)
 const LARGE_CAP = 49152;    // 48 KiB
 const DEFAULT_CAP = 24576;  // 24 KiB
 

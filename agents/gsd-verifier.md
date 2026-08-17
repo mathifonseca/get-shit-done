@@ -495,6 +495,22 @@ When enabled (`DEAD_CODE_SCAN` is `true`), scan modified files for context pollu
 - ⚠️ Warning: Commented-out code blocks, dead feature flags
 - ℹ️ Info: Potential parallel implementations (may be intentional during migration)
 
+**Record every finding in the broken-windows ledger.** Do not stop at reporting in
+VERIFICATION.md — a report is a thing someone has to remember, a ledger entry is a thing
+`/gsd:ship` refuses to walk past. For each finding, append it to `.planning/WINDOWS.md`:
+
+```bash
+gsd_run windows append --kind lint-warning --phase "${PHASE_NUMBER}" \
+  --file "<path>" --line "<line>" --description "<what was found> (dead-code scan)"
+```
+
+`lint-warning` is the ledger's existing bucket for this class; the `(dead-code scan)`
+suffix keeps the origin greppable. Entries accumulate across phases and, when
+`workflow.windows_enforce` is enabled, block `/gsd:ship` until each one is either fixed
+(`gsd_run windows fixed <id>`) or explicitly waived with a recorded reason
+(`gsd_run windows waive <id> "<reason>"`). The blocker/warning/info split above still
+drives what you say in VERIFICATION.md; the ledger is what makes it durable.
+
 ### Migration Safety Check
 
 If the project has a database layer (detect: `prisma/`, `migrations/`, `alembic/`, `src/models/`, `src/db/`, `*.entity.ts`):

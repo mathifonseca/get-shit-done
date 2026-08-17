@@ -5,10 +5,11 @@
  * Hook points tested: discuss:pre, discuss:post, execute:pre, execute:wave:pre,
  *                     verify:pre, ship:post
  *
- * 5 of these points have zero hooks in the real registry by design.
- * verify:pre graduated out of the empty set in #1562 (it now carries the
- * ai-integration `api-coverage.verify-pre` blocking gate); SECTION 5 pins the
- * new contract + retains synthetic extension-point-mechanics coverage.
+ * 4 of these points have zero hooks in the real registry by design.
+ * verify:pre graduated out of the empty set in #1562 (ai-integration
+ * `api-coverage.verify-pre` gate) and discuss:post graduated when the fork's
+ * design-spec capability landed; SECTION 5 and SECTION 2 pin those new
+ * contracts + retain synthetic extension-point-mechanics coverage.
  * Tests pin: exact envelope shape, placeholder string contract (Hyrum's Law),
  * resolver-filter mechanics (schema default / config-override / capabilityStatesById),
  * CLI contract (missing-arg, invalid-point), and Postel-leniency (malformed config).
@@ -175,20 +176,37 @@ describe('discuss:pre — real registry empty-resolution', () => {
 // SECTION 2: discuss:post — resolution + synthetic mechanics
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('discuss:post — E2E empty envelope + synthetic resolver mechanics', () => {
+// NOTE: discuss:post graduated out of the empty set when the fork's `design-spec`
+// capability registered a contribution there (default-on, opt-out via
+// workflow.design_spec=false) — the same graduation verify:pre went through in
+// #1562. The real-registry assertions below pin the NEW contract; the synthetic
+// BVA tests retain extension-point-mechanics coverage unchanged.
+describe('discuss:post — real registry carries the design-spec contribution; synthetic mechanics', () => {
   let tmpDir;
   before(() => { tmpDir = makeTempProjectWithConfig({}); });
   after(() => { cleanup(tmpDir); });
 
-  it('[empty-resolution] discuss:post E2E subprocess returns exact empty envelope — activeHooks:[], 3-key shape, placeholder string pinned', () => {
+  it('[happy] discuss:post E2E subprocess returns a well-formed envelope carrying the design-spec contribution (3-key shape pinned)', () => {
     const result = spawnGsd(['loop', 'render-hooks', 'discuss:post', '--raw', '--cwd', tmpDir], tmpDir);
     assert.strictEqual(result.status, 0, `expected exit 0. stderr: ${result.stderr}`);
     const envelope = JSON.parse(result.stdout.trim());
     assert.strictEqual(envelope.point, 'discuss:post');
-    assert.deepEqual(envelope.activeHooks, []);
-    assert.strictEqual(envelope.rendered, '_No active hooks at discuss:post._');
+    assert.ok(envelope.activeHooks.some((h) => h.capId === 'design-spec' && h.kind === 'contribution'));
     assert.deepEqual(Object.keys(envelope).sort(), ['activeHooks', 'point', 'rendered']);
     assert.ok(!Object.prototype.hasOwnProperty.call(envelope, 'warnings'), 'must not have spurious warnings field');
+  });
+
+  it('[opt-out] discuss:post with workflow.design_spec=false yields NO design-spec contribution — config opt-out empties the point', () => {
+    const resolved = resolveLoopHooks({
+      point: 'discuss:post',
+      registry: realRegistry,
+      config: { workflow: { design_spec: false } },
+    });
+    assert.strictEqual(
+      resolved.activeHooks.find((h) => h.capId === 'design-spec'),
+      undefined,
+      'opting out design_spec must remove the contribution from discuss:post'
+    );
   });
 
   it('[happy] discuss:post E2E with no .planning directory returns empty hooks (Postel leniency path)', () => {
@@ -197,17 +215,20 @@ describe('discuss:post — E2E empty envelope + synthetic resolver mechanics', (
       const result = spawnGsd(['loop', 'render-hooks', 'discuss:post', '--raw', '--cwd', bareDir], bareDir);
       assert.strictEqual(result.status, 0, `expected exit 0 even with no .planning dir. stderr: ${result.stderr}`);
       const envelope = JSON.parse(result.stdout.trim());
-      assert.strictEqual(envelope.activeHooks.length, 0);
-      assert.strictEqual(envelope.rendered, '_No active hooks at discuss:post._');
+      assert.ok(Array.isArray(envelope.activeHooks), 'envelope must still be well-formed with no .planning dir');
+      assert.ok(envelope.activeHooks.some((h) => h.capId === 'design-spec'),
+        'schema default (design_spec=true) still resolves with no config present');
     } finally {
       cleanup(bareDir);
     }
   });
 
-  it('[happy] discuss:post with real registry resolveLoopHooks returns activeHooks:[] (real registry, not synthetic)', () => {
+  it('[default-on] discuss:post with real registry yields the design-spec contribution (real registry, not synthetic)', () => {
     const resolved = resolveLoopHooks({ point: 'discuss:post', registry: realRegistry, config: {} });
     assert.strictEqual(resolved.point, 'discuss:post');
-    assert.strictEqual(resolved.activeHooks.length, 0, 'Real registry must have 0 hooks at discuss:post');
+    const contrib = resolved.activeHooks.find((h) => h.capId === 'design-spec' && h.kind === 'contribution');
+    assert.ok(contrib, 'design-spec must register at discuss:post by default');
+    assert.strictEqual(contrib.into, 'orchestrator');
   });
 
   it('[bva] discuss:post with synthetic capability, schema default=false + config absent → hook absent (schema default=false suppresses hook)', () => {
@@ -264,15 +285,16 @@ describe('discuss:post — E2E empty envelope + synthetic resolver mechanics', (
     assert.match(combined, /discuss:pre/);
   });
 
-  it('[negative] discuss:post E2E with malformed config.json → still exits 0 with empty hooks (Postel)', () => {
+  it('[negative] discuss:post E2E with malformed config.json → still exits 0 and falls back to schema defaults (Postel)', () => {
     const malformedDir = makeTempProject();
     fs.writeFileSync(path.join(malformedDir, '.planning', 'config.json'), '{invalid json');
     try {
       const result = spawnGsd(['loop', 'render-hooks', 'discuss:post', '--raw', '--cwd', malformedDir], malformedDir);
       assert.strictEqual(result.status, 0, `must not crash on malformed config. stderr: ${result.stderr}`);
       const envelope = JSON.parse(result.stdout.trim());
-      assert.strictEqual(envelope.activeHooks.length, 0);
-      assert.strictEqual(envelope.rendered, '_No active hooks at discuss:post._');
+      assert.deepEqual(Object.keys(envelope).sort(), ['activeHooks', 'point', 'rendered']);
+      assert.ok(envelope.activeHooks.some((h) => h.capId === 'design-spec'),
+        'malformed config must degrade to schema defaults, not to an empty hook set');
     } finally {
       cleanup(malformedDir);
     }
@@ -746,13 +768,12 @@ describe('CLI contract — missing/invalid point argument (shared across all 6 e
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 8: Parametric empty-point sweep across all 6 points (E2E regression guard)
+// SECTION 8: Parametric empty-point sweep across the remaining empty points (E2E regression guard)
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('Parametric E2E sweep — 4 empty points return correct envelope shape via real registry (ship:post excluded — mempalace registers 1 step there; verify:pre excluded since #1562 added the api-coverage gate)', () => {
+describe('Parametric E2E sweep — 3 empty points return correct envelope shape via real registry (ship:post excluded — mempalace registers 1 step there; verify:pre excluded since #1562 added the api-coverage gate; discuss:post excluded since the fork design-spec capability registers a contribution there)', () => {
   const EMPTY_POINTS = [
     'discuss:pre',
-    'discuss:post',
     'execute:pre',
     'execute:wave:pre',
   ];

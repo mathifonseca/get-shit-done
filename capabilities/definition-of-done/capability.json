@@ -1,0 +1,43 @@
+{
+  "id": "definition-of-done",
+  "role": "feature",
+  "version": "1.10.0",
+  "title": "Definition of Done",
+  "description": "Runs the fork's Definition of Done checklist after each execution wave so a phase cannot be called complete on task-completion alone.",
+  "tier": "full",
+  "requires": [],
+  "engines": {
+    "gsd": ">=1.6.0"
+  },
+  "runtimeCompat": {
+    "supported": [
+      "*"
+    ],
+    "unsupported": []
+  },
+  "skills": [],
+  "agents": [],
+  "hooks": [],
+  "config": {
+    "workflow.definition_of_done": {
+      "type": "boolean",
+      "default": true,
+      "description": "Run the Definition of Done checklist before a phase is considered complete."
+    }
+  },
+  "steps": [],
+  "contributions": [
+    {
+      "point": "execute:wave:post",
+      "into": "verifier",
+      "fragment": {
+        "path": "fragments/execute-wave-post.md"
+      },
+      "produces": [],
+      "consumes": [],
+      "when": "workflow.definition_of_done",
+      "onError": "skip"
+    }
+  ],
+  "gates": []
+}

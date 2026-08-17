@@ -32,6 +32,13 @@ const { spawnSync } = require('node:child_process');
 const { cleanup } = require('./helpers.cjs');
 const { gitOrThrow } = require('./helpers/git-fixture.cjs');
 
+// This suite exercises the GATE pipeline at execute:wave:post. Hook-count assertions
+// are scoped to kind === 'gate' so they remain exact as contributions are registered
+// at the same point (this fork adds playwright, definition-of-done and
+// adversarial-validation contributions there).
+const gatesOnly = (hooks) => hooks.filter((h) => h.kind === 'gate');
+
+
 const GSD_TOOLS = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 
 // ─── Test-local git helper ───────────────────────────────────────────────────
@@ -110,11 +117,11 @@ describe('A. loop render-hooks execute:wave:post — resolution', () => {
     assert.strictEqual(env.point, 'execute:wave:post');
     assert.ok(Array.isArray(env.activeHooks), 'activeHooks must be an array');
     // Real registry: 3 gates (schema-drift blocking, codebase-drift non-blocking, ui-safety blocking)
-    assert.strictEqual(env.activeHooks.length, 3,
-      `expected 3 gates; got ${env.activeHooks.length}: ${JSON.stringify(env.activeHooks.map(h => h.capId || h.check?.query))}`);
+    assert.strictEqual(gatesOnly(env.activeHooks).length, 3,
+      `expected 3 gates; got ${gatesOnly(env.activeHooks).length}: ${JSON.stringify(gatesOnly(env.activeHooks).map(h => h.capId || h.check?.query))}`);
 
     // Verify the three expected gate queries
-    const queries = env.activeHooks.map(h => h.check?.query);
+    const queries = gatesOnly(env.activeHooks).map(h => h.check?.query);
     assert.ok(queries.includes('verify.schema-drift'), 'verify.schema-drift gate must be present');
     assert.ok(queries.includes('verify.codebase-drift'), 'verify.codebase-drift gate must be present');
     assert.ok(queries.includes('ui.safety-gate'), 'ui.safety-gate gate must be present');
@@ -135,9 +142,14 @@ describe('A. loop render-hooks execute:wave:post — resolution', () => {
 
     assert.strictEqual(env.point, 'execute:wave:post');
     // This is the SPECIFIC differing value — must be 0, not 1, 2, or 3
-    assert.strictEqual(env.activeHooks.length, 0,
-      `expected 0 active hooks when both gates suppressed; got ${env.activeHooks.length}`);
-    assert.strictEqual(env.rendered, '_No active hooks at execute:wave:post._');
+    assert.strictEqual(gatesOnly(env.activeHooks).length, 0,
+      `expected 0 active gates when both gates suppressed; got ${gatesOnly(env.activeHooks).length}`);
+    // `rendered` reflects ALL active hooks; the fork's execute:wave:post contributions
+    // stay on, so assert that no GATE query renders rather than that the point is empty.
+    assert.ok(!env.rendered.includes('verify.schema-drift')
+      && !env.rendered.includes('verify.codebase-drift')
+      && !env.rendered.includes('ui.safety-gate'),
+      `no gate may render when both gate knobs are false; got: ${env.rendered}`);
   });
 
   test('[bva] partial suppression: schema_drift_gate=false → only ui gate present (1 hook)', () => {
@@ -156,11 +168,11 @@ describe('A. loop render-hooks execute:wave:post — resolution', () => {
     const env = r.parsed;
 
     // Specific differing value: exactly 1 hook, not 3 or 0
-    assert.strictEqual(env.activeHooks.length, 1,
-      `expected 1 hook (only ui); got ${env.activeHooks.length}: ${JSON.stringify(env.activeHooks.map(h => h.check?.query))}`);
-    assert.strictEqual(env.activeHooks[0].check?.query, 'ui.safety-gate',
-      `remaining hook must be ui.safety-gate, got ${env.activeHooks[0].check?.query}`);
-    assert.strictEqual(env.activeHooks[0].capId, 'ui');
+    assert.strictEqual(gatesOnly(env.activeHooks).length, 1,
+      `expected 1 hook (only ui); got ${gatesOnly(env.activeHooks).length}: ${JSON.stringify(gatesOnly(env.activeHooks).map(h => h.check?.query))}`);
+    assert.strictEqual(gatesOnly(env.activeHooks)[0].check?.query, 'ui.safety-gate',
+      `remaining gate must be ui.safety-gate, got ${gatesOnly(env.activeHooks)[0].check?.query}`);
+    assert.strictEqual(gatesOnly(env.activeHooks)[0].capId, 'ui');
   });
 
 });
@@ -557,8 +569,8 @@ describe('E. Full execute:wave:post pipeline — render-hooks then dispatch gate
     const envelope = step1.parsed;
 
     assert.strictEqual(envelope.point, 'execute:wave:post');
-    assert.strictEqual(envelope.activeHooks.length, 3,
-      `step1: expected 3 gates, got ${envelope.activeHooks.length}`);
+    assert.strictEqual(gatesOnly(envelope.activeHooks).length, 3,
+      `step1: expected 3 gates, got ${gatesOnly(envelope.activeHooks).length}`);
 
     // Confirm schema-drift gate is present and has correct metadata
     const schemaDriftHook = envelope.activeHooks.find(h => h.check?.query === 'verify.schema-drift');
@@ -590,6 +602,7 @@ describe('E. Full execute:wave:post pipeline — render-hooks then dispatch gate
 describe('F. Real registry execute:wave:post shape — guard against accidental changes', () => {
 
   const realRegistry = require('../gsd-core/bin/lib/capability-registry.cjs');
+
 
   test('[happy] real registry execute:wave:post has exactly 3 gates with correct queries', () => {
     const point = realRegistry.byLoopPoint['execute:wave:post'];
@@ -635,11 +648,14 @@ describe('F. Real registry execute:wave:post shape — guard against accidental 
     // #2285: claude-orchestration's dispatch-backend-selector contribution moved
     // from execute:wave:post to execute:wave:pre — wave:post fires AFTER the
     // wave already dispatched inline, too late to select a dispatch backend.
-    assert.strictEqual(point.contributions.length, 2,
-      `execute:wave:post must have 2 contributions (external-job + mempalace); got ${point.contributions.length}`);
+    // Fork: playwright, definition-of-done and adversarial-validation contribute here
+    // (were inline <step> blocks in execute-phase.md before the capability migration).
+    assert.strictEqual(point.contributions.length, 5,
+      `execute:wave:post must have 5 contributions; got ${point.contributions.length}`);
     const capIds = point.contributions.map(c => c.capId).sort();
-    assert.deepStrictEqual(capIds, ['external-job', 'mempalace'],
-      `execute:wave:post contributions must be external-job + mempalace; got ${capIds.join(',')}`);
+    assert.deepStrictEqual(capIds,
+      ['adversarial-validation', 'definition-of-done', 'external-job', 'mempalace', 'playwright'],
+      `execute:wave:post contributions mismatch; got ${capIds.join(',')}`);
   });
 
   test('[happy] real registry: execute:wave:pre has 1 contribution (claude-orchestration dispatch-backend selector, #2285)', () => {

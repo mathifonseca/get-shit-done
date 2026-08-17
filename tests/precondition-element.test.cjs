@@ -56,14 +56,14 @@ describe('issue #1949: gsd-planner.md declares <precondition> emission', () => {
   });
 
   // Fork ratchet: gsd-planner and gsd-executor are XL-tier on this fork
-  // (see XL_CAP in tests/agent-size-budget.test.cjs — 76800). This #1949 cap
+  // (see XL_CAP in tests/agent-size-budget.test.cjs — 71680). This #1949 cap
   // duplicates the LARGE tier bound; re-based to the fork's XL cap so the two
   // guards agree instead of contradicting each other.
-  test('planner is under the 76800-char cap after adding <precondition> content', () => {
+  test('planner is under the 71680-char cap after adding <precondition> content', () => {
     const planner = read(PLANNER);
     assert.ok(
-      planner.length < 76800,
-      `gsd-planner.md is ${planner.length} chars, must be < 76800 (LF-normalized)`
+      planner.length < 71680,
+      `gsd-planner.md is ${planner.length} chars, must be < 71680 (LF-normalized)`
     );
   });
 });
@@ -137,14 +137,14 @@ describe('issue #1949: gsd-executor.md asserts <precondition> before task execut
   });
 
   // Fork ratchet: gsd-planner and gsd-executor are XL-tier on this fork
-  // (see XL_CAP in tests/agent-size-budget.test.cjs — 76800). This #1949 cap
+  // (see XL_CAP in tests/agent-size-budget.test.cjs — 71680). This #1949 cap
   // duplicates the LARGE tier bound; re-based to the fork's XL cap so the two
   // guards agree instead of contradicting each other.
-  test('executor is under the 76800-char cap after adding <precondition> content', () => {
+  test('executor is under the 71680-char cap after adding <precondition> content', () => {
     const exec = read(EXECUTOR);
     assert.ok(
-      exec.length < 76800,
-      `gsd-executor.md is ${exec.length} chars, must be < 76800 (LF-normalized)`
+      exec.length < 71680,
+      `gsd-executor.md is ${exec.length} chars, must be < 71680 (LF-normalized)`
     );
   });
 });

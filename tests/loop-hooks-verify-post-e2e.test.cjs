@@ -40,6 +40,14 @@ const realRegistry = require('../gsd-core/bin/lib/capability-registry.cjs');
 // ── CLI path ───────────────────────────────────────────────────────────────────
 const GSD_TOOLS = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 
+// The three verify:post skill-steps under test. Assertions below are scoped to these
+// capIds so the resolver's filtering contract stays exactly pinned while remaining
+// correct as the capability registry grows (this fork registers an additional
+// `adversarial-validation` contribution at verify:post, the same way upstream added
+// the api-coverage gate at verify:pre in #1562).
+const UNDER_TEST = new Set(['nyquist', 'security', 'ui']);
+const scoped = (hooks) => hooks.filter((h) => UNDER_TEST.has(h.capId));
+
 // ── Env hermeticity (strip ambient GSD_ vars that skew planning dir lookups) ──
 const CLEAN_ENV = Object.fromEntries(
   Object.entries(process.env).filter(([k]) => !k.startsWith('GSD_')),
@@ -122,8 +130,8 @@ describe('verify:post — all-on config activates all three steps in registry or
     const envelope = JSON.parse(result.stdout.trim());
 
     assert.strictEqual(envelope.point, 'verify:post');
-    assert.strictEqual(envelope.activeHooks.length, 3,
-      `Expected 3 active hooks, got ${envelope.activeHooks.length}: ${JSON.stringify(envelope.activeHooks.map(h => h.capId))}`);
+    assert.strictEqual(scoped(envelope.activeHooks).length, 3,
+      `Expected 3 active hooks, got ${scoped(envelope.activeHooks).length}: ${JSON.stringify(scoped(envelope.activeHooks).map(h => h.capId))}`);
 
     // Step 1: nyquist
     const [nyquist, security, ui] = envelope.activeHooks;
@@ -183,11 +191,11 @@ describe('verify:post — no config.json falls back to schema defaults (all thre
     const envelope = JSON.parse(result.stdout.trim());
 
     assert.strictEqual(envelope.point, 'verify:post');
-    assert.strictEqual(envelope.activeHooks.length, 3,
-      `Schema defaults should activate 3 hooks, got ${envelope.activeHooks.length}`);
+    assert.strictEqual(scoped(envelope.activeHooks).length, 3,
+      `Schema defaults should activate 3 hooks, got ${scoped(envelope.activeHooks).length}`);
 
     // Verify capIds — schema default=true for all three
-    const capIds = envelope.activeHooks.map(h => h.capId);
+    const capIds = scoped(envelope.activeHooks).map(h => h.capId);
     assert.deepEqual(capIds, ['nyquist', 'security', 'ui'],
       `Expected ['nyquist','security','ui'], got ${JSON.stringify(capIds)}`);
   });
@@ -199,10 +207,10 @@ describe('verify:post — no config.json falls back to schema defaults (all thre
       config: {},
     });
     assert.strictEqual(resolved.point, 'verify:post');
-    assert.strictEqual(resolved.activeHooks.length, 3,
-      `Expected 3 active hooks via schema default, got ${resolved.activeHooks.length}`);
+    assert.strictEqual(scoped(resolved.activeHooks).length, 3,
+      `Expected 3 active hooks via schema default, got ${scoped(resolved.activeHooks).length}`);
     assert.deepEqual(
-      resolved.activeHooks.map(h => h.capId),
+      scoped(resolved.activeHooks).map(h => h.capId),
       ['nyquist', 'security', 'ui'],
     );
   });
@@ -220,10 +228,14 @@ describe('verify:post — all three flags explicitly false returns empty activeH
     const envelope = JSON.parse(result.stdout.trim());
 
     // Genuine assertion: MUST be 0 (not 1 or 3) — verifies filtering actually works
-    assert.strictEqual(envelope.activeHooks.length, 0,
-      `Expected 0 hooks when all flags=false, got ${envelope.activeHooks.length}: ${JSON.stringify(envelope.activeHooks.map(h => h.capId))}`);
-    assert.deepEqual(envelope.activeHooks, []);
-    assert.strictEqual(envelope.rendered, '_No active hooks at verify:post._');
+    assert.strictEqual(scoped(envelope.activeHooks).length, 0,
+      `Expected 0 hooks when all flags=false, got ${scoped(envelope.activeHooks).length}: ${JSON.stringify(scoped(envelope.activeHooks).map(h => h.capId))}`);
+    assert.deepEqual(scoped(envelope.activeHooks), []);
+    // `rendered` reflects ALL active hooks, so with the fork's adversarial-validation
+    // contribution still on it is non-empty even when all three skill-steps are off.
+    assert.ok(!envelope.rendered.includes('nyquist') && !envelope.rendered.includes('security.verify')
+      && !envelope.rendered.includes('ui-review'),
+      'no skill-step under test may render when all three flags are false');
     assert.strictEqual(envelope.point, 'verify:post');
   });
 
@@ -231,10 +243,13 @@ describe('verify:post — all three flags explicitly false returns empty activeH
     const resolved = resolveLoopHooks({
       point: 'verify:post',
       registry: realRegistry,
-      config: { workflow: { nyquist_validation: false, security_enforcement: false, ui_review: false } },
+      // "all-false" must include the fork's adversarial_validation knob, otherwise the
+      // point is not actually empty and the placeholder-render contract cannot hold.
+      config: { workflow: { nyquist_validation: false, security_enforcement: false, ui_review: false, adversarial_validation: false } },
     });
     // Must be exactly 0, not 1 or 3
-    assert.strictEqual(resolved.activeHooks.length, 0);
+    assert.strictEqual(scoped(resolved.activeHooks).length, 0);
+    assert.strictEqual(resolved.activeHooks.length, 0, 'point must be genuinely empty for the placeholder contract');
     assert.strictEqual(renderLoopHooks(resolved), '_No active hooks at verify:post._');
   });
 });
@@ -256,10 +271,10 @@ describe('verify:post — per-key BVA: each false excludes only that single step
     const envelope = JSON.parse(result.stdout.trim());
 
     // Genuine BVA: must be exactly 2, not 3 or 0
-    assert.strictEqual(envelope.activeHooks.length, 2,
-      `Expected 2 hooks (security+ui), got ${envelope.activeHooks.length}: ${JSON.stringify(envelope.activeHooks.map(h => h.capId))}`);
+    assert.strictEqual(scoped(envelope.activeHooks).length, 2,
+      `Expected 2 hooks (security+ui), got ${scoped(envelope.activeHooks).length}: ${JSON.stringify(scoped(envelope.activeHooks).map(h => h.capId))}`);
 
-    const capIds = envelope.activeHooks.map(h => h.capId);
+    const capIds = scoped(envelope.activeHooks).map(h => h.capId);
     assert.ok(!capIds.includes('nyquist'), `nyquist must be absent when nyquist_validation=false, got ${JSON.stringify(capIds)}`);
     assert.strictEqual(capIds[0], 'security', `First remaining hook must be security`);
     assert.strictEqual(capIds[1], 'ui', `Second remaining hook must be ui`);
@@ -279,10 +294,10 @@ describe('verify:post — per-key BVA: each false excludes only that single step
     const envelope = JSON.parse(result.stdout.trim());
 
     // Genuine BVA: must be exactly 2, not 3 or 0
-    assert.strictEqual(envelope.activeHooks.length, 2,
-      `Expected 2 hooks (nyquist+ui), got ${envelope.activeHooks.length}: ${JSON.stringify(envelope.activeHooks.map(h => h.capId))}`);
+    assert.strictEqual(scoped(envelope.activeHooks).length, 2,
+      `Expected 2 hooks (nyquist+ui), got ${scoped(envelope.activeHooks).length}: ${JSON.stringify(scoped(envelope.activeHooks).map(h => h.capId))}`);
 
-    const capIds = envelope.activeHooks.map(h => h.capId);
+    const capIds = scoped(envelope.activeHooks).map(h => h.capId);
     assert.ok(!capIds.includes('security'), `security must be absent when security_enforcement=false, got ${JSON.stringify(capIds)}`);
     assert.strictEqual(capIds[0], 'nyquist', `First remaining hook must be nyquist`);
     assert.strictEqual(capIds[1], 'ui', `Second remaining hook must be ui`);
@@ -302,10 +317,10 @@ describe('verify:post — per-key BVA: each false excludes only that single step
     const envelope = JSON.parse(result.stdout.trim());
 
     // Genuine BVA: must be exactly 2, not 3 or 0
-    assert.strictEqual(envelope.activeHooks.length, 2,
-      `Expected 2 hooks (nyquist+security), got ${envelope.activeHooks.length}: ${JSON.stringify(envelope.activeHooks.map(h => h.capId))}`);
+    assert.strictEqual(scoped(envelope.activeHooks).length, 2,
+      `Expected 2 hooks (nyquist+security), got ${scoped(envelope.activeHooks).length}: ${JSON.stringify(scoped(envelope.activeHooks).map(h => h.capId))}`);
 
-    const capIds = envelope.activeHooks.map(h => h.capId);
+    const capIds = scoped(envelope.activeHooks).map(h => h.capId);
     assert.ok(!capIds.includes('ui'), `ui must be absent when ui_review=false, got ${JSON.stringify(capIds)}`);
     assert.strictEqual(capIds[0], 'nyquist', `First remaining hook must be nyquist`);
     assert.strictEqual(capIds[1], 'security', `Second remaining hook must be security`);
@@ -333,8 +348,8 @@ describe('verify:post — surface-disable: capabilityStatesById filters hooks', 
     });
 
     // Genuine assertion: must be 2 (not 3) — proves surface filter excludes ui
-    assert.strictEqual(resolved.activeHooks.length, 2,
-      `Expected 2 hooks with ui disabled, got ${resolved.activeHooks.length}: ${JSON.stringify(resolved.activeHooks.map(h => h.capId))}`);
+    assert.strictEqual(scoped(resolved.activeHooks).length, 2,
+      `Expected 2 hooks with ui disabled, got ${scoped(resolved.activeHooks).length}: ${JSON.stringify(resolved.activeHooks.map(h => h.capId))}`);
 
     const capIds = resolved.activeHooks.map(h => h.capId);
     assert.ok(!capIds.includes('ui'), `ui must be filtered out when capability disabled`);
@@ -356,8 +371,8 @@ describe('verify:post — surface-disable: capabilityStatesById filters hooks', 
     });
 
     // Genuine: must be 2 (not 3) — proves security cluster exclusion
-    assert.strictEqual(resolved.activeHooks.length, 2,
-      `Expected 2 hooks with security disabled, got ${resolved.activeHooks.length}`);
+    assert.strictEqual(scoped(resolved.activeHooks).length, 2,
+      `Expected 2 hooks with security disabled, got ${scoped(resolved.activeHooks).length}`);
 
     const capIds = resolved.activeHooks.map(h => h.capId);
     assert.ok(!capIds.includes('security'), `security must be filtered out when capability disabled`);
@@ -370,6 +385,9 @@ describe('verify:post — surface-disable: capabilityStatesById filters hooks', 
       ['nyquist', { enabled: false, active: false }],
       ['security', { enabled: false, active: false }],
       ['ui', { enabled: false, active: false }],
+      // Fork: disable the adversarial-validation contribution too, so the point is
+      // genuinely empty and the placeholder-render contract below still applies.
+      ['adversarial-validation', { enabled: false, active: false }],
     ]);
     const resolved = resolveLoopHooks({
       point: 'verify:post',
@@ -379,7 +397,7 @@ describe('verify:post — surface-disable: capabilityStatesById filters hooks', 
     });
 
     assert.strictEqual(resolved.point, 'verify:post');
-    assert.deepEqual(resolved.activeHooks, []);
+    assert.deepEqual(scoped(resolved.activeHooks), []);
     assert.strictEqual(renderLoopHooks(resolved), '_No active hooks at verify:post._');
   });
 });
@@ -404,10 +422,10 @@ describe('verify:post — malformed config.json: schema defaults fire (3 active,
     const envelope = JSON.parse(result.stdout.trim());
     assert.strictEqual(envelope.point, 'verify:post');
     // Schema defaults (all true) must activate all 3 when config.json parse fails
-    assert.strictEqual(envelope.activeHooks.length, 3,
-      `Expected 3 hooks via schema defaults on malformed config, got ${envelope.activeHooks.length}`);
+    assert.strictEqual(scoped(envelope.activeHooks).length, 3,
+      `Expected 3 hooks via schema defaults on malformed config, got ${scoped(envelope.activeHooks).length}`);
 
-    const capIds = envelope.activeHooks.map(h => h.capId);
+    const capIds = scoped(envelope.activeHooks).map(h => h.capId);
     assert.deepEqual(capIds, ['nyquist', 'security', 'ui']);
   });
 });
@@ -426,7 +444,7 @@ describe('verify:post — deterministic ordering: repeated calls produce identic
     assert.deepEqual(first.activeHooks, second.activeHooks,
       'Two resolver calls must produce identical activeHooks (determinism)');
     assert.deepEqual(
-      first.activeHooks.map(h => h.capId),
+      scoped(first.activeHooks).map(h => h.capId),
       ['nyquist', 'security', 'ui'],
       'Order must be nyquist→security→ui',
     );
@@ -465,7 +483,7 @@ describe('verify:post — onError semantics: halt for nyquist+security, skip for
       config: { workflow: { nyquist_validation: true, security_enforcement: true, ui_review: true } },
     });
 
-    assert.strictEqual(resolved.activeHooks.length, 3);
+    assert.strictEqual(scoped(resolved.activeHooks).length, 3);
     // Genuine BVA: each onError must match the exact canonical value
     assert.strictEqual(resolved.activeHooks[0].onError, 'halt',
       `nyquist onError must be 'halt', got '${resolved.activeHooks[0].onError}'`);
@@ -484,9 +502,9 @@ describe('verify:post — onError semantics: halt for nyquist+security, skip for
     const envelope = JSON.parse(result.stdout.trim());
 
     // Genuine BVA: assert specific onError value at each position, not just presence
-    assert.strictEqual(envelope.activeHooks[0].onError, 'halt');
-    assert.strictEqual(envelope.activeHooks[1].onError, 'halt');
-    assert.strictEqual(envelope.activeHooks[2].onError, 'skip');
+    assert.strictEqual(scoped(envelope.activeHooks)[0].onError, 'halt');
+    assert.strictEqual(scoped(envelope.activeHooks)[1].onError, 'halt');
+    assert.strictEqual(scoped(envelope.activeHooks)[2].onError, 'skip');
   });
 });
 
@@ -520,20 +538,23 @@ describe('verify:post — envelope shape pins Hyrum\'s Law contract', () => {
     assert.deepEqual(keys, ['activeHooks', 'point', 'rendered'],
       `Empty-hooks envelope must have exactly 3 keys, got: ${JSON.stringify(keys)}`);
     assert.strictEqual(envelope.point, 'verify:post');
-    assert.deepEqual(envelope.activeHooks, []);
+    assert.deepEqual(scoped(envelope.activeHooks), []);
   });
 });
 
 // ─── 10. Real registry byLoopPoint shape check (no drift guard) ───────────────
 
-describe('verify:post — real registry has exactly 4 steps and 0 contributions+gates', () => {
-  test('[happy] realRegistry.byLoopPoint[verify:post] has 4 steps, 0 contributions, 0 gates', () => {
+describe('verify:post — real registry has exactly 4 steps, 1 contribution (fork adversarial-validation), 0 gates', () => {
+  test('[happy] realRegistry.byLoopPoint[verify:post] has 4 steps, 1 contribution, 0 gates', () => {
     const entry = realRegistry.byLoopPoint['verify:post'];
     assert.ok(entry, 'verify:post must exist in registry');
     assert.strictEqual(entry.steps.length, 4,
       `Expected 4 steps at verify:post, got ${entry.steps.length}`);
-    assert.strictEqual(entry.contributions.length, 0,
-      `Expected 0 contributions at verify:post, got ${entry.contributions.length}`);
+    // Fork: the adversarial-validation capability contributes the finder/critic/referee
+    // gate here (was an inline <step> in verify-work.md before the capability migration).
+    assert.strictEqual(entry.contributions.length, 1,
+      `Expected 1 contribution at verify:post, got ${entry.contributions.length}`);
+    assert.strictEqual(entry.contributions[0].capId, 'adversarial-validation');
     assert.strictEqual(entry.gates.length, 0,
       `Expected 0 gates at verify:post, got ${entry.gates.length}`);
   });

@@ -1,0 +1,43 @@
+{
+  "id": "playwright",
+  "role": "feature",
+  "version": "1.10.0",
+  "title": "Playwright verification",
+  "description": "Runs the project's Playwright suite after each execution wave and folds screenshot/pass-fail evidence into verification, auto-verifying the UAT items Playwright already covered so manual UAT is the fallback rather than the default.",
+  "tier": "full",
+  "requires": [],
+  "engines": {
+    "gsd": ">=1.6.0"
+  },
+  "runtimeCompat": {
+    "supported": [
+      "*"
+    ],
+    "unsupported": []
+  },
+  "skills": [],
+  "agents": [],
+  "hooks": [],
+  "config": {
+    "workflow.playwright_verification": {
+      "type": "boolean",
+      "default": true,
+      "description": "Run Playwright tests after each execution wave and treat screenshots as verification evidence."
+    }
+  },
+  "steps": [],
+  "contributions": [
+    {
+      "point": "execute:wave:post",
+      "into": "verifier",
+      "fragment": {
+        "path": "fragments/execute-wave-post.md"
+      },
+      "produces": [],
+      "consumes": [],
+      "when": "workflow.playwright_verification",
+      "onError": "skip"
+    }
+  ],
+  "gates": []
+}

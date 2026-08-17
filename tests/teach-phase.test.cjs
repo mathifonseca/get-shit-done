@@ -45,11 +45,24 @@ describe('TEACH-CONFIG: config knob registration (CODIFY-01)', () => {
     );
   });
 
-  test('workflow.teach_phase is registered in config-schema.cjs', () => {
+  test('workflow.teach_phase is registered — owned by the teach capability (CODIFY-01)', () => {
+    // The knob moved out of the central config-schema manifest into
+    // capabilities/teach/capability.json at the v1.10.0 capability migration.
+    // ADR-857 ownership: a capability-owned key lives ONLY in its capability, so
+    // asserting on VALID_CONFIG_KEYS here would now assert the violation, not the
+    // contract. The registration that matters is the capability declaration plus
+    // the key still resolving through the capability layer.
     assert.ok(
-      VALID_CONFIG_KEYS.has('workflow.teach_phase'),
-      'workflow.teach_phase must be registered in VALID_CONFIG_KEYS in config-schema.manifest.json (CODIFY-01)'
+      !VALID_CONFIG_KEYS.has('workflow.teach_phase'),
+      'workflow.teach_phase must NOT be in the central manifest — it is capability-owned'
     );
+    const cap = JSON.parse(fs.readFileSync(
+      path.join(REPO_ROOT, 'capabilities', 'teach', 'capability.json'), 'utf-8'));
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(cap.config, 'workflow.teach_phase'),
+      'capabilities/teach/capability.json must declare workflow.teach_phase (CODIFY-01)'
+    );
+    assert.strictEqual(cap.config['workflow.teach_phase'].type, 'boolean');
   });
 });
 

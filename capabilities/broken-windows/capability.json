@@ -3,7 +3,7 @@
   "role": "feature",
   "version": "1.10.0",
   "title": "Broken-windows ledger",
-  "description": "Cross-phase defect register accumulating stubs, TODOs, skipped tests, unrun verifies, and unmet truths into .planning/WINDOWS.md. When enforcement is enabled, it blocks /gsd-ship while any window is open unless explicitly waived with a recorded reason. Operationalizes GSD's no-defer discipline as a tracked artifact (issue #1950).",
+  "description": "Cross-phase defect register accumulating stubs, TODOs, skipped tests, unrun verifies, and unmet truths into .planning/WINDOWS.md. When enforcement is enabled, it blocks /gsd-ship while any window is open unless explicitly waived with a recorded reason. Operationalizes GSD's no-defer discipline as a tracked artifact (issue #1950). Fork addition: the verifier's dead-code scan feeds this ledger as `lint-warning` entries instead of maintaining a parallel per-phase report.",
   "tier": "full",
   "requires": [],
   "engines": {
@@ -22,7 +22,12 @@
     "workflow.windows_enforce": {
       "type": "boolean",
       "default": false,
-      "description": "Enable the blocking ship:pre gate for the broken-windows ledger. When true (opt-in), /gsd-ship blocks while .planning/WINDOWS.md has any open entry. When false (default), windows are still tracked (the executor and verifier still populate WINDOWS.md via gsd-tools windows append) but ship does not block — teams can adopt tracking before enforcement. Issue #1950."
+      "description": "Enable the blocking ship:pre gate for the broken-windows ledger. When true (opt-in), /gsd-ship blocks while .planning/WINDOWS.md has any open entry. When false (default), windows are still tracked (the executor and verifier still populate WINDOWS.md via gsd-tools windows append) but ship does not block \u2014 teams can adopt tracking before enforcement. Issue #1950."
+    },
+    "workflow.dead_code_scan": {
+      "type": "boolean",
+      "default": true,
+      "description": "Scan phase-modified files for context pollution (commented-out code, dead feature flags, orphaned exports, parallel implementations) and record findings in the broken-windows ledger as lint-warning entries."
     }
   },
   "steps": [],

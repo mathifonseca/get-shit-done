@@ -1,0 +1,47 @@
+{
+  "id": "design-spec",
+  "role": "feature",
+  "version": "1.10.0",
+  "title": "Frozen design spec",
+  "description": "Emits a frozen DESIGN.md after discuss when the phase produced enough architecturally-weighted locked decisions, so planning builds against a fixed contract instead of re-deriving structure.",
+  "tier": "full",
+  "requires": [],
+  "engines": {
+    "gsd": ">=1.6.0"
+  },
+  "runtimeCompat": {
+    "supported": [
+      "*"
+    ],
+    "unsupported": []
+  },
+  "skills": [],
+  "agents": [],
+  "hooks": [],
+  "config": {
+    "workflow.design_spec": {
+      "type": "boolean",
+      "default": true,
+      "description": "Generate a frozen DESIGN.md from discuss-phase locked decisions."
+    }
+  },
+  "steps": [],
+  "contributions": [
+    {
+      "point": "discuss:post",
+      "into": "orchestrator",
+      "fragment": {
+        "path": "fragments/discuss-post.md"
+      },
+      "produces": [
+        "DESIGN.md"
+      ],
+      "consumes": [
+        "CONTEXT.md"
+      ],
+      "when": "workflow.design_spec",
+      "onError": "skip"
+    }
+  ],
+  "gates": []
+}

@@ -4,6 +4,9 @@ Fork-added step (SDLC-aligned). Extracted from the execute-phase host loop per
 ADR-857 phase 6 (#1168): optional feature logic lives in a progressively-disclosed
 fragment, not the host loop body. Gated by `workflow.preflight_on_verify`.
 
+Not a capability contribution: this is an orchestrator tail procedure, not prompt
+text injected into an agent role (execute:post agentRoles are executor/verifier).
+
 **PR Creation** (when issue tracker is configured)
 
 ```bash

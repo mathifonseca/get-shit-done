@@ -1,0 +1,33 @@
+{
+  "id": "teach",
+  "role": "feature",
+  "version": "1.10.0",
+  "title": "Teach phase (codify learnings)",
+  "description": "Routes a completed phase's learnings to the right durable surface \u2014 rules, skill, MCP tool or hook \u2014 as HITL proposals in NN-TEACH.md. Never auto-writes a surface; silent no-op when the knob is off or no candidate matches a surface signal.",
+  "tier": "full",
+  "requires": [],
+  "engines": {
+    "gsd": ">=1.6.0"
+  },
+  "runtimeCompat": {
+    "supported": [
+      "*"
+    ],
+    "unsupported": []
+  },
+  "skills": [
+    "teach-phase"
+  ],
+  "agents": [],
+  "hooks": [],
+  "config": {
+    "workflow.teach_phase": {
+      "type": "boolean",
+      "default": false,
+      "description": "Codify phase learnings as HITL proposals (rules / skill / MCP tool / hook) via NN-TEACH.md."
+    }
+  },
+  "steps": [],
+  "contributions": [],
+  "gates": []
+}
