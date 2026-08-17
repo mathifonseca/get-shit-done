@@ -368,7 +368,7 @@ GSD 生成的 Markdown 文件会成为 LLM 系统提示。这意味着流入规�
 - `gsd-prompt-guard.js` — 扫描写入 `.planning/` 的 Write/Edit 调用中的注入模式（始终活跃，仅建议）
 - `gsd-workflow-guard.js` — 对 GSD 工作流上下文之外的文件编辑发出警告（通过 `hooks.workflow_guard` 选择性启用）
 
-**CI 扫描器：** `prompt-injection-scan.test.cjs` 扫描所有 agent、工作流和命令文件中的嵌入式注入向量。
+**CI 扫描器：** `prompt-injection-scan.security.test.cjs` 扫描所有 agent、工作流和命令文件中的嵌入式注入向量。
 
 ---
 
@@ -381,8 +381,8 @@ AI 编码工具会幻觉出包名。攻击者会在 npm、PyPI 和 crates.io 上
 ```markdown
 ## Package Legitimacy Audit
 
-| Package | Registry | Age | Downloads | Source Repo | slopcheck | Disposition |
-|---------|----------|-----|-----------|-------------|-----------|-------------|
+| Package | Registry | Age | Downloads | Source Repo | Verdict | Disposition |
+|---------|----------|-----|-----------|-------------|---------|-------------|
 | express | npm | 13 yrs | 100M+/wk | github.com/expressjs/express | [OK] | Approved |
 | some-new-util | npm | 3 days | 47 | none | [SLOP] | REMOVED |
 | api-bridge | npm | 6 mo | 1.2k/wk | github.com/user/api-bridge | [SUS] | Flagged |
@@ -394,7 +394,7 @@ AI 编码工具会幻觉出包名。攻击者会在 npm、PyPI 和 crates.io 上
 
 **执行期间** — 如果安装失败，执行器会显示检查点并停止，而不是静默尝试替代方案。
 
-**Slopcheck 判定：**
+**合法性判定：**
 
 | 判定 | 含义 | GSD 操作 |
 |---------|---------|------------|
@@ -462,6 +462,13 @@ claude --dangerously-skip-permissions
 /gsd-pause-work --report         # Generate session summary
 ```
 
+> [!CAUTION]
+> **The permissions flag is optional.** It skips per-file confirmation while
+> GSD's sub-agents read and write files. Use it only in low-stakes or
+> throwaway contexts. To keep confirmations enabled, start with `claude` instead.
+> For real work, read the [security model](../explanation/security-model.md) first.
+
+
 ### 从现有文档新建项目
 
 ```bash
@@ -473,8 +480,8 @@ claude --dangerously-skip-permissions
 ### 现有代码库
 
 ```bash
-/gsd-map-codebase           # Analyse what exists (parallel agents)
-/gsd-new-project            # Questions focus on what you're ADDING
+/gsd-onboard                # Safely map, ingest docs, and initialize planning
+# Follow printed handoff commands, then rerun /gsd-onboard
 # (normal phase workflow from here)
 ```
 
@@ -498,7 +505,7 @@ claude --dangerously-skip-permissions
 
 **needs-acknowledgement 行为。** 当守卫发现缺失的符号时，它会在计划审查输出中发出 needs-acknowledgement 通知，而不是硬性阻塞。您可以确认并继续（该符号可能是有意新增的），或请求修改计划。守卫不会自动拒绝计划——它为人工决策提供信号。
 
-**无需 intel 即可工作。** 默认情况下，守卫使用 `grep`/`ripgrep` 搜索源文件——无需预先索引。如果您已使用 `intel.enabled: true` 运行 `/gsd:map-codebase`，请将 `plan_review.source_grounding_authority: intel` 设置为使用更快的预构建 `api-map.json` 索引。
+**无需 intel 即可工作。** 默认情况下，守卫使用 `grep`/`ripgrep` 搜索源文件——无需预先索引。如果您已使用 `intel.enabled: true` 运行 `/gsd-map-codebase`，请将 `plan_review.source_grounding_authority: intel` 设置为使用更快的预构建 `api-map.json` 索引。
 
 ```bash
 # Enable/disable (default: on)
@@ -510,7 +517,7 @@ claude --dangerously-skip-permissions
 /gsd-settings plan_review.source_grounding_authority intel  # pre-indexed api-map.json
 ```
 
-在项目设置时切换（`/gsd:new-project` 在工作流偏好设置期间询问）或随时通过 `/gsd:settings`（计划部分 → 漂移守卫）切换。
+在项目设置时切换（`/gsd-new-project` 在工作流偏好设置期间询问）或随时通过 `/gsd-settings`（计划部分 → 漂移守卫）切换。
 
 ### 快速修复 Bug
 
@@ -561,14 +568,14 @@ claude --dangerously-skip-permissions
 
 ### 程序化 CLI（`gsd-tools query` 与 `gsd-tools.cjs`）
 
-对于自动化，优先使用带有已注册子命令的 **`gsd-tools query`**（参见 [CLI-TOOLS.md — SDK 和程序化访问](CLI-TOOLS.md#sdk-and-programmatic-access) 及 QUERY-HANDLERS.md）。旧版 `node $HOME/.claude/get-shit-done/bin/gsd-tools.cjs` CLI 仍受支持。
+对于自动化，优先使用带有已注册子命令的 **`gsd-tools query`**（参见 [CLI-TOOLS.md — SDK 和程序化访问](CLI-TOOLS.md#sdk-and-programmatic-access) 及 QUERY-HANDLERS.md）。旧版 `node $HOME/.claude/gsd-core/bin/gsd-tools.cjs` CLI 仍受支持。
 
 ### STATE.md 不同步
 
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state validate          # Detect drift
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state sync --verify     # Preview changes
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state sync              # Reconstruct STATE.md
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state validate          # Detect drift
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state sync --verify     # Preview changes
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state sync              # Reconstruct STATE.md
 ```
 
 ### 命令在"Spawning..."后似乎冻结
@@ -666,7 +673,7 @@ GSD 子 Agent 在单独的上下文窗口中运行——其工作在进行中对
 
 每个被禁用的服务器都会从后续每次交互中移除其模式。精简 MCP **与** `model_profile` 调整形成叠加效果——两个杠杆是累加的，MCP 节省效果立即体现在编排器生成的每个子 Agent 上。
 
-完整审计、运行时参考及与 `model_profile` 的组合说明，请参阅捆绑的 `context-budget.md` 参考中的 [MCP 工具模式成本](../../get-shit-done/references/context-budget.md#mcp-tool-schema-cost-harness-concern)。
+完整审计、运行时参考及与 `model_profile` 的组合说明，请参阅捆绑的 `context-budget.md` 参考中的 [MCP 工具模式成本](../../gsd-core/references/context-budget.md#mcp-tool-schema-cost-harness-concern)。
 
 ### 使用非 Claude 运行时（Codex、OpenCode、Gemini CLI、Kilo）
 
@@ -852,7 +859,7 @@ All subagent/executor commits MUST use `--no-verify`.
   reports/                # Session reports (from /gsd-pause-work --report)
   todos/
     pending/              # Captured ideas awaiting work
-    done/                 # Completed todos
+    completed/             # Completed todos
   debug/                  # Active debug sessions
     resolved/             # Archived debug sessions
   spikes/                 # Feasibility experiments (from /gsd-spike)
@@ -863,7 +870,8 @@ All subagent/executor commits MUST use `--no-verify`.
     themes/
       default.css         # Shared CSS variables for all sketches
     MANIFEST.md           # Index of all sketches with winners
-  codebase/               # Brownfield codebase mapping (from /gsd-map-codebase)
+  codebase/               # Brownfield codebase mapping (from /gsd-map-codebase or /gsd-onboard)
+  onboarding/             # Brownfield onboarding summary (from /gsd-onboard)
   phases/
     XX-phase-name/
       XX-YY-PLAN.md       # Atomic execution plans

@@ -2,7 +2,7 @@
 
 Use the configured GitHub CLI session for this checkout. Always pass
 `--repo open-gsd/gsd-core` on `gh` commands so issue and PR operations
-stay scoped to the canonical upstream repository (was `gsd-build/get-shit-done`
+stay scoped to the canonical upstream repository (was `gsd-build/get-shit-done` <!-- gsd-allow-legacy-name -->
 prior to the 2026-06-10 upstream migration).
 
 ---

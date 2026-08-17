@@ -18,7 +18,7 @@ This runs three stages in sequence:
 2. **Plan** — A `gsd-planner` subagent reads context, research, and requirements, then writes one or more `{phase}-{N}-PLAN.md` files.
 3. **Verify** — A `gsd-plan-checker` subagent validates plan quality across eight dimensions and triggers a revision loop (up to three iterations) until quality gates pass.
 
-If no phase number is given, GSD Core targets the next unplanned phase from the roadmap.
+If no phase number is given, the `/gsd-plan-phase` orchestrating workflow reads `ROADMAP.md` and targets the next unplanned phase. This detection happens in the workflow/LLM layer, not in the `gsd-tools.cjs` CLI — its phase-lookup commands require an explicit phase number.
 
 ---
 
@@ -58,17 +58,43 @@ Note: `--research-phase <N>` is a flag on `/gsd-plan-phase`. There is no standal
 
 ---
 
-## Plan vertical feature slices instead of horizontal layers
+## Override the planning granularity for one phase
 
-**If you want tasks organised as thin end-to-end slices** (UI → API → DB per feature) rather than by technical layer:
+**If you want fewer, larger tasks** for a simple or well-understood phase:
+
+```bash
+/gsd-plan-phase 2 --granularity coarse
+```
+
+**If you want more, smaller tasks** for tighter control over a risky or complex phase:
+
+```bash
+/gsd-plan-phase 2 --granularity fine
+```
+
+`--granularity` accepts `coarse`, `standard`, or `fine`. It overrides all granularity config keys (`granularities.planning`, `granularity`, `planning.granularity`) for this invocation only — no config edit required. Invalid values are rejected immediately with an error.
+
+If you want this granularity applied permanently, set it in config — see [CONFIGURATION.md](../CONFIGURATION.md). For the full flag reference see [COMMANDS.md](../COMMANDS.md).
+
+---
+
+## Tracer-first slices (the default) and opting out
+
+**By default, every plan leads with a `tracer` task** — the thinnest end-to-end slice (UI → API → DB) that touches every layer the phase modifies, wired and verified before any expansion task. A tracer is production-quality, not a throwaway prototype (see the `tracer bullet` glossary entry in `CONTEXT.md`). This proves the architecture early instead of discovering an integration dead-end after ten committed layers.
+
+To opt out and plan horizontal layers (the legacy default):
+
+```bash
+/gsd-plan-phase 1 --no-tracer
+```
+
+`--mvp` layers MVP enrichment on top of tracer-first — it frames the phase goal as a user story and, on Phase 1 of a new project with no prior phase summaries, also produces `SKELETON.md` (a Walking Skeleton covering project scaffold, routing, one real DB read/write, one real UI interaction, and dev deployment):
 
 ```bash
 /gsd-plan-phase 1 --mvp
 ```
 
-On Phase 1 of a new project with no prior phase summaries, `--mvp` also produces `SKELETON.md` — a Walking Skeleton covering project scaffold, routing, one real DB read/write, one real UI interaction, and dev deployment.
-
-You can persist MVP mode for a phase without the flag by adding `**Mode:** mvp` to that phase's entry in ROADMAP.md.
+You can persist MVP enrichment for a phase without the flag by adding `**Mode:** mvp` to that phase's entry in ROADMAP.md.
 
 ---
 
@@ -125,16 +151,6 @@ The convergence loop runs plan → review → replan → re-review cycles (up to
 ```
 
 Research is skipped; the planner reads the verification gaps directly.
-
----
-
-## Validate project state before planning begins
-
-```bash
-/gsd-plan-phase 2 --validate
-```
-
-Runs state validation before spawning the researcher. Use this if you suspect ROADMAP.md or STATE.md has drifted.
 
 ---
 

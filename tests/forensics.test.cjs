@@ -149,7 +149,7 @@ describe('forensics workflow', () => {
     // Scope check to the gh issue create invocation — a whole-file search would
     // pass even if gh issue create lacked --repo, because gh label list also
     // contains the repo string.
-    // Upstream repo: open-gsd/gsd-core (was gsd-build/get-shit-done pre-2026-06-10 migration).
+    // Upstream repo: open-gsd/gsd-core (was gsd-build/get-shit-done pre-2026-06-10 migration). // gsd-allow-legacy-name
     assert.match(
       content,
       /gh issue create[\s\S]{0,250}--repo\s+open-gsd\/gsd-core/,
@@ -160,7 +160,7 @@ describe('forensics workflow', () => {
   test('workflow checks bug label in open-gsd/gsd-core, not the current repo', () => {
     const content = fs.readFileSync(workflowPath, 'utf-8');
     // Regex is more robust than a fixed-length slice to formatting changes
-    // Upstream repo: open-gsd/gsd-core (was gsd-build/get-shit-done pre-2026-06-10 migration).
+    // Upstream repo: open-gsd/gsd-core (was gsd-build/get-shit-done pre-2026-06-10 migration). // gsd-allow-legacy-name
     assert.match(
       content,
       /gh label list[\s\S]{0,250}--repo\s+open-gsd\/gsd-core/,

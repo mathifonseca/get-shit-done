@@ -51,6 +51,25 @@ v1.40에서 여섯 개의 네임스페이스 라우터가 1단계 진입점으�
 
 ---
 
+### `/gsd-onboard`
+
+기존 코드베이스의 최초 GSD 온보딩을 안내합니다. 저장소 상태를 확인하고 코드베이스 매핑, 선택적 문서 수집, 프로젝트 초기화로 안전하게 넘긴 뒤 계획 파일이 준비되면 onboarding summary를 만듭니다.
+
+| 플래그 | 설명 |
+|------|-------------|
+| `--fast` | 경량 `/gsd-map-codebase --fast` 매핑 handoff 우선 사용. 단, `/gsd-new-project` 전에는 완전한 맵이 필요 |
+| `--text` | TUI 메뉴 대신 번호가 있는 plain-text gate 사용 |
+
+**전제 조건:** 기존 저장소 또는 계획 문서. 빈 greenfield 프로젝트는 `/gsd-new-project`를 사용하세요.
+**생성 결과:** map-codebase의 `.planning/codebase/`, new-project 또는 ingest-docs의 `.planning/`, 설정 후 `.planning/onboarding/SUMMARY.md`.
+
+```bash
+/gsd-onboard           # 안내형 brownfield 온보딩
+/gsd-onboard --fast    # 먼저 경량 맵을 사용하고, 프로젝트 설정 전 완전한 맵 작성
+```
+
+---
+
 ### `/gsd-workspace`
 
 GSD 워크스페이스 관리 — 리포지토리 복사본과 독립적인 `.planning/` 디렉토리를 갖는 격리된 워크스페이스 환경을 생성, 나열, 또는 삭제합니다.
@@ -152,7 +171,6 @@ GSD 워크스페이스 관리 — 리포지토리 복사본과 독립적인 `.pl
 | `--ingest <path-or-glob>` | 컨텍스트 합성을 위해 discuss-phase 대신 ADR 파일 사용 |
 | `--ingest-format <auto\|nygard\|madr\|narrative>` | `--ingest`에 대한 선택적 ADR 파서 형식 재정의 |
 | `--reviews` | REVIEWS.md의 크로스 AI 리뷰 피드백으로 재계획 |
-| `--validate` | 계획 시작 전 상태 검증 실행 |
 | `--bounce` | 계획 후 외부 계획 바운스 검증 실행 (`workflow.plan_bounce_script` 사용) |
 | `--skip-bounce` | 설정에서 활성화되어 있어도 계획 바운스 생략 |
 | `--mvp` | 수직 MVP 모드 — 계획자가 수평 레이어 대신 기능 슬라이스(UI→API→DB)로 작업을 구성합니다. 이전 단계 요약이 없는 새 프로젝트의 단계 1에서는 `SKELETON.md`(Walking Skeleton)도 생성합니다. ROADMAP.md에 `**Mode:** mvp`를 추가하여 단계별로 지속시킬 수 있으며, 플래그 없이 자동으로 `--mvp`가 적용됩니다. |
@@ -167,7 +185,7 @@ GSD 워크스페이스 관리 — 리포지토리 복사본과 독립적인 `.pl
 - `--view` 사용: 기존 RESEARCH.md를 stdout으로 출력, 생성 없음. RESEARCH.md가 없으면 오류 발생.
 
 **패키지 적법성 게이트 (v1.42.1):**
-리서처가 외부 패키지를 추천하면 각 패키지에 대해 `slopcheck install <pkg> --json`을 실행하고 레지스트리, 출시일, 다운로드 수, 소스 리포지토리, slopcheck 판정이 담긴 `## Package Legitimacy Audit` 테이블을 RESEARCH.md에 작성합니다. 판정:
+리서처가 외부 패키지를 추천하면 각 패키지에 대해 `gsd-tools query package-legitimacy check --ecosystem <npm|pypi|crates> <pkg>`을 실행하고 레지스트리, 출시일, 다운로드 수, 소스 리포지토리, 적법성 판정이 담긴 `## Package Legitimacy Audit` 테이블을 RESEARCH.md에 작성합니다. 판정:
 
 - `[SLOP]` — 패키지가 RESEARCH.md에서 완전히 제거; 계획자에게 전달되지 않음
 - `[SUS]` — 패키지 플래그 지정; 계획자가 설치 작업 전에 `checkpoint:human-verify` 삽입
@@ -181,7 +199,6 @@ WebSearch에서 가져온 패키지는 `[ASSUMED]`(`[VERIFIED]`가 아님)로 �
 /gsd-plan-phase 1                              # 단계 1 리서치 + 계획 + 검증
 /gsd-plan-phase 3 --skip-research              # 리서치 없이 계획 (친숙한 도메인)
 /gsd-plan-phase --auto                         # 비대화형 계획 수립
-/gsd-plan-phase 2 --validate                   # 계획 전 상태 검증
 /gsd-plan-phase 1 --bounce                     # 계획 + 외부 바운스 검증
 /gsd-plan-phase 2 --ingest docs/adr/0010.md   # 컨텍스트 합성을 위한 ADR 익스프레스 경로
 /gsd-plan-phase 2 --ingest 'docs/adr/00*.md' --ingest-format auto
@@ -201,7 +218,7 @@ WebSearch에서 가져온 패키지는 `[ASSUMED]`(`[VERIFIED]`가 아님)로 �
 | 인수 / 플래그 | 필수 | 설명 |
 |-----------------|----------|-------------|
 | `N` | **예** | 계획 및 리뷰할 단계 번호 |
-| `--codex` / `--gemini` / `--claude` / `--opencode` | 아니요 | 단일 리뷰어 선택 |
+| 리뷰어 플래그 | 아니요 | 모든 리뷰어 레인 플래그를 그대로 전달: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
 | `--all` | 아니요 | 구성된 모든 리뷰어를 병렬로 실행 |
 | `--max-cycles N` | 아니요 | 사이클 상한 재정의 (기본값 3) |
 
@@ -239,7 +256,6 @@ WebSearch에서 가져온 패키지는 `[ASSUMED]`(`[VERIFIED]`가 아님)로 �
 |----------|----------|-------------|
 | `N` | **예** | 실행할 단계 번호 |
 | `--wave N` | 아니요 | 단계에서 웨이브 `N`만 실행 |
-| `--validate` | 아니요 | 실행 시작 전 상태 검증 실행 |
 | `--cross-ai` | 아니요 | 외부 AI CLI에 실행 위임 (`workflow.cross_ai_command` 사용) |
 | `--no-cross-ai` | 아니요 | 설정에서 크로스 AI가 활성화되어 있어도 로컬 실행 강제 |
 
@@ -251,7 +267,6 @@ WebSearch에서 가져온 패키지는 `[ASSUMED]`(`[VERIFIED]`가 아님)로 �
 ```bash
 /gsd-execute-phase 1                # 단계 1 실행
 /gsd-execute-phase 1 --wave 2       # 웨이브 2만 실행
-/gsd-execute-phase 1 --validate     # 실행 전 상태 검증
 /gsd-execute-phase 2 --cross-ai     # 단계 2를 외부 AI CLI에 위임
 ```
 
@@ -573,7 +588,7 @@ Nyquist 검증 갭을 소급하여 감사하고 보완합니다.
     "flags": {
       "discuss": "--auto",
       "plan": "--skip-research",
-      "execute": "--validate"
+      "execute": "--cross-ai"
     }
   }
 }
@@ -593,7 +608,7 @@ Nyquist 검증 갭을 소급하여 감사하고 보완합니다.
 /gsd-help --brief <topic>           # 압축된 범위 지정 조회 — 시그니처 + 한 줄 요약
 ```
 
-전체 별칭 테이블은 `get-shit-done/workflows/help/modes/topic.md`를 참조하세요. 알 수 없는 주제는 인식된 목록을 출력합니다.
+전체 별칭 테이블은 `gsd-core/workflows/help/modes/topic.md`를 참조하세요. 알 수 없는 주제는 인식된 목록을 출력합니다.
 
 ---
 
@@ -1235,6 +1250,7 @@ AI 시스템 구축을 포함하는 단계에 대한 AI-SPEC.md 디자인 계약
 | `--qwen` | Qwen Code 검토 포함 (Alibaba Qwen 모델) |
 | `--cursor` | Cursor 에이전트 검토 포함 |
 | `--agy` / `--antigravity` | Antigravity CLI 검토 포함 (Google 자격증명으로 무료) |
+| `--kimi-code` | Kimi Code CLI 검토 포함 (Moonshot AI) |
 | `--ollama` | Ollama 서버 검토 포함 |
 | `--lm-studio` | LM Studio 서버 검토 포함 |
 | `--llama-cpp` | llama.cpp 서버 검토 포함 |
@@ -1517,7 +1533,7 @@ GSD Discord 커뮤니티에 참여하려면 GSD README의 링크를 방문하거
 npm run lint:descriptions
 ```
 
-이 검사는 `tests/enh-2789-description-budget.test.cjs`를 통해 `npm test`의 일부로도 실행됩니다.
+이 검사는 `tests/skill-frontmatter-contract.test.cjs`를 통해 `npm test`의 일부로도 실행됩니다.
 
 ---
 

@@ -49,6 +49,12 @@ function sanitizeWorkstreamSessionToken(value: unknown): string | null {
   return token ? token.slice(0, 160) : null;
 }
 
+/** Test-only seam: clear the memoized controlling-TTY probe cache (#1191). */
+function _resetControllingTtyCacheForTests(): void {
+  cachedControllingTtyToken = null;
+  didProbeControllingTtyToken = false;
+}
+
 function probeControllingTtyToken(): string | null {
   if (didProbeControllingTtyToken) return cachedControllingTtyToken;
   didProbeControllingTtyToken = true;
@@ -226,6 +232,31 @@ function getActiveWorkstream(cwd: string, opts: ActiveWorkstreamOpts = {}): stri
   return name;
 }
 
+/**
+ * Read-only sibling of getActiveWorkstream (#2850): identical resolution —
+ * adapter -> stored name -> validate format -> workstream dir exists — but
+ * NEVER calls adapter.clear(). getActiveWorkstream's self-heal (deleting a
+ * stale/invalid pointer) is correct for a command that is actively acting on
+ * the active workstream; it is wrong for a read-only consumer invoked on
+ * every render (e.g. the statusline hook), which must never mutate
+ * persistent, possibly cross-session state as a side effect of drawing a
+ * screen. A stale or invalid pointer simply resolves to null here — the
+ * caller decides what "unresolvable" means for its own render, and the
+ * pointer file is left exactly as it was for whatever created it to fix.
+ */
+function peekActiveWorkstream(cwd: string, opts: ActiveWorkstreamOpts = {}): string | null {
+  const adapter = pickActiveWorkstreamAdapter(cwd, opts);
+  if (!adapter) return null;
+
+  const name = adapter.read();
+  if (!name || !validateWorkstreamName(name)) return null;
+
+  const wsDir = path.join(planningRoot(cwd), 'workstreams', name);
+  if (!fs.existsSync(wsDir)) return null;
+
+  return name;
+}
+
 function setActiveWorkstream(cwd: string, name: string | null | undefined, opts: ActiveWorkstreamOpts = {}): void {
   const adapter = pickActiveWorkstreamAdapter(cwd, opts);
   if (!adapter) return;
@@ -342,9 +373,11 @@ export = {
   createMemoryPointerAdapter,
   pickActiveWorkstreamAdapter,
   getActiveWorkstream,
+  peekActiveWorkstream,
   setActiveWorkstream,
   clearActiveWorkstream,
   parseCliWorkstream,
   resolveActiveWorkstream,
   applyResolvedWorkstreamEnv,
+  _resetControllingTtyCacheForTests,
 };

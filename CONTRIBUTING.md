@@ -7,29 +7,25 @@
 git clone https://github.com/open-gsd/gsd-core.git
 cd gsd-core
 
-# Install dependencies
-npm install
+# Activate the pinned Node version from .nvmrc
+nvm use
+
+# Validate your environment
+npm run check:env
+
+# Install dependencies (reproducible, lockfile-driven)
+npm ci
 
 # Run tests
 npm test
 ```
 
----
+`npm ci` is required over `npm install`. It installs exactly what `package-lock.json`
+specifies and fails fast if the lockfile is out of sync — this is intentional.
 
-## Bootstrap your environment
-
-For a step-by-step setup guide covering Node version managers, `npm ci`, the environment
-validator, daily commands, and troubleshooting, see:
-
-**[docs/contributing/bootstrap.md](docs/contributing/bootstrap.md)**
-
-Quick start:
-
-```bash
-nvm use           # activate the pinned Node version from .nvmrc
-npm run check:env # validate your environment
-npm ci            # install from lockfile
-```
+**[docs/contributing/bootstrap.md](docs/contributing/bootstrap.md)** is the source of truth
+for setup. See it for Node version managers other than nvm (fnm, asdf, mise), the
+environment validator, daily commands, and troubleshooting.
 
 ---
 
@@ -102,7 +98,7 @@ An ADR (Architecture Decision Record) documents a significant architectural deci
 
 **Do not compute a "next number" locally.** Any PR that uses the legacy `NNNN-*` sequential pattern for a *new* ADR or PRD will be asked to rename the file to the `<issue#>-<slug>.md` format before merge.
 
-**Example:** Issue #3485 was opened, approved, and its number became the prefix: `docs/adr/3485-adr-prd-naming-convention.md` on branch `docs/3485-adr-prd-naming-convention`.
+**Example:** Issue #2264 was opened, approved, and its number became the prefix: `docs/adr/2264-golden-parity-redesign.md`.
 
 **Rejection reasons:** Issue not approved before file was created, filename uses local-compute sequential number instead of issue#, multiple decisions bundled in one PR, file placed in wrong directory (`docs/adr/` vs `docs/prd/`).
 
@@ -203,7 +199,13 @@ This writes `.changeset/<adjective>-<noun>-<noun>.md`. Three random words → co
 
 Fragments are consolidated into `CHANGELOG.md` at release time by the release workflow. See [`.changeset/README.md`](.changeset/README.md) for the format spec and [#2975](https://github.com/open-gsd/gsd-core/issues/2975) for the rationale.
 
-**CI enforcement:** the `Changeset Required` workflow (`scripts/changeset/lint.cjs`) fails any PR that touches `bin/`, `gsd-core/`, `agents/`, `commands/`, `hooks/`, or `sdk/src/` without a `.changeset/*.md` fragment.
+**CI enforcement:** the `Changeset Required` workflow (`scripts/changeset/lint.cjs`) fails any PR that touches `bin/`, `gsd-core/`, `src/`, `agents/`, `commands/`, `hooks/`, or `sdk/src/` without a `.changeset/*.md` fragment. (`src/` is the TypeScript source of truth compiled into `gsd-core/bin/lib/*.cjs`, so editing it is a user-facing change even though the generated `.cjs` is gitignored and never appears in the diff.)
+
+> **Running it locally.** The lint derives its changed-file set from `GITHUB_BASE_REF`, which only CI sets. `node scripts/changeset/lint.cjs` on a developer machine therefore does **not** evaluate your branch and can report success on a PR that CI will fail. Pass the base explicitly to reproduce the CI result:
+>
+> ```bash
+> GITHUB_BASE_REF=next node scripts/changeset/lint.cjs
+> ``` The gate also **validates the content** of every changed fragment: a fragment whose frontmatter does not parse (e.g. a `pr: 0` placeholder that was never backfilled to the real PR number) fails the gate with `fail_invalid_fragment`, naming the offending file. This stops a malformed fragment from merging to `next` and only detonating later in the release job's CHANGELOG render.
 
 **Opt-out:** PRs with no user-facing impact (test refactors, lint config changes, CI tweaks, formatting-only changes) can add the `no-changelog` label. The lint honors it. When unsure whether a change is user-facing, **add the fragment**.
 
@@ -215,7 +217,7 @@ then run `scripts/release-notes/format-github-release-notes.cjs --apply` to
 rewrite the body into the project's curated format: an **Install** block,
 followed by **What's Changed** grouped into **Feature** / **Enhancement** /
 **Fix** sections (classified by each PR's conventional-commit title prefix —
-`feat` → Feature, `fix` → Fix, everything else → Enhancement), then
+`feat` → Feature, `fix` → Fix, non-user-facing types `test`/`chore`/`ci`/`docs`/`refactor`/`perf`/`revert` → omitted from the user-facing notes, everything else → Enhancement), then
 **New Contributors** and the **Full Changelog** link.
 
 To re-format an existing release by hand (e.g. backfilling an older release):
@@ -227,6 +229,33 @@ node scripts/release-notes/format-github-release-notes.cjs \
 
 Omit `--apply` to print the reformatted body to stdout for review without
 publishing.
+
+### PR title convention (enforced at open time)
+
+Because the changelog is built from PR titles, your **PR title** must follow:
+
+```
+type(#<issue>): short summary
+```
+
+- **Start with the type** — `feat`, `fix`, or any other conventional type
+  (`chore`, `docs`, `refactor`, …). No leading tags or prefixes: a title like
+  `[security] fix(config): …` defeats the `^fix` bucket anchor and silently
+  files the entry under the wrong changelog section.
+- **Put the linked issue ref in the scope** — `(#<digits>)`. This is what
+  renders as a link to the issue in the changelog line. `fix(core): …` buckets
+  correctly but produces a changelog entry with **no issue link**.
+- A breaking-change marker is fine: `feat(#42)!: …`.
+
+Examples: `fix(#1542): roadmap rollback`, `feat(#39): milestone-prefixed phase IDs`,
+`enhance(#1549): add PR-title validator`.
+
+**CI enforcement:** `pr-title-validator.yml` checks the title on open/edit and
+fails with the required format if it doesn't conform. It reuses the same matcher
+the changelog classifier uses (`scripts/release-notes/conventional-title.cjs`), so a title
+that passes the check is guaranteed to bucket and link correctly. Fix a flagged
+title by editing it in place — the check re-runs on edit, no need to recreate
+the PR.
 
 ## Documentation Updates — Update the Relevant Docs
 
@@ -343,6 +372,169 @@ const { createTempProject, createTempGitProject, createTempDir, cleanup, runGsdT
 | `createTempDir(prefix?)` | Bare temp directory | Testing features that don't need `.planning/` |
 | `cleanup(tmpDir)` | Removes directory recursively | Always use in `afterEach` |
 | `runGsdTools(args, cwd, env?)` | Executes gsd-tools.cjs | Testing CLI commands |
+
+### Spawning a subprocess: use the process seam
+
+Anything that shells out goes through `tests/helpers/process-seam.cjs` — never a hand-rolled
+`spawnSync`/`execFileSync` in your suite.
+
+```javascript
+const { runNode, runGit, runHook, OUTCOME } = require('./helpers/process-seam.cjs');
+
+const r = runHook(HOOK_PATH, [], { input: JSON.stringify(payload), timeoutMs: 5000 });
+assert.equal(r.outcome, OUTCOME.EXITED);
+assert.equal(r.exitCode, 0);
+```
+
+| Primitive | Spawns |
+|---|---|
+| `runNode(argv, opts)` | `process.execPath` |
+| `runGit(argv, opts)` | `git` |
+| `runHook(scriptPath, argv, opts)` | `opts.interpreter` (default `process.execPath`; pass `'bash'` for a shell script) |
+
+`opts`: `{ cwd, env, input, timeoutMs, killSignal, interpreter }`.
+
+Every call returns the same discriminated union — `{ outcome, exitCode, stdout, stderr, timedOut,
+signal, killed, code }` — and **never throws** for a child's exit code, a timeout, a buffer
+overflow, or a spawn failure. All four are data, so you assert on them:
+
+```javascript
+assert.equal(r.outcome, OUTCOME.TIMED_OUT);
+assert.equal(r.timedOut, true);
+```
+
+Two rules the seam enforces for you:
+
+- **Every call is timeout-bounded.** `timeoutMs` defaults to 60s; there is no unbounded path. An
+  unbounded subprocess is an indefinite hang, and it is how macOS CI silently stops reporting.
+- **`outcome` distinguishes cases that look identical.** A timeout and a `maxBuffer` overflow both
+  report `exitCode: null` and `signal: 'SIGTERM'`, differing only in `code` (`ETIMEDOUT` vs
+  `ENOBUFS`). Branch on `outcome`, never on `signal`.
+
+The seam is **not** a fault-injection surface — it cannot tell an injected timeout from a genuine
+bench OOM. Inject faults in-process through a module's `deps` parameter instead.
+
+Per-suite wrappers are still expected and encouraged: bind your fixture (cwd, env, payload) in a
+local helper and delegate the spawn to the seam.
+
+**Class-norm timeouts live in `tests/helpers/timeouts.cjs`** — `PROBE_TIMEOUT_MS`,
+`GIT_TIMEOUT_MS`, `BUILD_TIMEOUT_MS`, `INSTALL_TIMEOUT_MS`. These describe how long a whole CLASS
+of subprocess call takes (a CLI probe, git plumbing on a fixture repo, a hooks build, a full
+`bin/install.js` run), not a single suite's preference, so import them rather than re-declaring the
+same literal with the same comment in yet another file. Only write a local constant when a site
+genuinely differs from its class (a real `tsc` compile, a `regen:derived` run, ...) — and give that
+local constant its own justifying comment explaining why it departs from the norm.
+
+#### When you want git to *throw*: `gitOrThrow`
+
+`runGit` never throws — that is the whole point of it. But `execSync` and `execFileSync` **do**
+throw on a non-zero exit, and a lot of fixture setup relies on that: `git commit` failing should
+stop the test right there, not hand back an empty string that produces a baffling assertion failure
+twenty lines later.
+
+For that case use `tests/helpers/git-fixture.cjs`:
+
+```javascript
+const { gitOrThrow } = require('./helpers/git-fixture.cjs');
+
+gitOrThrow(['init', '-b', 'main'], { cwd: dir });
+gitOrThrow(['commit', '-m', 'seed'], { cwd: dir });   // throws if git exits non-zero
+const branch = gitOrThrow(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: dir }).trim();
+```
+
+It returns `stdout` as a **string** on success. On any non-`EXITED` outcome, or a non-zero exit, it
+throws an `Error` carrying `status`, `exitCode`, `stdout`, `stderr`, `signal`, `timedOut` and
+`outcome` as own properties. `status` and `exitCode` are deliberate aliases: `status` is what the
+legacy `execSync` idiom reads (`catch (err) { assert.equal(err.status, 1) }`), so a migrated call
+site keeps working.
+
+| You want | Use |
+|---|---|
+| Every outcome as data; you branch on `outcome` | `runGit` |
+| Fixture setup that must abort loudly on failure | `gitOrThrow` |
+
+`process-seam.cjs` itself is untouched by this — it still never throws.
+
+If your per-suite wrapper spawns something that is **not** git — a node CLI via `runNode`, a bash
+snippet via `runHook` — and its callers depend on a throw, call `throwIfFailed(result, displayName)`
+directly instead of hand-rolling the same `outcome !== EXITED || exitCode !== 0` check. `gitOrThrow`
+is itself just `throwIfFailed` bound to `runGit`, so every thrown error — git or not — carries the
+same `status`/`exitCode`/`stdout`/`stderr`/`signal`/`timedOut`/`outcome` shape:
+
+```javascript
+const { throwIfFailed } = require('./helpers/git-fixture.cjs');
+
+const r = runNode([BUILD_SCRIPT], { timeoutMs: BUILD_TIMEOUT_MS });
+throwIfFailed(r, 'build-hooks.js (before install tests)');
+```
+
+#### When you want the legacy shape without a throw: `toLegacyResult`
+
+Some call sites never wanted a throw in the first place — they already branch on exit status as
+data, reading `.status`/`.stdout`/`.stderr` off the result themselves. Those still need the seam's
+`exitCode` renamed to the legacy `status` field their assertions expect. Use `toLegacyResult`
+instead of hand-rolling the three-line mapping — ~8 test files did exactly that independently
+before this export existed (#3147):
+
+```javascript
+const { toLegacyResult } = require('./helpers/git-fixture.cjs');
+
+function runLint(args = []) {
+  const r = runNode([LINT_SCRIPT, ...args], { timeoutMs: PROBE_TIMEOUT_MS });
+  return toLegacyResult(r); // { status, stdout, stderr }
+}
+```
+
+It is a bare mapping and nothing more. If your call site needs an extra field beyond that shape (a
+parsed-JSON body, a fixture-specific path alongside the result), compose it rather than extending
+the helper: `{ ...toLegacyResult(result), extra }`. And if your site's return shape genuinely
+diverges from `{ status, stdout, stderr }` — e.g. it substitutes a parsed report object for raw
+`stdout` — leave it as its own local mapping; forcing every result-reshaping helper onto one shared
+function is the same drift `toLegacyResult` exists to prevent, just in the other direction.
+
+#### The lint rule that enforces it
+
+`local/no-unbounded-spawn` (`eslint-rules/no-unbounded-spawn.cjs`) fails any `spawnSync`,
+`execFileSync` or `execSync` under `tests/` that is not timeout-bounded. It resolves renamed
+destructures (`const { execSync: exec } = require('node:child_process')`) and chained requires
+(`require('node:child_process').execSync(...)`), so renaming your way around it does not work.
+
+Two things it deliberately rejects, because both look bounded and are not:
+
+- `timeout: 0` — Node reads zero as *no timeout*.
+- `timeout: 999999999` — anything above the 600000 ms ceiling is effectively unbounded. Size the
+  number to what the command actually runs and say why in a comment.
+
+A non-literal value (`timeout: GIT_TIMEOUT_MS`) is trusted — that is the shape you should be
+writing.
+
+When a call genuinely needs more than the 600000 ms ceiling — a full installer run, a build plus
+generators — the escape is an inline marker comment, exactly the `// allow-test-rule: <reason>`
+idiom above:
+
+```javascript
+// allow-spawn-timeout-ceiling: regen:derived chains a full build plus eight generators
+timeout: 900000,
+```
+
+The reason is required and must be non-empty; a bare `// allow-spawn-timeout-ceiling:` (or one
+with only whitespace after the colon) is not an audit trail and still reports `timeoutTooLarge`.
+The marker binds only to the call it decorates — either the line immediately above it, or
+anywhere inside that call's own source range — never to the rest of the file. Critically, the
+escape only ever raises the ceiling for a call that already resolves to a numeric timeout: it
+never waives the requirement for a bound. A marked call with no `timeout` at all still reports
+`unboundedSpawn`.
+
+There is no allowlist. `eslint-rules/no-unbounded-spawn.allowlist.json` grandfathered files that
+predated the rule; the epic that introduced it (#3064) migrated every site across four waves and
+deleted the file in its terminal wave (#3148), so `local/no-unbounded-spawn` now runs with **no
+exemption surface** across `tests/**`. There is no file to add an entry to — fix the timeout at
+the call site instead. The only sanctioned escapes are an explicit `timeout` on a raw spawn (for a
+call shape the process seam cannot express, e.g. a `shell: true` invocation for `npm.cmd` on
+Windows, or `stdio` redirection to a real fd) and the `// allow-spawn-timeout-ceiling: <reason>`
+marker above for a bound over the 600000 ms ceiling. Never reach for `eslint-disable` on this rule
+— with the allowlist gone, that is the only remaining way to silence it, and a test asserts that no
+such comment exists anywhere under `tests/`.
 
 ### Test Structure
 
@@ -473,6 +665,14 @@ Required cases where relevant:
 - Scalars where arrays are expected, and objects where strings are expected
 
 Property-style parser tests are encouraged for high-risk parsers. They must be deterministic: pin the seed, bound the iteration count, and print replay data on failure.
+
+##### Fixture provenance (#2371)
+
+**A gate's fixtures may not be derived from the gate's own writer, grammar, or docstring examples. A negative fixture must come from a source that does not know the gate exists.**
+
+This is stricter than the adversarial-input rule above and exists because of it: `tests/fixtures/adversarial/` covers hostile input, but a fixture written by the parser's own author — even a deliberately "realistic" one — is still drawn from the author's mental model of the format. It can only ever confirm what the author already believed, never surface what they didn't anticipate. A property-test generator has the same failure mode one level up: seeding the generator from the writer/render function that produces the same format makes the document shape a constant, so the property can never explore a document the writer wouldn't produce (see the document-shaped vs. writer-seeded property tests in `tests/api-coverage.test.cjs` for a worked example — the writer-seeded one cannot fail against a decoy table; the document-shaped one can).
+
+For a gate whose fixtures come from real user reports, put them under `tests/fixtures/representative/<gate>/` with a `MANIFEST.json` labeling each fixture's source issue and expected gate verdict, and drive them through the gate's real CLI entrypoint (gate-verdict altitude), not the parser function in isolation — see `tests/fixtures/representative/README.md` and `tests/representative-corpus.test.cjs`. If the gate is not yet fixed, do not mark the assertion `{ todo: true }` and do not skip it: this repo's test-runner (`gsd-test` / `gsd-test-runner`) has no concept of node:test's `todo` option — its JSONL result parser only recognizes `kind: "pass" | "fail"`, so a thrown todo-marked test is still counted as a real failure and blocks the push gate. Instead record BOTH the correct target verdict (`expected*`) and the exact current observed verdict (`currentBuggyOutput`) in the manifest, and assert against `currentBuggyOutput` — an honest, non-vacuous characterization of today's known-broken behavior that passes today and breaks loudly the moment the real fix changes the observed output, forcing the assertion to be flipped to `expected*`.
 
 #### Filesystem writes and installers
 
@@ -726,6 +926,71 @@ npm run check:alias-drift
 
 This verifies generated alias artifacts are in sync with manifest source-of-truth.
 
+### Editing shipped content (gsd-core/workflows, references, templates, contexts, agents/, commands/gsd/)
+
+Editing the content of a copied shipped file — a `gsd-core/workflows/*.md`, an agent, a
+command definition — requires **zero manual fixture regeneration**. There is no
+committed path→hash manifest or per-file size baseline to update by hand; the
+differential attribution check (`tests/emitted-attribution.test.cjs`, ADR-2719) computes
+what your PR changed against `next` and requires every emitted-artifact hash that moved
+to be attributable to your diff. If it is not, the check fails and names the paths.
+
+Legitimate cases where emitted bytes move for a reason your diff cannot show directly —
+a converter change, for example — go through a **per-PR fragment** under
+`tests/emitted-drift-acks/` (#2914; name the path, say why); see `CONTEXT.md`'s
+`### Emitted Artifact Provenance` entry for the full model. Growth in a
+`gsd-core/workflows/*.md` or `agents/gsd-*.md` file is reported with its exact byte delta
+and needs the same acknowledgment; the outer tier hard caps in
+`tests/workflow-size-budget.test.cjs` / `tests/agent-size-budget.test.cjs` are unaffected
+and still apply. The legacy single `tests/emitted-drift-ack.json` is still read and
+unioned in for any branch that still carries it, but new acknowledgments go in a NEW
+fragment, never that file.
+
+You do not need to memorize any of this. **The failure output names its own remedy** — it
+tells you to create a new fragment under `tests/emitted-drift-acks/` (with a name nobody
+else is using — include your issue or PR number), which key to use, and prints a minimal
+valid document you can paste. Note the two key spaces, because the message says which one
+applies: an unattributable **hash** ripple is keyed on the emitted path
+(`skills/gsd-add-tests/SKILL.md`), while **growth** is keyed on the bare filename as it
+appears under `gsd-core/workflows/` or `agents/` (`explore.md`). When you remove the last
+entry from your fragment, delete the fragment file too — its presence is the alarm, so an
+empty one signals nothing. Nothing here is regenerated: if you find yourself looking for a
+baseline file to re-run a generator over, that file was deleted by #2724 and is not coming
+back.
+
+**Why fragments, not one file (#2914):** every PR needing an acknowledgment used to
+rewrite `tests/emitted-drift-ack.json`'s `paths` map wholesale — a single shared mutable
+file every such PR touches guarantees a merge conflict between any two of them (5 of 6
+conflicting PRs in one open queue collided on this file and nothing else), and it means
+spent, already-merged entries pile up on `next`. A fragment per PR — the same shape
+`.changeset/` already uses for the identical problem — means two PRs can never conflict on
+this seam again, and a fragment left on `next` after merge is inert rather than a shared
+cell. Two ack sources (two fragments, or a fragment and the legacy file) may **never** name
+the same path; that is a hard, loudly-reported error, not a silent last-wins.
+
+`tests/emitted-drift-ack.json` (the legacy single file, specifically — NOT the fragment
+directory) must never persist on `next` (#2914): every entry is scoped to the diff that
+introduced it, so once merged it is, by definition, already at the base — spent and inert,
+regardless of shape, and its persistence is what makes it a shared merge-conflict cell. A
+fragment persisting on `next` is harmless, since fragments are independently named and
+cannot conflict with anything, so this guard is deliberately scoped to the legacy file
+alone. This is enforced only on `next` itself, by the `guard-no-ack-on-next` job in
+`.github/workflows/test.yml` (push-to-`next` trigger,
+`scripts/lint-emitted-drift-ack.cjs --guard-next`), never as a PR-lane check — a PR-lane
+"base ack must be absent" check would red every open PR the moment one landed (the #2768
+shape #2789 exists to prevent). If you ever see the legacy file present on `next`, delete
+it; do not try to make it well-formed.
+
+`npm run regen:derived` still exists for the artifacts that ARE committed and derived —
+`sync-manifest-versions`, the ADR index, the capability matrix, the inventory manifest,
+the registry, and `tests/fixtures/install-tree/*.json` (`npm run gen:install-tree`, the
+one fixture family ADR-2719 §7 keeps committed, because it conflicts on 0 of 7 and its
+diffs are readable). Run it after a change to any of those, before committing:
+
+```bash
+npm run regen:derived
+```
+
 Optional local pre-commit hook entry (Git-native):
 
 ```bash
@@ -790,6 +1055,7 @@ The following checks run on every PR in addition to the test suite:
 | Job | What it checks | How to pass |
 |-----|----------------|-------------|
 | `Lint — ESLint` | No source-grep tests (see above), via the `local/no-source-grep` rule | Replace with `runGsdTools()` behavioral tests, or add `// allow-test-rule: <reason>` |
+| `Lint — cross-platform portability` | Windows-portability defects in tests, via `local/no-path-literal-in-assert` (more rules land per [ADR-1703](docs/adr/1703-portability-enforcement-architecture.md)) — e.g. a path-returning call asserted against a hardcoded `/`-literal | Normalize the actual: `String(pathFn(...)).replace(/\\/g, '/')`, or structure platform-specific code behind a `process.platform !== 'win32'` guard. **No `eslint-disable`** — see [cross-platform-portability-rules.md](docs/contributing/cross-platform-portability-rules.md) |
 
 Run locally before pushing: `npm run lint` (or `npx eslint .`)
 
@@ -834,7 +1100,7 @@ Defensive normalization at trust boundaries must validate both the value's type 
 
 - **CommonJS** (`.cjs`) — the project uses `require()`, not ESM `import`
 - **No external dependencies in core** — `gsd-tools.cjs` and all lib files use only Node.js built-ins
-- **Conventional commits** — `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `ci:`
+- **Conventional commits** — `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `ci:`. The full grammar is `<type>(<scope>): <subject>` (enforced by `hooks/gsd-validate-commit.sh`; subject ≤72 chars, lowercase, imperative mood, no trailing period). When the work resolves a tracked issue, put the issue number in the scope: `fix(#1520): randomize mktemp temp paths on BSD/macOS`. The same convention applies to PR titles — release notes are grouped by the title's type prefix (`feat` → Feature, `fix` → Fix, non-user-facing types omitted, everything else → Enhancement).
 
 ## File Structure
 
@@ -847,11 +1113,20 @@ gsd-core/
                           pattern: workflows/<name>/modes/*.md +
                           workflows/<name>/templates/*. Parent dispatches
                           to mode files. See workflows/discuss-phase/ as
-                          the canonical example (#2551). New modes for
+                          the canonical example (the discuss-phase/modes split, #717). New modes for
                           discuss-phase land in
                           workflows/discuss-phase/modes/<mode>.md.
-                          Per-file budgets enforced by
-                          tests/workflow-size-budget.test.cjs.
+                          Per-file growth is caught by the differential
+                          attribution check (tests/emitted-attribution.test.cjs,
+                          ADR-2719) — it reports the exact byte delta and
+                          requires a per-PR fragment in
+                          tests/emitted-drift-acks/ (#2914), no committed
+                          snapshot to regenerate. Loose tier
+                          hard caps remain in tests/workflow-size-budget.test.cjs.
+                          The same applies to agent files (agents/gsd-*.md,
+                          tests/agent-size-budget.test.cjs). Full how-to +
+                          reference in docs/TESTING-SUITES.md (Workflow &
+                          agent size budget); see issue #1074.
   references/           — Reference documentation (.md)
   templates/            — File templates
 agents/                 — Agent definitions (.md) — CANONICAL SOURCE

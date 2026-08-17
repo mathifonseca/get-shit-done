@@ -15,8 +15,9 @@ const { describe, test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 const { createTempProject, cleanup, TOOLS_PATH } = require('./helpers.cjs');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const TEST_ENV_BASE = {
   GSD_SESSION_KEY: '',
@@ -36,15 +37,15 @@ const TEST_ENV_BASE = {
 };
 
 function runMigrateConfig(cwd, extraArgs = [], env = {}) {
-  const result = spawnSync(process.execPath, [TOOLS_PATH, 'migrate-config', ...extraArgs], {
+  const result = runNode([TOOLS_PATH, 'migrate-config', ...extraArgs], {
     cwd,
-    encoding: 'utf-8',
     env: { ...process.env, ...TEST_ENV_BASE, ...env },
+    timeoutMs: PROBE_TIMEOUT_MS,
   });
   return {
     stdout: result.stdout || '',
     stderr: result.stderr || '',
-    status: result.status,
+    status: result.exitCode,
   };
 }
 
@@ -176,3 +177,36 @@ describe('migrate-config — idempotent (running twice produces no-op)', () => {
     assert.deepEqual(secondParsed.normalizations, [], 'Second run normalizations must be empty');
   });
 });
+
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/bug-321-config-defaults-clone-strategy.test.cjs — consolidation epic #1969 (B3 #1972)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:bug-321-config-defaults-clone-strategy (consolidation epic #1969 B3 #1972)", () => {
+'use strict';
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const configuration = require('../gsd-core/bin/lib/configuration.cjs');
+
+test('mergeDefaults clones defaults without JSON serialization fragility (#321)', () => {
+  const sentinelKey = '__bug321_bigint_sentinel__';
+  const sentinelValue = BigInt('9007199254740993001');
+
+  configuration.CONFIG_DEFAULTS[sentinelKey] = sentinelValue;
+  try {
+    const merged = configuration.mergeDefaults({});
+    assert.equal(
+      merged[sentinelKey],
+      sentinelValue,
+      'mergeDefaults must preserve non-JSON scalar defaults when cloning'
+    );
+  }
+  finally {
+    delete configuration.CONFIG_DEFAULTS[sentinelKey];
+  }
+});
+  });
+}

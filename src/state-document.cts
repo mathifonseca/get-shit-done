@@ -7,6 +7,8 @@
  * from the prior hand-written .cjs; only types are added.
  */
 
+import { splitTableRow } from './markdown-table.cjs';
+
 // Internal helpers
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -32,26 +34,220 @@ function existingProgressExceedsDerived(existingProgress: ProgressRecord, derive
   return existing !== null && derived !== null && existing > derived;
 }
 
+/**
+ * Return true if a pipe-table row's first cell is a separator cell (`---`
+ * variants) rather than a field name.  Prevents the separator row
+ * `| --- | --- |` from being treated as a field named "---".
+ */
+function isTableSeparatorRow(firstCell: string): boolean {
+  // A separator cell contains only dashes, colons (alignment hints), and whitespace.
+  return /^[\s\-:]+$/.test(firstCell.trim());
+}
+
+function countLeading(str: string): number {
+  const match = /^[ \t]*/.exec(str);
+  return match ? match[0].length : 0;
+}
+
+/**
+ * Canonicalize one UTF-16 code unit per the ECMAScript non-unicode
+ * `Canonicalize` abstract operation, which governs how a case-insensitive
+ * (`/i`, no `u` flag) RegExp compares characters: take `ch.toUpperCase()`.
+ * The uppercasing is REJECTED (the original character is kept as-is) in
+ * either of two cases: (1) `ch.toUpperCase()` does not produce exactly one
+ * character (e.g. "ß" -> "SS" — a multi-character case-fold can never be a
+ * per-character regex match, so Canonicalize leaves it alone), or (2) it
+ * produces exactly one character but the original character's code point is
+ * >= 128 while the uppercased character's code point is < 128 (this is what
+ * stops a non-ASCII character from folding onto an ASCII one under `/i` —
+ * e.g. KELVIN SIGN U+212A uppercases to ASCII "K" (U+004B), so this rule
+ * rejects the fold and keeps U+212A, meaning `/k/i`/`/K/i` do NOT match
+ * U+212A). Otherwise, the uppercased character is used. Plain
+ * `.toLowerCase()`/`.toUpperCase()` folds both of these cases, which is
+ * exactly why they diverge from real regex `/i` semantics.
+ */
+function canonicalizeCharForCaselessCompare(ch: string): string {
+  const upper = ch.toUpperCase();
+  if (upper.length !== 1) {
+    return ch;
+  }
+  if (ch.charCodeAt(0) >= 128 && upper.charCodeAt(0) < 128) {
+    return ch;
+  }
+  return upper;
+}
+
+/**
+ * Canonicalize a whole string, one UTF-16 code unit at a time, per the
+ * ECMAScript non-unicode `Canonicalize` rule (see
+ * canonicalizeCharForCaselessCompare) so that two strings compare equal
+ * under this function iff a non-`u`-flag `/i` RegExp would treat them as
+ * the same literal text. This is the correct replacement for
+ * `.toLowerCase()` when replicating a non-`u` `/i` regex: `.toLowerCase()`
+ * folds some non-ASCII characters (e.g. KELVIN SIGN U+212A) onto their
+ * ASCII counterparts, which real `/i` regex semantics do not. Iteration is
+ * by UTF-16 code unit (not code point) to match how a non-`u` regex engine
+ * itself operates on surrogate halves individually.
+ */
+function canonicalizeForCaselessCompare(str: string): string {
+  let result = '';
+  for (let i = 0; i < str.length; i++) {
+    result += canonicalizeCharForCaselessCompare(str[i]);
+  }
+  return result;
+}
+
+/**
+ * Return true when the caller's raw (untrimmed) `fieldName` may be considered
+ * to match a row's raw (untrimmed) field cell text. Faithfully replicates the
+ * backtracking of the regex this function replaced: `^(\|[ \t]*)(FieldName)
+ * ([ \t]*\|...)`. Group 1 (`\|[ \t]*`, greedy but backtrackable) can hand any
+ * PREFIX of the cell's leading `[ \t]` run over to group 2 (the literal,
+ * case-insensitive `fieldName` text) — so `fieldName` is tried at every offset
+ * `j` from 0 up to the length of that leading run. For a given `j` to be a
+ * genuine match, two things must hold: `rawCell.slice(j, j + fieldName.length)`
+ * must equal `fieldName` case-insensitively (group 2), AND everything left
+ * over after it — `rawCell.slice(j + fieldName.length)` — must be entirely
+ * `[ \t]` characters, because group 3 (`[ \t]*\|`) must consume that leftover
+ * as whitespace before it can reach the delimiter pipe.
+ *
+ * A simple count-of-leading/trailing-whitespace comparison is NOT equivalent:
+ * it ignores that group 2 is a literal-character match, not a whitespace-
+ * class match, so it can produce false positives whenever `fieldName`'s own
+ * padding is a different run of `[ \t]` characters than the cell's (e.g.
+ * `fieldName` padded with spaces against a cell padded with tabs) — caught by
+ * differential fuzzing against the regex this replaces.
+ *
+ * The case-insensitive comparison itself is done via
+ * canonicalizeForCaselessCompare, NOT `.toLowerCase()`: the replaced regex
+ * used `/i` WITHOUT the `u` flag, whose case-folding is the ECMAScript
+ * non-unicode `Canonicalize` operation. `.toLowerCase()` folds some non-ASCII
+ * characters onto ASCII ones (e.g. KELVIN SIGN U+212A -> "k") that `/i`
+ * (no `u`) does NOT fold, so `.toLowerCase()` alone would NOT faithfully
+ * replicate the old regex's semantics; canonicalizeForCaselessCompare does.
+ */
+function fieldNameMatchesRawCell(fieldName: string, rawCell: string): boolean {
+  const n = fieldName.length;
+  const cellLength = rawCell.length;
+  if (n > cellLength)
+    return false;
+  const leadingRun = countLeading(rawCell);
+  const maxOffset = Math.min(leadingRun, cellLength - n);
+  const canonicalFieldName = canonicalizeForCaselessCompare(fieldName);
+  for (let j = 0; j <= maxOffset; j++) {
+    if (canonicalizeForCaselessCompare(rawCell.slice(j, j + n)) !== canonicalFieldName)
+      continue;
+    if (/^[ \t]*$/.test(rawCell.slice(j + n)))
+      return true;
+  }
+  return false;
+}
+
+/**
+ * Locate the value cell of a pipe-table row `| FieldName | value |` for the
+ * given field name, by scanning `content` line by line (no whole-document
+ * regex). Only a strict two-column row (exactly 3 `|` chars, starting the
+ * line, ending the line after trailing space/tab is stripped) is considered;
+ * this is what makes a 3-column row or an unescaped-pipe-bearing value cell
+ * fail to match, mirroring the previous regex's behaviour. Separator rows
+ * (`| --- | --- |`) are skipped, not matched. The match is case-insensitive.
+ * A line terminator is `\r\n`, a lone `\r`, or a lone `\n` — matching the `m`
+ * flag semantics of the regex this function replaced. Returns the byte range
+ * of the value cell (after trimming surrounding space/tab) so the caller can
+ * splice it directly.
+ */
+function locateFieldRow(content: string, fieldName: string): { valueStart: number; valueEnd: number; rawValue: string } | null {
+  let lineStart = 0;
+  while (lineStart <= content.length) {
+    // A line terminator is `\r\n`, a lone `\r`, or a lone `\n` (JS treats a
+    // bare `\r` as a line terminator too — the regex this replaced used the
+    // `m` flag, which honors all three). Scan for whichever of `\r`/`\n`
+    // occurs first; if it's `\r` immediately followed by `\n`, the terminator
+    // is 2 chars wide, otherwise 1.
+    let terminatorIndex = -1;
+    let terminatorLength = 0;
+    for (let i = lineStart; i < content.length; i++) {
+      const ch = content[i];
+      if (ch === '\n') {
+        terminatorIndex = i;
+        terminatorLength = 1;
+        break;
+      }
+      if (ch === '\r') {
+        terminatorIndex = i;
+        terminatorLength = content[i + 1] === '\n' ? 2 : 1;
+        break;
+      }
+    }
+    const lineEnd = terminatorIndex === -1 ? content.length : terminatorIndex;
+    const line = content.slice(lineStart, lineEnd);
+    if (line.startsWith('|')) {
+      const pipeCount = (line.match(/\|/g) || []).length;
+      const trimmedEnd = line.replace(/[ \t]+$/, '');
+      if (pipeCount === 3 && trimmedEnd.endsWith('|')) {
+        const cells = splitTableRow(line);
+        if (cells.length === 2 && !isTableSeparatorRow(cells[0])) {
+          // Line has exactly 3 pipes (enforced above): opening pipe, the
+          // field/value separator pipe, and the row-closing pipe.
+          const fieldValueSeparatorPipe = line.indexOf('|', line.indexOf('|') + 1);
+          const rawCell = line.slice(1, fieldValueSeparatorPipe);
+          if (fieldNameMatchesRawCell(fieldName, rawCell)) {
+            const rowClosingPipe = line.indexOf('|', fieldValueSeparatorPipe + 1);
+            let valueStart = lineStart + fieldValueSeparatorPipe + 1;
+            while (content[valueStart] === ' ' || content[valueStart] === '\t')
+              valueStart++;
+            let valueEnd = lineStart + rowClosingPipe;
+            while (valueEnd - 1 >= valueStart && (content[valueEnd - 1] === ' ' || content[valueEnd - 1] === '\t'))
+              valueEnd--;
+            return { valueStart, valueEnd, rawValue: content.slice(valueStart, valueEnd) };
+          }
+        }
+      }
+    }
+    if (terminatorIndex === -1)
+      break;
+    lineStart = terminatorIndex + terminatorLength;
+  }
+  return null;
+}
+
 export function stateExtractField(content: string, fieldName: string): string | null {
   const escaped = escapeRegex(fieldName);
+  // Bold inline format: **FieldName:** value
   const boldPattern = new RegExp(`\\*\\*${escaped}:\\*\\*[ \\t]*(.+)`, 'i');
   const boldMatch = content.match(boldPattern);
   if (boldMatch)
     return boldMatch[1].trim();
+  // Plain line-start format: FieldName: value
   const plainPattern = new RegExp(`^${escaped}:[ \\t]*(.+)`, 'im');
   const plainMatch = content.match(plainPattern);
-  return plainMatch ? plainMatch[1].trim() : null;
+  if (plainMatch)
+    return plainMatch[1].trim();
+  // Pipe-table format: | FieldName | value |
+  // (Separator rows such as `| --- | --- |` are excluded.)
+  const hit = locateFieldRow(content, fieldName);
+  if (hit)
+    return hit.rawValue.trim();
+  return null;
 }
 
 export function stateReplaceField(content: string, fieldName: string, newValue: string): string | null {
   const escaped = escapeRegex(fieldName);
+  // Bold inline format: **FieldName:** value
   const boldPattern = new RegExp(`(\\*\\*${escaped}:\\*\\*\\s*)(.*)`, 'i');
   if (boldPattern.test(content)) {
     return content.replace(boldPattern, (_match, prefix: string) => `${prefix}${newValue}`);
   }
+  // Plain line-start format: FieldName: value
   const plainPattern = new RegExp(`(^${escaped}:\\s*)(.*)`, 'im');
   if (plainPattern.test(content)) {
     return content.replace(plainPattern, (_match, prefix: string) => `${prefix}${newValue}`);
+  }
+  // Pipe-table format: | FieldName | value |
+  // Preserve the surrounding pipe/whitespace structure; only swap the value cell.
+  const hit = locateFieldRow(content, fieldName);
+  if (hit) {
+    return content.slice(0, hit.valueStart) + newValue + content.slice(hit.valueEnd);
   }
   return null;
 }
@@ -119,10 +315,17 @@ export function shouldPreserveExistingProgress(existingProgress: unknown, derive
     return false;
   const existing = existingProgress as ProgressRecord;
   const derived = derivedProgress as ProgressRecord;
-  return (existingProgressExceedsDerived(existing, derived, 'total_phases') ||
+  // total_phases (#1446) and total_plans (#2440) are intentionally excluded
+  // from the ratchet: both must always take the freshly derived value so they
+  // can correct in BOTH directions. total_plans legitimately moves up (a new
+  // phase adds plans) and down (milestone reorganization removes phases).
+  // Ratcheting it freezes stale values. Only completed_phases and
+  // completed_plans keep ratchet behaviour — they are monotonic (once a
+  // phase/plan is complete, it stays complete).
+  return (
     existingProgressExceedsDerived(existing, derived, 'completed_phases') ||
-    existingProgressExceedsDerived(existing, derived, 'total_plans') ||
-    existingProgressExceedsDerived(existing, derived, 'completed_plans'));
+    existingProgressExceedsDerived(existing, derived, 'completed_plans')
+  );
 }
 
 export function normalizeProgressNumbers(progress: unknown): unknown {
@@ -190,6 +393,14 @@ export const KNOWN_STATUS_PATTERNS: RegExp[] = [
   /^Phase\s+\d+\s+complete/i,
   /^Verifying Phase\s+\d+/i,
   /^Phase complete/i,
+  // #1070: LLM executors (e.g. OpenCode) may write "Complete ✓" or bare "Complete"
+  // when finishing a phase.  Only bare terminal markers yield to the next phase's
+  // "Ready to execute" during planned-phase.  The pattern is anchored at both ends
+  // so that statuses with trailing prose (e.g. "Complete but needs manual QA",
+  // "Complete — ready for verification") are NOT matched and are preserved as
+  // executor-authored values.  Only exact forms like "Complete", "Complete ✓",
+  // "Complete✓", or "Complete ☑ " (trailing whitespace) match.
+  /^Complete\s*[✓✔✅☑]?\s*$/i,
 ];
 
 /**

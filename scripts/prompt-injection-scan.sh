@@ -14,6 +14,19 @@ set -euo pipefail
 
 # ─── Patterns ────────────────────────────────────────────────────────────────
 # Each pattern is a POSIX extended regex. Keep alphabetized by category.
+#
+# Left-boundary prefix `(^|[^[:alnum:]])`: several trigger words are also
+# suffixes of ordinary English words or camelCase identifiers (fact/impact/
+# contract/artifact/interact all end in "act"; retrieval/medieval end in
+# "eval"; blueprint/reprint/fingerprint end in "print"; describeFunction/
+# wrapFunction end in "Function"; Jordan/Sudan end in "dan"), so an
+# unanchored keyword matches as a false-positive substring. `\b` is a GNU
+# grep extension and this script must also run under BSD/macOS grep, so the
+# boundary is spelled out as `(^|[^[:alnum:]])` instead. This never narrows
+# real detections: a genuine attack phrase is always preceded by start-of-
+# line, whitespace, or punctuation, never by another alnum character glued
+# directly onto the keyword. Only patterns whose leading keyword is provably
+# not a real-word suffix are left unanchored (#3175 audit).
 
 PATTERNS=(
   # Instruction override
@@ -27,7 +40,7 @@ PATTERNS=(
   'you[[:space:]]+are[[:space:]]+now[[:space:]]+(a|an|my)[[:space:]]'
   'from[[:space:]]+now[[:space:]]+on[[:space:]]+(you|pretend|act|behave)'
   'pretend[[:space:]]+(you[[:space:]]+are|to[[:space:]]+be)[[:space:]]'
-  'act[[:space:]]+as[[:space:]]+(a|an|if|my)[[:space:]]'
+  '(^|[^[:alnum:]])act[[:space:]]+as[[:space:]]+(a|an|if|my)[[:space:]]'
   'roleplay[[:space:]]+as[[:space:]]'
   'assume[[:space:]]+the[[:space:]]+role[[:space:]]+of[[:space:]]'
 
@@ -35,7 +48,7 @@ PATTERNS=(
   'output[[:space:]]+(your|the)[[:space:]]+(system[[:space:]]+)?(prompt|instructions)'
   'reveal[[:space:]]+(your|the)[[:space:]]+(system[[:space:]]+)?(prompt|instructions)'
   'show[[:space:]]+me[[:space:]]+(your|the)[[:space:]]+(system[[:space:]]+)?(prompt|instructions)'
-  'print[[:space:]]+(your|the)[[:space:]]+(system[[:space:]]+)?(prompt|instructions)'
+  '(^|[^[:alnum:]])print[[:space:]]+(your|the)[[:space:]]+(system[[:space:]]+)?(prompt|instructions)'
   'what[[:space:]]+(is|are)[[:space:]]+(your|the)[[:space:]]+(system[[:space:]]+)?(prompt|instructions)'
   'repeat[[:space:]]+(your|the|all)[[:space:]]+(system[[:space:]]+)?(prompt|instructions|rules)'
 
@@ -51,13 +64,21 @@ PATTERNS=(
   '<</SYS>>'
 
   # Tool call injection / code execution in markdown
-  'eval[[:space:]]*\([[:space:]]*["\x27]'
-  'exec[[:space:]]*\([[:space:]]*["\x27]'
-  'Function[[:space:]]*\([[:space:]]*["\x27].*return'
+  #
+  # The quote-or-apostrophe class below is spelled ["'"'"'"] (a literal `'`
+  # via bash's close-quote/escape/reopen idiom), not `["\x27]` — `\x27` is a
+  # GNU-grep-only hex escape; BSD/macOS grep treats it as four literal
+  # characters (", \, x, 2, 7) and never matches an actual apostrophe, so
+  # `eval('...')` (single-quoted) silently went undetected on macOS while
+  # passing on GNU-grep CI runners. Found auditing #3175; fixed here since it
+  # is the same unanchored/portability defect class as the boundary fix.
+  '(^|[^[:alnum:]])eval[[:space:]]*\([[:space:]]*["'"'"']'
+  'exec[[:space:]]*\([[:space:]]*["'"'"']'
+  '(^|[^[:alnum:]])Function[[:space:]]*\([[:space:]]*["'"'"'].*return'
 
   # Jailbreak / DAN patterns
   'do[[:space:]]+anything[[:space:]]+now'
-  'DAN[[:space:]]+mode'
+  '(^|[^[:alnum:]])DAN[[:space:]]+mode'
   'developer[[:space:]]+mode[[:space:]]+(enabled|output|activated)'
   'jailbreak'
   'bypass[[:space:]]+(safety|content|security)[[:space:]]+(filter|check|rule|guard)'
@@ -69,21 +90,45 @@ ALLOWLIST=(
   'scripts/prompt-injection-scan.sh'
   'scripts/base64-scan.sh'
   'scripts/secret-scan.sh'
-  'tests/security-scan.test.cjs'
+  'tests/security-scan.security.test.cjs'
   'tests/security.test.cjs'
-  'tests/prompt-injection-scan.test.cjs'
+  'tests/prompt-injection-scan.security.test.cjs'
   'tests/verify.test.cjs'
   'gsd-core/bin/lib/security.cjs'
   'hooks/gsd-prompt-guard.js'
   'hooks/gsd-read-injection-scanner.js'
-  'tests/read-injection-scanner.test.cjs'
-  'tests/security-prompt-injection.test.cjs'
+  'tests/read-injection-scanner.security.test.cjs'
+  'tests/read-injection-scanner.property.test.cjs'
+  'tests/security-prompt-injection.security.test.cjs'
+  'tests/list-seeds.test.cjs'
   'tests/fixtures/adversarial/security/'
   'SECURITY.md'
   # These files contain intentional injection examples / security-model prose
   # and are not attack vectors — they explain/demonstrate injection patterns.
   'TEST-EXAMPLES.md'
   'explanation/security-model.md'
+  # The untrusted-input boundary reference quotes injection phrases
+  # ("ignore previous instructions", "you are now…") as examples agents must
+  # NOT comply with — it is the defense, not an attack vector.
+  'references/untrusted-input-boundary.md'
+  # Security regression tests for input validators — fixtures must contain
+  # real injection payloads to prove the validator rejects them. See
+  # DEFECT.PROMPT-INJECTION-SCAN-COLLISION in CONTEXT.md.
+  'tests/windsurf-conversion.test.cjs'
+  # RuleTester fixtures for the local/no-unguarded-nonportable-exec ESLint rule
+  # contain shell-exec command strings (exec("sh -c …"), execFileSync('bash',['-c',…]))
+  # as test DATA the rule must lint — not attack vectors. ADR-1703 Phase 3 (#1720).
+  'tests/no-unguarded-nonportable-exec.rule.test.cjs'
+  # RuleTester fixtures for the local/no-bare-npm-exec ESLint rule contain npm
+  # exec command strings (execFileSync('npm', ['install'])) as test DATA the rule
+  # must lint — not attack vectors. ADR-1703 Phase 4 (#1726).
+  'tests/no-bare-npm-exec.rule.test.cjs'
+  # #2547 — the Kimi field-shadowing regression proves gsd-prompt-guard still
+  # SCANS the reconstructed edit[].new content when a model-supplied new_string
+  # tries to shadow it. The fixture must be a real injection phrase or the test
+  # asserts nothing: it is the payload the guard is required to catch, carried
+  # as test DATA. Same class as the read-injection-scanner suites above.
+  'tests/kimi-payload-field-shadowing.security.test.cjs'
 )
 
 is_allowlisted() {

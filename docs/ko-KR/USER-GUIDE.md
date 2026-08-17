@@ -369,7 +369,7 @@ GSD는 LLM 시스템 프롬프트가 되는 마크다운 파일을 생성합니�
 - `gsd-prompt-guard.js` — `.planning/`에 대한 Write/Edit 호출에서 인젝션 패턴 스캔 (항상 활성, 자문 전용)
 - `gsd-workflow-guard.js` — GSD 워크플로우 컨텍스트 외부에서 파일 편집 시 경고 (`hooks.workflow_guard`를 통한 옵트인)
 
-**CI 스캐너:** `prompt-injection-scan.test.cjs`는 모든 에이전트, 워크플로우, 명령어 파일에서 삽입된 인젝션 벡터를 스캔합니다.
+**CI 스캐너:** `prompt-injection-scan.security.test.cjs`는 모든 에이전트, 워크플로우, 명령어 파일에서 삽입된 인젝션 벡터를 스캔합니다.
 
 ---
 
@@ -382,8 +382,8 @@ AI 코딩 도구는 패키지 이름을 환각합니다. 공격자는 npm, PyPI,
 ```markdown
 ## Package Legitimacy Audit
 
-| Package | Registry | Age | Downloads | Source Repo | slopcheck | Disposition |
-|---------|----------|-----|-----------|-------------|-----------|-------------|
+| Package | Registry | Age | Downloads | Source Repo | Verdict | Disposition |
+|---------|----------|-----|-----------|-------------|---------|-------------|
 | express | npm | 13 yrs | 100M+/wk | github.com/expressjs/express | [OK] | Approved |
 | some-new-util | npm | 3 days | 47 | none | [SLOP] | REMOVED |
 | api-bridge | npm | 6 mo | 1.2k/wk | github.com/user/api-bridge | [SUS] | Flagged |
@@ -395,7 +395,7 @@ AI 코딩 도구는 패키지 이름을 환각합니다. 공격자는 npm, PyPI,
 
 **실행 중** — 설치가 실패하면 실행자는 체크포인트를 표시하고 자동으로 대안을 시도하지 않고 중단합니다.
 
-**슬롭체크 판정:**
+**적법성 판정:**
 
 | 판정 | 의미 | GSD 조치 |
 |---------|---------|------------|
@@ -463,6 +463,13 @@ claude --dangerously-skip-permissions
 /gsd-pause-work --report         # Generate session summary
 ```
 
+> [!CAUTION]
+> **The permissions flag is optional.** It skips per-file confirmation while
+> GSD's sub-agents read and write files. Use it only in low-stakes or
+> throwaway contexts. To keep confirmations enabled, start with `claude` instead.
+> For real work, read the [security model](../explanation/security-model.md) first.
+
+
 ### 기존 문서로 새 프로젝트
 
 ```bash
@@ -474,8 +481,8 @@ claude --dangerously-skip-permissions
 ### 기존 코드베이스
 
 ```bash
-/gsd-map-codebase           # Analyse what exists (parallel agents)
-/gsd-new-project            # Questions focus on what you're ADDING
+/gsd-onboard                # Safely map, ingest docs, and initialize planning
+# Follow printed handoff commands, then rerun /gsd-onboard
 # (normal phase workflow from here)
 ```
 
@@ -499,7 +506,7 @@ claude --dangerously-skip-permissions
 
 **needs-acknowledgement 동작.** 가드가 누락된 심볼을 발견하면, 하드 차단 대신 계획 검토 출력에 `needs-acknowledgement` 알림을 표시합니다. 승인 후 진행하거나(심볼이 의도적으로 새로운 것일 수 있음) 계획 수정을 요청할 수 있습니다. 가드는 계획을 자동으로 거부하지 않으며 — 사람의 결정을 위한 신호를 표시합니다.
 
-**인텔 없이 작동.** 기본적으로 가드는 `grep`/`ripgrep`을 사용하여 소스 파일을 검색합니다 — 사전 인덱싱이 필요하지 않습니다. `intel.enabled: true`로 `/gsd:map-codebase`를 실행했다면 `plan_review.source_grounding_authority: intel`로 설정하여 더 빠른 사전 빌드 `api-map.json` 인덱스를 사용하세요.
+**인텔 없이 작동.** 기본적으로 가드는 `grep`/`ripgrep`을 사용하여 소스 파일을 검색합니다 — 사전 인덱싱이 필요하지 않습니다. `intel.enabled: true`로 `/gsd-map-codebase`를 실행했다면 `plan_review.source_grounding_authority: intel`로 설정하여 더 빠른 사전 빌드 `api-map.json` 인덱스를 사용하세요.
 
 ```bash
 # Enable/disable (default: on)
@@ -511,7 +518,7 @@ claude --dangerously-skip-permissions
 /gsd-settings plan_review.source_grounding_authority intel  # pre-indexed api-map.json
 ```
 
-프로젝트 설정 시(`/gsd:new-project`가 워크플로우 선호도 중 질문) 또는 `/gsd:settings`를 통해 언제든지 전환 가능합니다(계획 섹션 → 드리프트 가드).
+프로젝트 설정 시(`/gsd-new-project`가 워크플로우 선호도 중 질문) 또는 `/gsd-settings`를 통해 언제든지 전환 가능합니다(계획 섹션 → 드리프트 가드).
 
 ### 빠른 버그 수정
 
@@ -562,14 +569,14 @@ claude --dangerously-skip-permissions
 
 ### 프로그래밍 방식 CLI (`gsd-tools query` vs `gsd-tools.cjs`)
 
-자동화를 위해서는 등록된 서브명령어와 함께 **`gsd-tools query`**를 사용하세요([CLI-TOOLS.md — SDK 및 프로그래밍 방식 액세스](CLI-TOOLS.md#sdk-and-programmatic-access)와 QUERY-HANDLERS.md 참조). 레거시 `node $HOME/.claude/get-shit-done/bin/gsd-tools.cjs` CLI도 계속 지원됩니다.
+자동화를 위해서는 등록된 서브명령어와 함께 **`gsd-tools query`**를 사용하세요([CLI-TOOLS.md — SDK 및 프로그래밍 방식 액세스](CLI-TOOLS.md#sdk-and-programmatic-access)와 QUERY-HANDLERS.md 참조). 레거시 `node $HOME/.claude/gsd-core/bin/gsd-tools.cjs` CLI도 계속 지원됩니다.
 
 ### STATE.md 동기화 오류
 
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state validate          # Detect drift
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state sync --verify     # Preview changes
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state sync              # Reconstruct STATE.md
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state validate          # Detect drift
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state sync --verify     # Preview changes
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state sync              # Reconstruct STATE.md
 ```
 
 ### "Spawning..." 이후 명령어가 멈춘 것처럼 보일 때
@@ -667,7 +674,7 @@ GSD 서브에이전트는 별도의 컨텍스트 창에서 실행됩니다 — �
 
 비활성화된 서버는 이후 모든 턴에서 스키마를 제거합니다. MCP 정리는 `model_profile` 조정과 **복합**됩니다 — 두 레버는 가산적이며, MCP 절약은 오케스트레이터가 생성하는 모든 서브에이전트에서 즉시 나타납니다.
 
-전체 감사, 하네스 레퍼런스, `model_profile`과의 구성 노트는 번들된 `context-budget.md` 레퍼런스의 [MCP 도구 스키마 비용](../../get-shit-done/references/context-budget.md#mcp-tool-schema-cost-harness-concern)을 참조하세요.
+전체 감사, 하네스 레퍼런스, `model_profile`과의 구성 노트는 번들된 `context-budget.md` 레퍼런스의 [MCP 도구 스키마 비용](../../gsd-core/references/context-budget.md#mcp-tool-schema-cost-harness-concern)을 참조하세요.
 
 ### 비 Claude 런타임 사용 (Codex, OpenCode, Gemini CLI, Kilo)
 
@@ -853,7 +860,7 @@ All subagent/executor commits MUST use `--no-verify`.
   reports/                # Session reports (from /gsd-pause-work --report)
   todos/
     pending/              # Captured ideas awaiting work
-    done/                 # Completed todos
+    completed/             # Completed todos
   debug/                  # Active debug sessions
     resolved/             # Archived debug sessions
   spikes/                 # Feasibility experiments (from /gsd-spike)
@@ -864,7 +871,8 @@ All subagent/executor commits MUST use `--no-verify`.
     themes/
       default.css         # Shared CSS variables for all sketches
     MANIFEST.md           # Index of all sketches with winners
-  codebase/               # Brownfield codebase mapping (from /gsd-map-codebase)
+  codebase/               # Brownfield codebase mapping (from /gsd-map-codebase or /gsd-onboard)
+  onboarding/             # Brownfield onboarding summary (from /gsd-onboard)
   phases/
     XX-phase-name/
       XX-YY-PLAN.md       # Atomic execution plans

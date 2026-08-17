@@ -3,6 +3,7 @@
     "SessionStart": [
       {
         "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/gsd-ensure-canonical-path.js\"", "timeout": 5 },
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/gsd-check-update.js\"" }
         ]
       }
@@ -20,6 +21,18 @@
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/gsd-worktree-path-guard.js\"", "timeout": 5 }
         ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/gsd-write-guard.js\"", "timeout": 5 }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/gsd-agent-isolation-guard.js\"", "timeout": 5 }
+        ]
       }
     ],
     "PostToolUse": [
@@ -30,7 +43,7 @@
         ]
       },
       {
-        "matcher": "Read",
+        "matcher": "Read|WebFetch|WebSearch",
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/gsd-read-injection-scanner.js\"", "timeout": 5 }
         ]

@@ -8,7 +8,9 @@
 
 ## Decide which reviewers to use
 
-GSD Core can route review requests to any combination of: Gemini CLI, Claude (separate session), Codex CLI, CodeRabbit, OpenCode, Qwen Code, Cursor, Antigravity CLI, Ollama, LM Studio, and llama.cpp.
+GSD Core can route review requests to any combination of: Gemini CLI, Claude (separate session), Codex CLI, CodeRabbit, OpenCode, Qwen Code, Cursor, Antigravity CLI, Ollama, LM Studio, llama.cpp, and Kimi Code.
+
+That list is not fixed. Each of those is a declared reviewer lane, and a capability can ship its own — see [Ship a reviewer lane in your capability](ship-a-reviewer-lane.md). To see exactly which lanes your installation has, run `gsd-tools review-lane sections`.
 
 Each reviewer runs the same structured prompt against your `PLAN.md` files independently. Because different models have different blind spots, multi-reviewer consensus catches more issues than any single reviewer.
 
@@ -44,6 +46,8 @@ gsd config-set review.default_reviewers '["gemini","codex"]'
 ```
 
 For the full integration settings schema (API keys, model overrides per reviewer, local server host addresses), see [Configuration](../CONFIGURATION.md).
+
+If you need multiple independent reviewer voices from the same adapter, configure `review.reviewer_instances` and add those instance names to `review.default_reviewers`. Instance names run only through `review.default_reviewers`; they are not valid `/gsd-review` flags. See [Reviewer instances](../CONFIGURATION.md#reviewer-instances) for the schema.
 
 ---
 
@@ -154,6 +158,7 @@ This runs `plan-phase → review → replan → re-review` up to three cycles (d
 ## Related
 
 - [Verify and ship](verify-and-ship.md)
+- [Ship a reviewer lane in your capability](ship-a-reviewer-lane.md) — add a reviewer GSD does not ship with, by declaring it in a capability manifest
 - [Configuration](../CONFIGURATION.md)
 - [Commands](../COMMANDS.md)
 - [docs index](../README.md)

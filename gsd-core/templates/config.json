@@ -35,6 +35,7 @@
     "cross_ai_execution": false,
     "cross_ai_command": "",
     "cross_ai_timeout": 300,
+    "test_gate_timeout": 600,
     "milestone_retro": false,
     "teach_phase": false,
     "plan_lens_review": false
@@ -84,5 +85,5 @@
   },
   "project_code": null,
   "agent_skills": {},
-  "claude_md_path": "./CLAUDE.md"
+  "claude_md_path": "./.claude/CLAUDE.md"
 }

@@ -49,6 +49,9 @@ const REPO_ROOT = process.env.GSD_LINT_LEGACY_REPO_ROOT
 
 const ALLOWLIST_FILES = new Set([
   'CHANGELOG.md',
+  // Fork provenance + upstream sync log: historical prose that necessarily names
+  // the pre-2026-06-10 upstream repo. Same rationale as CHANGELOG.md.
+  'FORK.md',
   'README.ja-JP.md',
   'README.ko-KR.md',
   'README.pt-BR.md',

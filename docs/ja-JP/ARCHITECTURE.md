@@ -42,7 +42,7 @@ GSD Core は、ユーザーと AI コーディングエージェント（Claude 
                       │
 ┌─────────────────────▼────────────────────────────────┐
 │              WORKFLOW LAYER                           │
-│   get-shit-done/workflows/*.md — Orchestration logic  │
+│   gsd-core/workflows/*.md — Orchestration logic  │
 │   (Reads references, spawns agents, manages state)    │
 └──────┬──────────────┬─────────────────┬──────────────┘
        │              │                 │
@@ -54,7 +54,7 @@ GSD Core は、ユーザーと AI コーディングエージェント（Claude 
        │              │                 │
 ┌──────▼──────────────▼─────────────────▼──────────────┐
 │              CLI TOOLS LAYER                          │
-│   get-shit-done/bin/gsd-tools.cjs                     │
+│   gsd-core/bin/gsd-tools.cjs                     │
 │   (State, config, phase, roadmap, verify, templates)  │
 └──────────────────────┬───────────────────────────────┘
                        │
@@ -75,7 +75,7 @@ GSD Core は、ユーザーと AI コーディングエージェント（Claude 
 
 ### 2. 軽量オーケストレーター
 
-ワークフローファイル（`get-shit-done/workflows/*.md`）は重い処理を行いません。以下の役割に徹します：
+ワークフローファイル（`gsd-core/workflows/*.md`）は重い処理を行いません。以下の役割に徹します：
 - `gsd-tools.cjs init <workflow>` でコンテキストを読み込む
 - 焦点を絞ったプロンプトで専門エージェントを起動する
 - 結果を収集し、次のステップにルーティングする
@@ -125,7 +125,7 @@ eager なスキルリストのトークンコストを低く保つため、v1.40
 
 eager なスキルリストはターンごとの 2 つの主要コストの一つです。もう一つは `.claude/settings.json` で有効化されている各 MCP サーバーが注入する MCP ツールスキーマです。重量級の MCP サーバー（ブラウザ/playwright、Mac ツール、Windows ツール）はそれぞれターンごとに 20k+ トークンかかる場合があり、多くの場合 `model_profile` のチューニングで節約できるものをはるかに上回ります。トグルは Claude Code ハーネスにあります（`.claude/settings.json` の `enabledMcpjsonServers` / `disabledMcpjsonServers`）で、GSD の懸念事項ではありません。
 
-### ワークフロー（`get-shit-done/workflows/*.md`）
+### ワークフロー（`gsd-core/workflows/*.md`）
 
 コマンドが参照するオーケストレーションロジックです。以下を含むステップバイステップのプロセスが記述されています：
 
@@ -139,7 +139,7 @@ eager なスキルリストはターンごとの 2 つの主要コストの一�
 
 #### ワークフローのプログレッシブディスクロージャー
 
-ワークフローファイルは、対応する `/gsd-*` コマンドが呼び出されるたびに Claude のコンテキストにそのまま読み込まれます。そのコストを制限するため、`tests/workflow-size-budget.test.cjs` で強制されるワークフローサイズバジェットは #2361 のエージェントバジェットを反映します：
+ワークフローファイルは、対応する `/gsd-*` コマンドが呼び出されるたびに Claude のコンテキストにそのまま読み込まれます。そのコストを制限するため、`tests/workflow-size-budget.test.cjs` で強制されるワークフローサイズバジェットはエージェントサイズバジェット規則を反映します：
 
 | ティア | ファイルごとの行数制限 |
 |-----------|--------------------|
@@ -158,7 +158,7 @@ eager なスキルリストはターンごとの 2 つの主要コストの一�
 
 **エージェント総数:** 33
 
-### リファレンス（`get-shit-done/references/*.md`）
+### リファレンス（`gsd-core/references/*.md`）
 
 ワークフローとエージェントが `@-reference` で参照する共有知識ドキュメント（信頼できる数と完全なロスターについては [`docs/INVENTORY.md`](INVENTORY.md#references-41-shipped) を参照）：
 
@@ -194,7 +194,7 @@ eager なスキルリストはターンごとの 2 つの主要コストの一�
 - `user-profiling.md` — ユーザー行動プロファイリングの方法論
 - `thinking-partner.md` — 決定ポイントでの条件付きシンキングパートナー起動
 
-### テンプレート（`get-shit-done/templates/`）
+### テンプレート（`gsd-core/templates/`）
 
 すべてのプランニングアーティファクト用のMarkdownテンプレートです。`gsd-tools.cjs template fill` および `scaffold` コマンドにより、事前構造化されたファイルを作成するために使用されます：
 - `project.md`、`requirements.md`、`roadmap.md`、`state.md` — コアプロジェクトファイル
@@ -218,13 +218,13 @@ eager なスキルリストはターンごとの 2 つの主要コストの一�
 | `gsd-prompt-guard.js` | `PreToolUse` | `.planning/` への書き込みにプロンプトインジェクションパターンがないかスキャン（アドバイザリー） |
 | `gsd-workflow-guard.js` | `PreToolUse` | GSDワークフローコンテキスト外でのファイル編集を検出（アドバイザリー、`hooks.workflow_guard` によるオプトイン） |
 
-### コマンドルーティングハブ（`get-shit-done/bin/lib/command-routing-hub.cjs`）
+### コマンドルーティングハブ（`gsd-core/bin/lib/command-routing-hub.cjs`）
 
 CJS コマンドファミリールーターは `CommandRoutingHub` を通じてディスパッチします。ハブはノースロー純粋結果コントラクト（`hub.dispatch()` は内部例外をキャッチして `{ ok: false, kind, ...typedPayload }` を返す）とクローズドランタイムエラー分類（`UnknownCommand`、`InvalidArgs`、`HandlerRefusal`、`HandlerFailure`）を所有します。ルーターアダプターは薄い CLI トランスレーターのままです——ハブを構築し、`dispatch` を呼び出し、結果を `output()`/`error()` 呼び出しにマッピングします。`docs/adr/0174-retire-gsd-sdk-package-boundary.md` を参照。
 
-### CLI ツール（`get-shit-done/bin/`）
+### CLI ツール（`gsd-core/bin/`）
 
-`get-shit-done/bin/lib/` にドメインモジュールが分割された Node.js CLI ユーティリティ（`gsd-tools.cjs`）（信頼できるロスターについては [`docs/INVENTORY.md`](INVENTORY.md#cli-modules-33-shipped) を参照）：
+`gsd-core/bin/lib/` にドメインモジュールが分割された Node.js CLI ユーティリティ（`gsd-tools.cjs`）（信頼できるロスターについては [`docs/INVENTORY.md`](INVENTORY.md#cli-modules-33-shipped) を参照）：
 
 | モジュール | 責務 |
 | ---------------------- | --------------------------------------------------------------------------------------------------- |
@@ -375,7 +375,7 @@ ui-phase → UI-SPEC.md (design contract, optional)
 plan-phase
     ├── Research gate (blocks if RESEARCH.md has unresolved open questions)
     ├── Phase Researcher → RESEARCH.md
-    │       └── Package Legitimacy Gate: slopcheck on every package; [SLOP] removed,
+    │       └── Package Legitimacy Gate: registry-API verdict on every package; [SLOP] removed,
     │           [SUS]/[ASSUMED] flagged; Audit table written to RESEARCH.md
     ├── Planner (with reachability check) → PLAN.md files
     │       └── checkpoint:human-verify injected before [ASSUMED]/[SUS] installs;
@@ -428,7 +428,7 @@ UI-SPEC.md (per phase) ───────────────────
 ~/.claude/                          # Claude Code (global install)
 ├── skills/gsd-*/SKILL.md           # Global skills (authoritative roster: docs/INVENTORY.md)
 ├── commands/gsd/*.md               # Local Claude installs use slash commands instead of global skills
-├── get-shit-done/
+├── gsd-core/
 │   ├── bin/gsd-tools.cjs           # CLI utility
 │   ├── bin/lib/*.cjs               # Domain modules (authoritative roster: docs/INVENTORY.md)
 │   ├── workflows/*.md              # Workflow definitions (authoritative roster: docs/INVENTORY.md)
@@ -474,7 +474,8 @@ UI-SPEC.md (per phase) ───────────────────
 │   ├── FEATURES.md
 │   ├── ARCHITECTURE.md
 │   └── PITFALLS.md
-├── codebase/               # ブラウンフィールドマッピング（/gsd-map-codebase から）
+├── codebase/               # ブラウンフィールドマッピング（/gsd-map-codebase または /gsd-onboard から）
+├── onboarding/             # ブラウンフィールドオンボーディング概要（/gsd-onboard から）
 │   ├── STACK.md
 │   ├── ARCHITECTURE.md
 │   ├── CONVENTIONS.md
@@ -499,7 +500,7 @@ UI-SPEC.md (per phase) ───────────────────
 │       └── SUMMARY.md
 ├── todos/
 │   ├── pending/            # キャプチャされたアイデア
-│   └── done/               # 完了済みtodo
+│   └── completed/          # 完了済みtodo
 ├── threads/               # 永続コンテキストスレッド（/gsd-thread から）
 ├── seeds/                 # 将来に向けたアイデア（/gsd-capture --seed から）
 ├── debug/                  # アクティブなデバッグセッション
@@ -597,7 +598,7 @@ Runtime Engine (Claude Code / Gemini CLI)
 
 | レイヤー | コンポーネント | アクション |
 |-------|-----------|--------|
-| 調査 | `gsd-phase-researcher` | `slopcheck install <pkgs> --json` を実行；`## Package Legitimacy Audit` テーブルを RESEARCH.md に書き込む；RESEARCH.md が書かれる前に `[SLOP]` パッケージを除去 |
+| 調査 | `gsd-phase-researcher` | `gsd-tools query package-legitimacy check --ecosystem <npm\|pypi\|crates> <pkgs>` を実行；`## Package Legitimacy Audit` テーブルを RESEARCH.md に書き込む；RESEARCH.md が書かれる前に `[SLOP]` パッケージを除去 |
 | 計画 | `gsd-planner` | 監査テーブルを読み取る；任意の `[ASSUMED]` または `[SUS]` インストールタスクの前に `checkpoint:human-verify` を挿入；`<threat_model>` に `T-{phase}-SC` STRIDE サプライチェーン行を追加 |
 | 実行 | `gsd-executor` | RULE 3 はパッケージインストールを自動修正スコープから除外；失敗したインストールはチェックポイントとして表面化し、サイレントな代替なし |
 

@@ -38,8 +38,14 @@ Parse `$ARGUMENTS` for:
 
 After parsing, normalize: if `$DISCUSS_MODE` and `$RESEARCH_MODE` and `$VALIDATE_MODE` are all true, set `$FULL_MODE=true`. This ensures `--discuss --research --validate` is treated identically to `--full`.
 
-If `$DESCRIPTION` is empty after parsing, prompt user interactively:
+```bash
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
+RESPONSE_LANGUAGE=$(gsd_run query config-get response_language --default "" 2>/dev/null || echo "")
+```
 
+**If `response_language` is set:** All user-facing questions, prompts, and explanations in this workflow MUST be presented in `{response_language}`. Technical terms, code, file paths, and subagent prompts stay in English — only user-facing output is translated.
+
+If `$DESCRIPTION` is empty after parsing, prompt user interactively:
 
 **Text mode (`workflow.text_mode: true` in config or `--text` flag):** Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `text_mode` from init JSON is `true`. When TEXT_MODE is active, replace every `AskUserQuestion` call with a plain-text numbered list and ask the user to type their choice number. This is required for non-Claude runtimes (OpenAI Codex, Gemini CLI, etc.) where `AskUserQuestion` is not available.
 
@@ -125,8 +131,11 @@ If `$VALIDATE_MODE` only:
 **Step 2: Initialize**
 
 ```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "$HOME/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="$HOME/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi
-INIT=$(gsd_run query init.quick "$DESCRIPTION")
+DISCUSS_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--discuss([[:space:]]|$) ]]; then DISCUSS_PARAM="--discuss"; fi
+RESEARCH_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--research([[:space:]]|$) ]]; then RESEARCH_PARAM="--research"; fi
+VALIDATE_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--validate([[:space:]]|$) ]]; then VALIDATE_PARAM="--validate"; fi
+FULL_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--full([[:space:]]|$) ]]; then FULL_PARAM="--full"; fi
+INIT=$(gsd_run query init.quick "$DESCRIPTION" $DISCUSS_PARAM $RESEARCH_PARAM $VALIDATE_PARAM $FULL_PARAM)
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 AGENT_SKILLS_PLANNER=$(gsd_run query agent-skills gsd-planner)
 AGENT_SKILLS_EXECUTOR=$(gsd_run query agent-skills gsd-executor)
@@ -134,10 +143,21 @@ AGENT_SKILLS_CHECKER=$(gsd_run query agent-skills gsd-plan-checker)
 AGENT_SKILLS_VERIFIER=$(gsd_run query agent-skills gsd-verifier)
 ```
 
-Parse JSON for: `planner_model`, `executor_model`, `checker_model`, `verifier_model`, `commit_docs`, `branch_name`, `quick_id`, `slug`, `date`, `timestamp`, `quick_dir`, `task_dir`, `roadmap_exists`, `planning_exists`.
+Parse JSON for: `planner_model`, `executor_model`, `checker_model`, `verifier_model`, `reviewer_model`, `commit_docs`, `branch_name`, `quick_id`, `slug`, `date`, `timestamp`, `quick_dir`, `task_dir`, `roadmap_exists`, `planning_exists`, `response_language`.
+
+`init.quick` does not emit dedicated `state_path`/`project_path` fields, so derive them from the already-absolute `quick_dir` (#2376 — files handed to a spawned subagent must resolve regardless of that subagent's own cwd):
+```bash
+STATE_PATH="$(dirname "${quick_dir}")/STATE.md"
+PROJECT_PATH="$(dirname "${quick_dir}")/PROJECT.md"
+```
 
 ```bash
-USE_WORKTREES=$(gsd_run query config-get workflow.use_worktrees 2>/dev/null || echo "true")
+USE_WORKTREES=$(gsd_run query config-get workflow.use_worktrees --raw 2>/dev/null || echo "true")
+RUNTIME=$(gsd_run query config-get runtime --default claude --raw 2>/dev/null || echo "claude")
+if [ "$RUNTIME" != "claude" ] && [ "$USE_WORKTREES" != "false" ]; then
+  echo "FATAL: git worktree isolation (isolation=\"worktree\") is unsupported on runtime '$RUNTIME' — it would run executor agents unisolated against the main checkout. Set workflow.use_worktrees=false." >&2
+  exit 1
+fi
 ```
 
 If `USE_WORKTREES` is not `"false"`, run a startup orphan sweep before spawning any executors. This reaps locked worktrees whose lock-owner process is dead, whose branch is merged into the default branch, and whose lock file mtime is older than 5 minutes. Running it at startup prevents accumulation of orphaned worktrees from prior sessions that exited without cleanup (#3707).
@@ -184,8 +204,9 @@ compound on top of each other and stay unpushed (#2916). If `$branch_name`
 already exists locally, reuse it as-is so resumed work is not rebased.
 
 ```bash
-DEFAULT_BRANCH=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
-DEFAULT_BRANCH=${DEFAULT_BRANCH:-main}
+DEFAULT_BRANCH=$(gsd_run query git.base-branch 2>/dev/null \
+  || git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' \
+  || echo main)
 
 if git show-ref --verify --quiet "refs/heads/$branch_name"; then
   git switch "$branch_name" \
@@ -219,7 +240,11 @@ else
   # On success HEAD is exactly at origin/$DEFAULT_BRANCH, so a post-creation
   # merge-base / "ahead-of" guard would be unreachable — the explicit base
   # argument here is the single source of correctness for #2916.
-  git checkout -b "$branch_name" "origin/$DEFAULT_BRANCH" \
+  # --no-track: with the default branch.autoSetupMerge=true, checkout -b from a
+  # remote-tracking ref wires branch.<name>.merge to refs/heads/$DEFAULT_BRANCH
+  # (origin/master), so a GUI sync pushes quick-task commits straight onto
+  # origin/$DEFAULT_BRANCH, bypassing PR review (#2498).
+  git checkout -b "$branch_name" "origin/$DEFAULT_BRANCH" --no-track \
     || { echo "ERROR: Could not create '$branch_name' from origin/$DEFAULT_BRANCH (#2916)." >&2; exit 1; }
 fi
 ```
@@ -241,7 +266,7 @@ mkdir -p "${task_dir}"
 Create the directory for this quick task:
 
 ```bash
-QUICK_DIR=".planning/quick/${quick_id}-${slug}"
+QUICK_DIR="${task_dir}"
 mkdir -p "$QUICK_DIR"
 ```
 
@@ -255,197 +280,15 @@ Store `$QUICK_DIR` for use in orchestration.
 
 ---
 
-**Step 4.5: Discussion phase (only when `$DISCUSS_MODE`)**
-
-Skip this step entirely if NOT `$DISCUSS_MODE`.
-
-Display banner:
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- GSD ► DISCUSSING QUICK TASK
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-◆ Surfacing gray areas for: ${DESCRIPTION}
-```
-
-**4.5a. Identify gray areas**
-
-Analyze `$DESCRIPTION` to identify 2-4 gray areas — implementation decisions that would change the outcome and that the user should weigh in on.
-
-Use the domain-aware heuristic to generate phase-specific (not generic) gray areas:
-- Something users **SEE** → layout, density, interactions, states
-- Something users **CALL** → responses, errors, auth, versioning
-- Something users **RUN** → output format, flags, modes, error handling
-- Something users **READ** → structure, tone, depth, flow
-- Something being **ORGANIZED** → criteria, grouping, naming, exceptions
-
-Each gray area should be a concrete decision point, not a vague category. Example: "Loading behavior" not "UX".
-
-**4.5b. Present gray areas**
-
-```
-AskUserQuestion(
-  header: "Gray Areas",
-  question: "Which areas need clarification before planning?",
-  options: [
-    { label: "${area_1}", description: "${why_it_matters_1}" },
-    { label: "${area_2}", description: "${why_it_matters_2}" },
-    { label: "${area_3}", description: "${why_it_matters_3}" },
-    { label: "All clear", description: "Skip discussion — I know what I want" }
-  ],
-  multiSelect: true
-)
-```
-
-If user selects "All clear" → skip to Step 5 (no CONTEXT.md written).
-
-**4.5c. Discuss selected areas**
-
-For each selected area, ask 1-2 focused questions via AskUserQuestion:
-
-```
-AskUserQuestion(
-  header: "${area_name}",
-  question: "${specific_question_about_this_area}",
-  options: [
-    { label: "${concrete_choice_1}", description: "${what_this_means}" },
-    { label: "${concrete_choice_2}", description: "${what_this_means}" },
-    { label: "${concrete_choice_3}", description: "${what_this_means}" },
-    { label: "You decide", description: "Claude's discretion" }
-  ],
-  multiSelect: false
-)
-```
-
-Rules:
-- Options must be concrete choices, not abstract categories
-- Highlight recommended choice where you have a clear opinion
-- If user selects "Other" with freeform text, switch to plain text follow-up (per questioning.md freeform rule)
-- If user selects "You decide", capture as Claude's Discretion in CONTEXT.md
-- Max 2 questions per area — this is lightweight, not a deep dive
-
-Collect all decisions into `$DECISIONS`.
-
-**4.5d. Write CONTEXT.md**
-
-Write `${QUICK_DIR}/${quick_id}-CONTEXT.md` using the standard context template structure:
-
-```markdown
-# Quick Task ${quick_id}: ${DESCRIPTION} - Context
-
-**Gathered:** ${date}
-**Status:** Ready for planning
-
-<domain>
-## Task Boundary
-
-${DESCRIPTION}
-
-</domain>
-
-<decisions>
-## Implementation Decisions
-
-### ${area_1_name}
-- ${decision_from_discussion}
-
-### ${area_2_name}
-- ${decision_from_discussion}
-
-### Claude's Discretion
-${areas_where_user_said_you_decide_or_areas_not_discussed}
-
-</decisions>
-
-<specifics>
-## Specific Ideas
-
-${any_specific_references_or_examples_from_discussion}
-
-[If none: "No specific requirements — open to standard approaches"]
-
-</specifics>
-
-<canonical_refs>
-## Canonical References
-
-${any_specs_adrs_or_docs_referenced_during_discussion}
-
-[If none: "No external specs — requirements fully captured in decisions above"]
-
-</canonical_refs>
-```
-
-Note: Quick task CONTEXT.md omits `<code_context>` and `<deferred>` sections (no codebase scouting, no phase scope to defer to). Keep it lean. The `<canonical_refs>` section is included when external docs were referenced — omit it only if no external docs apply.
-
-Report: `Context captured: ${QUICK_DIR}/${quick_id}-CONTEXT.md`
+<!-- gsd:section id="discussion-phase" when="flag:--discuss" -->
+If `section_manifest` is `null` or `"discussion-phase"` is in its `included` list: read and execute `gsd-core/workflows/quick/steps/discussion-phase.md`. Otherwise skip — do not read the file.
+<!-- /gsd:section -->
 
 ---
 
-**Step 4.75: Research phase (only when `$RESEARCH_MODE`)**
-
-Skip this step entirely if NOT `$RESEARCH_MODE`.
-
-Display banner:
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- GSD ► RESEARCHING QUICK TASK
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-◆ Investigating approaches for: ${DESCRIPTION} (runs in a subagent — no output until it returns, ~1–5 min; expected, not a freeze)
-```
-
-Spawn a single focused researcher (not 4 parallel researchers like full phases — quick tasks need targeted research, not broad domain surveys):
-
-```
-Agent(
-  prompt="
-<research_context>
-
-**Mode:** quick-task
-**Task:** ${DESCRIPTION}
-**Output:** ${QUICK_DIR}/${quick_id}-RESEARCH.md
-
-<files_to_read>
-- .planning/STATE.md (Project state — what's already built)
-- .planning/PROJECT.md (Project context)
-- ./CLAUDE.md (if exists — project-specific guidelines)
-${DISCUSS_MODE ? '- ' + QUICK_DIR + '/' + quick_id + '-CONTEXT.md (User decisions — research should align with these)' : ''}
-</files_to_read>
-
-${AGENT_SKILLS_PLANNER}
-
-</research_context>
-
-<focus>
-This is a quick task, not a full phase. Research should be concise and targeted:
-1. Best libraries/patterns for this specific task
-2. Common pitfalls and how to avoid them
-3. Integration points with existing codebase
-4. Any constraints or gotchas worth knowing before planning
-
-Do NOT produce a full domain survey. Target 1-2 pages of actionable findings.
-</focus>
-
-<output>
-Write research to: ${QUICK_DIR}/${quick_id}-RESEARCH.md
-Use standard research format but keep it lean — skip sections that don't apply.
-Return: ## RESEARCH COMPLETE with file path
-</output>
-",
-  subagent_type="gsd-phase-researcher",
-  model="{planner_model}",
-  description="Research: ${DESCRIPTION}"
-)
-```
-
-> **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
-
-After researcher returns:
-1. Verify research exists at `${QUICK_DIR}/${quick_id}-RESEARCH.md`
-2. Report: "Research complete: ${QUICK_DIR}/${quick_id}-RESEARCH.md"
-
-If research file not found, warn but continue: "Research agent did not produce output — proceeding to planning without research."
+<!-- gsd:section id="research-phase" when="flag:--research" -->
+If `section_manifest` is `null` or `"research-phase"` is in its `included` list: read and execute `gsd-core/workflows/quick/steps/research-phase.md`. Otherwise skip — do not read the file.
+<!-- /gsd:section -->
 
 ---
 
@@ -467,8 +310,8 @@ Agent(
 **Description:** ${DESCRIPTION}
 
 <files_to_read>
-- .planning/STATE.md (Project State)
-- ./CLAUDE.md (if exists — follow project-specific guidelines)
+- ${STATE_PATH} (Project State)
+- ./CLAUDE.md or ./.claude/CLAUDE.md (if exists — follow project-specific guidelines)
 ${DISCUSS_MODE ? '- ' + QUICK_DIR + '/' + quick_id + '-CONTEXT.md (User decisions — locked, do not revisit)' : ''}
 ${RESEARCH_MODE ? '- ' + QUICK_DIR + '/' + quick_id + '-RESEARCH.md (Research findings — use to inform implementation choices)' : ''}
 </files_to_read>
@@ -510,159 +353,47 @@ If plan not found, error: "Planner failed to create ${quick_id}-PLAN.md"
 
 ---
 
-**Step 5.5: Plan-checker loop (only when `$VALIDATE_MODE`)**
-
-Skip this step entirely if NOT `$VALIDATE_MODE`.
-
-Display banner:
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- GSD ► CHECKING PLAN
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-◆ Spawning plan checker... (runs in a subagent — no output until it returns, ~1–5 min; expected, not a freeze)
-```
-
-Checker prompt:
-
-```markdown
-<verification_context>
-**Mode:** quick-full
-**Task Description:** ${DESCRIPTION}
-
-<files_to_read>
-- ${QUICK_DIR}/${quick_id}-PLAN.md (Plan to verify)
-</files_to_read>
-
-${AGENT_SKILLS_CHECKER}
-
-**Scope:** This is a quick task, not a full phase. Skip checks that require a ROADMAP phase goal.
-</verification_context>
-
-<check_dimensions>
-- Requirement coverage: Does the plan address the task description?
-- Task completeness: Do tasks have files, action, verify, done fields?
-- Key links: Are referenced files real?
-- Scope sanity: Is this appropriately sized for a quick task (1-3 tasks)?
-- must_haves derivation: Are must_haves traceable to the task description?
-
-Skip: cross-plan deps (single plan), ROADMAP alignment
-${DISCUSS_MODE ? '- Context compliance: Does the plan honor locked decisions from CONTEXT.md?' : '- Skip: context compliance (no CONTEXT.md)'}
-</check_dimensions>
-
-<expected_output>
-- ## VERIFICATION PASSED — all checks pass
-- ## ISSUES FOUND — structured issue list
-</expected_output>
-```
-
-```
-Agent(
-  prompt=checker_prompt,
-  subagent_type="gsd-plan-checker",
-  model="{checker_model}",
-  description="Check quick plan: ${DESCRIPTION}"
-)
-```
-
-> **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
-
-**Handle checker return:**
-
-- **`## VERIFICATION PASSED`:** Display confirmation, proceed to step 6.
-- **`## ISSUES FOUND`:** Display issues, check iteration count, enter revision loop.
-
-**Revision loop (max 2 iterations):**
-
-Track `iteration_count` (starts at 1 after initial plan + check).
-
-**If iteration_count < 2:**
-
-Display: `Sending back to planner for revision... (iteration ${N}/2)`
-
-Revision prompt:
-
-```markdown
-<revision_context>
-**Mode:** quick-full (revision)
-
-<files_to_read>
-- ${QUICK_DIR}/${quick_id}-PLAN.md (Existing plan)
-</files_to_read>
-
-${AGENT_SKILLS_PLANNER}
-
-**Checker issues:** ${structured_issues_from_checker}
-
-</revision_context>
-
-<instructions>
-Make targeted updates to address checker issues.
-Do NOT replan from scratch unless issues are fundamental.
-Return what changed.
-</instructions>
-```
-
-```
-Agent(
-  prompt=revision_prompt,
-  subagent_type="gsd-planner",
-  model="{planner_model}",
-  description="Revise quick plan: ${DESCRIPTION}"
-)
-```
-
-> **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
-
-After planner returns → spawn checker again, increment iteration_count.
-
-**If iteration_count >= 2:**
-
-Display: `Max iterations reached. ${N} issues remain:` + issue list
-
-Offer: 1) Force proceed, 2) Abort
+<!-- gsd:section id="plan-checker-loop" when="flag:--validate" -->
+If `section_manifest` is `null` or `"plan-checker-loop"` is in its `included` list: read and execute `gsd-core/workflows/quick/steps/plan-checker-loop.md`. Otherwise skip — do not read the file.
+<!-- /gsd:section -->
 
 ---
 
-**Step 5.6: Pre-dispatch plan commit (worktree mode only)**
-
-When `USE_WORKTREES !== "false"`, commit PLAN.md to the current branch **before** spawning the executor. This ensures the worktree inherits PLAN.md at its branch HEAD so the executor can read it via a worktree-rooted path — avoiding the main-repo path priming that triggers CC #36182 path-resolution drift.
-
-Skip this step entirely if `USE_WORKTREES === "false"` (non-worktree mode: PLAN.md is committed in Step 8 as usual).
-
-```bash
-if [ "${USE_WORKTREES}" != "false" ]; then
-  COMMIT_DOCS=$(gsd_run query config-get commit_docs 2>/dev/null || echo "true")
-  if [ "$COMMIT_DOCS" != "false" ]; then
-    git add "${QUICK_DIR}/${quick_id}-PLAN.md"
-    # No-op skip if nothing actually staged (idempotent re-runs).
-    if git diff --cached --quiet -- "${QUICK_DIR}/${quick_id}-PLAN.md"; then
-      echo "ℹ Pre-dispatch PLAN.md commit skipped (no staged changes)"
-    else
-      # Run hooks normally (#2924). If a project opts out via
-      # workflow.worktree_skip_hooks=true, honor that opt-in only.
-      SKIP_HOOKS=$(gsd_run query config-get workflow.worktree_skip_hooks 2>/dev/null || echo "false")
-      if [ "$SKIP_HOOKS" = "true" ]; then
-        git commit --no-verify -m "docs(${quick_id}): pre-dispatch plan for ${DESCRIPTION}" -- "${QUICK_DIR}/${quick_id}-PLAN.md" \
-          || { echo "ERROR: pre-dispatch PLAN.md commit failed (--no-verify path). Aborting before executor dispatch." >&2; exit 1; }
-      else
-        git commit -m "docs(${quick_id}): pre-dispatch plan for ${DESCRIPTION}" -- "${QUICK_DIR}/${quick_id}-PLAN.md" \
-          || { echo "ERROR: pre-dispatch PLAN.md commit failed — likely a pre-commit hook failure. Fix the hook output above (or set workflow.worktree_skip_hooks=true to bypass) and re-run." >&2; exit 1; }
-      fi
-    fi
-  fi
-fi
-```
+<!-- gsd:section id="worktree-pre-dispatch-commit" when="state:worktrees-enabled" -->
+If `section_manifest` is `null` or `"worktree-pre-dispatch-commit"` is in its `included` list: read and execute `gsd-core/workflows/quick/steps/worktree-pre-dispatch-commit.md`. Otherwise skip — do not read the file.
+<!-- /gsd:section -->
 
 ---
 
 **Step 6: Spawn executor**
 
+Auto-degrade to sequential if HEAD has diverged from the worktree fork base (#1941, mirrors
+execute-phase's #683/#1369 guard). Claude Code's `isolation="worktree"` forks new worktrees from
+`origin/HEAD`, not the live local HEAD. If a prior quick task in this session (or the Step 5.6
+pre-dispatch plan commit above) advanced local HEAD without an intervening `git push`,
+`origin/HEAD` stays pinned to a stale ancestor and the executor's `worktree_branch_check` guard
+halts with a base-mismatch fatal — potentially many commits behind, not just one. Run this check
+immediately before capturing `EXPECTED_BASE` so it reflects the most current local state.
+
+```bash
+if [ "$RUNTIME" = "claude" ] && [ "${USE_WORKTREES:-true}" != "false" ]; then
+  _QUICK_SHOULD_DEGRADE=$(gsd_run query worktree.base-check --pick shouldDegrade 2>/dev/null || true)
+  if [ "$_QUICK_SHOULD_DEGRADE" = "true" ]; then
+    _QUICK_DEGRADE_MSG=$(gsd_run query worktree.base-check --pick message 2>/dev/null || true)
+    [ -n "$_QUICK_DEGRADE_MSG" ] && printf '%s\n' "$_QUICK_DEGRADE_MSG" >&2
+    echo "⚠ [#1941] Worktree fork base diverged from orchestrator HEAD — auto-degrading to sequential mode for this quick task to avoid a base-mismatch halt." >&2
+    USE_WORKTREES=false
+  fi
+fi
+```
+
 Capture current HEAD before spawning (used for worktree branch check):
 ```bash
 EXPECTED_BASE=$(git rev-parse HEAD)
 if [ "${USE_WORKTREES:-true}" != "false" ]; then
-  QUICK_WORKTREE_MANIFEST=$(mktemp "${TMPDIR:-/tmp}/gsd-quick-worktree-XXXXXX.json")
+  # BSD/macOS mktemp only randomizes XXXXXX when it is the final path component, so make a
+  # suffixless temp then append the extension — portable across BSD + GNU (#1520).
+  QUICK_WORKTREE_MANIFEST=$(mktemp "${TMPDIR:-/tmp}/gsd-quick-worktree-XXXXXX") && mv "$QUICK_WORKTREE_MANIFEST" "${QUICK_WORKTREE_MANIFEST}.json" && QUICK_WORKTREE_MANIFEST="${QUICK_WORKTREE_MANIFEST}.json" || exit 1
   printf '{"worktrees":[]}\n' > "$QUICK_WORKTREE_MANIFEST"
   export QUICK_WORKTREE_MANIFEST
 fi
@@ -677,14 +408,28 @@ Execute quick task ${quick_id}.
 
 ${USE_WORKTREES !== "false" ? `
 <worktree_branch_check>
-ORCHESTRATOR build-time embed (NOT a sub-agent runtime step): before this dispatch, read \`gsd-core/references/worktree-branch-check.md\`, substitute \`{EXPECTED_BASE}\` with the base SHA captured above (${EXPECTED_BASE}), and replace this note with that fragment's \`<worktree_branch_check>\` block so the dispatched prompt carries the runnable guard verbatim — do not pass this instruction through in its place.
+ORCHESTRATOR build-time embed (NOT a sub-agent runtime step): before this dispatch, read \`gsd-core/references/worktree-branch-check.md\`, substitute \`{EXPECTED_BASE}\` with the base SHA captured above (${EXPECTED_BASE}), substitute \`{EXPECTED_BASE_ALTERNATE}\` with \`${QUICK_PLAN_PARENT}\` when it differs from \`${EXPECTED_BASE}\` (otherwise empty), and replace this note with that fragment's \`<worktree_branch_check>\` block so the dispatched prompt carries the runnable guard verbatim — do not pass this instruction through in its place.
 </worktree_branch_check>
+
+FIRST ACTION after the worktree branch check: ensure the quick PLAN.md exists at a worktree-rooted relative path before any Read/Edit/Write path can be primed. If \`${QUICK_DIR}/${quick_id}-PLAN.md\` is absent, materialize it from the shared git object store:
+
+\`\`\`bash
+QUICK_PLAN_COMMIT="${QUICK_PLAN_COMMIT}"
+QUICK_PLAN_PATH="${QUICK_DIR}/${quick_id}-PLAN.md"
+if [ ! -f "$QUICK_PLAN_PATH" ]; then
+  mkdir -p "$(dirname "$QUICK_PLAN_PATH")"
+  git show "${QUICK_PLAN_COMMIT}:${QUICK_PLAN_PATH}" > "$QUICK_PLAN_PATH" || {
+    echo "FATAL: unable to materialize quick plan from ${QUICK_PLAN_COMMIT}:${QUICK_PLAN_PATH}; refusing to continue." >&2
+    exit 42
+  }
+fi
+\`\`\`
 ` : ''}
 
 <files_to_read>
 - ${QUICK_DIR}/${quick_id}-PLAN.md (Plan)
-- .planning/STATE.md (Project state)
-- ./CLAUDE.md (Project instructions, if exists)
+- ${STATE_PATH} (Project state)
+- ./CLAUDE.md or ./.claude/CLAUDE.md (Project instructions, if exists)
 - .claude/skills/ or .agents/skills/ (Project skills, if either exists — list skills, read SKILL.md for each, follow relevant rules during implementation)
 </files_to_read>
 
@@ -728,7 +473,7 @@ SUMMARY.md and stop — the user must rerun with worktrees disabled.
 - Execute all tasks in the plan
 - Commit each task atomically (code changes only)
 - Run the <submodule_commit_guard> bash block before every \`git commit\` if SUBMODULE_PATHS is non-empty
-- Create summary at: ${QUICK_DIR}/${quick_id}-SUMMARY.md
+- Create summary at: ${QUICK_DIR}/${quick_id}-SUMMARY.md with `status: complete` in SUMMARY frontmatter (required so the audit-open milestone-close scanner recognises the task as done, not [unknown])
 - Do NOT commit docs artifacts (SUMMARY.md, STATE.md, PLAN.md) — the orchestrator handles the docs commit in Step 8
 - Do NOT update ROADMAP.md (quick tasks are separate from planned phases)
 </constraints>
@@ -742,7 +487,7 @@ SUMMARY.md and stop — the user must rerun with worktrees disabled.
 
 > **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
 
-If the executor ran with `isolation="worktree"`, append its returned `{agent_id, worktree_path, branch, expected_base}` metadata to `QUICK_WORKTREE_MANIFEST` before cleanup. If any field is unavailable, stop and ask for recovery; do not discover global worktrees.
+If the executor ran with `isolation="worktree"`, append its returned `{agent_id, worktree_path, branch, expected_base, allowed_bases}` metadata to `QUICK_WORKTREE_MANIFEST` before cleanup. Set `expected_base` to `${EXPECTED_BASE}` and `allowed_bases` to `["${EXPECTED_BASE}", "${QUICK_PLAN_PARENT}"]` with duplicates removed. If any required field is unavailable, stop and ask for recovery; do not discover global worktrees.
 
 After executor returns:
 1. **Worktree cleanup:** If the executor ran with `isolation="worktree"`, merge the worktree branch back and clean up:
@@ -760,6 +505,9 @@ After executor returns:
    gsd_run query worktree.cleanup-wave --manifest "$QUICK_WORKTREE_MANIFEST" || exit 1
    ```
    If `workflow.use_worktrees` is `false`, skip this step.
+
+   > **ISOLATED-RUN RECOVERY — FAIL SAFE (#1292):** When an isolated (worktree) run is *rejected* — the user declines to merge it, the orchestrator surfaces recovery guidance for a blocked/halted plan, or the run over-reached the requested scope — the worktree-isolation contract MUST hold through recovery. Do **NOT** propose continuing on `main`/the primary checkout as the default or recommended recovery path. Default to a **safe halt** and offer: (a) re-attempt in a **fresh, narrowly-scoped worktree**, or (b) inspect or discard the rejected worktree without merging. Any path that edits the primary checkout requires an **explicit, clearly-labeled confirmation** from the user first — editing `main` directly is never the proposed or default option for a run the user configured to be isolated.
+
 2. Verify summary exists at `${QUICK_DIR}/${quick_id}-SUMMARY.md`
 3. Extract commit hash from executor output
 4. Report completion status
@@ -776,11 +524,14 @@ Note: For quick tasks producing multiple plans (rare), spawn executors in parall
 
 Skip this step entirely if `$FULL_MODE` is false.
 
-**Config gate:**
+**Capability gate:**
 ```bash
-CODE_REVIEW_ENABLED=$(gsd_run query config-get workflow.code_review 2>/dev/null || echo "true")
+EXECUTE_POST_HOOKS_JSON=$(gsd_run loop render-hooks execute:post --raw)
 ```
-If `"false"`, skip with message "Code review skipped (workflow.code_review=false)".
+
+Resolve active step hooks from `EXECUTE_POST_HOOKS_JSON` where `kind == "step"` and `ref.skill == "code-review"`.
+
+If no active code-review step hook exists, skip with message "Code review skipped (code-review capability inactive)".
 
 **Scope files from executor's commits:**
 ```bash
@@ -813,7 +564,7 @@ Agent(
   Output: ${QUICK_DIR}/${quick_id}-REVIEW.md
   Depth: quick",
   subagent_type="gsd-code-reviewer",
-  model="{executor_model}"
+  model="{reviewer_model}"
 )
 ```
 
@@ -823,52 +574,9 @@ If review produces findings, display advisory message. **Error handling:** Failu
 
 ---
 
-**Step 6.5: Verification (only when `$VALIDATE_MODE`)**
-
-Skip this step entirely if NOT `$VALIDATE_MODE`.
-
-Display banner:
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- GSD ► VERIFYING RESULTS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-◆ Spawning verifier... (runs in a subagent — no output until it returns, ~1–5 min; expected, not a freeze)
-```
-
-```
-Agent(
-  prompt="Verify quick task goal achievement.
-Task directory: ${QUICK_DIR}
-Task goal: ${DESCRIPTION}
-
-<files_to_read>
-- ${QUICK_DIR}/${quick_id}-PLAN.md (Plan)
-</files_to_read>
-
-${AGENT_SKILLS_VERIFIER}
-
-Check must_haves against actual codebase. Create VERIFICATION.md at ${QUICK_DIR}/${quick_id}-VERIFICATION.md.",
-  subagent_type="gsd-verifier",
-  model="{verifier_model}",
-  description="Verify: ${DESCRIPTION}"
-)
-```
-
-> **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
-
-Read verification status:
-```bash
-grep "^status:" "${QUICK_DIR}/${quick_id}-VERIFICATION.md" | cut -d: -f2 | tr -d ' '
-```
-
-Store as `$VERIFICATION_STATUS`.
-
-| Status | Action |
-|--------|--------|
-| `passed` | Store `$VERIFICATION_STATUS = "Verified"`, continue to step 7 |
-| `human_needed` | Display items needing manual check, store `$VERIFICATION_STATUS = "Needs Review"`, continue |
-| `gaps_found` | Display gap summary, offer: 1) Re-run executor to fix gaps, 2) Accept as-is. Store `$VERIFICATION_STATUS = "Gaps"` |
+<!-- gsd:section id="quick-verification" when="flag:--validate" -->
+If `section_manifest` is `null` or `"quick-verification"` is in its `included` list: read and execute `gsd-core/workflows/quick/steps/quick-verification.md`. Otherwise skip — do not read the file.
+<!-- /gsd:section -->
 
 ---
 
@@ -915,6 +623,8 @@ Use `date` from init:
 ```markdown
 | ${quick_id} | ${DESCRIPTION} | ${date} | ${commit_hash} | [${quick_id}-${slug}](./quick/${quick_id}-${slug}/) |
 ```
+
+For a schema-safe append outside this workflow (e.g. from fast.md), `gsd_run quick-tasks-append --task <text>` performs the equivalent write via the shared, schema-backed `appendQuickTaskRow` helper (#2133, ADR-2143 §3/§7).
 
 **7d. Update "Last activity" line:**
 

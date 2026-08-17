@@ -14,10 +14,17 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { realClock } from './clock.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-import core = require('./core.cjs');
-const { output, error, toPosixPath, getMilestoneInfo, generateSlugInternal } = core;
-import { platformWriteSync, platformEnsureDir } from './shell-command-projection.cjs';
+import io = require('./io.cjs');
+const { output, error } = io;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import coreUtils = require('./core-utils.cjs');
+const { toPosixPath, generateSlugInternal } = coreUtils;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import roadmapParser = require('./roadmap-parser.cjs');
+const { getMilestoneInfo } = roadmapParser;
+import { platformWriteSync, platformEnsureDir, retryRenameSync } from './shell-command-projection.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
 const { planningRoot, setActiveWorkstream, getActiveWorkstream } = planningWorkspace;
@@ -86,13 +93,13 @@ function migrateToWorkstreams(cwd: string, workstreamName: string): MigrateResul
       const src = path.join(baseDir, item.name);
       if (fs.existsSync(src)) {
         const dest = path.join(wsDir, item.name);
-        fs.renameSync(src, dest);
+        retryRenameSync(src, dest);
         filesMoved.push(item.name);
       }
     }
   } catch (err) {
     for (const name of filesMoved) {
-      try { fs.renameSync(path.join(wsDir, name), path.join(baseDir, name)); } catch { /* ignore */ }
+      try { retryRenameSync(path.join(wsDir, name), path.join(baseDir, name)); } catch { /* ignore */ }
     }
     try { fs.rmSync(wsDir, { recursive: true }); } catch { /* ignore */ }
     try { fs.rmdirSync(path.join(baseDir, 'workstreams')); } catch { /* ignore */ }
@@ -171,7 +178,7 @@ function cmdWorkstreamCreate(cwd: string, name: string | null | undefined, optio
   platformEnsureDir(wsDir);
   platformEnsureDir(path.join(wsDir, 'phases'));
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = realClock.localToday();
   const stateContent = [
     '---',
     `workstream: ${slug}`,
@@ -228,6 +235,10 @@ function cmdWorkstreamList(cwd: string, raw: boolean): void {
     has_roadmap: ws.files.roadmap,
     has_state: ws.files.state,
     status: ws.status,
+    // #2562: a refused shipped marker must reach the surface. Projecting
+    // `status` without it renders the refusal invisible at the CLI, which is
+    // the silent-collapse defect this issue is about.
+    milestone_shipped_unverified: ws.milestone_shipped_unverified,
     current_phase: ws.current_phase,
     phase_count: ws.phase_count,
     completed_phases: ws.completed_phases,
@@ -265,6 +276,7 @@ function cmdWorkstreamStatus(cwd: string, name: string | null | undefined, raw: 
     phase_count: inv.phase_count,
     completed_phases: inv.completed_phases,
     status: inv.status,
+    milestone_shipped_unverified: inv.milestone_shipped_unverified,
     current_phase: inv.current_phase,
     last_activity: inv.last_activity,
   }, raw, undefined);
@@ -291,7 +303,7 @@ function cmdWorkstreamComplete(cwd: string, name: string | null | undefined, opt
   if (active === name) setActiveWorkstream(cwd, null as unknown as string);
 
   const archiveDir = path.join(root, 'milestones');
-  const today = new Date().toISOString().split('T')[0];
+  const today = realClock.localToday();
   let archivePath = path.join(archiveDir, `ws-${name}-${today}`);
   let suffix = 1;
   while (fs.existsSync(archivePath)) {
@@ -304,12 +316,12 @@ function cmdWorkstreamComplete(cwd: string, name: string | null | undefined, opt
   try {
     const entries = fs.readdirSync(wsDir, { withFileTypes: true });
     for (const entry of entries) {
-      fs.renameSync(path.join(wsDir, entry.name), path.join(archivePath, entry.name));
+      retryRenameSync(path.join(wsDir, entry.name), path.join(archivePath, entry.name));
       filesMoved.push(entry.name);
     }
   } catch (err) {
     for (const fname of filesMoved) {
-      try { fs.renameSync(path.join(archivePath, fname), path.join(wsDir, fname)); } catch { /* ignore */ }
+      try { retryRenameSync(path.join(archivePath, fname), path.join(wsDir, fname)); } catch { /* ignore */ }
     }
     try { fs.rmSync(archivePath, { recursive: true }); } catch { /* ignore */ }
     if (active === name) setActiveWorkstream(cwd, name!);
@@ -379,6 +391,7 @@ function cmdWorkstreamProgress(cwd: string, raw: boolean): void {
     name: ws.name,
     active: ws.active,
     status: ws.status,
+    milestone_shipped_unverified: ws.milestone_shipped_unverified,
     current_phase: ws.current_phase ?? null,
     phases: `${ws.completed_phases}/${ws.roadmap_phase_count}`,
     plans: `${ws.completed_plans}/${ws.total_plans}`,

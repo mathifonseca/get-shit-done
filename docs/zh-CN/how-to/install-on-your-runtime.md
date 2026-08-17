@@ -8,7 +8,7 @@
 
 ## 为什么需要安装程序
 
-GSD Core 以 Claude Code 原生 frontmatter 格式分发代理和命令文件。每个支持的运行时需要不同的 schema、目录结构和命令调用语法。安装程序负责执行必要的转换——例如，为 OpenCode 转换工具列表和颜色值、为 Codex 写入 TOML 代理条目，以及将所有命令体从连字符格式（`/gsd-update`）重写为冒号格式（`/gsd:update`）以适配 Gemini CLI。
+GSD Core 以 Claude Code 原生 frontmatter 格式分发代理和命令文件。每个支持的运行时需要不同的 schema、目录结构和命令调用语法。安装程序负责执行必要的转换——例如，为 OpenCode 转换工具列表和颜色值、为 Codex 写入 TOML 代理条目，以及将所有命令体从连字符格式（`/gsd-update`）重写为冒号格式（`/gsd-update`）以适配 Gemini CLI。
 
 **请勿直接从 `agents/` 或 `commands/` 复制文件。** 这样做会绕过转换过程，导致 schema 验证错误或命令缺失。
 
@@ -50,7 +50,7 @@ CLAUDE_CONFIG_DIR=~/.claude-alt npx @opengsd/gsd-core@latest --claude --global
 npx @opengsd/gsd-core@latest --gemini --global
 ```
 
-技能文件存放于 `~/.gemini/`。安装程序将所有命令体重写为 Gemini 的冒号命名空间格式（`/gsd:update`、`/gsd:config` 等）。安装后重启 Gemini CLI。
+技能文件存放于 `~/.gemini/`。安装程序将所有命令体重写为 Gemini 的冒号命名空间格式（`/gsd-update`、`/gsd-config` 等）。安装后重启 Gemini CLI。
 
 **覆盖安装目录：**
 
@@ -273,10 +273,11 @@ npx @opengsd/gsd-core@latest --opencode --global
 
 ## 安装后
 
-重启您的运行时以加载新命令和代理。然后启动您的第一个项目：
+重启您的运行时以加载新命令和代理。然后启动新项目或接入现有仓库：
 
 ```bash
-/gsd-new-project
+/gsd-new-project   # 新建项目
+/gsd-onboard       # 现有代码库
 ```
 
 如果重启后找不到该命令，请确认安装目录与运行时预期的配置路径匹配。上方的预发布版章节介绍了最常见的路径不匹配情况。

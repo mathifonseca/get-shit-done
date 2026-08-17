@@ -17,8 +17,10 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFileSync } = require('child_process');
 const { cleanup } = require('./helpers.cjs');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { throwIfFailed } = require('./helpers/git-fixture.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const CHECK_UPDATE_PATH = path.join(__dirname, '..', 'hooks', 'gsd-check-update.js');
 
@@ -87,7 +89,7 @@ describe('detectConfigDir runtime behavior (#1860)', () => {
     const hookSource = fs.readFileSync(CHECK_UPDATE_PATH, 'utf8');
 
     // Extract detectConfigDir function body (from 'function detectConfigDir' to the closing brace)
-    const fnMatch = hookSource.match(/(function detectConfigDir\(baseDir\)\s*\{[\s\S]*?\n\})/);
+    const fnMatch = hookSource.match(/(function detectConfigDir\(baseDir\)\s*\{[\s\S]*?\r?\n\})/);
     assert.ok(fnMatch, 'should be able to extract detectConfigDir function from hook source');
     const fnSource = fnMatch[1];
 
@@ -101,9 +103,9 @@ describe('detectConfigDir runtime behavior (#1860)', () => {
       "process.stdout.write(result);",
     ].join('\n');
 
-    const result = execFileSync(process.execPath, ['-e', testScript], {
-      encoding: 'utf8',
-    });
+    const nodeResult = runNode(['-e', testScript], { timeoutMs: PROBE_TIMEOUT_MS });
+    throwIfFailed(nodeResult, `node -e <detectConfigDir harness>`);
+    const result = nodeResult.stdout;
 
     const expectedDir = path.join(tmpHome, '.claude');
     assert.strictEqual(
@@ -124,7 +126,7 @@ describe('detectConfigDir runtime behavior (#1860)', () => {
     fs.writeFileSync(path.join(openCodeVersionDir, 'VERSION'), '1.0.0\n');
 
     const hookSource = fs.readFileSync(CHECK_UPDATE_PATH, 'utf8');
-    const fnMatch = hookSource.match(/(function detectConfigDir\(baseDir\)\s*\{[\s\S]*?\n\})/);
+    const fnMatch = hookSource.match(/(function detectConfigDir\(baseDir\)\s*\{[\s\S]*?\r?\n\})/);
     assert.ok(fnMatch, 'should be able to extract detectConfigDir function from hook source');
     const fnSource = fnMatch[1];
 
@@ -137,9 +139,9 @@ describe('detectConfigDir runtime behavior (#1860)', () => {
       "process.stdout.write(result);",
     ].join('\n');
 
-    const result = execFileSync(process.execPath, ['-e', testScript], {
-      encoding: 'utf8',
-    });
+    const nodeResult = runNode(['-e', testScript], { timeoutMs: PROBE_TIMEOUT_MS });
+    throwIfFailed(nodeResult, `node -e <detectConfigDir harness>`);
+    const result = nodeResult.stdout;
 
     const expectedDir = path.join(tmpHome, '.config', 'opencode');
     assert.strictEqual(

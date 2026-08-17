@@ -15,38 +15,9 @@ Valid GSD subagent types (use exact names — do not fall back to 'general-purpo
 
 <auto_mode>
 
-## Auto Mode Detection
-
-Check if `--auto` flag is present in $ARGUMENTS.
-
-**If auto mode:**
-
-- Skip brownfield mapping offer (assume greenfield)
-- Skip deep questioning (extract context from provided document)
-- Config: YOLO mode is implicit (skip that question), but ask granularity/git/agents FIRST (Step 2a)
-- After config: run Steps 6-9 automatically with smart defaults:
-  - Research: Always yes
-  - Requirements: Include all table stakes + features from provided document
-  - Requirements approval: Auto-approve
-  - Roadmap approval: Auto-approve
-
-**Document requirement:**
-Auto mode requires an idea document — either:
-
-- File reference: `/gsd:new-project --auto @prd.md`
-- Pasted/written text in the prompt
-
-If no document content provided, error:
-
-```
-Error: --auto requires an idea document.
-
-Usage:
-  /gsd:new-project --auto @your-idea.md
-  /gsd:new-project --auto [paste or write your idea here]
-
-The document should describe what you want to build.
-```
+<!-- gsd:section id="auto-mode-detection" when="flag:--auto" -->
+If `section_manifest` is `null` or `"auto-mode-detection"` is in its `included` list: read and execute `gsd-core/workflows/new-project/steps/auto-mode-detection.md`. Otherwise skip — do not read the file.
+<!-- /gsd:section -->
 
 </auto_mode>
 
@@ -57,15 +28,18 @@ The document should describe what you want to build.
 **MANDATORY FIRST STEP — Execute these checks before ANY user interaction:**
 
 ```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "$HOME/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="$HOME/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi
-INIT=$(gsd_run query init.new-project)
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
+AUTO_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--auto([[:space:]]|$) ]]; then AUTO_PARAM="--auto"; fi
+INIT=$(gsd_run query init.new-project $AUTO_PARAM)
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 AGENT_SKILLS_RESEARCHER=$(gsd_run query agent-skills gsd-project-researcher)
 AGENT_SKILLS_SYNTHESIZER=$(gsd_run query agent-skills gsd-research-synthesizer)
 AGENT_SKILLS_ROADMAPPER=$(gsd_run query agent-skills gsd-roadmapper)
 ```
 
-Parse JSON for: `researcher_model`, `synthesizer_model`, `roadmapper_model`, `commit_docs`, `project_exists`, `has_codebase_map`, `planning_exists`, `has_existing_code`, `has_package_file`, `is_brownfield`, `needs_codebase_map`, `has_git`, `git_worktree_root`, `in_nested_subdir`, `project_path`, `agents_installed`, `missing_agents`, `agent_runtime`, `agents_dir`, `required_agents`, `required_agents_installed`, `missing_required_agents`, `agent_skill_payloads_available`, `agent_skill_payload_agents`.
+Parse JSON for: `researcher_model`, `synthesizer_model`, `roadmapper_model`, `commit_docs`, `project_exists`, `has_codebase_map`, `planning_exists`, `has_existing_code`, `has_package_file`, `is_brownfield`, `needs_codebase_map`, `has_git`, `git_worktree_root`, `in_nested_subdir`, `project_path`, `agents_installed`, `missing_agents`, `agent_runtime`, `agents_dir`, `required_agents`, `required_agents_installed`, `missing_required_agents`, `agent_skill_payloads_available`, `agent_skill_payload_agents`, `requirements_path`, `roadmap_path`, `config_path`, `research_dir`, `response_language`.
+
+**If `response_language` is set:** All user-facing questions, prompts, and explanations in this workflow MUST be presented in `{response_language}`. Technical terms, code, file paths, and subagent prompts stay in English — only user-facing output is translated.
 
 **If `agents_installed` is false:** Display a warning before proceeding:
 ```text
@@ -99,6 +73,7 @@ Derive `RUNTIME` from the invoking prompt's `execution_context` path:
 - Path contains `/.codex/` → `RUNTIME=codex`
 - Path contains `/.gemini/` → `RUNTIME=gemini`
 - Path contains `/.config/opencode/` or `/.opencode/` → `RUNTIME=opencode`
+- Path contains `/.trae/` → `RUNTIME=trae`
 - Otherwise → `RUNTIME=claude`
 
 If `execution_context` path is not available, fall back to env vars:
@@ -106,12 +81,13 @@ If `execution_context` path is not available, fall back to env vars:
 if [ -n "$CODEX_HOME" ]; then RUNTIME="codex"
 elif [ -n "$GEMINI_CONFIG_DIR" ]; then RUNTIME="gemini"
 elif [ -n "$OPENCODE_CONFIG_DIR" ] || [ -n "$OPENCODE_CONFIG" ]; then RUNTIME="opencode"
+elif [ -n "$TRAE_CONFIG_DIR" ]; then RUNTIME="trae"
 else RUNTIME="claude"; fi
 ```
 
-Set the instruction file variable:
+Set the instruction file variable via the shared runtime-name policy adapter (`gsd_run query project-instruction-file`, backed by `getProjectInstructionFile` in `runtime-name-policy.cjs` — the single source of truth shared with `profile-output.cjs`):
 ```bash
-if [ "$RUNTIME" = "codex" ]; then INSTRUCTION_FILE="AGENTS.md"; else INSTRUCTION_FILE="CLAUDE.md"; fi
+INSTRUCTION_FILE=$(gsd_run query project-instruction-file --runtime "$RUNTIME")
 ```
 
 All subsequent references to the project instruction file use `$INSTRUCTION_FILE`.
@@ -128,170 +104,15 @@ All subsequent references to the project instruction file use `$INSTRUCTION_FILE
 
 **If auto mode:** Skip to Step 4 (assume greenfield, synthesize PROJECT.md from provided document).
 
-**If `needs_codebase_map` is true** (from init — existing code detected but no codebase map):
-
-
-**Text mode (`workflow.text_mode: true` in config or `--text` flag):** Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `text_mode` from init JSON is `true`. When TEXT_MODE is active, replace every `AskUserQuestion` call with a plain-text numbered list and ask the user to type their choice number. This is required for non-Claude runtimes (OpenAI Codex, Gemini CLI, etc.) where `AskUserQuestion` is not available.
-Use AskUserQuestion:
-
-- header: "Codebase"
-- question: "I detected existing code in this directory. Would you like to map the codebase first?"
-- options:
-  - "Map codebase first" — Run /gsd:map-codebase to understand existing architecture (Recommended)
-  - "Skip mapping" — Proceed with project initialization
-
-**If "Map codebase first":**
-
-```
-Run `/gsd:map-codebase` first, then return to `/gsd:new-project`
-```
-
-Exit command.
+<!-- gsd:section id="codebase-map-offer" when="state:needs-codebase-map" -->
+If `section_manifest` is `null` or `"codebase-map-offer"` is in its `included` list: read and execute `gsd-core/workflows/new-project/steps/codebase-map-offer.md`. Otherwise skip — do not read the file.
+<!-- /gsd:section -->
 
 **If "Skip mapping" OR `needs_codebase_map` is false:** Continue to Step 3.
 
-## 2a. Auto Mode Config (auto mode only)
-
-**If auto mode:** Collect config settings upfront before processing the idea document.
-
-YOLO mode is implicit (auto = YOLO). Ask remaining config questions:
-
-**Round 1 — Core settings (3 questions, no Mode question):**
-
-```
-AskUserQuestion([
-  {
-    header: "Granularity",
-    question: "How finely should scope be sliced into phases?",
-    multiSelect: false,
-    options: [
-      { label: "Coarse (Recommended)", description: "Fewer, broader phases (3-5 phases, 1-3 plans each)" },
-      { label: "Standard", description: "Balanced phase size (5-8 phases, 3-5 plans each)" },
-      { label: "Fine", description: "Many focused phases (8-12 phases, 5-10 plans each)" }
-    ]
-  },
-  {
-    header: "Execution",
-    question: "Run plans in parallel?",
-    multiSelect: false,
-    options: [
-      { label: "Parallel (Recommended)", description: "Independent plans run simultaneously" },
-      { label: "Sequential", description: "One plan at a time" }
-    ]
-  },
-  {
-    header: "Git Tracking",
-    question: "Commit planning docs to git?",
-    multiSelect: false,
-    options: [
-      { label: "Yes (Recommended)", description: "Planning docs tracked in version control" },
-      { label: "No", description: "Keep .planning/ local-only (add to .gitignore)" }
-    ]
-  }
-])
-```
-
-**Round 2 — Workflow agents (same as Step 5):**
-
-```
-AskUserQuestion([
-  {
-    header: "Research",
-    question: "Research before planning each phase? (adds tokens/time)",
-    multiSelect: false,
-    options: [
-      { label: "Yes (Recommended)", description: "Investigate domain, find patterns, surface gotchas" },
-      { label: "No", description: "Plan directly from requirements" }
-    ]
-  },
-  {
-    header: "Plan Check",
-    question: "Verify plans will achieve their goals? (adds tokens/time)",
-    multiSelect: false,
-    options: [
-      { label: "Yes (Recommended)", description: "Catch gaps before execution starts" },
-      { label: "No", description: "Execute plans without verification" }
-    ]
-  },
-  {
-    header: "Verifier",
-    question: "Verify work satisfies requirements after each phase? (adds tokens/time)",
-    multiSelect: false,
-    options: [
-      { label: "Yes (Recommended)", description: "Confirm deliverables match phase goals" },
-      { label: "No", description: "Trust execution, skip verification" }
-    ]
-  },
-  {
-    header: "Drift Guard",
-    question: "Enable the plan drift-guard? It verifies that symbols your plans cite (decorators, classes, functions, CLI flags) actually exist in your source at review time, catching hallucinated names before execution. [Y/n]",
-    multiSelect: false,
-    options: [
-      { label: "Yes (Recommended)", description: "Resolve symbol references against live source during plan review — catches hallucinated names before execution" },
-      { label: "No", description: "Skip symbol grounding — plan review proceeds without source verification" }
-    ]
-  },
-  {
-    header: "AI Models",
-    question: "Which AI models for planning agents?",
-    multiSelect: false,
-    options: [
-      { label: "Balanced (Recommended)", description: "Sonnet for most agents — good quality/cost ratio" },
-      { label: "Quality", description: "Opus for research/roadmap — higher cost, deeper analysis" },
-      { label: "Budget", description: "Haiku where possible — fastest, lowest cost" },
-      { label: "Inherit", description: "Use the current session model for all agents (OpenCode /model)" }
-    ]
-  }
-])
-```
-
-**Round 3 — PR body onboarding:**
-
-Ask which optional PRD-style sections `/gsd:ship` should append to generated PR bodies. These map to `ship.pr_body_sections`; selected sections are written with `"enabled": true`, unselected seeded sections are written with `"enabled": false` so the project can enable them later without editing `ship.md`.
-
-Prefer lean/agile PRD sections that make the delivered increment clear: user stories, acceptance criteria, Definition of Done or release criteria, risks, dependencies, and stakeholder review.
-
-```
-AskUserQuestion([
-  {
-    header: "PR Body",
-    question: "Which optional PRD-style sections should /gsd:ship include in PR bodies?",
-    multiSelect: true,
-    options: [
-      { label: "User Stories & Acceptance Criteria", description: "Append user-facing stories and acceptance checks from REQUIREMENTS.md" },
-      { label: "Risks & Dependencies", description: "Append rollout risks, dependencies, and rollback notes from PLAN.md" },
-      { label: "Success Metrics & Release Criteria", description: "Append measurable Definition of Done and release checks for stakeholder review" },
-      { label: "Stakeholder Review & Approval", description: "Append approval checklist for projects that need sign-off traceability" }
-    ]
-  }
-])
-```
-
-Build `ship.pr_body_sections` from those choices. For selected options, set `enabled: true`; for seeded but unselected options, set `enabled: false`. If the user selects none, use `"ship":{"pr_body_sections":[]}`.
-
-Create `.planning/config.json` with all settings (CLI fills in remaining defaults automatically):
-
-```bash
-mkdir -p .planning
-gsd_run query config-new-project '{"mode":"yolo","granularity":"[selected]","parallelization":true|false,"commit_docs":true|false,"model_profile":"quality|balanced|budget|inherit","workflow":{"research":true|false,"plan_check":true|false,"verifier":true|false,"nyquist_validation":true|false,"auto_advance":true},"plan_review":{"source_grounding":true|false},"ship":{"pr_body_sections":[{"heading":"User Stories & Acceptance Criteria","enabled":true|false,"source":"REQUIREMENTS.md ## User Stories || REQUIREMENTS.md ## Acceptance Criteria","fallback":"- Acceptance criteria are covered by the linked requirements and verification evidence."},{"heading":"Risks & Dependencies","enabled":true|false,"source":"PLAN.md ## Risks || PLAN.md ## Dependencies","fallback":"- No known high-risk rollout dependencies."},{"heading":"Success Metrics & Release Criteria","enabled":true|false,"source":"REQUIREMENTS.md ## Definition of Done || VERIFICATION.md ## Release Criteria","fallback":"- Release when automated verification and required manual checks pass."},{"heading":"Stakeholder Review & Approval","enabled":true|false,"template":"- Product owner approval pending for {phase_name}."}]}}'
-```
-
-**If commit_docs = No:** Add `.planning/` to `.gitignore`.
-
-**Commit config.json:**
-
-```bash
-mkdir -p .planning
-gsd_run query commit "chore: add project config" --files .planning/config.json
-```
-
-**Persist auto-advance chain flag to config (survives context compaction):**
-
-```bash
-gsd_run query config-set workflow._auto_chain_active true
-```
-
-Proceed to Step 4 (skip Steps 3 and 5).
+<!-- gsd:section id="auto-mode-config" when="flag:--auto" -->
+If `section_manifest` is `null` or `"auto-mode-config"` is in its `included` list: read and execute `gsd-core/workflows/new-project/steps/auto-mode-config.md`. Otherwise skip — do not read the file.
+<!-- /gsd:section -->
 
 ## 2b. Prior Spike/Sketch Detection
 
@@ -745,19 +566,52 @@ questions: [
       { label: "Yes (Recommended)", description: "Confirm deliverables match phase goals" },
       { label: "No", description: "Trust execution, skip verification" }
     ]
-  },
+  }
+]
+
+// Model profile uses a two-question split because AskUserQuestion enforces a hard
+// 4-option cap and there are 5 valid profiles (quality, balanced, budget, adaptive,
+// inherit). Q1 routes between adaptive/standard-tier/inherit; Q2 (shown only when
+// Q1 = "Standard tier…") picks among the three standard profiles. Mirrors the
+// /gsd:settings split (#3784, #1516).
+questions: [
   {
     header: "AI Models",
     question: "Which AI models for planning agents?",
     multiSelect: false,
     options: [
-      { label: "Balanced (Recommended)", description: "Sonnet for most agents — good quality/cost ratio" },
-      { label: "Quality", description: "Opus for research/roadmap — higher cost, deeper analysis" },
-      { label: "Budget", description: "Haiku where possible — fastest, lowest cost" },
-      { label: "Inherit", description: "Use the current session model for all agents (OpenCode /model)" }
+      { label: "Adaptive (Recommended)", description: "Role-based cost optimization: heavy roles use the highest-tier model available on the active runtime, light roles use the cheapest. Best balance of quality and cost across all supported runtimes (Claude, Codex, Gemini, OpenRouter, local)." },
+      { label: "Standard tier…", description: "Choose Quality, Balanced, or Budget — flat tier applied to all agents" },
+      { label: "Inherit", description: "Use the current session model for all agents (required for non-Claude runtimes: Codex, Gemini CLI, OpenCode /model, OpenRouter, local models)" }
     ]
   }
 ]
+
+**Conditional visibility — model_profile (Q2):**
+  Only ask this question when Q1's answer is "Standard tier…".
+  If Q1 = "Adaptive (Recommended)" → write model_profile=adaptive and SKIP Q2.
+  If Q1 = "Inherit"                → write model_profile=inherit and SKIP Q2.
+  If user cancels Q2 after picking "Standard tier…" → leave existing model_profile value unchanged.
+
+questions: [
+  {
+    question: "Which standard profile? (Quality / Balanced / Budget)",
+    header: "Model Tier",
+    multiSelect: false,
+    options: [
+      { label: "Quality", description: "Opus everywhere except verification (highest cost) — Claude only" },
+      { label: "Balanced", description: "Opus for planning, Sonnet for research/execution/verification — Claude only" },
+      { label: "Budget", description: "Sonnet for writing, Haiku for research/verification (lowest cost) — Claude only" }
+    ]
+  }
+]
+
+// Map UI choices → config values:
+//   Q1 "Adaptive (Recommended)"         → model_profile = "adaptive"
+//   Q1 "Inherit"                        → model_profile = "inherit"
+//   Q1 "Standard tier…" + Q2 "Quality"  → model_profile = "quality"
+//   Q1 "Standard tier…" + Q2 "Balanced" → model_profile = "balanced"
+//   Q1 "Standard tier…" + Q2 "Budget"   → model_profile = "budget"
 ```
 
 **Round 3 — Project Integration Settings:**
@@ -1019,7 +873,7 @@ Create `.planning/config.json` with all settings (CLI fills in remaining default
 
 ```bash
 mkdir -p .planning
-gsd_run query config-new-project '{"mode":"[yolo|interactive]","granularity":"[selected]","parallelization":true|false,"commit_docs":true|false,"model_profile":"quality|balanced|budget|inherit","workflow":{"research":true|false,"plan_check":true|false,"verifier":true|false,"nyquist_validation":[false if granularity=coarse, true otherwise],"scaffold_makefile":true|false,"scaffold_precommit":true|false,"scaffold_preflight":true|false,"scaffold_rules":true|false},"project":{"issue_tracker":"github|linear|jira|null","issue_prefix":"[selected or null]","pr_title_template":"[selected or null]","pr_body_requires_issue":true|false,"ci_commands":["[user input]"]},"git":{"branch_pattern":"[selected or null]"},"plan_review":{"source_grounding":true|false},"ship":{"pr_body_sections":[{"heading":"User Stories & Acceptance Criteria","enabled":true|false,"source":"REQUIREMENTS.md ## User Stories || REQUIREMENTS.md ## Acceptance Criteria","fallback":"- Acceptance criteria are covered by the linked requirements and verification evidence."},{"heading":"Risks & Dependencies","enabled":true|false,"source":"PLAN.md ## Risks || PLAN.md ## Dependencies","fallback":"- No known high-risk rollout dependencies."},{"heading":"Success Metrics & Release Criteria","enabled":true|false,"source":"REQUIREMENTS.md ## Definition of Done || VERIFICATION.md ## Release Criteria","fallback":"- Release when automated verification and required manual checks pass."},{"heading":"Stakeholder Review & Approval","enabled":true|false,"template":"- Product owner approval pending for {phase_name}."}]}}'
+gsd_run query config-new-project '{"mode":"[yolo|interactive]","granularity":"[selected]","parallelization":true|false,"commit_docs":true|false,"model_profile":"quality|balanced|budget|adaptive|inherit","workflow":{"research":true|false,"plan_check":true|false,"verifier":true|false,"nyquist_validation":[false if granularity=coarse, true otherwise],"scaffold_makefile":true|false,"scaffold_precommit":true|false,"scaffold_preflight":true|false,"scaffold_rules":true|false},"project":{"issue_tracker":"github|linear|jira|null","issue_prefix":"[selected or null]","pr_title_template":"[selected or null]","pr_body_requires_issue":true|false,"ci_commands":["[user input]"]},"git":{"branch_pattern":"[selected or null]"},"plan_review":{"source_grounding":true|false},"ship":{"pr_body_sections":[{"heading":"User Stories & Acceptance Criteria","enabled":true|false,"source":"REQUIREMENTS.md ## User Stories || REQUIREMENTS.md ## Acceptance Criteria","fallback":"- Acceptance criteria are covered by the linked requirements and verification evidence."},{"heading":"Risks & Dependencies","enabled":true|false,"source":"PLAN.md ## Risks || PLAN.md ## Dependencies","fallback":"- No known high-risk rollout dependencies."},{"heading":"Success Metrics & Release Criteria","enabled":true|false,"source":"REQUIREMENTS.md ## Definition of Done || VERIFICATION.md ## Release Criteria","fallback":"- Release when automated verification and required manual checks pass."},{"heading":"Stakeholder Review & Approval","enabled":true|false,"template":"- Product owner approval pending for {phase_name}."}]}}'
 ```
 
 **Note:** Run `/gsd:settings` anytime to update model profile, workflow agents, branching strategy, and other preferences.
@@ -1124,6 +978,10 @@ Display spawning indicator:
 
 Spawn 4 parallel gsd-project-researcher agents with path references:
 
+<!-- #2517 model-omit-on-inherit -->
+
+> **Model omission (#2517).** Omit the `model` parameter entirely when the value it would carry (`researcher_model`, `synthesizer_model`, `roadmapper_model`) is `"inherit"` or empty. An empty value 404s on runtimes without native tier aliases — the default on non-Claude runtimes. Omitting it inherits the orchestrator's model. See @gsd-core/references/model-profile-resolution.md.
+
 ```text
 Agent(prompt="<research_type>
 Project Research — Stack dimension for [domain].
@@ -1159,8 +1017,12 @@ Your STACK.md feeds into roadmap creation. Be prescriptive:
 - [ ] Confidence levels assigned to each recommendation
 </quality_gate>
 
+<!-- #2508 runtime-aware-dispatch -->
+
+> **Runtime-aware dispatch (#2508 Phase 4).** GSD workflows dispatch specialized subagents by role. Before dispatching on a built-in-only runtime (kimi-code — three built-ins only), resolve the role to a built-in via `gsd_run query resolve-dispatch-type --requested <role> --raw`. On named-dispatch runtimes (Claude/OpenCode/…) the role is returned unchanged; on kimi-code it maps to `coder`/`explore`/`plan` by role-suffix. The persona rides `${AGENT_SKILLS_<ROLE>}` (Phase 3) regardless. See @gsd-core/references/runtime-aware-dispatch.md.
+
 <output>
-Write to: .planning/research/STACK.md
+Write to: {research_dir}/STACK.md
 Use template: ~/.claude/gsd-core/templates/research-project/STACK.md
 </output>
 ", subagent_type="gsd-project-researcher", model="{researcher_model}", description="Stack research")
@@ -1200,7 +1062,7 @@ Your FEATURES.md feeds into requirements definition. Categorize clearly:
 </quality_gate>
 
 <output>
-Write to: .planning/research/FEATURES.md
+Write to: {research_dir}/FEATURES.md
 Use template: ~/.claude/gsd-core/templates/research-project/FEATURES.md
 </output>
 ", subagent_type="gsd-project-researcher", model="{researcher_model}", description="Features research")
@@ -1240,7 +1102,7 @@ Your ARCHITECTURE.md informs phase structure in roadmap. Include:
 </quality_gate>
 
 <output>
-Write to: .planning/research/ARCHITECTURE.md
+Write to: {research_dir}/ARCHITECTURE.md
 Use template: ~/.claude/gsd-core/templates/research-project/ARCHITECTURE.md
 </output>
 ", subagent_type="gsd-project-researcher", model="{researcher_model}", description="Architecture research")
@@ -1280,7 +1142,7 @@ Your PITFALLS.md prevents mistakes in roadmap/planning. For each pitfall:
 </quality_gate>
 
 <output>
-Write to: .planning/research/PITFALLS.md
+Write to: {research_dir}/PITFALLS.md
 Use template: ~/.claude/gsd-core/templates/research-project/PITFALLS.md
 </output>
 ", subagent_type="gsd-project-researcher", model="{researcher_model}", description="Pitfalls research")
@@ -1297,16 +1159,16 @@ Synthesize research outputs into SUMMARY.md.
 </task>
 
 <files_to_read>
-- .planning/research/STACK.md
-- .planning/research/FEATURES.md
-- .planning/research/ARCHITECTURE.md
-- .planning/research/PITFALLS.md
+- {research_dir}/STACK.md
+- {research_dir}/FEATURES.md
+- {research_dir}/ARCHITECTURE.md
+- {research_dir}/PITFALLS.md
 </files_to_read>
 
 ${AGENT_SKILLS_SYNTHESIZER}
 
 <output>
-Write to: .planning/research/SUMMARY.md
+Write to: {research_dir}/SUMMARY.md
 Use template: ~/.claude/gsd-core/templates/research-project/SUMMARY.md
 Commit after writing.
 </output>
@@ -1314,6 +1176,14 @@ Commit after writing.
 ```
 
 > **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
+
+**Synthesizer output self-heal (#222) — verify SUMMARY.md materialized:** The synthesizer's canonical output is `.planning/research/SUMMARY.md` on disk; its brief structured return (`## SYNTHESIS COMPLETE` plus a few `###` confirmation lines) is NOT the file content. A known LLM false-refusal (issue #222) sometimes makes the agent return the full SUMMARY.md document inline — fabricating a write restriction (e.g. "the runtime is blocking file writes") — instead of writing the file. Prompt hardening alone does not fully eliminate it, so the orchestrator MUST absorb the failure deterministically before spawning `gsd-roadmapper`:
+
+1. Verify `.planning/research/SUMMARY.md` exists AND is substantive — non-empty, and free of any leftover `<!-- gsd:write-continue -->` continuation sentinel (which marks a truncated/incomplete write). You may validate with `gsd_run verify-summary .planning/research/SUMMARY.md` — it exits 0 regardless, so check its JSON `passed` field (`"passed": false` means missing or invalid), not the process exit code. If it passes, continue normally.
+2. If it is MISSING or invalid AND the synthesizer's return message contains the FULL SUMMARY.md document — recognizable by the template's top-level markers `# Project Research Summary`, `## Key Findings`, `## Implications for Roadmap`, and `## Sources`, not merely the brief `## SYNTHESIS COMPLETE` confirmation — the false-refusal fired: write that returned document to `.planning/research/SUMMARY.md` with the Write tool, then commit ALL research artifacts the synthesizer owns (it commits on behalf of the four researchers) with `gsd_run query commit "docs: complete project research" --files .planning/research/` unless they are already committed. Log `⚠ #222 self-heal: synthesizer returned SUMMARY.md inline without writing it; orchestrator persisted the file.`
+3. If it is MISSING or invalid AND the return is only a brief confirmation (no full SUMMARY document to recover), the synthesizer genuinely failed — surface the error and stop; do NOT spawn `gsd-roadmapper` against a missing or incomplete SUMMARY.md.
+
+This guarantees `gsd-roadmapper` (which lists SUMMARY.md as required reading) never runs against a missing or truncated SUMMARY.md.
 
 Display research complete banner and key findings:
 
@@ -1538,10 +1408,10 @@ Agent(prompt="
 <planning_context>
 
 <files_to_read>
-- .planning/PROJECT.md (Project context)
-- .planning/REQUIREMENTS.md (v1 Requirements)
-- .planning/research/SUMMARY.md (Research findings - if exists)
-- .planning/config.json (Granularity and mode settings)
+- {project_path} (Project context)
+- {requirements_path} (v1 Requirements)
+- {research_dir}/SUMMARY.md (Research findings - if exists)
+- {config_path} (Granularity and mode settings)
 </files_to_read>
 
 ${AGENT_SKILLS_ROADMAPPER}
@@ -1639,7 +1509,7 @@ Use AskUserQuestion:
   [user's notes]
 
   <files_to_read>
-  - .planning/ROADMAP.md (Current roadmap to revise)
+  - {roadmap_path} (Current roadmap to revise)
   </files_to_read>
 
   ${AGENT_SKILLS_ROADMAPPER}
@@ -1771,7 +1641,7 @@ PHASE1_HAS_UI=$(echo "$PHASE1_SECTION" | grep -qi "UI hint.*yes" && echo "true" 
 - `.planning/REQUIREMENTS.md`
 - `.planning/ROADMAP.md`
 - `.planning/STATE.md`
-- `$INSTRUCTION_FILE` (`AGENTS.md` for Codex, `CLAUDE.md` for all other runtimes)
+- `$INSTRUCTION_FILE` (runtime-derived via the shared `getProjectInstructionFile` policy: `AGENTS.md` for codex/opencode/kilo/kimi, `.github/copilot-instructions.md` for copilot, `GEMINI.md` for gemini/antigravity, `.claude/CLAUDE.md` for claude)
 - `.claude/preflight.yaml` (if preflight scaffolding selected)
 - `.claude/rules/` (if rules scaffolding selected)
   - `principles.md`
@@ -1801,7 +1671,7 @@ PHASE1_HAS_UI=$(echo "$PHASE1_SECTION" | grep -qi "UI hint.*yes" && echo "true" 
 - [ ] ROADMAP.md created with phases, requirement mappings, success criteria
 - [ ] STATE.md initialized
 - [ ] REQUIREMENTS.md traceability updated
-- [ ] `$INSTRUCTION_FILE` generated with GSD workflow guidance (AGENTS.md for Codex, CLAUDE.md otherwise)
+- [ ] `$INSTRUCTION_FILE` generated with GSD workflow guidance (runtime-derived via the shared `getProjectInstructionFile` policy — `AGENTS.md` for codex/opencode/kilo/kimi, `.github/copilot-instructions.md` for copilot, `GEMINI.md` for gemini/antigravity, `.claude/CLAUDE.md` for claude; an existing hand-crafted file without GSD markers is left untouched unless `--force`)
 - [ ] Preflight checklist scaffolded (if selected) → **committed**
 - [ ] Rules directory scaffolded (if selected) → **committed**
 - [ ] User knows next step is `/gsd:discuss-phase 1`

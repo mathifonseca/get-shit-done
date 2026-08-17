@@ -369,7 +369,7 @@ GSD は LLM のシステムプロンプトになるマークダウンファイ�
 - `gsd-prompt-guard.js` — `.planning/` への Write/Edit 呼び出しでインジェクションパターンをスキャンする（常時有効、アドバイザリーのみ）
 - `gsd-workflow-guard.js` — GSD ワークフローコンテキスト外でのファイル編集を警告する（`hooks.workflow_guard` 経由でオプトイン）
 
-**CI スキャナー:** `prompt-injection-scan.test.cjs` はすべてのエージェント、ワークフロー、コマンドファイルに埋め込まれたインジェクションベクターをスキャンします。
+**CI スキャナー:** `prompt-injection-scan.security.test.cjs` はすべてのエージェント、ワークフロー、コマンドファイルに埋め込まれたインジェクションベクターをスキャンします。
 
 ---
 
@@ -382,8 +382,8 @@ AI コーディングツールはパッケージ名を幻覚することがあ�
 ```markdown
 ## Package Legitimacy Audit
 
-| Package | Registry | Age | Downloads | Source Repo | slopcheck | Disposition |
-|---------|----------|-----|-----------|-------------|-----------|-------------|
+| Package | Registry | Age | Downloads | Source Repo | Verdict | Disposition |
+|---------|----------|-----|-----------|-------------|---------|-------------|
 | express | npm | 13 yrs | 100M+/wk | github.com/expressjs/express | [OK] | Approved |
 | some-new-util | npm | 3 days | 47 | none | [SLOP] | REMOVED |
 | api-bridge | npm | 6 mo | 1.2k/wk | github.com/user/api-bridge | [SUS] | Flagged |
@@ -395,7 +395,7 @@ AI コーディングツールはパッケージ名を幻覚することがあ�
 
 **実行中** — インストールが失敗した場合、エグゼキューターはチェックポイントを提示して停止し、代替案をサイレントに試みません。
 
-**スロップチェックの判定:**
+**正当性の判定:**
 
 | 判定 | 意味 | GSD のアクション |
 |---------|---------|------------|
@@ -403,12 +403,7 @@ AI コーディングツールはパッケージ名を幻覚することがあ�
 | `[SUS]` | 疑わしいシグナル | フラグ付き; プランナーが `checkpoint:human-verify` を追加 |
 | `[SLOP]` | 高確信度の幻覚 | RESEARCH.md から削除; プランナーに到達しない |
 
-slopcheck を手動でインストールするには:
-
-```bash
-pip install slopcheck
-# verify: slopcheck install express --json
-```
+判定はライブのレジストリ API（npm、PyPI、crates.io）から計算されます — 個別にインストールするツールはありません。`slopcheck` はオプションのエスカレート専用アダプター（判定を引き上げることはできますが、引き下げることはできません）です。出荷される設定はこれを配線しておらず、その不在によってゲートの動作が変わることはありません。
 
 ---
 
@@ -463,6 +458,13 @@ claude --dangerously-skip-permissions
 /gsd-pause-work --report         # Generate session summary
 ```
 
+> [!CAUTION]
+> **The permissions flag is optional.** It skips per-file confirmation while
+> GSD's sub-agents read and write files. Use it only in low-stakes or
+> throwaway contexts. To keep confirmations enabled, start with `claude` instead.
+> For real work, read the [security model](../explanation/security-model.md) first.
+
+
 ### 既存ドキュメントからの新規プロジェクト
 
 ```bash
@@ -474,8 +476,8 @@ claude --dangerously-skip-permissions
 ### 既存のコードベース
 
 ```bash
-/gsd-map-codebase           # Analyse what exists (parallel agents)
-/gsd-new-project            # Questions focus on what you're ADDING
+/gsd-onboard                # Safely map, ingest docs, and initialize planning
+# Follow printed handoff commands, then rerun /gsd-onboard
 # (normal phase workflow from here)
 ```
 
@@ -499,7 +501,7 @@ claude --dangerously-skip-permissions
 
 **needs-acknowledgement の動作。** ガードが欠損シンボルを発見すると、ハードブロックではなく `needs-acknowledgement` 通知をプランレビュー出力に出力します。承認して続行（シンボルが意図的に新規の場合）するか、プランの修正を要求できます。ガードはプランを自動拒否しません — 人間の判断のためのシグナルを提示します。
 
-**intel なしでも動作。** デフォルトではガードは `grep`/`ripgrep` を使用してソースファイルを検索します — 事前インデックスは不要です。`intel.enabled: true` で `/gsd:map-codebase` を実行済みの場合、`plan_review.source_grounding_authority: intel` を設定すると、より高速な事前構築済みの `api-map.json` インデックスを使用できます。
+**intel なしでも動作。** デフォルトではガードは `grep`/`ripgrep` を使用してソースファイルを検索します — 事前インデックスは不要です。`intel.enabled: true` で `/gsd-map-codebase` を実行済みの場合、`plan_review.source_grounding_authority: intel` を設定すると、より高速な事前構築済みの `api-map.json` インデックスを使用できます。
 
 ```bash
 # Enable/disable (default: on)
@@ -511,7 +513,7 @@ claude --dangerously-skip-permissions
 /gsd-settings plan_review.source_grounding_authority intel  # pre-indexed api-map.json
 ```
 
-プロジェクト設定時（`/gsd:new-project` がワークフロー設定中に尋ねます）または `/gsd:settings`（Planning セクション → Drift Guard）経由でいつでも切り替えられます。
+プロジェクト設定時（`/gsd-new-project` がワークフロー設定中に尋ねます）または `/gsd-settings`（Planning セクション → Drift Guard）経由でいつでも切り替えられます。
 
 ### クイックバグ修正
 
@@ -562,14 +564,14 @@ claude --dangerously-skip-permissions
 
 ### プログラマティック CLI（`gsd-tools query` vs `gsd-tools.cjs`）
 
-自動化には、登録済みサブコマンドを使用する **`gsd-tools query`** を推奨します（[CLI-TOOLS.md — SDK とプログラマティックアクセス](CLI-TOOLS.md#sdk-and-programmatic-access) と QUERY-HANDLERS.md を参照）。レガシーの `node $HOME/.claude/get-shit-done/bin/gsd-tools.cjs` CLI は引き続きサポートされています。
+自動化には、登録済みサブコマンドを使用する **`gsd-tools query`** を推奨します（[CLI-TOOLS.md — SDK とプログラマティックアクセス](CLI-TOOLS.md#sdk-and-programmatic-access) と QUERY-HANDLERS.md を参照）。レガシーの `node $HOME/.claude/gsd-core/bin/gsd-tools.cjs` CLI は引き続きサポートされています。
 
 ### STATE.md の同期ずれ
 
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state validate          # Detect drift
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state sync --verify     # Preview changes
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state sync              # Reconstruct STATE.md
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state validate          # Detect drift
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state sync --verify     # Preview changes
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state sync              # Reconstruct STATE.md
 ```
 
 ### 「Spawning...」の後にコマンドがフリーズしているように見える
@@ -667,7 +669,7 @@ budget プロファイルに切り替えてください: `/gsd-config --profile 
 
 サーバーを無効にすると、以降のすべてのターンからそのスキーマが削除されます。MCP のトリミングは `model_profile` の調整と**複合効果があります** — 両方のレバーは相加的であり、MCP の節約はオーケストレーターが生成するすべてのサブエージェントにわたってすぐに現れます。
 
-完全な監査、ハーネスリファレンス、`model_profile` との組み合わせに関するノートは、バンドルされた `context-budget.md` リファレンスの [MCP ツールスキーマコスト](../../get-shit-done/references/context-budget.md#mcp-tool-schema-cost-harness-concern) を参照してください。
+完全な監査、ハーネスリファレンス、`model_profile` との組み合わせに関するノートは、バンドルされた `context-budget.md` リファレンスの [MCP ツールスキーマコスト](../../gsd-core/references/context-budget.md#mcp-tool-schema-cost-harness-concern) を参照してください。
 
 ### 非 Claude ランタイムの使用（Codex、OpenCode、Gemini CLI、Kilo）
 
@@ -853,7 +855,7 @@ All subagent/executor commits MUST use `--no-verify`.
   reports/                # Session reports (from /gsd-pause-work --report)
   todos/
     pending/              # Captured ideas awaiting work
-    done/                 # Completed todos
+    completed/             # Completed todos
   debug/                  # Active debug sessions
     resolved/             # Archived debug sessions
   spikes/                 # Feasibility experiments (from /gsd-spike)
@@ -864,7 +866,8 @@ All subagent/executor commits MUST use `--no-verify`.
     themes/
       default.css         # Shared CSS variables for all sketches
     MANIFEST.md           # Index of all sketches with winners
-  codebase/               # Brownfield codebase mapping (from /gsd-map-codebase)
+  codebase/               # Brownfield codebase mapping (from /gsd-map-codebase or /gsd-onboard)
+  onboarding/             # Brownfield onboarding summary (from /gsd-onboard)
   phases/
     XX-phase-name/
       XX-YY-PLAN.md       # Atomic execution plans

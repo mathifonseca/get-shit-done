@@ -15,11 +15,14 @@
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
+const yaml = require('js-yaml');
 
 const {
   extractFrontmatter,
   reconstructFrontmatter,
   spliceFrontmatter,
+  stripFrontmatter,
+  noOpObjectListSetError,
   parseMustHavesBlock,
   FRONTMATTER_SCHEMAS,
 } = require('../gsd-core/bin/lib/frontmatter.cjs');
@@ -830,8 +833,11 @@ describe('FRONTMATTER_SCHEMAS', () => {
     ]);
   });
 
-  test('three schemas exist: plan, summary, verification', () => {
-    assert.deepEqual(Object.keys(FRONTMATTER_SCHEMAS).sort(), ['plan', 'summary', 'verification']);
+  test('four schemas exist: plan, plan-gap-closure, summary, verification (#2847)', () => {
+    assert.deepEqual(
+      Object.keys(FRONTMATTER_SCHEMAS).sort(),
+      ['plan', 'plan-gap-closure', 'summary', 'verification']
+    );
   });
 
   test('plan includes phase field', () => {
@@ -856,6 +862,55 @@ describe('FRONTMATTER_SCHEMAS', () => {
 
   test('verification does not include completed field', () => {
     assert.ok(!FRONTMATTER_SCHEMAS.verification.required.includes('completed'));
+  });
+});
+
+// ─── FRONTMATTER_SCHEMAS['plan-gap-closure'] (#2847) ──────────────────────────
+//
+// #2847: --gaps does not load planner-gap-closure.md's requirement into the
+// only machine-checked gate — gap-closure plans could pass validation
+// without `gap_closure: true`, so a subsequent `--gaps-only` execute run
+// silently matched zero plans. Fix: a dedicated schema that requires every
+// 'plan' field plus `gap_closure`, kept separate so standard/reviews-mode
+// plans (validated against 'plan', asserted unchanged above) are unaffected.
+
+describe("FRONTMATTER_SCHEMAS['plan-gap-closure'] (#2847)", () => {
+  // #2847 review: "has required field", "has exactly 9 required fields",
+  // "includes gap_closure field", and "is a superset of every plan-required
+  // field" were deleted here. Each was strictly subsumed by the deepEqual
+  // exact-list test below (a 9-element array that deepEquals a literal
+  // containing 'gap_closure' trivially has 9 elements, a 'required' key,
+  // and includes 'gap_closure' — none of those checks could ever fail
+  // independently of the deepEqual one). The "superset" test was additionally
+  // tautological on its own: plan-gap-closure.required is LITERALLY
+  // `[...PLAN_REQUIRED_FIELDS, 'gap_closure']` (src/frontmatter.cts), so it
+  // cannot fail while that spread exists, regardless of what the deepEqual
+  // test above catches.
+  test('plan-gap-closure schema required fields are exact', () => {
+    assert.deepEqual(FRONTMATTER_SCHEMAS['plan-gap-closure'].required, [
+      'phase', 'plan', 'type', 'wave', 'depends_on', 'files_modified', 'autonomous', 'must_haves', 'gap_closure',
+    ]);
+  });
+
+  test('plan schema (standard/reviews mode) does NOT include gap_closure — unaffected by #2847 fix', () => {
+    assert.ok(!FRONTMATTER_SCHEMAS.plan.required.includes('gap_closure'));
+  });
+
+  // requiredValues (#2847 review finding): presence alone let `gap_closure: false`
+  // validate as valid:true — --gaps-only filters strictly on gap_closure === true,
+  // so that was a live reproduction of #2847's reported symptom, one value away.
+  test('plan-gap-closure requires the value "true" for gap_closure, not mere presence', () => {
+    assert.ok('requiredValues' in FRONTMATTER_SCHEMAS['plan-gap-closure']);
+    assert.equal(FRONTMATTER_SCHEMAS['plan-gap-closure'].requiredValues.gap_closure, 'true');
+  });
+
+  test('plan schema has no requiredValues — every field is presence-only, unaffected by #2847 fix', () => {
+    assert.equal(FRONTMATTER_SCHEMAS.plan.requiredValues, undefined);
+  });
+
+  test('summary and verification schemas have no requiredValues — presence-only, unaffected', () => {
+    assert.equal(FRONTMATTER_SCHEMAS.summary.requiredValues, undefined);
+    assert.equal(FRONTMATTER_SCHEMAS.verification.requiredValues, undefined);
   });
 });
 
@@ -940,6 +995,85 @@ describe('spliceFrontmatter: exact delimiter handling', () => {
     const input = '---\ntitle: T\n---\nbody line';
     const result = spliceFrontmatter(input, { k: 'v' });
     assert.equal(result, '---\nk: v\n---\nbody line');
+  });
+});
+
+// spliceFrontmatter per-key identity preservation + fail-closed (#1572). These exercise
+// sliceTopLevelFrontmatterSegments, the per-key deepEqual/preserve/regenerate/drop/append
+// loop, and regenerateFrontmatterKey's "[object Object]" fail-closed directly.
+describe('spliceFrontmatter: per-key preservation + fail-closed (#1572)', () => {
+  const PLAN = [
+    '---', 'phase: 1', 'wave: 1',
+    'must_haves:', '  artifacts:', '    - path: src/foo.ts', '      provides: the foo',
+    '---', '# body', '',
+  ].join('\n');
+
+  test('unchanged object-list key keeps its original raw text (provides survives) when a scalar sibling changes', () => {
+    const parsed = extractFrontmatter(PLAN);
+    parsed.wave = '2'; // mutate one scalar; must_haves flattened-projection unchanged
+    const out = spliceFrontmatter(PLAN, parsed);
+    // must_haves.artifacts raw preserved verbatim (provides intact) — NOT regenerated.
+    assert.deepEqual(parseMustHavesBlock(out, 'artifacts'), [{ path: 'src/foo.ts', provides: 'the foo' }]);
+    // the changed scalar WAS regenerated.
+    assert.ok(/^wave: 2$/m.test(out), 'changed scalar wave must be regenerated to 2');
+    // original ordering preserved (phase before wave before must_haves).
+    const phaseIdx = out.indexOf('phase:');
+    const waveIdx = out.indexOf('wave:');
+    const mhIdx = out.indexOf('must_haves:');
+    assert.ok(phaseIdx < waveIdx && waveIdx < mhIdx, 'top-level key order preserved');
+  });
+
+  test('a changed scalar regenerates only that key (no other key touched)', () => {
+    const out = spliceFrontmatter(PLAN, { ...extractFrontmatter(PLAN), phase: '9' });
+    assert.ok(/^phase: 9$/m.test(out));
+    // wave unchanged → still 1
+    assert.ok(/^wave: 1$/m.test(out));
+  });
+
+  test('keys absent from newObj are dropped (key set is defined by newObj)', () => {
+    const out = spliceFrontmatter(PLAN, { phase: '1' });
+    assert.ok(/^phase: 1$/m.test(out));
+    assert.ok(!/wave:/.test(out), 'wave (absent from newObj) must be dropped');
+    assert.ok(!/must_haves:/.test(out), 'must_haves (absent from newObj) must be dropped');
+  });
+
+  test('genuinely-new keys (not in original) are appended', () => {
+    const out = spliceFrontmatter(PLAN, { ...extractFrontmatter(PLAN), brand_new: 'x' });
+    assert.ok(/^brand_new: x$/m.test(out), 'new key appended');
+    // existing keys still present
+    assert.ok(/^phase: 1$/m.test(out));
+  });
+
+  test('a nested indented block stays attached to its parent key (segment slicer respects indentation)', () => {
+    const multi = '---\na: 1\nmust_haves:\n  artifacts:\n    - path: x\n      provides: y\nb: 2\n---\n';
+    const out = spliceFrontmatter(multi, { ...extractFrontmatter(multi), b: '3' });
+    // The indented artifacts block must be preserved as part of must_haves (not split off),
+    // and b regenerated. proves the slicer grouped the nested lines under must_haves.
+    assert.deepEqual(parseMustHavesBlock(out, 'artifacts'), [{ path: 'x', provides: 'y' }]);
+    assert.ok(/^b: 3$/m.test(out));
+    assert.ok(/^a: 1$/m.test(out));
+  });
+
+  test('whole-document no-op returns the input verbatim', () => {
+    const out = spliceFrontmatter(PLAN, extractFrontmatter(PLAN));
+    assert.equal(out, PLAN);
+  });
+
+  test('changing must_haves to an unrepresentable object-list fails closed (throws, no [object Object])', () => {
+    const newObj = { ...extractFrontmatter(PLAN), must_haves: { artifacts: [{ path: 'p', provides: 'q' }] } };
+    assert.throws(
+      () => spliceFrontmatter(PLAN, newObj),
+      /cannot faithfully serialize key "must_haves"/,
+      'a changed object-list key must fail closed rather than emit [object Object]',
+    );
+  });
+
+  test('no-frontmatter path also fails closed for an unrepresentable object-list value', () => {
+    assert.throws(
+      () => spliceFrontmatter('body only', { must_haves: { artifacts: [{ path: 'p' }] } }),
+      /cannot faithfully serialize the requested frontmatter/,
+      'generating fresh frontmatter with an object-list must fail closed',
+    );
   });
 });
 
@@ -1045,6 +1179,81 @@ describe('reconstructFrontmatter: round-trip', () => {
   });
 });
 
+// #1779 — reconstructFrontmatter must emit valid YAML for scalars and block-
+// array items that carry an embedded `"`/`\`, a control char, an empty string,
+// a leading YAML indicator, or surrounding whitespace. The project's own lossy
+// `extractFrontmatter` tolerates the broken output, which is exactly why these
+// assert round-trip through a STRICT parser (js-yaml) instead — the strict path
+// fails on the unescaped/bare emission and passes only once every wrap site
+// escapes and every unsafe-bare value is routed through the quoted form.
+describe('reconstructFrontmatter: strict-YAML round-trip (#1779)', () => {
+  // Serialize via the production path, then load with a strict YAML parser.
+  const strictRoundTrip = (obj) => yaml.load(reconstructFrontmatter(obj));
+
+  test('top-level scalar with indicator + embedded quotes (the reported case)', () => {
+    const obj = { upstream: 'https://x (Tom; "Git. Ship. Done")' };
+    assert.deepEqual(strictRoundTrip(obj), obj);
+  });
+
+  test('nested scalar with indicator + embedded quotes', () => {
+    const obj = { meta: { note: 'see: "the docs"' } };
+    assert.deepEqual(strictRoundTrip(obj), obj);
+  });
+
+  test('top-level block-array item with indicator + embedded quotes', () => {
+    // 4 items forces block form (the inline `[a, b]` branch caps at 3).
+    const obj = { tags: ['a: "1"', 'b: "2"', 'c: "3"', 'd: "4"'] };
+    assert.deepEqual(strictRoundTrip(obj), obj);
+  });
+
+  test('nested block-array item with indicator + embedded quotes', () => {
+    const obj = { meta: { tags: ['a: "1"', 'b: "2"', 'c: "3"', 'd: "4"'] } };
+    assert.deepEqual(strictRoundTrip(obj), obj);
+  });
+
+  test('embedded backslash is escaped (not just quotes)', () => {
+    const obj = { path: 'a:\\b\\c "x"' };
+    assert.deepEqual(strictRoundTrip(obj), obj);
+  });
+
+  test('control chars in a wrapped value are escaped (newline, tab, NUL)', () => {
+    const obj = { note: 'line1: a\nline2\twith\x00nul' };
+    assert.deepEqual(strictRoundTrip(obj), obj);
+  });
+
+  test('CRLF round-trips (locks the \\r escape for Windows-authored values)', () => {
+    const obj = { note: 'line1: a\r\nline2' };
+    assert.deepEqual(strictRoundTrip(obj), obj);
+  });
+
+  test('empty string round-trips as "" (bare `k:` would reload as null)', () => {
+    assert.deepEqual(strictRoundTrip({ k: '' }), { k: '' });
+  });
+
+  test('embedded/leading quote with NO indicator still round-trips', () => {
+    assert.deepEqual(strictRoundTrip({ k: '"x' }), { k: '"x' });
+    assert.deepEqual(strictRoundTrip({ k: "'leading single" }), { k: "'leading single" });
+    assert.deepEqual(strictRoundTrip({ k: 'say "hi" there' }), { k: 'say "hi" there' });
+  });
+
+  test('leading YAML indicators with no `:`/`#` still round-trip', () => {
+    for (const v of ['>x', '|x', '&anchor', '*alias', '!tag', '[flow', '{map', '%pct', '@reserved', '`tick']) {
+      assert.deepEqual(strictRoundTrip({ k: v }), { k: v }, `value ${JSON.stringify(v)}`);
+    }
+  });
+
+  test('leading/trailing whitespace is preserved (bare would be trimmed)', () => {
+    assert.deepEqual(strictRoundTrip({ k: '  leading' }), { k: '  leading' });
+    assert.deepEqual(strictRoundTrip({ k: 'trailing  ' }), { k: 'trailing  ' });
+  });
+
+  test('plain values without indicators are unaffected (no spurious quoting)', () => {
+    const obj = { name: 'simple-value', label: 'plain' };
+    assert.equal(reconstructFrontmatter(obj), 'name: simple-value\nlabel: plain');
+    assert.deepEqual(yaml.load(reconstructFrontmatter(obj)), obj);
+  });
+});
+
 describe('extractFrontmatter: boundary — dash at start of file', () => {
   test('--- at byte 0 is treated as frontmatter', () => {
     const result = extractFrontmatter('---\nkey: val\n---\n');
@@ -1121,5 +1330,82 @@ describe('reconstructFrontmatter: nested subval plain string', () => {
   test('nested subval with hash quoted', () => {
     const result = reconstructFrontmatter({ meta: { tag: 'issue#42' } });
     assert.equal(result, 'meta:\n  tag: "issue#42"');
+  });
+});
+
+// noOpObjectListSetError (#1660) — pure detection helper, unit-tested directly because the
+// cmdFrontmatterSet path is not in Stryker's property/unit set.
+describe('noOpObjectListSetError (#1660)', () => {
+  const ORIG = '---\nphase: 1\n---\n';
+  test('changed content (real update) → null', () => {
+    assert.equal(noOpObjectListSetError(ORIG, ORIG + 'x', { must_haves: 1 }), null);
+  });
+  test('scalar value no-op → null (idempotent scalar sets are fine)', () => {
+    for (const v of [1, 'str', true, 0, '']) assert.equal(noOpObjectListSetError(ORIG, ORIG, v), null, `scalar ${JSON.stringify(v)}`);
+  });
+  test('scalar-array value no-op → null (scalar arrays round-trip faithfully)', () => {
+    assert.equal(noOpObjectListSetError(ORIG, ORIG, ['a', 'b']), null);
+    assert.equal(noOpObjectListSetError(ORIG, ORIG, []), null);
+  });
+  test('null value no-op → null', () => {
+    assert.equal(noOpObjectListSetError(ORIG, ORIG, null), null);
+  });
+  test('dict value no-op → error message naming the object-list round-trip limit', () => {
+    const msg = noOpObjectListSetError(ORIG, ORIG, { artifacts: [{ path: 'p' }] });
+    assert.equal(typeof msg, 'string');
+    assert.ok(msg.includes('had no effect'), msg);
+    assert.ok(msg.includes('object-list'), msg);
+    assert.ok(msg.includes('Edit the file directly'), msg);
+  });
+});
+
+// ─── stripFrontmatter ─────────────────────────────────────────────────────────
+
+describe('stripFrontmatter', () => {
+  const stacked = ['---', 'a: 1', '---', '---', 'b: 2', '---', '', 'Real body.'].join('\n');
+
+  test('strips a single block', () => {
+    assert.strictEqual(stripFrontmatter(['---', 'a: 1', '---', '', 'Body.'].join('\n')), 'Body.');
+  });
+
+  test('is CRLF-tolerant', () => {
+    const crlf = ['---', 'a: 1', '---', '', 'Body.'].join('\r\n');
+    assert.strictEqual(stripFrontmatter(crlf), 'Body.');
+  });
+
+  test('defaults to stripping every stacked block (corruption recovery)', () => {
+    assert.strictEqual(stripFrontmatter(stacked), 'Real body.');
+  });
+
+  test('an omitted options argument keeps the greedy default', () => {
+    // Back-compat: state.cts and state-transition.cts call this with one arg.
+    assert.strictEqual(stripFrontmatter(stacked, {}), 'Real body.');
+  });
+
+  test('once: true stops after the first block', () => {
+    assert.strictEqual(
+      stripFrontmatter(stacked, { once: true }),
+      ['---', 'b: 2', '---', '', 'Real body.'].join('\n'),
+    );
+  });
+
+  test('once: false is the greedy default', () => {
+    assert.strictEqual(stripFrontmatter(stacked, { once: false }), 'Real body.');
+  });
+
+  test('returns content unchanged when there is no frontmatter', () => {
+    const plain = ['Just prose.', '', 'More prose.'].join('\n');
+    assert.strictEqual(stripFrontmatter(plain), plain);
+    assert.strictEqual(stripFrontmatter(plain, { once: true }), plain);
+  });
+
+  test('leaves an unterminated block alone under both modes', () => {
+    const unterminated = ['---', 'a: 1', 'b: 2'].join('\n');
+    assert.strictEqual(stripFrontmatter(unterminated), unterminated);
+    assert.strictEqual(stripFrontmatter(unterminated, { once: true }), unterminated);
+  });
+
+  test('empty string round-trips', () => {
+    assert.strictEqual(stripFrontmatter(''), '');
   });
 });

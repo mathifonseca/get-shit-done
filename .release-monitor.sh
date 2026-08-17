@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Release monitor for open-gsd/gsd-core (was gsd-build/get-shit-done until 2026-06-10 upstream migration)
+# Release monitor for open-gsd/gsd-core (was gsd-build/get-shit-done until 2026-06-10 upstream migration)  # gsd-allow-legacy-name
 # Checks every 15 minutes, writes new release info to a signal file
 
 REPO="open-gsd/gsd-core"

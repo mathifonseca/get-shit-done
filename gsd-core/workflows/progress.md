@@ -12,12 +12,13 @@ Read all files referenced by the invoking prompt's execution_context before star
 **Load progress context (paths only):**
 
 ```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "$HOME/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="$HOME/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi
-INIT=$(gsd_run query init.progress)
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
+FORENSIC_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--forensic([[:space:]]|$) ]]; then FORENSIC_PARAM="--forensic"; fi
+INIT=$(gsd_run query init.progress $FORENSIC_PARAM)
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
 
-Extract from init JSON: `project_exists`, `roadmap_exists`, `state_exists`, `phases`, `current_phase`, `next_phase`, `milestone_version`, `completed_count`, `phase_count`, `paused_at`, `state_path`, `roadmap_path`, `project_path`, `config_path`.
+Extract from init JSON: `project_exists`, `roadmap_exists`, `state_exists`, `phases`, `current_phase`, `next_phase`, `milestone_version`, `completed_count`, `phase_count`, `paused_at`, `state_path`, `roadmap_path`, `project_path`, `config_path`, `phase_mvp_mode`.
 
 ```bash
 DISCUSS_MODE=$(gsd_run query config-get workflow.discuss_mode 2>/dev/null || echo "discuss")
@@ -104,7 +105,7 @@ PROGRESS_BAR=$(gsd_run query progress.bar --raw)
 
 Present:
 
-```
+````
 # [Project Name]
 
 **Progress:** {PROGRESS_BAR}
@@ -131,40 +132,32 @@ CONTEXT: [✓ if has_context | - if not]
 ## Pending Todos
 - [count] pending — /gsd:capture --list to review
 
+## Open Windows
+- [count] open in `.planning/WINDOWS.md` — /gsd:ship blocks while any remain
+(Only show this section if count > 0; suppressed when ledger is empty or absent)
+
+```bash
+WINDOWS_STATUS=$(gsd_run windows status --raw 2>/dev/null || echo '')
+WINDOWS_OPEN=$(printf '%s' "$WINDOWS_STATUS" | jq -r '.ledger.open_count // 0' 2>/dev/null || echo 0)
+WINDOWS_WAIVED=$(printf '%s' "$WINDOWS_STATUS" | jq -r '.ledger.waived_count // 0' 2>/dev/null || echo 0)
+```
+
+Render `Open Windows` only when `$WINDOWS_OPEN` is greater than `0` (or `$WINDOWS_WAIVED` is greater than `0`, so an auditable deferral history remains visible). Phrase: `{WINDOWS_OPEN} open, {WINDOWS_WAIVED} waived — resolves with /gsd:ship gate; inspect via gsd_run windows status`. The ledger is cross-phase; the count is the project total, not the current phase's.
+
+
 ## Active Debug Sessions
 - [count] active — /gsd:debug to continue
 (Only show this section if count > 0)
 
 ## What's Next
 [Next phase/plan objective from roadmap analyze]
-```
+````
 
 </step>
 
-<step name="mvp_display">
-**MVP-mode display (when phase has `**Mode:** mvp` in ROADMAP.md).**
-
-Resolve `MVP_MODE` per phase via the centralized resolver. progress has no `--mvp` CLI flag (mode is inherited from the planned phase), so we omit `--cli-flag`:
-
-```bash
-MVP_MODE=$(gsd_run query phase.mvp-mode "${PHASE_NUMBER}" --pick active)
-```
-
-When `MVP_MODE=true`, the per-phase progress block adds a **user-flow status** sub-block sourced from the phase's PLAN.md task names. Each task whose name reads like a user-visible capability (e.g., "Register flow", "Login flow", "Password reset") is rendered as a status line:
-
-```
-Phase 1 — User Auth MVP
-  ✅ Walking Skeleton complete           ← from SKELETON.md existence
-  ✅ Register flow working               ← from PLAN.md task with summary
-  ✅ Login flow working                  ← from PLAN.md task with summary
-  🔄 Password reset (in progress)        ← from PLAN.md task without summary
-  ⬜ Email verification                  ← from PLAN.md task not yet started
-```
-
-**User-flow filter:** Tasks whose names are technical-sounding ("Wire DB schema", "Create migration", "Bump deps") are NOT rendered as user-flow status lines. Heuristic: a task name is user-flow-shaped if it ends in "flow", "page", "screen", or starts with a verb the user would recognize ("Register", "Login", "Upload", "View"). Tasks that fail the heuristic still count toward the standard task progress total but don't appear in the user-flow sub-block.
-
-When `MVP_MODE=false` (mode is null, absent, or the phase has no `**Mode:**` line), fall back to the standard display path — no behavioral change.
-</step>
+<!-- gsd:section id="mvp-display" when="state:phase-mvp-mode" -->
+If `section_manifest` is `null` or `"mvp-display"` is in its `included` list: read and execute `gsd-core/workflows/progress/steps/mvp-display.md`. Otherwise skip — do not read the file.
+<!-- /gsd:section -->
 
 <step name="route">
 **Determine next action based on verified counts.**
@@ -264,12 +257,26 @@ Track: `outstanding_debt` — `summary.total_items` from the audit.
 |-------|------|-------|
 | {phase} | {filename} | {pending_count} pending, {skipped_count} skipped, {blocked_count} blocked |
 | {phase} | {filename} | human_needed — {count} items |
+| {phase} | {filename} | {unresolved_count} deferred items |
 
 Review: `/gsd:audit-uat ${GSD_WS}` — full cross-phase audit
 Resume testing: `/gsd:verify-work {phase} ${GSD_WS}` — retest specific phase
 ```
 
 This is a WARNING, not a blocker — routing proceeds normally. The debt is visible so the user can make an informed choice.
+
+**Step 1.7: Check verification status for the current phase**
+
+A phase whose verification is missing, unknown, `gaps_found`, or `human_needed` is NOT complete, even when every PLAN.md has a matching SUMMARY.md. The count-based status (`roadmap.analyze`) only sees plans/summaries, so without this check such a phase is reported complete and routing skips straight to the next phase. When the phase appears count-complete (`summaries = plans AND plans > 0`), consult the verification report (the same `verification.status` gate `ship` and `execute-phase` use, from #651):
+
+```bash
+PHASE_DIR=".planning/phases/[current-phase-dir]"
+VERIFICATION=$(gsd_run query verification.status "${PHASE_DIR}" 2>/dev/null)
+VERIFICATION_STATUS=$(printf '%s' "$VERIFICATION" | jq -r '.status' 2>/dev/null || echo "")
+VERIFICATION_NEXT_ACTION=$(printf '%s' "$VERIFICATION" | jq -r '.next_action' 2>/dev/null || echo "")
+```
+
+Track: `verification_status` — the `.status` field (`passed | stale | gaps_found | human_needed | missing | unknown`). The query/projection handles a missing VERIFICATION.md (`missing`), unexpected values, and stale verification (`stale`, when summaries are newer than verification). Only `passed` routes as phase complete (Step 3); every other status routes back to close verification debt (Step 2).
 
 **Step 2: Route based on counts**
 
@@ -278,8 +285,15 @@ This is a WARNING, not a blocker — routing proceeds normally. The debt is visi
 | uat_partial > 0 | UAT testing incomplete | Go to **Route E.2** |
 | uat_with_gaps > 0 | UAT gaps need fix plans | Go to **Route E** |
 | summaries < plans | Unexecuted plans exist | Go to **Route A** |
-| summaries = plans AND plans > 0 | Phase complete | Go to Step 3 |
+| summaries = plans AND plans > 0 AND verification_status = missing | Phase executed; verification report missing | Go to **Route V.missing** |
+| summaries = plans AND plans > 0 AND verification_status = unknown | Phase executed; verification status unknown | Go to **Route V.unknown** |
+| summaries = plans AND plans > 0 AND verification_status = stale | Phase executed; verification is stale | Go to **Route V.stale** |
+| summaries = plans AND plans > 0 AND verification_status = gaps_found | Phase executed; verification found gaps | Go to **Route V.gaps** |
+| summaries = plans AND plans > 0 AND verification_status = human_needed | Phase executed; awaiting human verification | Go to **Route V.human** |
+| summaries = plans AND plans > 0 AND verification_status = passed | Phase complete (verification passed) | Go to Step 3 |
 | plans = 0 | Phase not yet planned | Go to **Route B** |
+
+Rows are evaluated top to bottom; the first matching row wins. The `verification_status` rows must precede the passed row so non-`passed` verification is not reported as complete.
 
 ---
 
@@ -431,6 +445,76 @@ UAT.md exists with `status: partial` — testing session ended before all items 
 
 ---
 
+**Route V.missing: verification report missing**
+
+All plans have summaries, but canonical verification has not passed. The phase is implementation-complete, not phase-complete.
+
+```
+`/gsd:execute-phase {phase} ${GSD_WS}` — re-run execution verification
+```
+
+---
+
+**Route V.unknown: verification status unknown**
+
+VERIFICATION.md has an unexpected status. The phase is implementation-complete, not phase-complete.
+
+```
+`/gsd:execute-phase {phase} ${GSD_WS}` — regenerate verification
+```
+
+---
+
+**Route V.stale: verification is stale**
+
+VERIFICATION.md has `status: passed`, but one or more SUMMARY.md files are newer than the verification report. The phase is implementation-complete, not phase-complete.
+
+```
+`/gsd:verify-work {phase} ${GSD_WS}` — re-run verification against the latest summaries
+```
+
+---
+
+**Route V.gaps: verification found gaps (gaps_found)**
+
+VERIFICATION.md exists with `status: gaps_found` — verification identified gaps that need fix plans. The phase is NOT complete.
+
+```
+---
+
+## ⚠ Verification Gaps Found
+
+**{phase_num}-VERIFICATION.md** reports `gaps_found`. ${VERIFICATION_NEXT_ACTION}
+
+`/clear` then:
+
+`/gsd:plan-phase {phase} --gaps ${GSD_WS}`
+
+---
+```
+
+---
+
+**Route V.human: human verification required (human_needed)**
+
+VERIFICATION.md exists with `status: human_needed` — automated checks passed but manual verification items remain. The phase is NOT complete until they are resolved.
+
+```
+---
+
+## Human Verification Required
+
+**{phase_num}-VERIFICATION.md** reports `human_needed`. ${VERIFICATION_NEXT_ACTION}
+
+`/clear` then:
+
+`/gsd:verify-work {phase} ${GSD_WS}` — resume human verification
+
+---
+```
+
+---
+
 **Step 3: Check milestone status (only when phase complete)**
 
 Read ROADMAP.md and identify:
@@ -446,7 +530,7 @@ State: "Current phase is {X}. Milestone has {N} phases (highest: {Y})."
 | Condition | Meaning | Action |
 |-----------|---------|--------|
 | current phase < highest phase | More phases remain | Go to **Route C** |
-| current phase = highest phase | Milestone complete | Go to **Route D** |
+| current phase = highest phase | All phases complete | Go to **Route D** |
 
 ---
 
@@ -512,7 +596,7 @@ NEXT_HAS_UI=$(echo "$NEXT_PHASE_SECTION" | grep -qi "UI hint.*yes" && echo "true
 
 ---
 
-**Route D: Milestone complete**
+**Route D: All phases complete (milestone ready to close)**
 
 ```
 ---
@@ -574,117 +658,9 @@ Ready to plan the next milestone.
 - Handoff file exists → mention it, offer `/gsd:resume-work ${GSD_WS}`
 </step>
 
-<step name="forensic_audit">
-**Forensic Integrity Audit** — only runs when `--forensic` is present in ARGUMENTS.
-
-If `--forensic` is NOT present in ARGUMENTS: skip this step entirely. Default progress behavior (standard report + routing) is unchanged.
-
-If `--forensic` IS present: after the standard report and routing suggestion have been displayed, append the following audit section.
-
----
-
-## Forensic Integrity Audit
-
-Running 6 deep checks against project state...
-
-Run each check in order. For each check, emit ✓ (pass) or ⚠ (warning) with concrete evidence when a problem is found.
-
-**Check 1 — STATE vs artifact consistency**
-
-Read STATE.md `status` / `stopped_at` fields (from the STATE snapshot already loaded). Compare against the artifact count from the roadmap analysis. If STATE.md claims the current phase is pending/mid-flight but the artifact count shows it as complete (all PLAN.md files have matching SUMMARY.md files), flag inconsistency. Emit:
-- ✓ `STATE.md consistent with artifact count` — if both agree
-- ⚠ `STATE.md claims [status] but artifact count shows phase complete` — with the specific values
-
-**Check 2 — Orphaned handoff files**
-
-Check for existence of:
-```bash
-ls .planning/HANDOFF.json .planning/phases/*/.continue-here.md .planning/phases/*/*HANDOFF*.md 2>/dev/null || true
-```
-Also check `.planning/continue-here.md`.
-
-Emit:
-- ✓ `No orphaned handoff files` — if none found
-- ⚠ `Orphaned handoff files found` — list each file path, add: `→ Work was paused mid-flight. Read the handoff before continuing.`
-
-**Check 3 — Deferred scope drift**
-
-Search phase artifacts (CONTEXT.md, DISCUSSION-LOG.md, BUG-BRIEF.md, VERIFICATION.md, SUMMARY.md, HANDOFF.md files under `.planning/phases/`) for patterns:
-```bash
-grep -rl "defer to Phase\|future phase\|out of scope Phase\|deferred to Phase" .planning/phases/ 2>/dev/null || true
-```
-
-For each match, extract the referenced phase number. Cross-reference against ROADMAP.md phase list. If the referenced phase number is NOT in ROADMAP.md, flag as deferred scope not captured.
-
-Emit:
-- ✓ `All deferred scope captured in ROADMAP` — if no mismatches
-- ⚠ `Deferred scope references phase(s) not in ROADMAP` — list: file, reference text, missing phase number
-
-**Check 4 — Memory-flagged pending work**
-
-Check if `.planning/MEMORY.md` or `.planning/memory/` exists:
-```bash
-ls .planning/MEMORY.md .planning/memory/*.md 2>/dev/null || true
-```
-
-If found, grep for entries containing: `pending`, `status`, `deferred`, `not yet run`, `backfill`, `blocking`.
-
-Emit:
-- ✓ `No memory entries flagging pending work` — if none found or no MEMORY.md
-- ⚠ `Memory entries flag pending/deferred work` — list the matching lines (max 5, truncated at 80 chars)
-
-**Check 5 — Blocking operational todos**
-
-Check for pending todos:
-```bash
-ls .planning/todos/pending/*.md 2>/dev/null || true
-```
-
-For files found, scan for keywords indicating operational blockers: `script`, `credential`, `API key`, `manual`, `verification`, `setup`, `configure`, `run `.
-
-Emit:
-- ✓ `No blocking operational todos` — if no pending todos or none match operational keywords
-- ⚠ `Blocking operational todos found` — list the file names and matching keywords (max 5)
-
-**Check 6 — Uncommitted code**
-
-```bash
-git status --porcelain 2>/dev/null | grep -v "^??" | grep -v "^.planning\/" | grep -v "^\.\." | head -10
-```
-
-If output is non-empty (modified/staged files outside `.planning/`), flag as uncommitted code.
-
-Emit:
-- ✓ `Working tree clean` — if no modified files outside `.planning/`
-- ⚠ `Uncommitted changes in source files` — list up to 10 file paths
-
----
-
-After all 6 checks, display the verdict:
-
-**If all 6 checks passed:**
-```
-### Verdict: CLEAN
-
-The standard progress report is trustworthy — proceed with the routing suggestion above.
-```
-
-**If 1 or more checks failed:**
-```
-### Verdict: N INTEGRITY ISSUE(S) FOUND
-
-The standard progress report may not reflect true project state.
-Review the flagged items above before acting on the routing suggestion.
-```
-
-Then for each failed check, add a concrete next action:
-- Check 2 (orphaned handoff): `Read the handoff file(s) and resume from where work was paused: /gsd:resume-work ${GSD_WS}`
-- Check 3 (deferred scope): `Add the missing phases to ROADMAP.md or update the deferred references`
-- Check 4 (memory pending): `Review the flagged memory entries and resolve or clear them`
-- Check 5 (blocking todos): `Complete the operational steps in .planning/todos/pending/ before continuing`
-- Check 6 (uncommitted code): `Commit or stash the uncommitted changes before advancing`
-- Check 1 (STATE inconsistency): `Run /gsd:verify-work ${PHASE} ${GSD_WS} to reconcile state`
-</step>
+<!-- gsd:section id="forensic-audit" when="flag:--forensic" -->
+If `section_manifest` is `null` or `"forensic-audit"` is in its `included` list: read and execute `gsd-core/workflows/progress/steps/forensic-audit.md`. Otherwise skip — do not read the file.
+<!-- /gsd:section -->
 
 </process>
 

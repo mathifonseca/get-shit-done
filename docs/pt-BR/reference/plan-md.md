@@ -14,7 +14,7 @@ Os planos ficam dentro de diretórios de fase em:
 
 Por exemplo: `.planning/phases/03-post-feed/03-02-PLAN.md` (Fase 3, Plano 2).
 
-Os planos são produzidos pelo agente `gsd-planner` (disparado por `/gsd:plan-phase`) e consumidos por `execute-phase`. Uma fase normalmente contém entre um e quatro planos; os planos dentro de uma fase são atribuídos a ondas de execução para que trabalhos independentes sejam executados em paralelo.
+Os planos são produzidos pelo agente `gsd-planner` (disparado por `/gsd-plan-phase`) e consumidos por `execute-phase`. Uma fase normalmente contém entre um e quatro planos; os planos dentro de uma fase são atribuídos a ondas de execução para que trabalhos independentes sejam executados em paralelo.
 
 ---
 
@@ -122,8 +122,8 @@ Lista os arquivos de workflow que o executor lê antes de começar. Sempre inclu
 
 ```xml
 <execution_context>
-@~/.claude/get-shit-done/workflows/execute-plan.md
-@~/.claude/get-shit-done/templates/summary.md
+@~/.claude/gsd-core/workflows/execute-plan.md
+@~/.claude/gsd-core/templates/summary.md
 </execution_context>
 ```
 

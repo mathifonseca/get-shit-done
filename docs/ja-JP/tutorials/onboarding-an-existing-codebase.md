@@ -42,17 +42,24 @@ npx @opengsd/gsd-core@latest
 claude --dangerously-skip-permissions
 ```
 
+> [!CAUTION]
+> **The permissions flag is optional.** It skips per-file confirmation while
+> GSD's sub-agents read and write files. Use it only in low-stakes or
+> throwaway contexts. To keep confirmations enabled, start with `claude` instead.
+> For real work, read the [security model](../explanation/security-model.md) first.
+
+
 ---
 
-## ステップ 3 — コードベースのマッピング
+## ステップ 3 — Brownfield オンボーディングの開始
 
-プロジェクトを作成する前に、GSD Core に既存のコードを学習させてください。これがブラウンフィールドの計画を正確にするステップです。
+プロジェクトを作成する前に、GSD Core にリポジトリ状態を確認させ、安全な次のトップレベルコマンドを表示させます。これにより、コードベースコンテキストの取りこぼしや既存 planning ファイルの上書きを防げます。
 
 ```text
-/gsd-map-codebase
+/gsd-onboard
 ```
 
-GSD Core が4つの並行マッパーサブエージェントを生成します（「Spawning 4 parallel codebase mapper agents…」という通知が表示されます。1〜5分かかりますので中断しないでください）。各エージェントはそれぞれ異なる観点に注目します:
+オンボーディングがコードベースマップ不足を示したら、推奨オプションを選び、表示された `/gsd-map-codebase` ハンドオフを実行してから `/gsd-onboard` を再実行します。`/gsd-onboard --fast` は軽量な初回パスには使えますが、`/gsd-new-project` の前には完全なマップが必要です。`/gsd-map-codebase` が4つの並行マッパーサブエージェントを生成します（「Spawning 4 parallel codebase mapper agents…」という通知が表示されます。1〜5分かかりますので中断しないでください）。各エージェントはそれぞれ異なる観点に注目します:
 
 | エージェント | 観点 |
 |-------|-------|
@@ -84,7 +91,7 @@ Created .planning/codebase/:
 
 ---
 
-## ステップ 4 — コンテキストをクリアしてプロジェクトを作成
+## ステップ 4 — オンボーディングを再実行してプロジェクトを初期化する
 
 セッションウィンドウをクリアします:
 
@@ -92,11 +99,13 @@ Created .planning/codebase/:
 /clear
 ```
 
-プロジェクトを作成します。前のステップで GSD Core が既存のコードを見つけているため、これがブラウンフィールドプロジェクトであることをすでに把握しています。`/gsd-new-project` を実行すると、既存のものを再説明するのではなく、*追加する*内容に焦点を当てた質問がされます:
+`/gsd-onboard` をもう一度実行します。GSD Core が ADR、PRD、spec、RFC、またはルートレベルの要件ドキュメントを検出した場合は、先に推奨される `/gsd-ingest-docs` ハンドオフを実行し、その後 `/gsd-onboard` を再実行してください。コンテキストが整うと、オンボーディングはプロジェクト初期化のハンドオフを表示します:
 
 ```text
 /gsd-new-project
 ```
+
+前のステップで GSD Core が既存のコードを見つけているため、`/gsd-new-project` はこれがブラウンフィールドプロジェクトだと分かっています。質問は既存のものを再説明するのではなく、*追加する*内容に焦点を当てます:
 
 GSD Core が何を作りたいかを尋ねます。コードベース全体の説明ではなく、追加する機能で答えてください:
 
@@ -124,6 +133,8 @@ Proposed Roadmap
 
 ロードマップを承認してください。
 
+プロジェクト設定が完了したら、もう一度 `/gsd-onboard` を実行します。`PROJECT.md`、`REQUIREMENTS.md`、`ROADMAP.md`、`STATE.md` がすべて存在するため、オンボーディングは `.planning/onboarding/SUMMARY.md` を作成または確認します。
+
 **`.planning/` に作成されるファイル:**
 
 ```text
@@ -133,6 +144,7 @@ Proposed Roadmap
   ROADMAP.md          ← フェーズ 1、ステータス: pending
   STATE.md            ← セッションメモリ
   config.json         ← ワークフロー設定
+  onboarding/SUMMARY.md ← オンボーディング状態と次のコマンド
   codebase/           ← ステップ 3 の7つのマップファイル
 ```
 
@@ -212,6 +224,7 @@ GSD Core があなたの `CONVENTIONS.md` と `ARCHITECTURE.md` を読み込ん�
 
 ## 学んだこと
 
+- `/gsd-onboard` が対話型コマンドをネストしたり既存 planning ファイルを上書きしたりせずに、ブラウンフィールド設定を安全に順序付ける仕組み。
 - `/gsd-map-codebase` が4つの並行エージェントを実行して `.planning/codebase/` に `STACK.md`、`ARCHITECTURE.md`、`CONVENTIONS.md`、`CONCERNS.md`、`STRUCTURE.md`、`TESTING.md`、`INTEGRATIONS.md` を生成する仕組み。
 - ブラウンフィールドリポジトリで `/gsd-new-project` を実行すると、*追加する*内容に焦点を当てた質問がされ、既存コードから Validated 要件が自動入力される仕組み。
 - コードベースマップが `/gsd-discuss-phase` のすべての質問を形成する方法 — ファイルパス、パターン、規約が実際のコードから導出される。

@@ -38,6 +38,7 @@
   - [모델 프로파일](#26-model-profiles)
 - [브라운필드 기능](#brownfield-features)
   - [코드베이스 매핑](#27-codebase-mapping)
+  - [기존 코드베이스 온보딩](#27b-existing-codebase-onboarding)
 - [유틸리티 기능](#utility-features)
   - [디버그 시스템](#28-debug-system)
   - [할 일 관리](#29-todo-management)
@@ -716,7 +717,7 @@
 
 **명령어:** `/gsd-map-codebase [area]`
 
-**목적:** 새 프로젝트를 시작하기 전에 기존 코드베이스를 분석하여 GSD가 무엇이 존재하는지 이해하도록 합니다.
+**목적:** 새 프로젝트 시작 전 또는 `/gsd-onboard`의 매핑 handoff로 기존 코드베이스를 분석하여 GSD가 무엇이 존재하는지 이해하도록 합니다.
 
 **요구사항.**
 - REQ-MAP-01: 각 분석 영역에 대한 병렬 매퍼 에이전트를 생성해야 합니다.
@@ -735,6 +736,27 @@
 | `STRUCTURE.md` | 디렉토리 레이아웃과 파일 구성 |
 | `TESTING.md` | 테스트 인프라, 커버리지, 패턴 |
 | `INTEGRATIONS.md` | 외부 서비스, API, 서드파티 의존성 |
+
+### 27b. Existing Codebase Onboarding
+
+**명령어:** `/gsd-onboard [--fast] [--text]`
+
+**목적:** 기존 저장소의 최초 설정을 안내하고 brownfield 상태를 확인해 코드베이스 매핑, docs 수집, 프로젝트 초기화로 안전하게 handoff합니다.
+
+**요구사항.**
+- REQ-ONBOARD-01: 기존 코드, package manifest, planning 문서, 부분 `.planning/` 상태, 코드베이스 맵 누락을 감지해야 합니다.
+- REQ-ONBOARD-02: 필요한 `.planning/codebase/` 맵 파일이 없는 brownfield에서는 `/gsd-map-codebase` 또는 `/gsd-map-codebase --fast`로 handoff해야 합니다. fast 맵 readiness는 부분 상태이며 `/gsd-new-project`에 충분한 것으로 취급해서는 안 됩니다.
+- REQ-ONBOARD-03: ADR/PRD/SPEC/RFC 후보가 있고 project가 없으면 `/gsd-new-project` 전에 `/gsd-ingest-docs`를 제안해야 합니다.
+- REQ-ONBOARD-04: `PROJECT.md`, `REQUIREMENTS.md`, `ROADMAP.md`, `STATE.md`가 모두 있을 때까지 완료로 보고하지 않아야 합니다.
+- REQ-ONBOARD-05: project setup 후에만 `.planning/onboarding/SUMMARY.md`를 만들거나 확인해야 합니다.
+- REQ-ONBOARD-06: 대화형 메뉴가 없는 runtime을 위해 `--text` 번호형 plain-text gate를 지원해야 합니다.
+
+**생성 산출물.**
+| 산출물 | 설명 |
+|----------|-------------|
+| `.planning/codebase/` | `/gsd-map-codebase` handoff가 생성한 코드베이스 맵 |
+| `.planning/PROJECT.md`, `REQUIREMENTS.md`, `ROADMAP.md`, `STATE.md` | `/gsd-new-project` 또는 `/gsd-ingest-docs`가 생성한 planning setup |
+| `.planning/onboarding/SUMMARY.md` | Onboarding status, artifact index, next-command summary |
 
 ---
 
@@ -1045,9 +1067,9 @@ fix(03-01): correct auth token expiry
 
 ### 42. Cross-AI Peer Review
 
-**명령어:** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--all]`
+**명령어:** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--antigravity] [--ollama] [--lm-studio] [--llama-cpp] [--kimi-code] [--all]`
 
-**목적:** 외부 AI CLI(Gemini, Claude, Codex, CodeRabbit, OpenCode, Qwen Code, Cursor, Antigravity)를 호출하여 페이즈 계획을 독립적으로 검토합니다. 검토자별 피드백이 담긴 구조화된 REVIEWS.md를 생성합니다.
+**목적:** 외부 AI CLI(Gemini, Claude, Codex, CodeRabbit, OpenCode, Qwen Code, Cursor, Antigravity, Kimi Code)와 로컬 OpenAI 호환 서버(Ollama, LM Studio, llama.cpp)를 호출하여 페이즈 계획을 독립적으로 검토합니다. 검토자별 피드백이 담긴 구조화된 REVIEWS.md를 생성합니다.
 
 **요구사항.**
 - REQ-REVIEW-01: 시스템에서 사용 가능한 AI CLI를 감지해야 합니다.
@@ -1131,7 +1153,7 @@ fix(03-01): correct auth token expiry
 **3. 워크플로우 가드 훅** (`gsd-workflow-guard.js`)
 Claude가 GSD 워크플로우 컨텍스트 밖에서 파일 편집을 시도하는 것을 감지하는 PreToolUse 훅입니다. 직접 편집 대신 `/gsd-quick` 또는 `/gsd-fast` 사용을 권고합니다. `hooks.workflow_guard`로 구성 가능합니다(기본값: false).
 
-**4. CI 준비 주입 스캐너** (`prompt-injection-scan.test.cjs`)
+**4. CI 준비 주입 스캐너** (`prompt-injection-scan.security.test.cjs`)
 모든 에이전트, 워크플로우, 명령어 파일에서 포함된 주입 벡터를 스캔하는 테스트 스위트입니다.
 
 **요구사항.**

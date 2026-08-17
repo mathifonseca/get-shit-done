@@ -11,32 +11,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execTool, execGit, platformWriteSync } from './shell-command-projection.cjs';
 
-// ─── Config Gate ─────────────────────────────────────────────────────────────
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import capabilityStateMod = require('./capability-state.cjs');
+const { isCapabilityActive } = capabilityStateMod;
 
-/**
- * Check whether graphify is enabled in the project config.
- * Reads config.json directly via fs. Returns false by default
- * (when no config, no graphify key, or on error).
- */
-function isGraphifyEnabled(planningDir: string): boolean {
-  try {
-    const configPath = path.join(planningDir, 'config.json');
-    if (!fs.existsSync(configPath)) return false;
-    const config: unknown = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    if (
-      config &&
-      typeof config === 'object' &&
-      'graphify' in config &&
-      config.graphify &&
-      typeof config.graphify === 'object' &&
-      'enabled' in config.graphify &&
-      (config.graphify as Record<string, unknown>).enabled === true
-    ) return true;
-    return false;
-  } catch {
-    return false;
-  }
-}
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- io.cjs is an export= CommonJS module
+import ioMod = require('./io.cjs');
+const { serializeForOutput } = ioMod;
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- prompt-budget.cjs is an export= CommonJS module
+import promptBudget = require('./prompt-budget.cjs');
+// The repo's single token scale (phase-estimation.cts documents the rule: a
+// ratio between two measurement methods measures the methods, not the miss).
+// This module previously carried a private copy of the same chars/4 formula.
+const { estimateTokens } = promptBudget;
+
+// ─── Config Gate ─────────────────────────────────────────────────────────────
 
 interface DisabledResponse {
   disabled: true;
@@ -94,8 +84,12 @@ function execGraphify(cwd: string, args: string[], options: { timeout?: number }
     };
   }
 
-  // Timeout — seam exposes signal; spawnSync sets SIGTERM when killed by timeout.
-  if (result.signal === 'SIGTERM') {
+  // Timeout — result.timedOut is derived by the shared isSpawnTimeout predicate
+  // (shell-command-projection.cts), keyed on error.code === 'ETIMEDOUT' rather
+  // than signal === 'SIGTERM': Windows does not reliably report SIGTERM on a
+  // timeout kill, and an externally-delivered SIGTERM (error is null) is not
+  // a timeout at all.
+  if (result.timedOut) {
     return {
       exitCode: 124,
       stdout: result.stdout,
@@ -167,6 +161,7 @@ function checkGraphifyVersion(): VersionResult {
   }
 
   // Strategy 2: fall back to python3 importlib.metadata
+  let pyPackageConfirmed = false;
   if (!versionStr) {
     const pyResult = execTool('python3', [
       '-c',
@@ -174,8 +169,19 @@ function checkGraphifyVersion(): VersionResult {
     ], { timeout: 5000 });
 
     if (!pyResult.error && pyResult.exitCode === 0 && pyResult.stdout) {
-      versionStr = pyResult.stdout;
+      versionStr = pyResult.stdout.trim();
+      pyPackageConfirmed = true; // importlib.metadata confirmed the package
     }
+  } else {
+    // #3020: verify the `graphify` binary on PATH is actually the graphifyy
+    // package — a foreign binary that happens to print a version-like string
+    // must not silently report compatible. If importlib.metadata cannot confirm
+    // the package, emit an identity warning even if the version looks right.
+    const pyVerify = execTool('python3', [
+      '-c',
+      'from importlib.metadata import version; print(version("graphifyy"))',
+    ], { timeout: 5000 });
+    pyPackageConfirmed = !pyVerify.error && pyVerify.exitCode === 0 && !!pyVerify.stdout;
   }
 
   if (!versionStr) {
@@ -188,10 +194,22 @@ function checkGraphifyVersion(): VersionResult {
     return { version: versionStr, compatible: null, warning: 'Could not parse version: ' + versionStr };
   }
 
-  const compatible = parts[0] === 0 && parts[1] >= 4;
-  const warning = compatible ? null : 'graphify version ' + versionStr + ' is outside tested range >=0.4.0,<1.0';
+  const versionInRange = parts[0] === 0 && parts[1] >= 4;
 
-  return { version: versionStr, compatible, warning };
+  // #3020: if the `graphify` binary answered --version but the Python package
+  // graphifyy could not be confirmed, the tool identity is unverified — emit
+  // a warning naming the mismatch regardless of version-range compatibility.
+  if (!pyPackageConfirmed) {
+    return {
+      version: versionStr,
+      compatible: false,
+      warning: 'graphify version ' + versionStr + ' detected but the graphifyy Python package could not be confirmed — the `graphify` binary on PATH may be a different tool. Verify with: pip show graphifyy',
+    };
+  }
+
+  const warning = versionInRange ? null : 'graphify version ' + versionStr + ' is outside tested range >=0.4.0,<1.0';
+
+  return { version: versionStr, compatible: versionInRange, warning };
 }
 
 // ─── Internal Helpers ────────────────────────────────────────────────────────
@@ -316,46 +334,149 @@ interface BudgetResult {
   trimmed: string | null;
   total_nodes: number;
   total_edges: number;
+  budget_met: boolean;
+  budget_estimate: number;
+}
+
+/** The core payload a query response wraps, before the wire shape is applied. */
+interface QueryResponseCore {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  trimmed: string | null;
+  budget?: { met: boolean; estimate: number };
+}
+
+/**
+ * The single definition of `graphifyQuery`'s wire shape.
+ *
+ * Both the emitter (`graphifyQuery`'s return) and the budget estimator go
+ * through here, so `budget_estimate` measures the object the caller actually
+ * receives rather than a private approximation of it (#2738).
+ */
+function buildQueryResponse(term: string, core: QueryResponseCore) {
+  return {
+    term,
+    nodes: core.nodes,
+    edges: core.edges,
+    total_nodes: core.nodes.length,
+    total_edges: core.edges.length,
+    trimmed: core.trimmed,
+    // Budget outcome (#2738) — only present when a budget was requested
+    ...(core.budget ? { budget_met: core.budget.met, budget_estimate: core.budget.estimate } : {}),
+  };
 }
 
 /**
  * Apply token budget by dropping edges by confidence tier (D-04, D-05, D-06).
- * Token estimation: Math.ceil(JSON.stringify(obj).length / 4).
  * Drop order: AMBIGUOUS -> INFERRED -> EXTRACTED.
+ *
+ * The estimate measures the response **as emitted** — `serializeForOutput()`
+ * over the same object `graphifyQuery` returns, pretty-printed and including
+ * the wrapper keys. Measuring a compact `{nodes, edges}` instead understates
+ * the payload the caller receives, which makes `budget_met` a confident claim
+ * about a payload nobody is handed (#2738).
+ *
+ * `term` participates in the emitted bytes, so it is threaded through; the
+ * default keeps direct unit calls on the same wire shape, minus those bytes.
  */
-function applyBudget(result: ExpandResult, budgetTokens: number | null): ExpandResult | BudgetResult {
-  if (!budgetTokens) return result;
+function applyBudget(
+  result: ExpandResult,
+  budgetTokens: number | null,
+  term = '',
+): ExpandResult | BudgetResult {
+  // == null (not truthiness): --budget 0 is a valid parsed budget the router
+  // forwards, and treating it as "no budget" silently returns the unbounded
+  // result — the same silent-non-application defect class as #974/#2738.
+  //
+  // Number.isFinite additionally keeps NaN out of the comparisons below, where
+  // every `estimate <= NaN` is false: the loop would strip all three tiers and
+  // return a seeds-only payload indistinguishable from a legitimate aggressive
+  // trim. The CLI cannot reach that state — graphify-command-router rejects a
+  // non-numeric --budget before this is called — but graphifyQuery and
+  // applyBudget are module-level entry points a future caller could reach
+  // without that validation. Infinity routes here too, and deliberately: an
+  // unbounded budget is not a budget.
+  if (budgetTokens == null || !Number.isFinite(budgetTokens)) return result;
 
   const CONFIDENCE_ORDER = ['AMBIGUOUS', 'INFERRED', 'EXTRACTED'];
   let edges = [...result.edges];
   let omitted = 0;
 
-  const estimateTokens = (obj: unknown) => Math.ceil(JSON.stringify(obj).length / 4);
+  // Nodes that survive a given edge set: edge-reachable, plus seeds (always kept)
+  const survivingNodes = (edgeSet: GraphEdge[]) => {
+    const reachableNodes = new Set<string>();
+    for (const edge of edgeSet) {
+      reachableNodes.add(edge.source);
+      reachableNodes.add(edge.target);
+    }
+    return result.nodes.filter(n => reachableNodes.has(n.id) || (result.seeds && result.seeds.has(n.id)));
+  };
+
+  const trimmedLabel = (dropped: number, unreachable: number) =>
+    dropped > 0 ? `[${dropped} edges omitted, ${unreachable} nodes unreachable]` : null;
+
+  /**
+   * Tokens of the response as `output()` will emit it.
+   *
+   * Self-referential by construction: `budget_estimate` is itself one of the
+   * emitted fields, so its own digit width counts toward the total. Resolved by
+   * iterating to a fixed point — the sequence is non-decreasing (a wider number,
+   * and `false` over `true`, can only add characters), so it settles in a couple
+   * of passes. The cap is a guard rather than an expectation, and it exits on the
+   * larger value: over-reporting is the safe direction for a budget signal;
+   * under-reporting is the defect this fixes.
+   */
+  const wireEstimate = (
+    candidateNodes: GraphNode[],
+    candidateEdges: GraphEdge[],
+    trimmed: string | null,
+  ): number => {
+    let est = 0;
+    for (let i = 0; i < 8; i++) {
+      const next = estimateTokens(
+        serializeForOutput(
+          buildQueryResponse(term, {
+            nodes: candidateNodes,
+            edges: candidateEdges,
+            trimmed,
+            budget: { met: est <= budgetTokens, estimate: est },
+          }),
+        ),
+      );
+      if (next === est) break;
+      est = next;
+    }
+    return est;
+  };
+
+  // Estimate against the post-pruning node set after each tier removal, so a
+  // removal that already fits (once orphaned nodes are excluded) stops the loop
+  // instead of dropping the next, higher-confidence tier too (#2738).
+  let nodes = survivingNodes(edges);
+  let estimate = wireEstimate(nodes, edges, trimmedLabel(omitted, result.nodes.length - nodes.length));
 
   for (const tier of CONFIDENCE_ORDER) {
-    if (estimateTokens({ nodes: result.nodes, edges }) <= budgetTokens) break;
+    if (estimate <= budgetTokens) break;
     const before = edges.length;
     // Check both confidence and confidence_score field names (Open Question 1)
     edges = edges.filter(e => (e.confidence || e.confidence_score) !== tier);
     omitted += before - edges.length;
+    nodes = survivingNodes(edges);
+    estimate = wireEstimate(nodes, edges, trimmedLabel(omitted, result.nodes.length - nodes.length));
   }
 
-  // Find unreachable nodes after edge removal
-  const reachableNodes = new Set<string>();
-  for (const edge of edges) {
-    reachableNodes.add(edge.source);
-    reachableNodes.add(edge.target);
-  }
-  // Always keep seed nodes
-  const nodes = result.nodes.filter(n => reachableNodes.has(n.id) || (result.seeds && result.seeds.has(n.id)));
   const unreachable = result.nodes.length - nodes.length;
 
   return {
     nodes,
     edges,
-    trimmed: omitted > 0 ? `[${omitted} edges omitted, ${unreachable} nodes unreachable]` : null,
+    trimmed: trimmedLabel(omitted, unreachable),
     total_nodes: nodes.length,
     total_edges: edges.length,
+    // Seeds are retained unconditionally, so the seed set is a floor the
+    // reduction cannot go below — report the outcome instead of hiding a miss (#2738)
+    budget_met: estimate <= budgetTokens,
+    budget_estimate: estimate,
   };
 }
 
@@ -390,17 +511,52 @@ function countCommitsBetween(cwd: string, from: string, to: string): number | nu
   return Number.isFinite(n) ? n : null;
 }
 
+// ─── Graph location resolution (#1825) ───────────────────────────────────────
+//
+// `graphify.graph_path` (in .planning/config.json) lets one umbrella-level graph
+// serve multiple sibling projects without a per-project mirror. When set, query /
+// status / diff read the configured graph, and the diff snapshot travels with it
+// (alongside graph.json). When unset/blank/non-string, behaviour is byte-identical
+// to the historical `<planningDir>/graphs/graph.json`.
+
+const GRAPH_FILENAME = 'graph.json';
+const SNAPSHOT_FILENAME = '.last-build-snapshot.json';
+
+interface GraphLocation {
+  /** Absolute path to graph.json. */
+  graphPath: string;
+  /** True iff graphify.graph_path was explicitly configured (non-empty string). */
+  configured: boolean;
+}
+
+/**
+ * Resolve the absolute graph.json location. Honors `graphify.graph_path` in
+ * config.json (resolved relative to the project root, `cwd`); falls back to the
+ * default `<planningDir>/graphs/graph.json` when unset/blank/non-string.
+ */
+function resolveGraphLocation(cwd: string, planningDir: string): GraphLocation {
+  const config = safeReadJson(path.join(planningDir, 'config.json'));
+  const graphify = (config && (config as Record<string, unknown>)['graphify']) as Record<string, unknown> | undefined;
+  const configuredValue = graphify && graphify['graph_path'];
+  if (typeof configuredValue === 'string' && configuredValue.trim().length > 0) {
+    return { graphPath: path.resolve(cwd, configuredValue), configured: true };
+  }
+  return { graphPath: path.join(planningDir, 'graphs', GRAPH_FILENAME), configured: false };
+}
+
 /**
  * Query the knowledge graph for nodes matching a term, with optional budget cap.
  * Uses seed-then-expand BFS traversal (D-01).
  */
 function graphifyQuery(cwd: string, term: string, options: { budget?: number | null } = {}): unknown {
   const planningDir = path.join(cwd, '.planning');
-  if (!isGraphifyEnabled(planningDir)) return disabledResponse();
+  if (!isCapabilityActive('graphify', cwd)) return disabledResponse();
 
-  const graphPath = path.join(planningDir, 'graphs', 'graph.json');
+  const { graphPath, configured } = resolveGraphLocation(cwd, planningDir);
   if (!fs.existsSync(graphPath)) {
-    return { error: 'No graph built yet. Run graphify build first.' };
+    return { error: configured
+      ? `Configured graph not found at ${graphPath}. Set graphify.graph_path or run /gsd:graphify build.`
+      : 'No graph built yet. Run graphify build first.' };
   }
 
   const graph = safeReadJson(graphPath);
@@ -410,18 +566,20 @@ function graphifyQuery(cwd: string, term: string, options: { budget?: number | n
 
   let result: ExpandResult | BudgetResult = seedAndExpand(graph, term);
 
-  if (options.budget) {
-    result = applyBudget(result, options.budget);
+  if (options.budget != null) {
+    result = applyBudget(result, options.budget, term);
   }
 
-  return {
-    term,
+  // Same builder the estimator measured, so budget_estimate describes exactly
+  // these bytes (#2738).
+  return buildQueryResponse(term, {
     nodes: result.nodes,
     edges: result.edges,
-    total_nodes: result.nodes.length,
-    total_edges: result.edges.length,
     trimmed: 'trimmed' in result ? (result.trimmed || null) : null,
-  };
+    budget: 'budget_met' in result
+      ? { met: result.budget_met, estimate: result.budget_estimate }
+      : undefined,
+  });
 }
 
 /**
@@ -435,11 +593,13 @@ function graphifyQuery(cwd: string, term: string, options: { budget?: number | n
  */
 function graphifyStatus(cwd: string): unknown {
   const planningDir = path.join(cwd, '.planning');
-  if (!isGraphifyEnabled(planningDir)) return disabledResponse();
+  if (!isCapabilityActive('graphify', cwd)) return disabledResponse();
 
-  const graphPath = path.join(planningDir, 'graphs', 'graph.json');
+  const { graphPath, configured } = resolveGraphLocation(cwd, planningDir);
   if (!fs.existsSync(graphPath)) {
-    return { exists: false, message: 'No graph built yet. Run graphify build to create one.' };
+    return { exists: false, message: configured
+      ? `Configured graph not found at ${graphPath}. Set graphify.graph_path or run /gsd:graphify build.`
+      : 'No graph built yet. Run graphify build to create one.' };
   }
 
   const stat = fs.statSync(graphPath);
@@ -498,10 +658,10 @@ function graphifyStatus(cwd: string): unknown {
  */
 function graphifyDiff(cwd: string): unknown {
   const planningDir = path.join(cwd, '.planning');
-  if (!isGraphifyEnabled(planningDir)) return disabledResponse();
+  if (!isCapabilityActive('graphify', cwd)) return disabledResponse();
 
-  const snapshotPath = path.join(planningDir, 'graphs', '.last-build-snapshot.json');
-  const graphPath = path.join(planningDir, 'graphs', 'graph.json');
+  const { graphPath } = resolveGraphLocation(cwd, planningDir);
+  const snapshotPath = path.join(path.dirname(graphPath), SNAPSHOT_FILENAME);
 
   if (!fs.existsSync(snapshotPath)) {
     return { no_baseline: true, message: 'No previous snapshot. Run graphify build first, then build again to generate a diff baseline.' };
@@ -554,14 +714,18 @@ function graphifyDiff(cwd: string): unknown {
  */
 function graphifyBuild(cwd: string): unknown {
   const planningDir = path.join(cwd, '.planning');
-  if (!isGraphifyEnabled(planningDir)) return disabledResponse();
+  if (!isCapabilityActive('graphify', cwd)) return disabledResponse();
 
   const installed = checkGraphifyInstalled();
   if (!installed.installed) return { error: installed.message };
 
   const version = checkGraphifyVersion();
 
-  // Ensure output directory exists (D-05)
+  // Ensure output directory exists (D-05). Build stays project-scoped: the build
+  // skill cp's artifacts into `<planningDir>/graphs/` regardless of graph_path, so
+  // graphs_dir reflects that real destination (not the configured read location).
+  // A shared umbrella graph is built in the umbrella project; sub-projects only
+  // READ it via graphify.graph_path (#1825).
   const graphsDir = path.join(planningDir, 'graphs');
   fs.mkdirSync(graphsDir, { recursive: true });
 
@@ -594,7 +758,8 @@ interface SnapshotResult {
  * using platformWriteSync for crash safety.
  */
 function writeSnapshot(cwd: string): SnapshotResult | { error: string } {
-  const graphPath = path.join(cwd, '.planning', 'graphs', 'graph.json');
+  const planningDir = path.join(cwd, '.planning');
+  const { graphPath } = resolveGraphLocation(cwd, planningDir);
   const graph = safeReadJson(graphPath);
   if (!graph) return { error: 'Cannot write snapshot: graph.json not parseable' };
 
@@ -605,7 +770,7 @@ function writeSnapshot(cwd: string): SnapshotResult | { error: string } {
     edges: graph.edges || graph.links || [],
   };
 
-  const snapshotPath = path.join(cwd, '.planning', 'graphs', '.last-build-snapshot.json');
+  const snapshotPath = path.join(path.dirname(graphPath), SNAPSHOT_FILENAME);
   platformWriteSync(snapshotPath, JSON.stringify(snapshot, null, 2));
   return {
     saved: true,
@@ -619,7 +784,6 @@ function writeSnapshot(cwd: string): SnapshotResult | { error: string } {
 
 export = {
   // Config gate
-  isGraphifyEnabled,
   disabledResponse,
   // Subprocess
   execGraphify,

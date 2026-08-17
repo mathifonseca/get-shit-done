@@ -42,17 +42,24 @@ npx @opengsd/gsd-core@latest
 claude --dangerously-skip-permissions
 ```
 
+> [!CAUTION]
+> **The permissions flag is optional.** It skips per-file confirmation while
+> GSD's sub-agents read and write files. Use it only in low-stakes or
+> throwaway contexts. To keep confirmations enabled, start with `claude` instead.
+> For real work, read the [security model](../explanation/security-model.md) first.
+
+
 ---
 
-## Step 3 — 코드베이스 매핑
+## Step 3 — 브라운필드 온보딩 시작
 
-프로젝트를 생성하기 전에 GSD Core가 이미 존재하는 것을 학습하도록 합니다. 이 단계가 브라운필드 계획의 정확도를 높이는 핵심입니다.
+프로젝트를 생성하기 전에 GSD Core가 저장소 상태를 검사하고 안전한 다음 top-level 명령을 알려주게 하세요. 이 단계는 코드베이스 컨텍스트를 건너뛰거나 기존 planning 파일을 덮어쓰는 일을 방지합니다.
 
 ```text
-/gsd-map-codebase
+/gsd-onboard
 ```
 
-GSD Core가 4개의 병렬 매퍼 서브 에이전트를 생성합니다("Spawning 4 parallel codebase mapper agents…" 메시지가 표시되며, 1–5분 소요됩니다. 중단하지 마세요). 각 에이전트는 서로 다른 관심사에 집중합니다:
+온보딩이 코드베이스 맵 누락을 보고하면 권장 옵션을 선택하고 출력된 `/gsd-map-codebase` handoff를 실행한 뒤 `/gsd-onboard`를 다시 실행합니다. `/gsd-onboard --fast`는 가벼운 첫 패스에는 충분하지만, `/gsd-new-project` 전에는 완전한 맵이 필요합니다. `/gsd-map-codebase`가 4개의 병렬 매퍼 서브 에이전트를 생성합니다("Spawning 4 parallel codebase mapper agents…" 메시지가 표시되며, 1–5분 소요됩니다. 중단하지 마세요). 각 에이전트는 서로 다른 관심사에 집중합니다:
 
 | 에이전트 | 집중 영역 |
 |---------|---------|
@@ -84,7 +91,7 @@ Created .planning/codebase/:
 
 ---
 
-## Step 4 — 컨텍스트 초기화 후 프로젝트 생성
+## Step 4 — 온보딩 재실행 및 프로젝트 초기화
 
 세션 창을 초기화합니다:
 
@@ -92,7 +99,7 @@ Created .planning/codebase/:
 /clear
 ```
 
-이제 프로젝트를 생성합니다. GSD Core가 이전 단계에서 기존 코드를 발견했으므로, 이미 이것이 브라운필드 프로젝트임을 알고 있습니다. `/gsd-new-project`를 실행하면 기존의 것을 재구성하는 것이 아니라 *추가하는* 것에 집중한 질문을 합니다:
+이제 `/gsd-onboard`를 다시 실행합니다. GSD Core가 ADR, PRD, spec, RFC 또는 루트 요구사항 문서를 감지하면 먼저 권장되는 `/gsd-ingest-docs` handoff를 실행하고 이후 `/gsd-onboard`를 다시 실행하세요. 컨텍스트가 준비되면 온보딩이 프로젝트 초기화 handoff를 출력합니다:
 
 ```text
 /gsd-new-project
@@ -124,6 +131,8 @@ Proposed Roadmap
 
 로드맵을 승인합니다.
 
+프로젝트 설정이 끝난 뒤 `/gsd-onboard`를 한 번 더 실행합니다. 이제 `PROJECT.md`, `REQUIREMENTS.md`, `ROADMAP.md`, `STATE.md`가 모두 있으므로 온보딩은 `.planning/onboarding/SUMMARY.md`를 생성하거나 확인합니다.
+
 **`.planning/`에 생성되는 파일:**
 
 ```text
@@ -133,6 +142,7 @@ Proposed Roadmap
   ROADMAP.md          ← Phase 1, 상태: pending
   STATE.md            ← 세션 메모리
   config.json         ← 워크플로 설정
+  onboarding/SUMMARY.md ← 온보딩 상태와 다음 명령
   codebase/           ← Step 3에서 생성된 7개의 맵 파일
 ```
 
@@ -212,6 +222,7 @@ GSD Core가 `CONVENTIONS.md`와 `ARCHITECTURE.md`를 읽었으므로, 질문들�
 
 ## 배운 내용
 
+- `/gsd-onboard`가 인터랙티브 명령을 중첩하거나 기존 planning 파일을 덮어쓰지 않고 브라운필드 설정을 안전하게 순서화하는 방법.
 - `/gsd-map-codebase`가 4개의 병렬 에이전트를 실행하여 `.planning/codebase/`에 `STACK.md`, `ARCHITECTURE.md`, `CONVENTIONS.md`, `CONCERNS.md`, `STRUCTURE.md`, `TESTING.md`, `INTEGRATIONS.md`를 생성하는 방법.
 - 브라운필드 저장소에서 `/gsd-new-project`가 *추가하는* 것에 집중한 질문을 하고 기존 코드에서 Validated 요구사항을 채우는 방법.
 - 코드베이스 맵이 `/gsd-discuss-phase`의 모든 질문을 형성하는 방법 — 파일 경로, 패턴, 컨벤션이 실제 코드에서 옵니다.

@@ -3,6 +3,38 @@
 - **Status:** Proposed
 - **Date:** 2026-06-03
 
+## Why this is still `Proposed` (audited 2026-07-17)
+
+Confirmed shipped: immutable per-release tags (`finalize` mints `v<version>` exactly once at
+line 629; `rc` auto-increments `v<version>-rc.N` at line 353 — no force-push or re-tag anywhere
+in the file), the `@next`/`@latest` dist-tag split (`npm publish --provenance --access public
+--tag next` in the `rc` job at line 437 vs. the default/`latest` publish in `finalize` at line
+636), and the Amendment (2026-06-12, #1104) "`next` rests at last published" behavior, wired
+through `scripts/sync-next-version.cjs` in both the `rc` job (`release.yml:479`) and the
+`main`→`next` back-merge (`auto-backmerge.yml:176-178`).
+
+**The blocker.** Decision §1 — the mechanism this ADR is named for — is not implemented: "recreate
+(or hard-reset) an **ephemeral** `release/<version>` branch from `origin/next` HEAD at the *start*
+of each `rc`/`finalize` run." In the live `.github/workflows/release.yml`, the `create` job still
+creates `release/<version>` once and hard-errors if it already exists ("Branch $BRANCH already
+exists. Delete it first or use rc/finalize.", lines 126–133); the `rc` job's checkout (line 330)
+and the `finalize` job's checkout (line 522) both simply check out that same pre-existing ref —
+neither job fetches, resets, or recreates it from `origin/next`. This is exactly the "persistent
+branch you never backport into" antipattern the ADR's own Context section set out to kill, and
+precisely the alternative its own Alternatives section rejected ("Keep the persistent branch but
+cherry-pick RC fixes into it ... Rejected as primary"). `docs/adr/README.md:98` already names this
+ADR in the corpus audit as one whose "namesake mechanism is performed by hand." Issue #660 is
+closed `COMPLETED`, but its scope was landing the ADR/design decision, not the `release.yml`
+re-cut step — no commit since has added it; today, cutting an rc "on the head of `next`" still
+requires a manual `git push --force origin <next-head>:refs/heads/release/<version>` before
+dispatching the workflow.
+
+**Unblock condition.** Add a step to both the `rc` and `finalize` jobs in
+`.github/workflows/release.yml` that hard-resets (or recreates) `release/<version>` from
+`origin/next` HEAD before the version bump, so the re-cut happens automatically on every
+dispatch instead of via a manual force-push. Once that step exists in the file and one real
+`rc`/`finalize` run has exercised it end to end, this ADR is ready for another ratification pass.
+
 ## Context
 
 The release pipeline (`.github/workflows/release.yml`) is a three-mode `workflow_dispatch`
@@ -79,7 +111,7 @@ or a movable tag — as the RC surface.** Concretely:
 4. **RC = the `@next` dist-tag, full stop.** Testers run `npm i -g @opengsd/gsd-core@next`.
    Because each `rc` run is cut from `next` HEAD, every rc.N already includes all prior fixes.
    No long-lived branch, no tag movement. `finalize` promotes the released version to `@latest`
-   (and keeps the existing `npm dist-tag add … next` so `@next` never trails `@latest`).
+   (`@next` remains the prerelease channel managed exclusively by the `rc` job; `finalize` does not repoint it).
 
 5. **Everything else stays:** custom changesets + CHANGELOG render, release-notes formatter,
    smoke-test gates, provenance, `main`/`next`, `auto-backmerge` (main→next).
@@ -151,3 +183,26 @@ right; only the *movable placeholder* mechanic was wrong.
    *(Recommend: keep the rc tags — harmless, immutable, and they anchor the GitHub prerelease.)*
 3. `-dev` floor increment: next-patch (`A.B.(C+1)-dev.0`, the precedence-safe default above) or
    next-minor (`A.(B+1).0-dev.0`)? *(Recommend: next-patch floor.)*
+
+## Amendment (2026-06-12, #1104): `next` tracks the last published release
+
+**Supersedes** the §2 / "Resolved by maintainer" choice to rest `next` on a `-dev` stream.
+
+The `-dev` floor (e.g. `1.3.1-dev.0`) was never published to npm, yet it became the
+source-of-truth version on the default branch and leaked to the real world via source/dev
+installs that report `package.json`'s version — a version no release ever bore. To eliminate
+phantom versions, `next` now **rests at the last published release** and is synced
+automatically by the release pipeline for **every** release type:
+
+- **finalize / hotfix** (these push `main`): the existing `main → next` back-merge
+  (`.github/workflows/auto-backmerge.yml`) sets `next`'s version to `main`'s released version,
+  folded into the same back-merge PR.
+- **rc** (publishes a pre-release to the `release/<version>` branch + `@next`; does **not** push
+  `main`): the `rc` job in `.github/workflows/release.yml` opens and admin-merges a
+  `chore: sync next package version` PR after a confirmed publish.
+
+Both paths share `scripts/sync-next-version.cjs`, which sets `package.json` and stamps the
+runtime manifests (`plugin.json`, `gemini-extension.json`) via the `version` lifecycle hook,
+and **refuses any non-release version string** (fail-closed — a `-dev`/placeholder can never be
+written to `next` again). Open question 3 (the `-dev` floor increment) is therefore moot: there
+is no `-dev` floor.

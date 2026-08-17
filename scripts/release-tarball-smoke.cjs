@@ -47,16 +47,28 @@ const os = require('os');
 const path = require('path');
 const { PACKAGE_NAME } = require('../gsd-core/bin/lib/package-identity.cjs');
 const { ExitError, runMain } = require('./lib/cli-exit.cjs');
-// 120 s proved too tight on Windows GitHub-hosted runners: cold-cache
-// `npm install -g` with a 1499-file tarball took ~120 s exactly, causing
-// spawnSync to fire SIGTERM and return { status: null, stdout: '', stderr: '' }
-// (Node docs: status is null when subprocess terminated due to a signal).
-// The INSTALL_FAILED branch checks `status !== 0`, which null satisfies, so the
-// test saw empty stdout/stderr and a spurious INSTALL_FAILED. Windows runners
-// are slower than Linux/macOS for filesystem-heavy operations (
-// https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners/about-github-hosted-runners#standard-github-hosted-runners-for-public-repositories
-// ). Raise to 600 s (the same ceiling the before() helper uses for pack+install).
-const CHILD_TIMEOUT_MS = process.platform === 'win32' ? 600_000 : 120_000;
+// 120 s proved too tight for cold-cache `npm install -g` of a 1499-file tarball:
+// spawnSync fires SIGTERM at the deadline and returns { status: null, stdout: '',
+// stderr: '' } (Node docs: status is null when a subprocess is terminated by a
+// signal). The INSTALL_FAILED branch checks `status !== 0`, which null satisfies,
+// so the test sees empty stdout/stderr and a spurious INSTALL_FAILED (surfaced as
+// `installError: spawnSync npm ETIMEDOUT`).
+//
+// First observed on Windows GitHub-hosted runners, which are slower for
+// filesystem-heavy work
+// (https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners/about-github-hosted-runners#standard-github-hosted-runners-for-public-repositories),
+// then again on a slow Linux bench (cartographer: cold disk, constrained CPU) —
+// the same failure the before() helper's SLOW_HOST_TIMEOUT already guards for
+// pack+install. The slow-host reality is not platform-specific, so the ceiling is
+// now uniform 600 s across all platforms AND shared with before() via this
+// exported constant, so the two surfaces cannot diverge again. 600 s stays well
+// clear of a real cold install (3–6 min) without masking a genuine hang.
+const CHILD_TIMEOUT_MS = 600_000;
+const QUIET_NPM_ENV = Object.freeze({
+  npm_config_loglevel: 'error',
+  npm_config_update_notifier: 'false',
+  NO_UPDATE_NOTIFIER: '1',
+});
 
 // ---------------------------------------------------------------------------
 // Frozen result-code enum
@@ -304,7 +316,7 @@ function runSmoke({
   // Use the caller-supplied npmEnv if provided (allows HOME isolation on Docker
   // hosts where HOME may be unwritable — same pattern as runNpm() in helpers.cjs).
   // Falls back to process.env to preserve existing CLI / programmatic behaviour. (#131)
-  const effectiveNpmEnv = npmEnv !== undefined ? npmEnv : process.env;
+  const effectiveNpmEnv = { ...(npmEnv !== undefined ? npmEnv : process.env), ...QUIET_NPM_ENV };
   const installResult = spawnSync(
     npmCmd,
     ['install', '-g', '--prefix', installPrefix, tarballPath],
@@ -570,6 +582,7 @@ function cliMain() {
         encoding: 'utf-8',
         shell: process.platform === 'win32',
         timeout: CHILD_TIMEOUT_MS,
+        env: { ...process.env, ...QUIET_NPM_ENV },
       },
     ).trim();
     // npm pack outputs the filename on stdout (last line when verbose)
@@ -622,7 +635,7 @@ function cleanup(...dirs) {
 // Exports
 // ---------------------------------------------------------------------------
 
-module.exports = { SMOKE, runSmoke, binInvocation };
+module.exports = { SMOKE, runSmoke, binInvocation, CHILD_TIMEOUT_MS };
 
 if (require.main === module) {
   runMain(cliMain);

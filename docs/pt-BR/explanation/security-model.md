@@ -56,7 +56,7 @@ pesquisador → planejador → executor do GSD e eventualmente seria executado c
 A barreira opera em três estágios do pipeline:
 
 **Estágio de pesquisa.** Quando `gsd-phase-researcher` recomenda pacotes
-externos, executa `slopcheck install <pkgs> --json` para cada um. Os resultados
+externos, executa `gsd-tools query package-legitimacy check --ecosystem <npm|pypi|crates> <pkgs>` para cada um. Os resultados
 são gravados em uma tabela `## Package Legitimacy Audit` no `RESEARCH.md`.
 Pacotes marcados com `[SLOP]` (alucinação de alta confiança ou registrado por
 atacante) são **removidos inteiramente do `RESEARCH.md`** antes de o arquivo
@@ -136,7 +136,7 @@ substituir as instruções do agente ou exfiltrar informações.
 O GSD Core trata a injeção de prompt em três níveis.
 
 **Validação de entrada (`security.cjs`).** O módulo
-`get-shit-done/bin/lib/security.cjs` é o utilitário central de segurança.
+`gsd-core/bin/lib/security.cjs` é o utilitário central de segurança.
 Ele fornece:
 
 - Prevenção de path traversal: caminhos de arquivo fornecidos pelo usuário
@@ -168,7 +168,7 @@ de ser lido* em busca de instruções injetadas em conteúdo não confiável —
 capturando casos em que um atacante incorporou instruções em um arquivo que o
 GSD está prestes a incorporar ao contexto de um agente.
 
-**Scanner de CI.** `prompt-injection-scan.test.cjs` escaneia todos os arquivos
+**Scanner de CI.** `prompt-injection-scan.security.test.cjs` escaneia todos os arquivos
 de agente, workflow e comando em busca de vetores de injeção embutidos como
 parte do conjunto de testes. Isso detecta tentativas de injeção no próprio
 código-fonte do GSD — por exemplo, um ataque de cadeia de suprimentos que
@@ -229,7 +229,7 @@ bem-sucedido.
 
 **O que o Package Legitimacy Gate não elimina:** Um pacote legítimo que é
 comprometido posteriormente (tomada de conta, confusão de dependências em sua
-própria árvore) não é detectado pelo slopcheck, que verifica sinais de registro
+própria árvore) não é detectado pelo portão da API de registro, que verifica sinais de registro
 no momento da pesquisa. Lock files e `npm audit` na camada de integridade de
 dependências são os controles para essa classe de ataque.
 

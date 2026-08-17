@@ -15,9 +15,12 @@ const { isSemverNewer } = require('../gsd-core/bin/lib/semver-compare.cjs');
 // Latest-version lookup is delegated to the single deterministic adapter
 // (#498). checkLatestVersion() owns the npm-view call, the timeout/semver
 // policy, and the package name — sourced from the baked Package Identity seam.
-// The previous `require('../package.json').name` (#378) resolved to undefined
-// in the installed tree (only a {"type":"commonjs"} marker ships), so the
-// background check never reported updates.
+// The previous `require('../package.json').name` (#378) never yielded a name in
+// the installed tree — at the time it resolved to the synthetic
+// {"type":"commonjs"} marker GSD wrote at the config root, which has no `.name`,
+// so the background check never reported updates. Since #2544 GSD writes no
+// marker there at all, so that require would now fail to resolve outright.
+// Either way the name must come from the baked seam, never a walk-up.
 const { checkLatestVersion } = require('../gsd-core/bin/check-latest-version.cjs');
 const { PACKAGE_NAME } = require('../gsd-core/bin/lib/package-identity.cjs');
 // Authoritative list of managed hooks — shared with tests to retire source-grep
@@ -53,14 +56,20 @@ try {
 } catch (e) {}
 
 // Check for stale hooks — compare hook version headers against installed VERSION
-// Hooks are installed at configDir/hooks/ (e.g. ~/.claude/hooks/) (#1421)
+// Since #3023 the bundle directory name is resolved from __dirname (this
+// worker is staged INSIDE the bundle), not assumed to be configDir/hooks —
+// the directory name is runtime-descriptor-driven (e.g. `gsd-hooks/` for pi).
 // Only check hooks that GSD currently ships — orphaned files from removed features
 // (e.g., gsd-intel-*.js) must be ignored to avoid permanent stale warnings (#1750)
 // MANAGED_HOOKS is imported from ./managed-hooks-registry.cjs above.
 
 let staleHooks = [];
 if (configDir) {
-  const hooksDir = path.join(configDir, 'hooks');
+  // #3023: the bundle's directory name is runtime-descriptor-driven (pi stages
+  // it as `gsd-hooks/`), so deriving it as `<configDir>/hooks` silently scanned
+  // nothing there. This worker is staged INSIDE the bundle, so __dirname is the
+  // bundle directory by construction — name-agnostic and one fewer assumption.
+  const hooksDir = __dirname;
   try {
     if (fs.existsSync(hooksDir)) {
       const hookFiles = fs.readdirSync(hooksDir).filter(f => MANAGED_HOOKS.includes(f));
@@ -91,7 +100,7 @@ if (configDir) {
 // now sourced from the package-identity seam, not hardcoded in this worker.
 let isFork = false;
 try {
-  const homeCode = path.join(require('os').homedir(), 'code', 'get-shit-done', 'FORK.md');
+  const homeCode = path.join(require('os').homedir(), 'code', 'get-shit-done', 'FORK.md'); // gsd-allow-legacy-name
   isFork = fs.existsSync(homeCode);
 } catch (e) {}
 

@@ -1,0 +1,149 @@
+{
+  "id": "cursor",
+  "role": "runtime",
+  "version": "1.10.0",
+  "title": "Cursor",
+  "description": "Cursor IDE — skills-only workflow surface; hooks.json surface; Claude hook event dialect; recursive skill loader (flat nesting); tier-2 support.",
+  "tier": "core",
+  "requires": [],
+  "engines": {
+    "gsd": ">=1.6.0"
+  },
+  "runtime": {
+    "configHome": {
+      "kind": "dot-home",
+      "name": ".cursor",
+      "env": [
+        "CURSOR_CONFIG_DIR"
+      ]
+    },
+    "localConfigDir": ".cursor",
+    "configFormat": "none",
+    "artifactLayout": {
+      "global": [
+        {
+          "kind": "skills",
+          "destSubpath": "skills",
+          "prefix": "gsd-",
+          "nesting": "flat",
+          "recursive": true,
+          "converter": "convertClaudeCommandToCursorSkill"
+        },
+        {
+          "kind": "agents",
+          "destSubpath": "agents",
+          "prefix": "gsd-",
+          "nesting": "flat",
+          "recursive": false,
+          "converter": "convertClaudeAgentToCursorAgent"
+        }
+      ],
+      "local": [
+        {
+          "kind": "skills",
+          "destSubpath": "skills",
+          "prefix": "gsd-",
+          "nesting": "flat",
+          "recursive": true,
+          "converter": "convertClaudeCommandToCursorSkill"
+        },
+        {
+          "kind": "agents",
+          "destSubpath": "agents",
+          "prefix": "gsd-",
+          "nesting": "flat",
+          "recursive": false,
+          "converter": "convertClaudeAgentToCursorAgent"
+        }
+      ]
+    },
+    "commandStyle": "slash-hyphen",
+    "hooksSurface": "cursor-hooks-json",
+    "hookEvents": "claude",
+    "sandboxTier": "none",
+    "supportTier": 2,
+    "installSurface": "cursor-hooks-json",
+    "writesSharedSettings": false,
+    "permissionWriter": null,
+    "extendedHookEvents": [],
+    "hostIntegration": {
+      "embeddingMode": "imperative",
+      "commandSurface": "slash-file",
+      "dispatch": {
+        "namedDispatch": true,
+        "nested": true,
+        "maxDepth": 2,
+        "background": true,
+        "subagentToolkit": "full",
+        "backgroundDispatch": true,
+        "isolation": "harness-worktree"
+      },
+      "modelMode": "passive",
+      "hookBus": "host",
+      "stateIO": "filesystem",
+      "transport": "mcp",
+      "runtime": "node",
+      "effortSurface": "undocumented"
+    },
+    "harnessIsolationFlag": "--worktree",
+    "hostBehaviors": {
+      "reapplyCommand": "gsd-update --reapply (mention the skill name)",
+      "frontmatterDialect": "cursor",
+      "hooksJsonSurface": true,
+      "skipSharedHooksInstall": true,
+      "retiredArtifacts": [
+        {
+          "destSubpath": "commands",
+          "prefix": "gsd-",
+          "suffix": ".md"
+        }
+      ],
+      "skipUpdateBannerCommand": true,
+      "skipSettingsUi": true,
+      "managedHookEvents": [
+        "sessionStart",
+        "postToolUse",
+        "preToolUse",
+        "stop",
+        "subagentStart",
+        "subagentStop"
+      ],
+      "reviewerCli": true
+    }
+  },
+  "reviewer": {
+    "slug": "cursor",
+    "flags": [
+      "--cursor"
+    ],
+    "transport": "spawn",
+    "probe": {
+      "kind": "command-exists",
+      "binary": "cursor-agent"
+    },
+    "invoke": {
+      "binary": "cursor-agent",
+      "args": [
+        "-p",
+        "--mode",
+        "ask",
+        "--trust",
+        "--output-format",
+        "text",
+        "{{prompt}}"
+      ],
+      "promptChannel": "argv-file-ref",
+      "outputChannel": "stdout",
+      "modelArg": null,
+      "effortChannel": "none"
+    },
+    "timeoutFloorMs": 900000,
+    "emptyOutput": "stub-with-stderr",
+    "reviewsSection": "Cursor",
+    "evidenceClass": "source-grounded",
+    "requiresBinaries": [],
+    "promptBudgetKey": null,
+    "modelConfigKey": null,
+    "handler": null
+  }
+}

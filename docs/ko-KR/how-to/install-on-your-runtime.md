@@ -8,7 +8,7 @@ GSD Core(`@opengsd/gsd-core`)를 매일 사용하는 AI 코딩 런타임에 설�
 
 ## 인스톨러가 필요한 이유
 
-GSD Core는 Claude Code의 네이티브 frontmatter 형식으로 에이전트 및 명령 파일을 제공합니다. 각 지원 런타임은 서로 다른 스키마, 디렉터리 구조, 명령 호출 문법을 요구합니다. 인스톨러는 필요한 변환을 수행합니다. 예를 들어 OpenCode용 도구 목록 및 색상 값 변환, Codex용 TOML 에이전트 항목 작성, Gemini CLI용 모든 명령 본문을 하이픈 형식(`/gsd-update`)에서 콜론 형식(`/gsd:update`)으로 재작성합니다.
+GSD Core는 Claude Code의 네이티브 frontmatter 형식으로 에이전트 및 명령 파일을 제공합니다. 각 지원 런타임은 서로 다른 스키마, 디렉터리 구조, 명령 호출 문법을 요구합니다. 인스톨러는 필요한 변환을 수행합니다. 예를 들어 OpenCode용 도구 목록 및 색상 값 변환, Codex용 TOML 에이전트 항목 작성, Gemini CLI용 모든 명령 본문을 하이픈 형식(`/gsd-update`)에서 콜론 형식(`/gsd-update`)으로 재작성합니다.
 
 **`agents/` 또는 `commands/`에서 파일을 직접 복사하지 마세요.** 그렇게 하면 변환을 우회하게 되어 스키마 유효성 검사 오류나 누락된 명령이 발생합니다.
 
@@ -50,7 +50,7 @@ CLAUDE_CONFIG_DIR=~/.claude-alt npx @opengsd/gsd-core@latest --claude --global
 npx @opengsd/gsd-core@latest --gemini --global
 ```
 
-스킬은 `~/.gemini/`에 저장됩니다. 인스톨러는 모든 명령 본문을 Gemini의 콜론 네임스페이스(`/gsd:update`, `/gsd:config` 등)로 재작성합니다. 설치 후 Gemini CLI를 재시작하세요.
+스킬은 `~/.gemini/`에 저장됩니다. 인스톨러는 모든 명령 본문을 Gemini의 콜론 네임스페이스(`/gsd-update`, `/gsd-config` 등)로 재작성합니다. 설치 후 Gemini CLI를 재시작하세요.
 
 **설치 디렉터리 재정의:**
 
@@ -273,10 +273,11 @@ npx @opengsd/gsd-core@latest --opencode --global
 
 ## 설치 후
 
-새 명령과 에이전트를 적용하려면 런타임을 재시작하세요. 그런 다음 첫 번째 프로젝트를 시작합니다:
+새 명령과 에이전트를 적용하려면 런타임을 재시작하세요. 그런 다음 새 프로젝트를 시작하거나 기존 저장소를 온보딩합니다:
 
 ```bash
-/gsd-new-project
+/gsd-new-project   # 그린필드 프로젝트
+/gsd-onboard       # 기존 코드베이스
 ```
 
 재시작 후 명령을 찾을 수 없다면 설치 디렉터리가 런타임이 기대하는 설정 경로와 일치하는지 확인하세요. 위의 프리릴리스 에디션 섹션에서 가장 흔한 불일치 사례를 다룹니다.

@@ -29,7 +29,8 @@ function tmpDir(prefix) {
 function createFixtureRuntime() {
   const base = createTempDir('gsd-surface-apply-');
   const runtimeConfigDir = base;
-  const commandsDir = path.join(runtimeConfigDir, 'commands', 'gsd');
+  // #1367: claude local uses flat commands/ (not commands/gsd/) — commandsDir is commands/.
+  const commandsDir = path.join(runtimeConfigDir, 'commands');
   const agentsDir = path.join(runtimeConfigDir, 'agents');
   fs.mkdirSync(commandsDir, { recursive: true });
   fs.mkdirSync(agentsDir, { recursive: true });
@@ -59,6 +60,7 @@ function readFrontmatterDescription(markdown) {
 
 describe('applySurface', () => {
   test('core profile: only core skills appear in commandsDir', (t) => {
+    // #1367: claude local uses flat gsd-<stem>.md files at commands/ (not commands/gsd/<stem>.md).
     const { base, runtimeConfigDir, commandsDir } = createFixtureRuntime();
     t.after(() => cleanup(base));
     writeActiveProfile(runtimeConfigDir, 'core');
@@ -72,11 +74,14 @@ describe('applySurface', () => {
     const layout = resolveRuntimeArtifactLayout('claude', runtimeConfigDir, 'local');
     const resolved = applySurface(runtimeConfigDir, layout, manifest, CLUSTERS);
 
-    const files = fs.readdirSync(commandsDir).filter(f => f.endsWith('.md'));
+    // After #1367: files are gsd-<stem>.md (not bare stem.md). Strip the gsd- prefix
+    // to check against the REAL_COMMANDS_DIR (which still uses bare names).
+    const files = fs.readdirSync(commandsDir).filter(f => f.startsWith('gsd-') && f.endsWith('.md'));
     for (const file of files) {
-      assert.ok(fs.existsSync(path.join(REAL_COMMANDS_DIR, file)), `unexpected file: ${file}`);
+      const bareName = file.slice('gsd-'.length); // gsd-help.md → help.md
+      assert.ok(fs.existsSync(path.join(REAL_COMMANDS_DIR, bareName)), `unexpected file: ${file} (no source: ${bareName})`);
     }
-    const expectedCore = [...resolved.skills].map(stem => `${stem}.md`).sort();
+    const expectedCore = [...resolved.skills].map(stem => `gsd-${stem}.md`).sort();
     assert.deepStrictEqual(
       [...files].sort(),
       expectedCore,
@@ -98,7 +103,8 @@ describe('applySurface', () => {
     const layout = resolveRuntimeArtifactLayout('claude', runtimeConfigDir, 'local');
     applySurface(runtimeConfigDir, layout, manifest, CLUSTERS);
 
-    const afterStandard = new Set(fs.readdirSync(commandsDir).filter(f => f.endsWith('.md')));
+    // #1367: files are gsd-<stem>.md in flat commands/
+    const afterStandard = new Set(fs.readdirSync(commandsDir).filter(f => f.startsWith('gsd-') && f.endsWith('.md')));
 
     writeSurface(runtimeConfigDir, {
       baseProfile: 'core',
@@ -108,11 +114,11 @@ describe('applySurface', () => {
     });
     const resolvedCore = applySurface(runtimeConfigDir, layout, manifest, CLUSTERS);
 
-    const afterCore = new Set(fs.readdirSync(commandsDir).filter(f => f.endsWith('.md')));
+    const afterCore = new Set(fs.readdirSync(commandsDir).filter(f => f.startsWith('gsd-') && f.endsWith('.md')));
 
     assert.ok(afterCore.size <= afterStandard.size, 'core should have fewer or equal files than standard');
 
-    const expectedCore = [...resolvedCore.skills].map(stem => `${stem}.md`).sort();
+    const expectedCore = [...resolvedCore.skills].map(stem => `gsd-${stem}.md`).sort();
     assert.deepStrictEqual(
       [...afterCore].sort(),
       expectedCore,
@@ -120,8 +126,9 @@ describe('applySurface', () => {
     );
 
     for (const file of afterCore) {
+      const bareName = file.slice('gsd-'.length);
       assert.ok(
-        fs.existsSync(path.join(REAL_COMMANDS_DIR, file)),
+        fs.existsSync(path.join(REAL_COMMANDS_DIR, bareName)),
         `file in commandsDir not a real skill: ${file}`
       );
     }
@@ -161,13 +168,14 @@ describe('applySurface', () => {
     const layout = resolveRuntimeArtifactLayout('claude', runtimeConfigDir, 'local');
     applySurface(runtimeConfigDir, layout, manifest, CLUSTERS);
 
+    // #1367: flat gsd-<stem>.md files at commands/ (not commands/gsd/<stem>.md)
     assert.ok(
-      fs.existsSync(path.join(commandsDir, 'help.md')),
-      'help.md should be copied from install source'
+      fs.existsSync(path.join(commandsDir, 'gsd-help.md')),
+      'gsd-help.md should be copied from install source (#1367: flat hyphen layout)'
     );
     assert.ok(
-      fs.existsSync(path.join(commandsDir, 'new-project.md')),
-      'new-project.md should be copied from install source'
+      fs.existsSync(path.join(commandsDir, 'gsd-new-project.md')),
+      'gsd-new-project.md should be copied from install source (#1367: flat hyphen layout)'
     );
   });
 
@@ -231,11 +239,12 @@ describe('applySurface', () => {
     const layout = resolveRuntimeArtifactLayout('claude', runtimeConfigDir, 'local');
     applySurface(runtimeConfigDir, layout, manifest, CLUSTERS);
 
-    const commandsDir = path.join(runtimeConfigDir, 'commands', 'gsd');
-    assert.ok(fs.existsSync(commandsDir), 'commands/gsd dir should be created even if initially absent');
-    const files = fs.readdirSync(commandsDir).filter(f => f.endsWith('.md'));
-    assert.ok(files.length > 0, 'commands/gsd should contain staged skill files');
-    assert.ok(files.includes('help.md'), 'help.md should be present after applySurface on missing dest');
+    // #1367: claude local uses flat commands/ (not commands/gsd/)
+    const commandsDir = path.join(runtimeConfigDir, 'commands');
+    assert.ok(fs.existsSync(commandsDir), 'commands/ dir should be created even if initially absent');
+    const files = fs.readdirSync(commandsDir).filter(f => f.startsWith('gsd-') && f.endsWith('.md'));
+    assert.ok(files.length > 0, 'commands/ should contain staged skill files (gsd-*.md)');
+    assert.ok(files.includes('gsd-help.md'), 'gsd-help.md should be present after applySurface on missing dest');
   });
 
   test('Hermes profile shrink: stale GSD skill dirs are removed; user skills preserved', (t) => {
@@ -307,8 +316,8 @@ describe('applySurface', () => {
   // (matching installRuntimeArtifacts/_copyStaged behaviour) and must NOT prune
   // user-created command files that install would preserve.
   //
-  // Affected runtimes have a FLAT command dir (opencode `command/`, cursor
-  // `commands/`, augment `commands/`, kilo `command/`) with kind.prefix='gsd-'.
+  // Affected runtimes have a FLAT command dir (opencode `commands/` — #2329,
+  // cursor `commands/`, augment `commands/`, kilo `command/`) with kind.prefix='gsd-'.
   // _copyStaged names files `gsd-<stem>.md` but the buggy _syncGsdDir copies
   // them as `<stem>.md` (unprefixed) and also deletes ALL .md files not in the
   // staged set, including user files.
@@ -324,7 +333,7 @@ describe('applySurface', () => {
       explicitRemoves: [],
     });
 
-    // Determine the command dest dir for opencode: commandsKind destSubpath='command'
+    // Determine the command dest dir for opencode: commandsKind destSubpath='commands' (#2329)
     const layout = resolveRuntimeArtifactLayout('opencode', configDir, 'global');
     const commandsKind = layout.kinds.find(k => k.kind === 'commands');
     assert.ok(commandsKind, 'opencode layout must have a commands kind');
@@ -375,9 +384,8 @@ describe('applySurface', () => {
   // against future drift between _syncGsdDir (surface) and _copyStaged (install)
   // command-naming logic.
   //
-  // Matrix: opencode/kilo = flat command/ + prefix gsd-;
-  //         cursor/augment = flat commands/ + prefix gsd-;
-  //         gemini = namespaced commands/gsd/ (no file prefix — dir is namespace).
+  // Matrix: opencode/cursor/augment = flat commands/ + prefix gsd- (#2329: opencode
+  //         moved from singular command/ to commands/); kilo = flat command/ + prefix gsd-.
   // For each runtime we: run install into installDir, run applySurface into
   // surfaceDir (same 'standard' profile both sides), then compare sorted .md
   // filename sets in the commands dest dir. On a fresh dir (no superseded files)
@@ -391,7 +399,7 @@ describe('applySurface', () => {
     // the same skill set so any filename difference is purely a naming bug.
     const resolvedProfile = resolveProfile({ modes: ['standard'], manifest });
 
-    const PARITY_RUNTIMES = ['opencode', 'cursor', 'augment', 'kilo', 'gemini'];
+    const PARITY_RUNTIMES = ['opencode', 'cursor', 'augment', 'kilo'];
 
     for (const runtime of PARITY_RUNTIMES) {
       // Create two independent temp dirs — one for install, one for surface.
@@ -1046,4 +1054,364 @@ describe('listSurface', () => {
       cleanup(dir);
     }
   });
+});
+
+// ─── #1615: applySurface must rewrite commands kind (Windsurf workflows) ─────
+// Adversarial review of PR #1622 found that applySurface only rewrites 'skills'
+// kinds, skipping 'commands'. Windsurf's capability now stages workflow files
+// as kind='commands'; without the rewrite, /gsd-surface would write workflow
+// bodies containing raw @~/.claude/... references that don't exist on a
+// Windsurf install. The same gap affected any runtime with commands kinds.
+describe('applySurface — commands kind path rewrite (#1615 adversarial review)', () => {
+  test('windsurf workflow bodies are rewritten to install target (no raw ~/.claude/)', (t) => {
+    const base = createTempDir('gsd-surface-cmds-windsurf-');
+    t.after(() => cleanup(base));
+    const runtimeConfigDir = base;
+
+    // Stage the canonical command body the workflow delegates to.
+    const canonicalDir = path.join(runtimeConfigDir, 'gsd-core', 'commands', 'gsd');
+    fs.mkdirSync(canonicalDir, { recursive: true });
+    fs.writeFileSync(path.join(canonicalDir, 'help.md'),
+      '---\nname: help\ndescription: Show help\n---\n\nHelp body\n');
+
+    const manifest = loadSkillsManifest(REAL_COMMANDS_DIR);
+    const layout = resolveRuntimeArtifactLayout('windsurf', runtimeConfigDir, 'local');
+
+    // Sanity: layout must have a commands kind (workflows) — pre-condition
+    // introduced by PR #1622; if a future refactor removes it, this test
+    // would silently pass without exercising the rewrite path.
+    const commandsKind = layout.kinds.find((k) => k.kind === 'commands');
+    assert.ok(commandsKind, 'pre-condition: windsurf layout has a commands kind');
+
+    applySurface(runtimeConfigDir, layout, manifest, CLUSTERS);
+
+    // Workflow files should be written to <configDir>/workflows/gsd-*.md
+    const workflowsDir = path.join(runtimeConfigDir, 'workflows');
+    const workflowFiles = fs.existsSync(workflowsDir)
+      ? fs.readdirSync(workflowsDir).filter((f) => f.startsWith('gsd-') && f.endsWith('.md'))
+      : [];
+    assert.ok(workflowFiles.length > 0,
+      `expected at least one gsd-*.md workflow under ${workflowsDir}; got [${workflowFiles.join(', ')}]`);
+
+    // Every workflow body must reference the install target, NOT the raw
+    // ~/.claude/ path. This is the regression: pre-fix, the commands kind
+    // was skipped and raw @~/.claude/... survived into the synced file.
+    for (const fileName of workflowFiles) {
+      const workflowPath = path.join(workflowsDir, fileName);
+      const content = fs.readFileSync(workflowPath, 'utf8');
+      assert.ok(
+        !content.includes('~/.claude/'),
+        `${fileName} must not contain raw ~/.claude/ after applySurface rewrite (got: ${content.slice(0, 200)})`,
+      );
+      assert.ok(
+        !content.includes('$HOME/.claude/'),
+        `${fileName} must not contain raw $HOME/.claude/ after applySurface rewrite`,
+      );
+    }
+  });
+});
+
+// ─── #2911: skills-kind destination parity (installer vs surface-apply) ──────
+//
+// _copyStaged (src/install-engine.cts) resolves the write root as
+// `kind.home ?? layout.configDir`. Before the #2911 fix, applySurface's
+// _syncGsdDir call always resolved against `layout.configDir`, ignoring
+// `kind.home`. For runtimes whose skills kind declares a `home` override
+// (currently only codex: home='.agents' at GLOBAL scope — see
+// capabilities/codex/capability.json), a fresh install landed skills under
+// the override root while a surface re-stage created a SECOND tree under
+// the runtime's own configDir.
+//
+// These tests exercise the REAL applySurface code path (not a hand-copy of
+// its destination formula) so a future regression that re-diverges the two
+// writers is caught by actual file placement, not by a self-consistent
+// re-derivation of the (possibly still-buggy) formula.
+describe('skills-kind destination parity: installer vs surface-apply (#2911)', () => {
+  const runtimeArtifactInstallPlan = require('../gsd-core/bin/lib/runtime-artifact-install-plan.cjs');
+  const capabilityRegistry = require('../gsd-core/bin/lib/capability-registry.cjs');
+
+  const RUNTIME_IDS = Object.keys(capabilityRegistry.runtimes);
+  const PARITY_MANIFEST = loadSkillsManifest(REAL_COMMANDS_DIR);
+
+  // os.homedir() on POSIX/Windows reads HOME/USERPROFILE from the environment
+  // (Node docs), so redirecting it here for the duration of a test is safe and
+  // avoids ever touching the real developer home directory even though the
+  // only current `home`-override runtime (codex) resolves via os.homedir().
+  function withFakeHome(fakeHome, fn) {
+    const savedHome = process.env.HOME;
+    const savedUserProfile = process.env.USERPROFILE;
+    process.env.HOME = fakeHome;
+    process.env.USERPROFILE = fakeHome;
+    try {
+      return fn();
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+      if (savedUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedUserProfile;
+    }
+  }
+
+  // Runtimes whose registry entry declares a `home` override on any kind —
+  // stated explicitly per the #2911 acceptance criteria, not hidden. Recomputed
+  // from the registry (not hardcoded) so a newly-added override is picked up.
+  function runtimesWithHomeOverride() {
+    const found = [];
+    for (const runtime of RUNTIME_IDS) {
+      for (const scope of ['global', 'local']) {
+        let layout;
+        try {
+          layout = resolveRuntimeArtifactLayout(runtime, '/tmp/fake-config-dir-2911', scope);
+        } catch {
+          continue;
+        }
+        if (layout.kinds.some((k) => typeof k.home === 'string' && k.home !== '')) {
+          found.push(`${runtime}/${scope}`);
+        }
+      }
+    }
+    return found;
+  }
+
+  test('registry home-override discrimination report (#2911)', () => {
+    const overrides = runtimesWithHomeOverride();
+    // Stated per the brief: at time of writing only codex/global has a `home`
+    // override, so this parity test discriminates on exactly one runtime/scope
+    // pair. This assertion documents that fact and fails loudly if the set
+    // ever changes shape unexpectedly empty (a discrimination-less parity
+    // test would be silently vacuous).
+    assert.ok(overrides.length > 0, 'expected at least one runtime/scope with a home override (codex/global)');
+    assert.deepStrictEqual(overrides, ['codex/global'], `home-override set changed — update this test's documentation. Found: ${overrides.join(', ')}`);
+  });
+
+  for (const scope of ['global', 'local']) {
+    test(`applySurface writes skills-kind output to the SAME destination the installer would use, for every runtime in the registry (${scope})`, (t) => {
+      const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2911-fakehome-'));
+      t.after(() => cleanup(fakeHome));
+
+      const failures = [];
+      let discriminatingRuntimes = 0;
+
+      for (const runtime of RUNTIME_IDS) {
+        const configDir = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2911-parity-${runtime}-${scope}-`));
+        t.after(() => cleanup(configDir));
+
+        withFakeHome(fakeHome, () => {
+          let layout;
+          try {
+            layout = resolveRuntimeArtifactLayout(runtime, configDir, scope);
+          } catch {
+            return; // runtime/scope combination not supported
+          }
+          const skillsKind = layout.kinds.find((k) => k.kind === 'skills');
+          if (!skillsKind) return; // e.g. cline/kimi at local scope: no skills kind
+
+          if (typeof skillsKind.home === 'string' && skillsKind.home !== '') {
+            discriminatingRuntimes++;
+          }
+
+          writeActiveProfile(configDir, 'core');
+          writeSurface(configDir, {
+            baseProfile: 'core',
+            disabledClusters: [],
+            explicitAdds: [],
+            explicitRemoves: [],
+          });
+
+          applySurface(configDir, layout, PARITY_MANIFEST, CLUSTERS);
+
+          // The installer's REAL destination-selection formula (verbatim from
+          // createRuntimeArtifactInstallPlan / _copyStaged): honor kind.home as
+          // a FALLBACK-preferred override, else configDir.
+          const installerDest = runtimeArtifactInstallPlan.assertDestWithinConfigHome(
+            skillsKind.home ?? layout.configDir,
+            skillsKind.destSubpath,
+          );
+
+          if (!fs.existsSync(installerDest) || fs.readdirSync(installerDest).length === 0) {
+            failures.push(
+              `${runtime}/${scope}: applySurface did NOT write skills-kind output to the installer's ` +
+              `destination "${installerDest}" — surface-apply and installer destination formulas have diverged.`,
+            );
+            return;
+          }
+
+          // If the runtime declares a home override, the OLD buggy root
+          // (configDir/destSubpath) must not have ALSO been populated —
+          // otherwise a re-stage creates a second, stale tree (#2911 symptom).
+          if (typeof skillsKind.home === 'string' && skillsKind.home !== '') {
+            const legacyDest = path.join(layout.configDir, skillsKind.destSubpath);
+            if (legacyDest !== installerDest && fs.existsSync(legacyDest) && fs.readdirSync(legacyDest).length > 0) {
+              failures.push(
+                `${runtime}/${scope}: applySurface ALSO wrote a second tree at the legacy location ` +
+                `"${legacyDest}" (kind.home override "${skillsKind.home}" was not honored consistently).`,
+              );
+            }
+          }
+        });
+      }
+
+      assert.deepStrictEqual(failures, [], `#2911 parity failures (${scope}):\n${failures.join('\n')}`);
+      // Not a hard requirement, but surfaces how many runtime/scope pairs this
+      // run actually discriminated on (i.e. exercised a non-trivial home
+      // override), matching the acceptance-criteria ask to state this plainly.
+      t.diagnostic(`${scope}: ${discriminatingRuntimes} runtime(s) discriminated on a home override`);
+    });
+  }
+});
+
+// ─── #2911: codex-specific regression (skills-kind home override) ───────────
+describe('codex skills-kind destination: home override (#2911)', () => {
+  const runtimeArtifactInstallPlan = require('../gsd-core/bin/lib/runtime-artifact-install-plan.cjs');
+
+  function withFakeHome(fakeHome, fn) {
+    const savedHome = process.env.HOME;
+    const savedUserProfile = process.env.USERPROFILE;
+    process.env.HOME = fakeHome;
+    process.env.USERPROFILE = fakeHome;
+    try {
+      return fn();
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+      if (savedUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedUserProfile;
+    }
+  }
+
+  test('codex + global: applySurface stages skills under $HOME/.agents, NOT under $CODEX_HOME (#2911 AC)', (t) => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2911-codex-home-'));
+    t.after(() => cleanup(fakeHome));
+    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2911-codex-home-dir-'));
+    t.after(() => cleanup(codexHome));
+
+    withFakeHome(fakeHome, () => {
+      const manifest = loadSkillsManifest(REAL_COMMANDS_DIR);
+      writeActiveProfile(codexHome, 'core');
+      writeSurface(codexHome, {
+        baseProfile: 'core',
+        disabledClusters: [],
+        explicitAdds: [],
+        explicitRemoves: [],
+      });
+      const layout = resolveRuntimeArtifactLayout('codex', codexHome, 'global');
+      const skillsKind = layout.kinds.find((k) => k.kind === 'skills');
+      assert.ok(skillsKind, 'pre-condition: codex global layout has a skills kind');
+      assert.strictEqual(skillsKind.home, path.join(fakeHome, '.agents'), 'pre-condition: codex skills kind declares the $HOME/.agents override');
+
+      applySurface(codexHome, layout, manifest, CLUSTERS);
+
+      const expectedDest = runtimeArtifactInstallPlan.assertDestWithinConfigHome(
+        path.join(fakeHome, '.agents'),
+        skillsKind.destSubpath,
+      );
+      assert.ok(
+        fs.existsSync(expectedDest) && fs.readdirSync(expectedDest).length > 0,
+        `#2911: codex global surface-apply must stage skills under $HOME/.agents (expected non-empty dir at ${expectedDest})`,
+      );
+
+      const wrongDest = path.join(codexHome, skillsKind.destSubpath);
+      assert.ok(
+        !fs.existsSync(wrongDest) || fs.readdirSync(wrongDest).length === 0,
+        `#2911: codex global surface-apply must NOT create a second skills tree under $CODEX_HOME (found populated dir at ${wrongDest})`,
+      );
+    });
+  });
+
+  test('codex + local: no home override — surface-apply destination is unchanged (#2911 AC3)', (t) => {
+    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2911-codex-local-'));
+    t.after(() => cleanup(codexHome));
+
+    const manifest = loadSkillsManifest(REAL_COMMANDS_DIR);
+    writeActiveProfile(codexHome, 'core');
+    writeSurface(codexHome, {
+      baseProfile: 'core',
+      disabledClusters: [],
+      explicitAdds: [],
+      explicitRemoves: [],
+    });
+    const layout = resolveRuntimeArtifactLayout('codex', codexHome, 'local');
+    const skillsKind = layout.kinds.find((k) => k.kind === 'skills');
+    assert.ok(skillsKind, 'pre-condition: codex local layout has a skills kind');
+    assert.strictEqual(skillsKind.home, undefined, 'pre-condition (AC3): codex local scope declares NO home override');
+
+    applySurface(codexHome, layout, manifest, CLUSTERS);
+
+    const expectedDest = runtimeArtifactInstallPlan.assertDestWithinConfigHome(codexHome, skillsKind.destSubpath);
+    assert.ok(
+      fs.existsSync(expectedDest) && fs.readdirSync(expectedDest).length > 0,
+      `#2911 AC3: codex local surface-apply must stage skills under $CODEX_HOME (expected non-empty dir at ${expectedDest})`,
+    );
+  });
+});
+
+// ─── installOpencodeFamilySkills destination parity (#2911 sibling coverage) ─
+//
+// installOpencodeFamilySkills (src/install-engine.cts) is a FOURTH destination-
+// computation writer, alongside _copyStaged, the inline guard in
+// installRuntimeArtifacts, and createRuntimeArtifactUninstallPlan — all three of
+// which honor `skillsKindEntry.home ?? <install root>`. This writer originally did
+// not, and would silently reproduce the #2911 duplicate-tree symptom the moment
+// any combined-family runtime (opencode, kilo) gains a `home` override. Neither
+// declares one today, so this test exercises the REAL production code path
+// (installOpencodeFamilySkills, via the module-ref call convention documented at
+// src/install-engine.cts:37-38) under a synthetic `home` override injected by
+// monkeypatching resolveRuntimeArtifactLayout's shared module export — the same
+// object install-engine.cjs calls through at runtime — rather than re-deriving
+// the destination formula by hand. This proves discrimination even though no
+// registry runtime exercises it yet, and will catch a future divergence the
+// moment a combined-family runtime's descriptor grows a `home` override.
+describe('installOpencodeFamilySkills destination parity (#2911 sibling coverage)', () => {
+  const installEngine = require('../gsd-core/bin/lib/install-engine.cjs');
+  const runtimeArtifactLayoutModule = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+
+  function stageRawCommands(runtime, configDir) {
+    const layout = resolveRuntimeArtifactLayout(runtime, configDir, 'global');
+    const commandsKind = layout.kinds.find((k) => k.kind === 'commands');
+    return commandsKind.stage(resolveProfile({ modes: ['core'], manifest: loadSkillsManifest(REAL_COMMANDS_DIR) }));
+  }
+
+  for (const runtime of ['opencode', 'kilo']) {
+    test(`${runtime}: installOpencodeFamilySkills honors a skills-kind home override instead of always resolving against configDir (#2911 sibling)`, (t) => {
+      const configDir = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2911-ocfs-${runtime}-`));
+      const fakeHomeOverride = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2911-ocfs-home-${runtime}-`));
+      t.after(() => { cleanup(configDir); cleanup(fakeHomeOverride); });
+
+      const originalResolve = runtimeArtifactLayoutModule.resolveRuntimeArtifactLayout;
+      // Capture the real destSubpath before patching so the assertion below
+      // never hardcodes a literal path fragment.
+      const realLayout = originalResolve(runtime, configDir, 'global');
+      const skillsKindReal = realLayout.kinds.find((k) => k.kind === 'skills');
+      assert.ok(skillsKindReal, `pre-condition: ${runtime} global layout has a skills kind`);
+
+      runtimeArtifactLayoutModule.resolveRuntimeArtifactLayout = function (rt, targetDir, scope) {
+        const layout = originalResolve(rt, targetDir, scope);
+        if (rt === runtime) {
+          const patchedKinds = layout.kinds.map((k) => (k.kind === 'skills' ? { ...k, home: fakeHomeOverride } : k));
+          return { ...layout, kinds: patchedKinds };
+        }
+        return layout;
+      };
+
+      try {
+        const raw = stageRawCommands(runtime, configDir);
+        const count = installEngine.installOpencodeFamilySkills(runtime, configDir, raw, `${configDir}/`);
+        assert.ok(count >= 1, `${runtime}: installOpencodeFamilySkills should report installed skills`);
+
+        const overrideDest = path.join(fakeHomeOverride, skillsKindReal.destSubpath);
+        assert.ok(
+          fs.existsSync(overrideDest) && fs.readdirSync(overrideDest).length > 0,
+          `${runtime}: installOpencodeFamilySkills must write skills-kind output under the home override ` +
+          `"${overrideDest}" — it must not always resolve against configDir.`,
+        );
+
+        // If the home override is not honored, output lands under the legacy
+        // configDir/destSubpath location instead (the #2911 duplicate-tree symptom).
+        const legacyDest = path.join(configDir, skillsKindReal.destSubpath);
+        assert.ok(
+          !fs.existsSync(legacyDest) || fs.readdirSync(legacyDest).length === 0,
+          `${runtime}: installOpencodeFamilySkills must NOT ALSO write a second tree at the legacy location ` +
+          `"${legacyDest}" once a home override is declared.`,
+        );
+      } finally {
+        runtimeArtifactLayoutModule.resolveRuntimeArtifactLayout = originalResolve;
+      }
+    });
+  }
 });

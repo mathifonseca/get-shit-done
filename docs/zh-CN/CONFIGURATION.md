@@ -141,7 +141,7 @@ GSD 将项目设置存储在 `.planning/config.json` 中。该文件在 `/gsd-ne
 | `model_profile` | enum | `quality`, `balanced`, `budget`, `adaptive`, `inherit` | `balanced` | 每个 agent 的模型层级（参见[模型配置文件](#模型配置文件)）。`adaptive` 根据 [#1713](https://github.com/open-gsd/gsd-core/issues/1713) / [#1806](https://github.com/open-gsd/gsd-core/issues/1806) 添加，在运行时感知的配置文件下与其他层级以相同方式解析。 |
 | `runtime` | string | `claude`, `codex` 或任意字符串 | （无） | [运行时感知配置文件解析](#运行时感知配置文件-2517)的活跃运行时。设置后，配置文件层级（opus/sonnet/haiku）解析为运行时原生模型 ID。目前仅 Codex 安装路径通过此解析器为每个 agent 生成模型 ID；其他运行时（`opencode`、`gemini`、`qwen`、`copilot` 等）在 spawn 时消费该解析器，并在 [#2612](https://github.com/open-gsd/gsd-core/issues/2612) 中获得专用安装路径支持。未设置时（默认），行为与之前版本相同。v1.39 新增 |
 | `model_profile_overrides.<runtime>.<tier>` | string \| object | 按运行时的层级覆盖 | （无） | 覆盖特定 `(runtime, tier)` 的运行时感知层级映射。层级为 `opus`、`sonnet`、`haiku` 之一。值为模型 ID 字符串（如 `"gpt-5-pro"`）或 `{ model, reasoning_effort }`。参见[运行时感知配置文件](#运行时感知配置文件-2517)。v1.39 新增 |
-| `model_policy.provider` | string | `openai`, `anthropic`, `google`, `qwen`, `generic` | （无） | 声明模型提供商。已知提供商（`openai`、`anthropic`、`google`、`qwen`）启用基于目录的预设。`generic` 将所有模型 ID 视为不透明字符串——无前缀推断，无推理努力默认值。`model_policy.runtime_tiers` 在旧版 `model_profile_overrides` 之前解析。参见[模型策略预设](#模型策略预设-model_policy--v142-新增)。v1.42 新增（[#49](https://github.com/open-gsd/gsd-core/issues/49)） |
+| `model_policy.provider` | string | `openai`, `anthropic`, `anthropic-fable`, `google`, `qwen`, `generic` | （无） | 声明模型提供商。已知提供商（`openai`、`anthropic`、`anthropic-fable`、`google`、`qwen`）启用基于目录的预设。`generic` 将所有模型 ID 视为不透明字符串——无前缀推断，无推理努力默认值。`model_policy.runtime_tiers` 在旧版 `model_profile_overrides` 之前解析。参见[模型策略预设](#模型策略预设-model_policy--v142-新增)。v1.42 新增（[#49](https://github.com/open-gsd/gsd-core/issues/49)） |
 | `model_policy.budget` | enum | `high`, `medium`, `low` | （无） | 使用已知提供商时选择预算层级。GSD 在解析时将匹配的目录预设具体化为显式层级映射。当 `provider` 为 `generic` 或 `custom` 时忽略。v1.42 新增（[#49](https://github.com/open-gsd/gsd-core/issues/49)） |
 | `model_policy.high` | string | 模型 ID | （无） | `generic`/`custom` 提供商的高成本层级模型 ID。当 `provider: "generic"` 或 `"custom"` 时使用。v1.42 新增（[#49](https://github.com/open-gsd/gsd-core/issues/49)） |
 | `model_policy.medium` | string | 模型 ID | （无） | `generic`/`custom` 提供商的中等成本层级模型 ID。v1.42 新增（[#49](https://github.com/open-gsd/gsd-core/issues/49)） |
@@ -155,7 +155,7 @@ GSD 将项目设置存储在 `.planning/config.json` 中。该文件在 `/gsd-ne
 | `project_code` | string | 任意短字符串 | （无） | 阶段目录名称的前缀（如 `"ABC"` 生成 `ABC-01-setup/`）。v1.31 新增 |
 | `phase_id_convention` | enum | `"milestone-prefixed"`, `null` | `null` | 阶段 ID 命名规范。`null` = 旧版数字 ID（`Phase 1`、`Phase 2`）。`"milestone-prefixed"` = 编码所属里程碑的全局唯一 ID（`Phase 1-01`、`Phase 1-02`）。运行 `gsd-tools roadmap upgrade --convention milestone-prefixed` 迁移现有 ROADMAP.md。 |
 | `response_language` | string | 语言代码 | （无） | agent 响应语言（如 `"pt"`、`"ko"`、`"ja"`）。传播至所有派生 agent，实现跨阶段语言一致性。v1.32 新增 |
-| `context_window` | number | 任意整数 | `200000` | 上下文窗口大小（token 数）。对于 1M 上下文模型（如 `claude-opus-4-7[1m]`），设置为 `1000000`。`>= 500000` 的值启用自适应上下文增强（完整读取之前的 SUMMARY.md，更深入的反模式读取）。通过 `/gsd-config --advanced` 配置。 |
+| `context_window` | number | 任意整数 | `200000` | 上下文窗口大小（token 数）。对于 1M 上下文模型（如 `claude-fable-5`），设置为 `1000000`。`>= 500000` 的值启用自适应上下文增强（完整读取之前的 SUMMARY.md，更深入的反模式读取）。通过 `/gsd-config --advanced` 配置。 |
 | `context_profile` | string | `dev`, `research`, `review` | （无） | 执行上下文预设，为当前工作类型应用预配置的模式、模型和工作流设置包。v1.34 新增 |
 | `claude_md_path` | string | 任意文件路径 | `./CLAUDE.md` | 生成的 CLAUDE.md 文件的自定义输出路径。适用于需要将 CLAUDE.md 放在非根目录位置的 monorepo 或项目。默认为项目根目录下的 `./CLAUDE.md`。v1.36 新增 |
 | `claude_md_assembly.mode` | enum | `embed`, `link` | `embed` | 控制如何将受管理的节写入 CLAUDE.md。`embed`（默认）在 GSD 标记之间内联内容。`link` 改为写入 `@.planning/<source-path>`——Claude Code 在运行时展开引用，在典型项目中将 CLAUDE.md 大小减少约 65%。`link` 仅适用于有真实源文件的节；`workflow` 和回退节始终嵌入。按块覆盖：`claude_md_assembly.blocks.<section>`（如 `claude_md_assembly.blocks.architecture: link`）。v1.38 新增 |
@@ -184,7 +184,7 @@ API 密钥字段接受字符串值（密钥本身）。也可以设置为哨兵�
 | `firecrawl` | string \| boolean \| null | `null` | 用于深度抓取的 Firecrawl API 密钥。显示时已脱敏 |
 | `exa_search` | string \| boolean \| null | `null` | 用于语义搜索的 Exa Search API 密钥。显示时已脱敏 |
 
-**脱敏规范（`get-shit-done/bin/lib/secrets.cjs`）：** 8 个字符及以上的密钥显示为 `****<末4位>`；较短的密钥显示为 `****`；`null`/空值显示为 `(unset)`。明文原样写入 `.planning/config.json`——该文件是安全边界——但 CLI、确认表格、日志和 `AskUserQuestion` 描述中不显示明文。这也适用于 `config-set` 命令本身的输出：`config-set brave_search <key>` 返回带脱敏值的 JSON 负载。
+**脱敏规范（`gsd-core/bin/lib/secrets.cjs`）：** 8 个字符及以上的密钥显示为 `****<末4位>`；较短的密钥显示为 `****`；`null`/空值显示为 `(unset)`。明文原样写入 `.planning/config.json`——该文件是安全边界——但 CLI、确认表格、日志和 `AskUserQuestion` 描述中不显示明文。这也适用于 `config-set` 命令本身的输出：`config-set brave_search <key>` 返回带脱敏值的 JSON 负载。
 
 ### 代码审查 CLI 路由
 
@@ -256,7 +256,7 @@ API 密钥字段接受字符串值（密钥本身）。也可以设置为哨兵�
 | `workflow.plan_chunked` | boolean | `false` | 启用分块规划模式。为 `true`（或向 `/gsd-plan-phase` 传递 `--chunked` 标志）时，编排器将单个长期规划器任务拆分为一个简短的轮廓任务，后跟 N 个简短的按计划任务（每个约 3-5 分钟）。每个计划单独提交以具备崩溃韧性。如果任务挂起且终端被强制终止，使用 `--chunked` 重新运行将从最后完成的计划处恢复。在长期任务可能在 stdio 上挂起的 Windows 上特别有用。v1.38 新增 |
 | `workflow.code_review_command` | string | （无） | `/gsd-ship` 中外部代码审查集成的 shell 命令。通过 stdin 接收更改的文件路径。非零退出阻塞发布工作流。v1.36 新增 |
 | `workflow.tdd_mode` | boolean | `false` | 将 TDD 流水线作为一等执行模式启用。为 `true` 时，规划器积极地将 `type: tdd` 应用于符合条件的任务（业务逻辑、API、验证、算法），执行器强制执行 RED/GREEN/REFACTOR 门禁序列。阶段结束时的协作审查检查点验证门禁合规性。v1.36 新增 |
-| `workflow.human_verify_mode` | string | `'end-of-phase'` | 控制人工验证检查点。`'end-of-phase'`（自 #3309 起为默认值）抑制 `checkpoint:human-verify` 任务，并将检查嵌入 `<verify><human-check>` 块以供阶段结束审查。`'mid-flight'` 恢复阻塞式检查点任务。`checkpoint:decision` 和 `checkpoint:human-action` 不受影响。参见[检查点参考](../../get-shit-done/references/checkpoints.md#checkpoint_types)。 |
+| `workflow.human_verify_mode` | string | `'end-of-phase'` | 控制人工验证检查点。`'end-of-phase'`（自 #3309 起为默认值）抑制 `checkpoint:human-verify` 任务，并将检查嵌入 `<verify><human-check>` 块以供阶段结束审查。`'mid-flight'` 恢复阻塞式检查点任务。`checkpoint:decision` 和 `checkpoint:human-action` 不受影响。参见[检查点参考](../../gsd-core/references/checkpoints.md#checkpoint_types)。 |
 | `workflow.cross_ai_execution` | boolean | `false` | 将阶段执行委托给外部 AI CLI，而非派生本地执行器 agent。适用于利用不同模型在特定阶段的优势。v1.36 新增 |
 | `workflow.cross_ai_command` | string | （无） | 跨 AI 执行的 shell 命令模板。通过 stdin 接收阶段提示词。必须生成与 SUMMARY.md 兼容的输出。当 `cross_ai_execution` 为 `true` 时必需。v1.36 新增 |
 | `workflow.cross_ai_timeout` | number | `300` | 跨 AI 执行命令的超时秒数。防止失控的外部进程。v1.36 新增 |
@@ -285,7 +285,7 @@ API 密钥字段接受字符串值（密钥本身）。也可以设置为哨兵�
 
 ## 发布设置
 
-`ship.pr_body_sections` 为 `/gsd-ship` 添加额外的 PR 正文节，用于项目特定的 PRD/PR 正文内容，而无需编辑 `get-shit-done/workflows/ship.md`。
+`ship.pr_body_sections` 为 `/gsd-ship` 添加额外的 PR 正文节，用于项目特定的 PRD/PR 正文内容，而无需编辑 `gsd-core/workflows/ship.md`。
 
 有关入门示例和故障排除的用户指南，请参阅[自定义 PR 正文节](../ship-pr-body-sections.md)。
 
@@ -471,8 +471,8 @@ gsd-tools query config-set agent_skills.gsd-executor '["skills/my-skill"]'
 
 | 设置 | 类型 | 默认值 | 描述 |
 |---------|------|---------|-------------|
-| `plan_review.source_grounding` | boolean | `true` | 启用计划漂移防护。为 `true`（默认）时，计划审查将 PLAN.md 中引用的每个符号与实时源代码树对比解析。引用不存在的函数、类、装饰器或 CLI 标志的计划在计划批准前产生 `needs-acknowledgement` 通知。设为 `false` 完全跳过符号验证。可在设置期间（`/gsd:new-project`）或随时通过 `/gsd:settings` 切换。 |
-| `plan_review.source_grounding_authority` | enum | `grep` | 选择用于验证符号存在性的解析器适配器。允许值：`grep`（默认——对源文件进行 ripgrep/grep 搜索，任何项目无需额外工具即可使用），`intel`（查询 `/gsd:map-codebase` 构建的 `.planning/intel/api-map.json` 索引；需要 `intel.enabled: true`），`treesitter`（保留用于未来的 tree-sitter 适配器），`lsp`（保留用于未来的 LSP 适配器），`scip`（保留用于未来的 SCIP/LSIF 适配器）。当您已运行 `/gsd:map-codebase` 并希望使用更快的预索引查找时，使用 `intel`。`grep` 和 `intel` 之外的所有值均为保留值，在当前版本中无效。 |
+| `plan_review.source_grounding` | boolean | `true` | 启用计划漂移防护。为 `true`（默认）时，计划审查将 PLAN.md 中引用的每个符号与实时源代码树对比解析。引用不存在的函数、类、装饰器或 CLI 标志的计划在计划批准前产生 `needs-acknowledgement` 通知。设为 `false` 完全跳过符号验证。可在设置期间（`/gsd-new-project`）或随时通过 `/gsd-settings` 切换。 |
+| `plan_review.source_grounding_authority` | enum | `grep` | 选择用于验证符号存在性的解析器适配器。允许值：`grep`（默认——对源文件进行 ripgrep/grep 搜索，任何项目无需额外工具即可使用），`intel`（查询 `/gsd-map-codebase` 构建的 `.planning/intel/api-map.json` 索引；需要 `intel.enabled: true`），`treesitter`（保留用于未来的 tree-sitter 适配器），`lsp`（保留用于未来的 LSP 适配器），`scip`（保留用于未来的 SCIP/LSIF 适配器）。当您已运行 `/gsd-map-codebase` 并希望使用更快的预索引查找时，使用 `intel`。`grep` 和 `intel` 之外的所有值均为保留值，在当前版本中无效。 |
 
 <a id="graphify-settings"></a>
 ### Graphify 设置
@@ -712,7 +712,7 @@ gsd-tools query config-set features.thinking_partner false
 |---------|------|---------|-------------|
 | `manager.flags.discuss` | string | （无） | 追加到 discuss-phase 命令的标志（如 `"--auto"`） |
 | `manager.flags.plan` | string | （无） | 追加到 plan-phase 命令的标志（如 `"--skip-research"`） |
-| `manager.flags.execute` | string | （无） | 追加到 execute-phase 命令的标志（如 `"--validate"`） |
+| `manager.flags.execute` | string | （无） | 追加到 execute-phase 命令的标志（如 `"--cross-ai"`） |
 
 **示例：**
 
@@ -722,7 +722,7 @@ gsd-tools query config-set features.thinking_partner false
     "flags": {
       "discuss": "--auto",
       "plan": "--skip-research",
-      "execute": "--validate"
+      "execute": "--cross-ai"
     }
   }
 }
@@ -757,7 +757,7 @@ gsd-tools query config-set features.thinking_partner false
 | gsd-doc-writer | Opus | Sonnet | Haiku | Sonnet | Inherit |
 | gsd-doc-verifier | Sonnet | Sonnet | Haiku | Haiku | Inherit |
 
-> **所有 33 个发布 agent 在目录（`sdk/shared/model-catalog.json`）中均有显式的按配置文件层级分配。** 上表显示最常用 agent 的代表性子集。对于此处未列出的 agent，`model_overrides` 接受任何已发布的 agent 名称。权威的配置文件数据通过 `get-shit-done/bin/lib/model-catalog.cjs` 和 `sdk/src/model-catalog.ts` 从 `sdk/shared/model-catalog.json` 导出。
+> **所有 33 个发布 agent 在目录（`sdk/shared/model-catalog.json`）中均有显式的按配置文件层级分配。** 上表显示最常用 agent 的代表性子集。对于此处未列出的 agent，`model_overrides` 接受任何已发布的 agent 名称。权威的配置文件数据通过 `gsd-core/bin/lib/model-catalog.cjs` 和 `sdk/src/model-catalog.ts` 从 `sdk/shared/model-catalog.json` 导出。
 
 ### 按 Agent 覆盖
 
@@ -805,10 +805,10 @@ gsd-tools query config-set features.thinking_partner false
 | 阶段类型 | Agents |
 |---|---|
 | `planning` | `gsd-planner`, `gsd-roadmapper`, `gsd-pattern-mapper` |
-| `discuss` | （保留——当前无 subagent） |
+| `discuss` | `gsd-assumptions-analyzer` |
 | `research` | `gsd-phase-researcher`, `gsd-project-researcher`, `gsd-research-synthesizer`, `gsd-codebase-mapper`, `gsd-ui-researcher` |
 | `execution` | `gsd-executor`, `gsd-debugger`, `gsd-doc-writer` |
-| `verification` | `gsd-verifier`, `gsd-plan-checker`, `gsd-integration-checker`, `gsd-nyquist-auditor`, `gsd-ui-checker`, `gsd-ui-auditor`, `gsd-doc-verifier` |
+| `verification` | `gsd-verifier`, `gsd-plan-checker`, `gsd-integration-checker`, `gsd-nyquist-auditor`, `gsd-ui-checker`, `gsd-ui-auditor`, `gsd-doc-verifier`, `gsd-code-reviewer` |
 | `completion` | （保留——当前无 subagent） |
 
 `discuss` 和 `completion` 被 schema 接受以保持前向兼容性；今天设置它们是无操作，直到某个 subagent 映射到它们为止。
@@ -963,7 +963,7 @@ minimal < low < medium < high < xhigh < max
 2. `effort.agent_overrides[<agent-id>]`
 3. `effort.routing_tier_defaults[<light|standard|heavy>]`
 4. `effort.default`
-5. `"high"`（Anthropic Opus 4.8 通用默认值）
+5. `"high"`（Claude 通用默认值）
 
 ```json
 {
@@ -1108,13 +1108,13 @@ minimal < low < medium < high < xhigh < max
 
 | 运行时 | `opus` | `sonnet` | `haiku` | reasoning_effort |
 |---------|--------|----------|---------|------------------|
-| `claude` | `claude-opus-4-8` | `claude-sonnet-4-6` | `claude-haiku-4-5` | （不使用） |
-| `codex` | `gpt-5.5` | `gpt-5.3-codex` | `gpt-5.4-mini` | `xhigh` / `medium` / `medium` |
+| `claude` | `claude-opus-4-8` | `claude-sonnet-5` | `claude-haiku-4-5` | （不使用） |
+| `codex` | `gpt-5.6-sol` | `gpt-5.6-terra` | `gpt-5.6-luna` | `xhigh` / `medium` / `medium` |
 | `gemini` | `gemini-3-pro` | `gemini-3-flash` | `gemini-2.5-flash-lite` | （不使用） |
 | `qwen` | `qwen3-max-2026-01-23` | `qwen3-coder-plus` | `qwen3-coder-next` | （不使用） |
-| `opencode` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-4-6` | `anthropic/claude-haiku-4-5` | （不使用） |
-| `copilot` | `claude-opus-4-8` | `claude-sonnet-4-6` | `claude-haiku-4-5` | （不使用） |
-| `hermes` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-4-6` | `anthropic/claude-haiku-4-5` | （不使用） |
+| `opencode` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | （不使用） |
+| `copilot` | `claude-opus-4-8` | `claude-sonnet-5` | `claude-haiku-4-5` | （不使用） |
+| `hermes` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | （不使用） |
 | B 组（`kilo`、`cline`、`cursor`、`windsurf`、`augment`、`trae`、`codebuddy`、`antigravity`） | （无内置默认——您的运行时处理模型选择） | | | |
 
 **Codex 示例** — 单个配置，分层模型，无大型 `model_overrides` 块：
@@ -1126,7 +1126,7 @@ minimal < low < medium < high < xhigh < max
 }
 ```
 
-这将 `gsd-planner` 解析为 `gpt-5.5`（xhigh），`gsd-executor` 解析为 `gpt-5.3-codex`（medium），`gsd-codebase-mapper` 解析为 `gpt-5.4-mini`（medium）。Codex 安装器将 `model = "..."` 和 `model_reasoning_effort = "..."` 嵌入每个生成的 agent TOML。
+这将 `gsd-planner` 解析为 `gpt-5.6-sol`（xhigh），`gsd-executor` 解析为 `gpt-5.6-terra`（medium），`gsd-codebase-mapper` 解析为 `gpt-5.6-luna`（medium）。Codex 安装器将 `model = "..."` 和 `model_reasoning_effort = "..."` 嵌入每个生成的 agent TOML。
 
 **Claude 示例** — 显式选择解析到完整 Claude ID（无需 `resolve_model_ids: true`）：
 
@@ -1179,7 +1179,7 @@ minimal < low < medium < high < xhigh < max
 
 > **[#49](https://github.com/open-gsd/gsd-core/issues/49)** — 提供商中立的模型策略配置界面。在旧版 `model_profile_overrides` 之前解析。
 
-`model_policy` 提供了一种更简单、提供商中立的方式来跨运行时配置模型层级。对于手动知道正确模型 ID 需要使用 `model_profile_overrides` 的非 Anthropic 运行时，这是首选界面。通过 `/gsd:settings` → 第 8 节（模型策略）配置。
+`model_policy` 提供了一种更简单、提供商中立的方式来跨运行时配置模型层级。对于手动知道正确模型 ID 需要使用 `model_profile_overrides` 的非 Anthropic 运行时，这是首选界面。通过 `/gsd-settings` → 第 8 节（模型策略）配置。
 
 ### 已知提供商预设
 
@@ -1191,14 +1191,14 @@ minimal < low < medium < high < xhigh < max
   "model_policy": {
     "provider": "openai",
     "budget": "medium",
-    "high":   "gpt-5.5",
-    "medium": "gpt-5.3-codex",
-    "low":    "gpt-5.4-mini"
+    "high":   "gpt-5.6-sol",
+    "medium": "gpt-5.6-terra",
+    "low":    "gpt-5.6-luna"
   }
 }
 ```
 
-已知提供商：`openai`、`anthropic`、`google`、`qwen`。预算级别：`high`、`medium`、`low`。
+已知提供商：`openai`、`anthropic`、`anthropic-fable`、`google`、`qwen`。预算级别：`high`、`medium`、`low`。使用 `anthropic` 保留基于 Opus 4.8 的 Claude 预设，或使用 `anthropic-fable` 在高预算路由中选择 Claude Fable 5。
 
 对于高级的按运行时控制，`runtime_tiers` 接受使用内部配置文件层级名称（`opus`、`sonnet`、`haiku`）的显式条目：
 
@@ -1209,9 +1209,9 @@ minimal < low < medium < high < xhigh < max
     "provider": "openai",
     "runtime_tiers": {
       "codex": {
-        "opus":   { "model": "gpt-5.5",        "reasoning_effort": "high" },
-        "sonnet": { "model": "gpt-5.3-codex",  "reasoning_effort": "medium" },
-        "haiku":  { "model": "gpt-5.4-mini",   "reasoning_effort": "low" }
+        "opus":   { "model": "gpt-5.6-sol",        "reasoning_effort": "high" },
+        "sonnet": { "model": "gpt-5.6-terra",     "reasoning_effort": "medium" },
+        "haiku":  { "model": "gpt-5.6-luna",      "reasoning_effort": "low" }
       }
     }
   }

@@ -55,6 +55,7 @@ GSD stores project settings in `.planning/config.json`. Created during `/gsd-new
     "cross_ai_execution": false,
     "cross_ai_command": null,
     "cross_ai_timeout": 300,
+    "test_gate_timeout": 600,
     "security_enforcement": true,
     "security_asvs_level": 1,
     "security_block_on": "high",
@@ -82,6 +83,7 @@ GSD stores project settings in `.planning/config.json`. Created during `/gsd-new
   },
   "review": {
     "default_reviewers": null,
+    "reviewer_instances": {},
     "models": {}
   },
   "parallelization": {
@@ -113,6 +115,9 @@ GSD stores project settings in `.planning/config.json`. Created during `/gsd-new
     "always_confirm_destructive": true,
     "always_confirm_external_services": true
   },
+  "security": {
+    "injection_blocking": false
+  },
   "project_code": null,
   "agent_skills": {},
   "agent_skills_security": {
@@ -129,11 +134,33 @@ GSD stores project settings in `.planning/config.json`. Created during `/gsd-new
   "intel": {
     "enabled": false
   },
-  "claude_md_path": "./CLAUDE.md"
+  "claude_md_path": "./.claude/CLAUDE.md"
 }
 ```
 
 ---
+
+## When your config file cannot be read
+
+GSD distinguishes a config file that is **absent** from one that is **present but unusable**. The
+two used to be indistinguishable: a single trailing comma in `.planning/config.json` silently
+replaced your entire configuration with built-in defaults, and nothing said so (#1880).
+
+| Situation | What GSD does | Diagnostic |
+|---|---|---|
+| No `.planning/config.json` | Uses built-in defaults. This is normal. | none |
+| File present, valid, has settings | Uses your settings. | none |
+| File present, valid, but empty (`{}`) | Uses built-in defaults. | none |
+| **File present but not valid JSON** | Uses built-in defaults — **your settings are not applied** | `warning: <path> is not valid JSON — its settings were NOT applied` |
+| **File present but unreadable** (e.g. permissions) | Uses built-in defaults — **your settings are not applied** | `warning: <path> could not be read (EACCES) — its settings were NOT applied` |
+
+The warning is printed once per file per run, so a repeated command will not spam it.
+
+The same applies to the global `~/.gsd/defaults.json`. If the project config is also unusable, the
+project one is reported, since that is the file you are most likely able to fix.
+
+**If you see this warning:** your config was not applied. Validate the file, for example with
+`node -e "JSON.parse(require('fs').readFileSync('.planning/config.json','utf8'))"`, then re-run.
 
 ## Core Settings
 
@@ -142,9 +169,9 @@ GSD stores project settings in `.planning/config.json`. Created during `/gsd-new
 | `mode` | enum | `interactive`, `yolo` | `interactive` | `yolo` auto-approves decisions; `interactive` confirms at each step |
 | `granularity` | enum | `coarse`, `standard`, `fine` | `standard` | Controls phase count: `coarse` (2-4), `standard` (4-6), `fine` (6-10) |
 | `model_profile` | enum | `quality`, `balanced`, `budget`, `adaptive`, `inherit` | `balanced` | Model tier for each agent (see [Model Profiles](#model-profiles)). `adaptive` was added per [#1713](https://github.com/open-gsd/gsd-core/issues/1713) / [#1806](https://github.com/open-gsd/gsd-core/issues/1806) and resolves the same way as the other tiers under runtime-aware profiles. |
-| `runtime` | string | `claude`, `codex`, or any string | (none) | Active runtime for [runtime-aware profile resolution](#runtime-aware-profiles-2517). When set, profile tiers (opus/sonnet/haiku) resolve to runtime-native model IDs. Today only the Codex install path emits per-agent model IDs from this resolver; other runtimes (`opencode`, `gemini`, `qwen`, `copilot`, …) consume the resolver at spawn time and gain dedicated install-path support in [#2612](https://github.com/open-gsd/gsd-core/issues/2612). When unset (default), behavior is unchanged from prior versions. Added in v1.39 |
+| `runtime` | string | `claude`, `codex`, or any string | (none) | Active runtime for [runtime-aware profile resolution](#runtime-aware-profiles-2517). When set, profile tiers (opus/sonnet/haiku) resolve to runtime-native model IDs. The resolved ID is embedded into each agent's static frontmatter at install time on `codex` and `opencode` (whose `task` / `spawn_agent` interfaces do not accept an inline `model` parameter, so editing `model_overrides` requires re-running `gsd install <runtime>` to take effect — see [Per-Agent Overrides](#per-agent-overrides)); other runtimes consume the resolver at spawn time. When unset (default), behavior is unchanged from prior versions. Added in v1.39 |
 | `model_profile_overrides.<runtime>.<tier>` | string \| object | per-runtime tier override | (none) | Override the runtime-aware tier mapping for a specific `(runtime, tier)`. Tier is one of `opus`, `sonnet`, `haiku`. Value is either a model ID string (e.g. `"gpt-5-pro"`) or `{ model, reasoning_effort }`. See [Runtime-Aware Profiles](#runtime-aware-profiles-2517). Added in v1.39 |
-| `model_policy.provider` | string | `openai`, `anthropic`, `google`, `qwen`, `generic` | (none) | Declares the model provider. Known providers (`openai`, `anthropic`, `google`, `qwen`) unlock catalog-backed presets. `generic` treats all model IDs as opaque strings — no prefix inference, no reasoning-effort defaults. `model_policy.runtime_tiers` resolves before legacy `model_profile_overrides`. See [Model Policy Presets](#model-policy-presets-model_policy--added-in-v142). Added in v1.42 ([#49](https://github.com/open-gsd/gsd-core/issues/49)) |
+| `model_policy.provider` | string | `openai`, `anthropic`, `anthropic-fable`, `google`, `qwen`, `generic` | (none) | Declares the model provider. Known providers (`openai`, `anthropic`, `anthropic-fable`, `google`, `qwen`) unlock catalog-backed presets. `generic` treats all model IDs as opaque strings — no prefix inference, no reasoning-effort defaults. `model_policy.runtime_tiers` resolves before legacy `model_profile_overrides`. See [Model Policy Presets](#model-policy-presets-model_policy--added-in-v142). Added in v1.42 ([#49](https://github.com/open-gsd/gsd-core/issues/49)) |
 | `model_policy.budget` | enum | `high`, `medium`, `low` | (none) | Selects a budget tier when using a known provider. GSD materializes the matching catalog preset into explicit tier mappings at resolve time. Ignored when `provider` is `generic` or `custom`. Added in v1.42 ([#49](https://github.com/open-gsd/gsd-core/issues/49)) |
 | `model_policy.high` | string | model ID | (none) | High-cost tier model ID for `generic`/`custom` provider. Used when `provider: "generic"` or `"custom"`. Added in v1.42 ([#49](https://github.com/open-gsd/gsd-core/issues/49)) |
 | `model_policy.medium` | string | model ID | (none) | Medium-cost tier model ID for `generic`/`custom` provider. Added in v1.42 ([#49](https://github.com/open-gsd/gsd-core/issues/49)) |
@@ -155,19 +182,24 @@ GSD stores project settings in `.planning/config.json`. Created during `/gsd-new
 | `dynamic_routing.enabled` | boolean | `true`, `false` | `false` | Master switch for [dynamic routing with failure-tier escalation](#dynamic-routing-with-failure-tier-escalation-dynamic_routing--added-in-v140). When `true`, agents resolve to `tier_models[default_tier]` and escalate one tier up on orchestrator-detected soft failure. Added in v1.40 ([#3024](https://github.com/open-gsd/gsd-core/pull/3031)) |
 | `dynamic_routing.tier_models.<tier>` | enum | `opus`, `sonnet`, `haiku` | (none) | Tier alias for `light`, `standard`, or `heavy`. Used when `dynamic_routing.enabled: true`. Added in v1.40 |
 | `dynamic_routing.escalate_on_failure` | boolean | `true`, `false` | `true` | When `false`, escalation is disabled even if `enabled: true` — every attempt uses the default tier. Added in v1.40 |
-| `dynamic_routing.max_escalations` | integer | `0`, `1`, `2`, … | `1` | Hard cap on retries per agent invocation. Beyond the cap the resolver returns the cap-tier model. Added in v1.40 |
+| `dynamic_routing.max_escalations` | integer | `0`, `1`, `2`, … | `1` | Hard cap on retries per agent invocation. Beyond the cap the resolver returns the cap-tier model. Also caps `provider_escalation`. Added in v1.40 |
+| `dynamic_routing.provider_escalation` | string[] | ordered model IDs | (none) | Opt-in fallback providers tried when a run dies on a quota / rate limit — see [provider escalation](#provider-escalation-on-quota-exceeded--added-in-v143). Added in v1.43 ([#2296](https://github.com/open-gsd/gsd-core/issues/2296)) |
 | `project_code` | string | any short string | (none) | Prefix for phase directory names (e.g., `"ABC"` produces `ABC-01-setup/`). Added in v1.31 |
 | `phase_id_convention` | enum | `"milestone-prefixed"`, `null` | `null` | Phase ID naming convention. `null` = legacy numeric IDs (`Phase 1`, `Phase 2`). `"milestone-prefixed"` = globally unique IDs that encode the enclosing milestone (`Phase 1-01`, `Phase 1-02`). Run `gsd-tools roadmap upgrade --convention milestone-prefixed` to migrate an existing ROADMAP.md. |
-| `response_language` | string | language code | (none) | Language for agent responses (e.g., `"pt"`, `"ko"`, `"ja"`). Propagates to all spawned agents for cross-phase language consistency. Added in v1.32 |
-| `context_window` | number | any integer | `200000` | Context window size in tokens. Set `1000000` for 1M-context models (e.g., `claude-opus-4-7[1m]`). Values `>= 500000` enable adaptive context enrichment (full-body reads of prior SUMMARY.md, deeper anti-pattern reads). Configured via `/gsd-config --advanced`. |
+| `response_language` | string | language code | (none) | Language for agent responses (e.g., `"pt"`, `"ko"`, `"ja"`). Propagates to all spawned agents for cross-phase language consistency. Added in v1.32. UAT checkpoint frames (`/gsd-verify-work`) render a localized banner/instruction for English, Spanish, French, German, Portuguese, Japanese, Chinese, Korean, Italian, Dutch, Polish, Russian, Ukrainian, Turkish, Hindi, Arabic, Vietnamese, and Indonesian (endonyms and ISO codes also accepted); any other value falls back to the English frame. |
+| `context_window` | number | any integer | `200000` | Context window size in tokens. Set `1000000` for 1M-context models (e.g., `claude-fable-5`). Values `>= 500000` enable adaptive context enrichment (full-body reads of prior SUMMARY.md, deeper anti-pattern reads). Configured via `/gsd-config --advanced`. |
 | `context_profile` | string | `dev`, `research`, `review` | (none) | Execution context preset that applies a pre-configured bundle of mode, model, and workflow settings for the current type of work. Added in v1.34 |
-| `claude_md_path` | string | any file path | `./CLAUDE.md` | Custom output path for the generated CLAUDE.md file. Useful for monorepos or projects that need CLAUDE.md in a non-root location. Defaults to `./CLAUDE.md` at the project root. Added in v1.36 |
+| `claude_md_path` | string | any file path | `./.claude/CLAUDE.md` | Custom output path for the generated CLAUDE.md file. Useful for monorepos or projects that need CLAUDE.md in a non-root location. Defaults to `./.claude/CLAUDE.md` — a valid project-scoped memory location that keeps GSD-generated content from polluting a hand-crafted repo-root `CLAUDE.md` ([#1098](https://github.com/open-gsd/gsd-core/issues/1098)). An existing file without GSD markers is never overwritten unless `--force` is passed. Default changed from `./CLAUDE.md` in v1.5. Added in v1.36 |
 | `claude_md_assembly.mode` | enum | `embed`, `link` | `embed` | Controls how managed sections are written into CLAUDE.md. `embed` (default) inlines content between GSD markers. `link` writes `@.planning/<source-path>` instead — Claude Code expands the reference at runtime, reducing CLAUDE.md size by ~65% on typical projects. `link` only applies to sections that have a real source file; `workflow` and fallback sections always embed. Per-block overrides: `claude_md_assembly.blocks.<section>` (e.g. `claude_md_assembly.blocks.architecture: link`). Added in v1.38 |
 | `context` | string | any text | (none) | Custom context string injected into every agent prompt for the project. Use to provide persistent project-specific guidance (e.g., coding conventions, team practices) that every agent should be aware of |
 | `phase_naming` | string | any string | (none) | Custom prefix for phase directory names. When set, overrides the auto-generated phase slug (e.g., `"feature"` produces `feature-01-setup/` instead of the roadmap-derived slug) |
 | `brave_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Brave Search API availability. When unset, GSD checks for `BRAVE_API_KEY` env var or `~/.gsd/brave_api_key` file |
 | `firecrawl` | boolean | `true`/`false` | auto-detected | Override auto-detection of Firecrawl API availability. When unset, GSD checks for `FIRECRAWL_API_KEY` env var or `~/.gsd/firecrawl_api_key` file |
 | `exa_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Exa Search API availability. When unset, GSD checks for `EXA_API_KEY` env var or `~/.gsd/exa_api_key` file |
+| `tavily_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Tavily Search API availability. When unset, GSD checks for `TAVILY_API_KEY` env var or `~/.gsd/tavily_api_key` file |
+| `ref_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Ref search API availability. When unset, GSD checks for `REF_API_KEY` env var or `~/.gsd/ref_api_key` file |
+| `perplexity` | boolean | `true`/`false` | auto-detected | Override auto-detection of Perplexity API availability. When unset, GSD checks for `PERPLEXITY_API_KEY` env var or `~/.gsd/perplexity_api_key` file |
+| `jina` | boolean | `true`/`false` | `true` | Override auto-detection of Jina API availability. Jina is a terminal fallback in the docs waterfall and defaults to available (`true`); GSD checks for `JINA_API_KEY` env var or `~/.gsd/jina_api_key` file when an explicit override is needed |
 | `search_gitignored` | boolean | `true`/`false` | `false` | Legacy top-level alias for `planning.search_gitignored`. Prefer the namespaced form; this alias is accepted for backward compatibility |
 
 > **Note:** `granularity` was renamed from `depth` in v1.22.3. Existing configs are auto-migrated.
@@ -187,21 +219,41 @@ API key fields accept a string value (the key itself). They can also be set to t
 | `brave_search` | string \| boolean \| null | `null` | Brave Search API key used for web research. Displayed as `****<last-4>` in all UI / `config-set` output; never echoed plaintext |
 | `firecrawl` | string \| boolean \| null | `null` | Firecrawl API key for deep-crawl scraping. Masked in display |
 | `exa_search` | string \| boolean \| null | `null` | Exa Search API key for semantic search. Masked in display |
+| `tavily_search` | string \| boolean \| null | `null` | Tavily Search API key used in the web-discovery waterfall. Masked in display |
+| `ref_search` | string \| boolean \| null | `null` | Ref search API key used in the docs-discovery waterfall. Masked in display |
+| `perplexity` | string \| boolean \| null | `null` | Perplexity API key used in the web-discovery waterfall. Masked in display |
+| `jina` | string \| boolean \| null | `null` | Jina API key (docs / scrape fallback). Masked in display |
 
 **Masking convention (`gsd-core/bin/lib/secrets.cjs`):** keys 8+ characters render as `****<last-4>`; shorter keys render as `****`; `null`/empty renders as `(unset)`. Plaintext is written as-is to `.planning/config.json` — that file is the security boundary — but the CLI, confirmation tables, logs, and `AskUserQuestion` descriptions never display the plaintext. This applies to the `config-set` command output itself: `config-set brave_search <key>` returns a JSON payload with the value masked.
 
 ### Code-review CLI routing
 
-`review.models.<cli>` maps a reviewer flavor to a shell command. The code-review workflow shells out using this command when a matching flavor is requested.
+`review.models.<cli>` maps a reviewer flavor to a bare model id, which is injected into the CLI's own model flag (`--model`, `-m`, …) when the reviewer is invoked.
+
+The key suffix is **not** always the lane slug. Each lane declares the config key it reads, and one shipped lane already differs: the Antigravity lane's slug is `antigravity` but its key is `review.models.agy`, after the CLI's own name. Consult the table below rather than deriving the key from the flag.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `review.models.claude` | string | (session model) | Command for Claude-flavored review. Defaults to the session model when unset |
-| `review.models.codex` | string | `null` | Command for Codex review, e.g. `"codex exec --model gpt-5"` |
-| `review.models.gemini` | string | `null` | Command for Gemini review, e.g. `"gemini -m gemini-2.5-pro"` |
-| `review.models.opencode` | string | `null` | Command for OpenCode review, e.g. `"opencode run --model claude-sonnet-4"` |
+| `review.models.claude` | string | (session model) | Model id for Claude-flavored review. Defaults to the session model when unset |
+| `review.models.codex` | string | `null` | Model id for Codex review (injected into --model), e.g. `"gpt-5"` |
+| `review.models.gemini` | string | `null` | Model id for Gemini review (injected into -m), e.g. `"gemini-2.5-pro"` |
+| `review.models.opencode` | string | `null` | Model id for OpenCode review (injected into --model), e.g. `"claude-sonnet-4"` |
+| `review.models.kimi-code` | string | `null` | Model id for Kimi Code review (injected into -m) |
 
-The `<cli>` slug is validated against `[a-zA-Z0-9_-]+`. Empty or path-containing slugs are rejected by `config-set`.
+**Ownership.** These keys are owned by their reviewer-lane capabilities rather than the central
+config schema — `review.models.ollama` belongs to the `ollama` capability, `review.ollama_host`
+to the same, and so on. Key names and existing `.planning/config.json` files are unchanged; only
+which schema validates them moved.
+
+One consequence follows: `<cli>` must now name a **declared reviewer lane**. Previously any slug
+matching `[a-zA-Z0-9_-]+` was accepted, so a typo or a key left over from a removed reviewer
+validated silently and was never read. Such a key is now rejected by `config-set`. The declared
+lanes are `gemini`, `claude`, `codex`, `opencode`, `agy` (the Antigravity lane — its key suffix is
+the CLI's own name, not the lane slug), `ollama`, `lm_studio` and `llama_cpp`.
+
+The same applies to `review.max_prompt_tokens_per_reviewer.<slug>`. `review.max_prompt_tokens`
+(the global default), `review.default_reviewers` and `review.reviewer_instances` describe policy
+across lanes rather than one lane's behavior, so they remain central and are unaffected.
 
 ### Reviewer defaults for `/gsd-review`
 
@@ -209,7 +261,7 @@ Use `review.default_reviewers` to scope the no-flag `/gsd-review` run to a subse
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `review.default_reviewers` | string[] \| null | `null` (all detected reviewers) | Optional default subset for no-flag `/gsd-review`, e.g. `["gemini","codex"]`. Precedence is: explicit reviewer flags > `--all` > `review.default_reviewers` > all detected. Unknown slugs are ignored with a warning; known-but-undetected slugs are ignored with an info note; empty arrays are rejected by `config-set`. |
+| `review.default_reviewers` | string[] \| null | `null` (all detected reviewers) | Optional default subset for no-flag `/gsd-review`, e.g. `["gemini","codex"]`. Entries may be built-in reviewer slugs or configured `review.reviewer_instances` names. Precedence is: explicit reviewer flags > `--all` > `review.default_reviewers` > all detected. Unknown slugs are ignored with a warning when no instances are configured; with `review.reviewer_instances` present, unknown entries are hard errors to catch typoed instance names. Known-but-undetected slugs are ignored with an info note; empty arrays are rejected by `config-set`. This leniency is specific to the configured default: a reviewer named by an explicit CLI flag that cannot run is an error, not an info note. |
 
 Example:
 
@@ -219,6 +271,49 @@ Example:
     "default_reviewers": ["gemini", "codex"]
   }
 }
+```
+
+### Reviewer instances for `/gsd-review` (#1517)
+
+Use `review.reviewer_instances` to run one model-capable adapter as several independent
+reviewer identities — e.g. two OpenCode-backed reviews with different models in a single
+`/gsd-review` pass. Each entry maps an instance name to `{ cli, model?, agent? }`.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `review.reviewer_instances.<name>.cli` | string | (required) | A known reviewer adapter the instance reuses (e.g. `opencode`). Must be a built-in slug; never an arbitrary shell command. |
+| `review.reviewer_instances.<name>.model` | string | (adapter default) | Opaque `provider/model` id passed through verbatim to the adapter's `--model`. GSD does not parse it. |
+| `review.reviewer_instances.<name>.agent` | string | (none) | Opaque agent name; honoured only by adapters with a native agent concept (OpenCode `--agent` in v1). |
+
+Instance names must match `^[a-z0-9][a-z0-9-]*$` and must not equal a built-in reviewer slug.
+Instances participate ONLY through `review.default_reviewers` (there are no per-instance CLI
+flags). Instance references are expanded before built-in slugs; an instance is available iff
+its `cli` is detected. An entry that is neither a defined instance nor a built-in slug is a
+hard error (a typo'd instance name must be loud). When two or more selected instances share
+the same `cli`, `REVIEWS.md` prints a one-line shared-adapter caveat so review consensus is
+not silently overstated. See [ADR-1517](adr/1517-reviewer-instances-config-surface.md).
+
+Example:
+
+```json
+{
+  "review": {
+    "reviewer_instances": {
+      "opencode-deepseek": { "cli": "opencode", "model": "deepseek/deepseek-v4-pro", "agent": "review" },
+      "opencode-mimo": { "cli": "opencode", "model": "xiaomi/mimo-v2.5-pro" }
+    },
+    "default_reviewers": ["opencode-deepseek", "opencode-mimo", "codex"]
+  }
+}
+```
+
+Set each field via `config-set`:
+
+```bash
+gsd config-set review.reviewer_instances.opencode-deepseek.cli opencode
+gsd config-set review.reviewer_instances.opencode-deepseek.model deepseek/deepseek-v4-pro
+gsd config-set review.reviewer_instances.opencode-deepseek.agent review
+gsd config-set review.default_reviewers '["opencode-deepseek","opencode-mimo","codex"]'
 ```
 
 ### Agent-skill injection (dynamic)
@@ -240,16 +335,18 @@ Most workflow toggles follow the **absent = enabled** pattern: if a key is missi
 | `workflow.nyquist_validation` | boolean | `true` | Test coverage mapping during plan-phase research |
 | `workflow.ui_phase` | boolean | `true` | Generate UI design contracts for frontend phases |
 | `workflow.ui_safety_gate` | boolean | `true` | Prompt to run /gsd-ui-phase for frontend phases during plan-phase |
+| `workflow.assumption_delta` | boolean | `true` | Advisory architecture checkpoint during planning. When a phase makes something **plural, optional, or chosen** that used to be **singular, required, or derived** (e.g. a second auth method, a required field becoming optional, a constant becoming a parameter), the planner is prompted to re-ask whether the primary key / identity model still names the right thing (promote the new general representation vs. add it alongside). Non-blocking; fires only on a detected signal. Bare "or" is intentionally excluded (prose false-positives). Inspect a phase with `gsd query assumption-delta scan <phase>`. Added in #1561 |
 | `workflow.ui_review` | boolean | `true` | Run visual quality audit (`/gsd-ui-review`) after phase execution in autonomous mode. When `false`, the UI audit step is skipped. |
 | `workflow.node_repair` | boolean | `true` | Autonomous task repair on verification failure |
 | `workflow.node_repair_budget` | number | `2` | Max repair attempts per failed task |
+| `workflow.smart_zone_tokens` | number | `100000` | Smart-zone token budget for phase-effort estimation (#2630, [ADR-2629](adr/2629-phase-effort-estimation-calibration.md)). A phase whose estimate exceeds this is flagged with a split recommendation — **advisory only, never a block**. This is a *policy default, not a benchmark constant*: LLM output quality degrades before the advertised context window is full, but the effective ceiling is model-, task-, and distractor-dependent, so no universal number exists. Lower it for models that degrade early; the estimate-vs-actual calibration loop corrects the figure per project over time. Must be a positive integer. |
 | `workflow.research_before_questions` | boolean | `false` | Run research before discussion questions instead of after |
 | `workflow.discuss_mode` | string | `'discuss'` | Controls how `/gsd-discuss-phase` gathers context. `'discuss'` (default) asks questions one-by-one. `'assumptions'` reads the codebase first, generates structured assumptions with confidence levels, and only asks you to correct what's wrong. Added in v1.28 |
 | `workflow.max_discuss_passes` | number | `3` | Maximum number of question rounds in discuss-phase before the workflow stops asking. Useful in headless/auto mode to prevent infinite discussion loops. |
 | `workflow.skip_discuss` | boolean | `false` | When `true`, `/gsd-autonomous` bypasses the discuss-phase entirely, writing minimal CONTEXT.md from the ROADMAP phase goal. Useful for projects where developer preferences are fully captured in PROJECT.md/REQUIREMENTS.md. Added in v1.28 |
 | `workflow.questions_per_area` | string or number | `'all'` | Controls how many questions are asked per gray area before prompting to continue. `'all'` (default) asks every relevant question then moves on automatically. A number (e.g., `4`, `5`, `8`) asks that many then prompts "More questions / Next area" |
 | `workflow.text_mode` | boolean | `false` | Replaces AskUserQuestion TUI menus with plain-text numbered lists. Required for Claude Code remote sessions (`/rc` mode) where TUI menus don't render. Can also be set per-session with `--text` flag on discuss-phase. Added in v1.28 |
-| `workflow.use_worktrees` | boolean | `true` | When `false`, disables git worktree isolation for parallel execution. Users who prefer sequential execution or whose environment does not support worktrees can disable this. Added in v1.31. **Branch-divergence note:** when your branch is ahead of `origin/HEAD`, GSD auto-degrades to sequential and prints a warning. Set `worktree.baseRef:"head"` in `.claude/settings.local.json` (run `node gsd-tools.cjs worktree set-baseref`) to restore parallel execution. See [Fix the worktree base-mismatch (exit 42) error](how-to/fix-worktree-base-mismatch.md). |
+| `workflow.use_worktrees` | boolean | `true` | When `false`, disables git worktree isolation for parallel execution. Users who prefer sequential execution or whose environment does not support worktrees can disable this. Added in v1.31. **Branch-divergence note:** when your branch has diverged from `origin/HEAD`, GSD auto-degrades to sequential and prints a warning. See [`worktree.baseRef`](#worktree-settings) to restore parallel execution on a diverged branch. **Non-Claude note:** git worktree isolation uses Claude Code's `isolation="worktree"` agent primitive, which no other runtime honors. On any non-Claude install (Codex, Cursor, Antigravity, Qwen, etc.) a runtime-neutral `.planning/config.json` resolves the runtime to that install's own id and defaults this key to `false`; forcing `use_worktrees: true` on a non-Claude install fails closed before any executor dispatch (#1515, #1521). |
 | `workflow.test_contracts` | boolean | `true` | Treat test files as read-only during execution. The executor fixes the implementation, not the tests. If a test is genuinely wrong, escalates to user. Inspired by "tests as completion contracts" |
 | `workflow.adversarial_validation` | boolean | `true` | Three-layer adversarial review across the entire pipeline: (1) Devil's Advocate challenges plans before execution, (2) Edge Case Hunter reviews code in parallel during execution, (3) finder+critic+referee agents cross-validate after execution. Disable with `false` for lightweight phases |
 | `workflow.dead_code_scan` | boolean | `true` | Scan for dead code during verification: commented-out code blocks, dead feature flags, orphaned exports, parallel implementations. Treats dead code as context pollution |
@@ -275,23 +372,30 @@ Most workflow toggles follow the **absent = enabled** pattern: if a key is missi
 | `workflow.plan_bounce_script` | string | (none) | Path to the external script invoked for plan bounce validation. Receives the PLAN.md path as its first argument. Required when `plan_bounce` is `true`. Added in v1.36 |
 | `workflow.plan_bounce_passes` | number | `2` | Number of sequential bounce passes to run. Each pass feeds the previous pass's output back into the validator. Higher values increase rigor at the cost of latency. Added in v1.36 |
 | `workflow.post_planning_gaps` | boolean | `true` | Unified post-planning gap report (#2493). After all plans are generated and committed, scans REQUIREMENTS.md and CONTEXT.md `<decisions>` against every PLAN.md in the phase directory, then prints one `Source \| Item \| Status` table. Word-boundary matching (REQ-1 vs REQ-10) and natural sort (REQ-02 before REQ-10). Non-blocking — informational report only. Set to `false` to skip Step 13e of plan-phase. |
-| `workflow.plan_review_convergence` | boolean | `false` | Enable the `/gsd-plan-review-convergence` command. Disabled by default — the command exits with an enable instruction when this key is `false`. The command automates the manual plan→review→replan loop: it spawns configured reviewers (Codex, Gemini, Claude, OpenCode, Ollama, LM Studio, llama.cpp), counts unresolved HIGH concerns via the CYCLE_SUMMARY contract, replans with `--reviews` feedback, and repeats until converged or max cycles reached. Enable with `gsd config-set workflow.plan_review_convergence true`. Added in v1.39 |
+| `workflow.plan_review_convergence` | boolean | `false` | Enable the `/gsd-plan-review-convergence` command. Disabled by default — the command exits with an enable instruction when this key is `false`. The command automates the manual plan→review→replan loop: it spawns configured reviewers (Codex, Gemini, Claude, OpenCode, Ollama, LM Studio, llama.cpp), counts unresolved HIGH concerns and actionable MEDIUM/LOW findings via the CYCLE_SUMMARY contract, replans with `--reviews` feedback, and repeats until converged or max cycles reached. Enable with `gsd config-set workflow.plan_review_convergence true`. Added in v1.39 |
 | `workflow.plan_chunked` | boolean | `false` | Enable chunked planning mode. When `true` (or when `--chunked` flag is passed to `/gsd-plan-phase`), the orchestrator splits the single long-lived planner Task into a short outline Task followed by N short per-plan Tasks (~3-5 min each). Each plan is committed individually for crash resilience. If a Task hangs and the terminal is force-killed, rerunning with `--chunked` resumes from the last completed plan. Particularly useful on Windows where long-lived Tasks may hang on stdio. Added in v1.38 |
 | `workflow.code_review_command` | string | (none) | Shell command for external code review integration in `/gsd-ship`. Receives changed file paths via stdin. Non-zero exit blocks the ship workflow. Added in v1.36 |
 | `workflow.tdd_mode` | boolean | `false` | Enable TDD pipeline as a first-class execution mode. When `true`, the planner aggressively applies `type: tdd` to eligible tasks (business logic, APIs, validations, algorithms) and the executor enforces RED/GREEN/REFACTOR gate sequence. An end-of-phase collaborative review checkpoint verifies gate compliance. Added in v1.36 |
+| `workflow.mvp_mode` | boolean | `false` | Persist the MVP-mode flag in config so every phase defaults to MVP framing without requiring `--mvp` on the CLI. Resolved via the precedence chain: `--mvp` CLI flag → ROADMAP.md `**Mode:** mvp` field → this config value → `false`. When `true`, the planner, executor, verifier, and discovery surfaces treat the phase as an MVP vertical slice (UI → API → DB) of one user-visible capability instead of a horizontal layer. |
 | `workflow.human_verify_mode` | string | `'end-of-phase'` | Controls human verification checkpoints. `'end-of-phase'` (default since #3309) suppresses `checkpoint:human-verify` tasks and embeds checks into `<verify><human-check>` blocks for end-of-phase review. `'mid-flight'` restores blocking checkpoint tasks. `checkpoint:decision` and `checkpoint:human-action` are unaffected. See [Checkpoints Reference](../gsd-core/references/checkpoints.md#checkpoint_types). |
+| `workflow.context_guard_mode` | string | `'warn'` | Context exhaustion guard for `execute-phase`. Before each wave, the orchestrator self-assesses context pressure using the degradation signals defined in `context-budget.md`. `'warn'` (default) emits a warning and recommends `/gsd-pause-work` when POOR tier (70%+) is detected. `'auto'` automatically invokes `/gsd-pause-work` before the next wave. `'off'` disables the guard. Set via: `gsd config-set workflow.context_guard_mode auto`. Added in #1452. |
 | `workflow.cross_ai_execution` | boolean | `false` | Delegate phase execution to an external AI CLI instead of spawning local executor agents. Useful for leveraging a different model's strengths for specific phases. Added in v1.36 |
 | `workflow.cross_ai_command` | string | (none) | Shell command template for cross-AI execution. Receives the phase prompt via stdin. Must produce SUMMARY.md-compatible output. Required when `cross_ai_execution` is `true`. Added in v1.36 |
 | `workflow.cross_ai_timeout` | number | `300` | Timeout in seconds for cross-AI execution commands. Prevents runaway external processes. Added in v1.36 |
+| `workflow.test_gate_timeout` | number | `600` | Wall-clock timeout (seconds) for a verification test gate; a watch-mode runner (vitest/jest) that never exits is aborted after this budget instead of hanging the orchestrator (#1857) |
 | `workflow.ai_integration_phase` | boolean | `true` | Enable the `/gsd-ai-integration-phase` command. When `false`, the command exits with a configuration gate message |
+| `workflow.api_coverage_gate` | boolean | `true` | Require an explicit API-coverage decision before a phase that integrates an external API/SDK/service can seal. At `plan:pre` the planner is prompted to produce a `COVERAGE.md` matrix (full coverage by default, every opt-out reasoned); at `verify:pre` a blocking gate fails the seal unless the matrix is complete. Independent of `ai_integration_phase` (#1562) |
 | `workflow.auto_prune_state` | boolean | `false` | When `true`, automatically prune stale entries from STATE.md at phase boundaries instead of prompting |
 | `workflow.pattern_mapper` | boolean | `true` | Run the `gsd-pattern-mapper` agent between research and planning to map new files to existing codebase analogs |
-| `workflow.subagent_timeout` | number | `600` | Timeout in seconds for individual subagent invocations. Increase for long-running research or execution phases |
+| `workflow.subagent_timeout` | number | `300000` | Timeout in milliseconds for parallel subagent tasks (e.g. codebase mapping). Increase for large codebases or slower models. Default: 300000 (5 minutes) |
 | `executor.stall_detect_interval_minutes` | number | `5` | Minutes between executor stall checks while an executor agent is active. The execute-phase orchestrator uses this cadence to inspect recent commits and avoid waiting forever on a silent agent. |
 | `executor.stall_threshold_minutes` | number | `10` | Minutes without executor completion or expected-branch commit activity before execute-phase offers recovery choices for a possible stalled executor. |
+| `planner.stall_detect_interval_minutes` | number | `5` | Minutes between planner/plan-checker stall checks while a planner or plan-checker agent is active. The plan-phase orchestrator uses this cadence to inspect on-disk `*-PLAN.md` activity and avoid waiting forever on a silent agent (#2650). |
+| `planner.stall_threshold_minutes` | number | `10` | Minutes without a completion marker or fresh on-disk plan activity before plan-phase automatically surfaces the accept-plans/retry/stop recovery choice for a possible stalled planner or plan-checker (#2650). |
 | `workflow.inline_plan_threshold` | number | `3` | Maximum number of tasks in a phase before the planner generates a separate PLAN.md file instead of inlining tasks in the prompt |
-| `workflow.drift_threshold` | number | `3` | Minimum number of new structural elements (new directories, barrel exports, migrations, route modules) introduced during a phase before the post-execute codebase-drift gate takes action. See [#2003](https://github.com/open-gsd/gsd-core/issues/2003). Added in v1.39 |
-| `workflow.drift_action` | string | `warn` | What to do when `workflow.drift_threshold` is exceeded after `/gsd-execute-phase`. `warn` prints a message suggesting `/gsd-map-codebase --paths …`; `auto-remap` spawns `gsd-codebase-mapper` scoped to the affected paths. Added in v1.39 |
+| `workflow.drift_threshold` | number | `3` | Minimum number of new structural elements (new directories, barrel exports, migrations, route modules) before the codebase-drift gate takes action. The gate runs at two points: `plan:pre` (before `/gsd-plan-phase` plans — **non-blocking, warn-only**, so plans are authored against a fresh STRUCTURE.md) and `execute:wave:post` (after `/gsd-execute-phase` — honors `workflow.drift_action`). See [#2003](https://github.com/open-gsd/gsd-core/issues/2003). Added in v1.39 |
+| `workflow.drift_action` | string | `warn` | What to do when `workflow.drift_threshold` is exceeded **at `execute:wave:post`** (after `/gsd-execute-phase`). `warn` prints a message suggesting `/gsd-map-codebase --paths …`; `auto-remap` spawns `gsd-codebase-mapper` scoped to the affected paths. The `plan:pre` pre-check is always warn-only regardless of this setting — it never auto-spawns the mapper at plan entry. Added in v1.39 |
+| `workflow.plan_drift_precheck` | boolean | `true` | Enable the non-blocking codebase-drift pre-check at `plan:pre`, before `/gsd-plan-phase` spawns the planner. Surfaces a stale STRUCTURE.md (drift over `workflow.drift_threshold`) as a warn-only advisory pointing to `/gsd-map-codebase`; never blocks planning, never spawns the mapper. Separate from the `execute:wave:post` gates so autonomous/CI runs can silence the plan-time advisory while keeping execute-time drift detection on. Added in v1.6.0. See [#1592](https://github.com/open-gsd/gsd-core/issues/1592). |
 | `workflow.build_command` | string | (none) | Shell command to build the project in the post-merge build gate (Step A of step 5.6 in execute-phase). When unset, the gate auto-detects: Xcode (`.xcodeproj` present) → `xcodebuild build`, `Makefile` with `build:` target → `make build`, Justfile → `just build`, `Cargo.toml` → `cargo build`, `go.mod` → `go build ./...`, Python → `python -m py_compile`, `package.json` with `build` script → `npm run build`. Runs with a 5-minute timeout; failure increments `WAVE_FAILURE_COUNT`. Added in v1.39 |
 | `workflow.test_command` | string | (none) | Shell command to run the project's test suite in the post-merge test gate (Step B of step 5.6 in execute-phase) and the regression gate. When unset, the gate auto-detects: Xcode (`.xcodeproj` present) → `xcodebuild test`, `Makefile` with `test:` target → `make test`, Justfile → `just test`, `package.json` → `npm test`, `Cargo.toml` → `cargo test`, `go.mod` → `go test ./...`, Python → `python -m pytest`. Runs with a 5-minute timeout; failure increments `WAVE_FAILURE_COUNT`. Added in v1.39 |
 | `workflow.milestone_retro` | boolean | `false` | Enable multi-lens milestone retro. When `true`, `write_retrospective` invokes `gsd-core/workflows/retro.md` — spawning 4 isolated failure-class lenses + synthesizer — and injects a `### Tensions` subsection into the existing `.planning/RETROSPECTIVE.md` milestone entry (between `### Key Lessons` and `### Cost Observations`). Intermediate positions live in an ephemeral `.planning/tmp/retro-v{X.Y}/` scratch dir (deleted on success). `Candidate change:` lines in Tensions are the documented input to the next-transition `graduation` HITL. Default `false` (opt-in). |
@@ -309,6 +413,14 @@ Most workflow toggles follow the **absent = enabled** pattern: if a key is missi
 | `project.ci_commands` | array | `null` | CI commands to suggest before PR (e.g., `['make check', 'make check-frontend']`) |
 | `git.branch_pattern` | string | `null` | Regex for branch naming validation (e.g., `'^[a-z]+-\\d+/'`) |
 
+## Worktree Settings
+
+> **File:** `.claude/settings.local.json` — not `.planning/config.json`. Unlike all other keys in this reference, `worktree.*` settings live in the Claude Code runtime settings file. Fresh installs and upgrades auto-set `worktree.baseRef: "head"` there (no-clobber) when `workflow.use_worktrees` is enabled. The key can also be set via `gsd-tools worktree set-baseref`.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `worktree.baseRef` | string | (unset) | Controls which ref the worktree-based parallel executor uses as the base when creating new phase/wave worktrees. When unset, the executor bases new worktrees on the repository default branch (`origin/HEAD`); if the current branch has diverged, execute-phase auto-degrades to sequential execution rather than halting (as of v1.4.0). Set to `"head"` to base new worktrees on the local `HEAD` instead — the appropriate choice when working on a branch that has diverged from the default branch, as it prevents the exit-42 base-mismatch halt and allows wave-based parallel execution to proceed normally. See [Fix the worktree base-mismatch (exit 42) error](how-to/fix-worktree-base-mismatch.md). |
+
 ## Code Quality Settings
 
 The `code_quality.*` namespace gates optional structural-analysis tooling that augments `/gsd-code-review`. Settings are additive: each tool is independently opt-in and off by default.
@@ -317,7 +429,7 @@ The `code_quality.*` namespace gates optional structural-analysis tooling that a
 |---------|------|---------|-------------|
 | `code_quality.fallow.enabled` | boolean | `false` | Enables fallow structural pre-pass for `/gsd-code-review`. When `false`, no fallow binary probe or JSON artifact is produced. |
 | `code_quality.fallow.scope` | string | `phase` | Scope for fallow analysis: `phase` (current review file scope) or `repo` (entire repository). |
-| `code_quality.fallow.profile` | string | `standard` | Fallow profile selector passed to the pre-pass runner (`minimal`, `standard`, `strict`). |
+| `code_quality.fallow.profile` | string | `standard` | Strictness preset for the fallow pre-pass (`minimal`, `standard`, `strict`). Fallow has no native profile concept, so this maps to its `--max-crap` complexity threshold: `minimal`→50, `standard`→30, `strict`→15 (lower = stricter). |
 | `code_quality.fallow.mcp` | boolean | `false` | **Reserved — not yet implemented.** When `true`, enables MCP-backed structural findings mode for runtimes that support MCP server routing. Setting this to `true` is currently a no-op and emits a runtime warning. |
 
 ## Ship Settings
@@ -415,6 +527,9 @@ If `.planning/` is in `.gitignore`, `commit_docs` is automatically `false` regar
 | `hooks.workflow_guard` | boolean | `false` | Warn when file edits happen outside GSD workflow context (advises using `/gsd-quick` or `/gsd-fast`) |
 | `statusline.show_last_command` | boolean | `false` | Append `last: /<cmd>` suffix to the statusline showing the most recently invoked slash command. Opt-in; reads the active session transcript to extract the latest `<command-name>` tag (closes #2538) |
 | `statusline.context_position` | string | `"end"` | Position of the context-window meter. `"end"` (default) renders at line tail; `"front"` renders immediately after the model name so the meter stays visible in narrow terminals. Closes #2937 |
+| `statusline.show_context_tokens` | boolean | `false` | Append the absolute token count (e.g. `(156k)`) after the context meter's percentage. Sums input, cache-creation, cache-read, and output tokens from the hook payload — a broader basis than the meter's percentage (which excludes output tokens), so the two figures can diverge slightly. Opt-in; the meter is unchanged when the flag is absent |
+| `statusline.state_format` | string | `"full"` | Format of the GSD-state segment. `"full"` (default) is the existing rendering with milestone name and progress bar. `"compact"` renders `<version> · P<phase>/<total> · <status>` (e.g. `v1.12 · P7/12 · executing`) — drops the milestone name and bar, and collapses narrative statuses to the canonical keyword set from `normalizeStateStatus()` (`paused` — the canonical stuck state — renders uppercase as `PAUSED`) |
+| `statusline.show_git` | boolean | `false` | Append a git segment after the directory: current branch plus compact work-state markers (`+staged` `~unstaged` `?untracked` `↑ahead` `↓behind`, or `✓` when clean and in sync). One `git status --porcelain=v2` call per render; the segment is absent outside a git repo or when git is unavailable |
 
 The prompt injection guard hook (`gsd-prompt-guard.js`) is always active and cannot be disabled — it's a security feature, not a workflow toggle.
 
@@ -430,52 +545,96 @@ Inject custom skill files into GSD subagent prompts. Skills are read by agents a
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `agent_skills` | object | `{}` | Map of agent types to skill directory paths |
+| `agent_skills` | object | `{}` | Map of agent types to arrays of skill entries |
 | `agent_skills_security.trusted_global_roots` | array of strings | `[]` | Opt-in allowlist of additional trusted directories for `global:` skills. See [Trusted global skill roots](#trusted-global-skill-roots-agent_skills_securitytrusted_global_roots) |
 
 ### Configuration
 
-Add an `agent_skills` section to `.planning/config.json` mapping agent types to arrays of skill directory paths (relative to project root):
+Add an `agent_skills` section to `.planning/config.json` mapping agent types to arrays of skill entries:
 
 ```json
 {
   "agent_skills": {
-    "gsd-executor": ["skills/testing-standards", "skills/api-conventions"],
+    "gsd-executor": [
+      "skills/testing-standards",
+      "global:shared-conventions",
+      "global:coderabbit:code-review"
+    ],
     "gsd-planner": ["skills/architecture-rules"],
     "gsd-verifier": ["skills/acceptance-criteria"]
   }
 }
 ```
 
-Each path must be a directory containing a `SKILL.md` file. Paths are validated for safety (no traversal outside project root).
+### Skill Entry Forms
+
+Each element in the array is one of three forms:
+
+| Form | Example | Resolution |
+|------|---------|------------|
+| Project-relative path | `"skills/my-skill"` | Resolves to `<project>/skills/my-skill/SKILL.md`, injected as an `@`-include |
+| Global personal skill | `"global:<name>"` | Resolves to `~/.claude/skills/<name>/SKILL.md`, injected as an `@`-include |
+| Plugin-provided skill (Claude only) | `"global:<plugin>:<skill>"` | A Claude Code plugin skill, loaded by name via the Skill tool at agent spawn time |
+
+**Project-relative paths** must point to a directory containing a `SKILL.md` file. Paths are validated for safety (no traversal outside the project root).
+
+**Global personal skills** (`global:<name>`) resolve against the runtime's global skills directory (e.g. `~/.claude/skills/`). Symlink-escape protection applies unless the target is listed in `agent_skills_security.trusted_global_roots`.
+
+**Plugin-provided skills** (`global:<plugin>:<skill>`) follow the namespaced form `seg(:seg)*`, where each segment is one or more alphanumeric characters, underscores, or hyphens joined by single colons (e.g. `global:coderabbit:code-review`). This form is **Claude-only**: on the Claude runtime GSD emits a Skill-tool load directive in the agent's `<agent_skills>` block so the agent loads the skill by name via the Skill tool, and Claude Code resolves the `plugin:skill` namespace. On all other runtimes the entry is skipped with a warning — the plugin/Skill-tool model is specific to Claude Code and has no equivalent elsewhere.
+
+> **Why load by name rather than path?** Claude Code's plugin cache is versioned and ephemeral, so there is no stable filesystem path to `@`-include. Loading by namespaced name via the Skill tool lets Claude Code's own resolver locate the current version of the plugin skill at runtime.
+
+The plugin must already be installed in the user's Claude Code environment (`/plugin install …`). GSD only references the skill by its namespaced name and does not read or validate the plugin cache itself.
 
 ### Supported Agent Types
 
-Any GSD agent type can receive skills. Common types:
+Any GSD agent type can receive skills. The agent types that consume `agent_skills` are the GSD sub-agents the workflows dispatch. There are 22 consumer agents in total, including:
 
-- `gsd-executor` -- executes implementation plans
-- `gsd-planner` -- creates phase plans
-- `gsd-checker` -- verifies plan quality
-- `gsd-verifier` -- post-execution verification
-- `gsd-researcher` -- phase research
-- `gsd-project-researcher` -- new-project research
-- `gsd-debugger` -- diagnostic agents
-- `gsd-codebase-mapper` -- codebase analysis
-- `gsd-advisor` -- discuss-phase advisors
-- `gsd-ui-researcher` -- UI design contract creation
-- `gsd-ui-checker` -- UI spec verification
-- `gsd-roadmapper` -- roadmap creation
-- `gsd-synthesizer` -- research synthesis
+- `gsd-executor` — executes implementation plans
+- `gsd-planner` — creates phase plans
+- `gsd-plan-checker` — verifies plan quality
+- `gsd-verifier` — post-execution verification
+- `gsd-phase-researcher` — phase research
+- `gsd-project-researcher` — new-project research
+- `gsd-debugger` — diagnostic agents
+- `gsd-codebase-mapper` — codebase analysis
+- `gsd-code-reviewer` — code review
+- `gsd-ui-researcher` — UI design contract creation
+- `gsd-ui-checker` — UI spec verification
+- `gsd-ui-auditor` — UI audit
+- `gsd-roadmapper` — roadmap creation
+- `gsd-research-synthesizer` — research synthesis
+- and others (see `tests/agent-skills.test.cjs` `CONSUMER_AGENTS` list for the full 22)
+
+The `Skill` tool is granted to consumer agents deliberately and is instruction-bounded — agents use it only to load the skills listed in the `<agent_skills>` block.
 
 ### How It Works
 
-At spawn time, workflows call `gsd-tools query agent-skills <type>` (or legacy `node gsd-tools.cjs agent-skills <type>`) to load configured skills. If skills exist for the agent type, they are injected as an `<agent_skills>` block in the Task() prompt:
+Skills reach a consumer agent through **two cooperating seams** (dual injection — see [ADR 1866](adr/1866-agent-skills-dual-injection-contract.md)):
+
+1. **Orchestrator-side (primary on Claude Code).** At spawn time, workflows call `gsd-tools query agent-skills <type>` (or legacy `node gsd-tools.cjs agent-skills <type>`) in their bash init and interpolate the resulting `<agent_skills>` block into the `Task()`/`Agent()` prompt. This is established across ~25 workflows.
+
+2. **Agent-side self-load (durable fallback).** Each of the 22 consumer agents also self-loads in its own mandatory init step — it runs `gsd_run query agent-skills <its-type>` and `Read`s every listed `SKILL.md` per [`gsd-core/references/agent-skills-bootstrap.md`](../gsd-core/references/agent-skills-bootstrap.md). This is the path that works on every runtime, including **Cursor**, where `Skill()`-delegated workflow bash init does not reliably execute and `/gsd-autonomous` delegates via flat `Skill()` calls.
+
+**Dedup guard.** If an agent's prompt already contains an `<agent_skills>` block (orchestrator already injected one), the agent skips self-load — so on runtimes where both seams run (Claude Code), the prompt never carries two copies. `query agent-skills` is read-only and idempotent: it exits 0 with an empty block when nothing is configured for the type, so self-load is zero-overhead for unconfigured agents.
+
+For project-relative and global personal skills, entries appear as `@`-includes:
 
 ```xml
 <agent_skills>
 Read these user-configured skills:
 - @skills/testing-standards/SKILL.md
-- @skills/api-conventions/SKILL.md
+- @/Users/you/.claude/skills/shared-conventions/SKILL.md
+</agent_skills>
+```
+
+For a mixed config (path-resolvable and plugin-provided skills together), entries appear interleaved in config order in a single section:
+
+```xml
+<agent_skills>
+Read these user-configured skills:
+- @skills/testing-standards/SKILL.md
+- Load the `coderabbit:code-review` skill via the Skill tool before proceeding (plugin-provided).
 </agent_skills>
 ```
 
@@ -488,6 +647,8 @@ Set skills via the CLI:
 ```bash
 gsd-tools query config-set agent_skills.gsd-executor '["skills/my-skill"]'
 ```
+
+See [How to attach a plugin-provided skill to a GSD agent](how-to/attach-a-plugin-skill-to-a-gsd-agent.md) for a step-by-step walkthrough of the `global:plugin:skill` form.
 
 ---
 
@@ -535,6 +696,27 @@ Setting the parent object (`agent_skills_security`) directly is not supported; u
 
 ---
 
+## Capability Trust (`capabilities.*`)
+
+Policy for installing and updating third-party capabilities (ADR-1244). These keys govern the trust gate; they have no effect if you only ever use the native first-party capabilities shipped with GSD. They are **policy inputs** read by the `gsd capability` command flow, which passes the resulting decision into the capability lifecycle — `strict_known_registries` gates whether a source may be installed at all; `auto_update` is consulted by the `update`/`outdated` flow (which always re-prompts when a new version's executable surface set changes). The full rationale — including why there is no sandbox — is in [The capability trust model](explanation/capability-trust-model.md).
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `capabilities.strict_known_registries` | array \| null | `null` | Allowlist gating **which sources** third-party capabilities may be installed from. `null` (default) is permissive: external installs (git / npm / tarball) are allowed and each still passes the consent + integrity gate. `[]` (explicit empty array) is lockdown: **all external installs are blocked** — only local-filesystem installs are permitted (managed/enterprise mode). A non-empty list is a **host-based allowlist**: only sources whose host matches an entry (exact host or a subdomain of it — `github.com` matches `api.github.com` but never `evilgithub.com`) are permitted; add the literal token `npm` to permit the npm source kind. Local installs are never "external" and are always allowed. |
+| `capabilities.auto_update` | boolean | `false` | Whether installed third-party capabilities may auto-update. **Off by default.** Even when enabled, GSD re-prompts for explicit consent whenever a new version's executable surface set (hooks / command modules / MCP servers) differs from the installed one — the consent you gave was for a specific surface, not a blank cheque. |
+
+```bash
+# Lock the machine down to local-only capability installs:
+gsd config-set capabilities.strict_known_registries '[]'
+
+# Allow only your org's GitHub + npm:
+gsd config-set capabilities.strict_known_registries '["github.com", "npm"]'
+```
+
+> **Security note:** `strict_known_registries` matching is **host-based, not substring** — a lookalike host like `evilgithub.com` is rejected even when `github.com` is allowed. `integrity` (sha512) pins only the top-level fetched artifact, not an npm package's transitive dependency tree; see the trust-model explanation for that boundary.
+
+---
+
 ## Feature Flags
 
 Toggle optional capabilities via the `features.*` config namespace. Feature flags default to `false` (disabled) — enabling a flag opts into new behavior without affecting existing workflows.
@@ -553,8 +735,51 @@ The `plan_review.*` namespace controls the plan drift guard, which verifies that
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `plan_review.source_grounding` | boolean | `true` | Enable the plan drift guard. When `true` (the default), plan review resolves every symbol reference cited in a PLAN.md against the live source tree. Plans that cite a non-existent function, class, decorator, or CLI flag produce a `needs-acknowledgement` notice before the plan is approved. Disable with `false` to skip symbol verification entirely. Toggle during setup (`/gsd:new-project`) or at any time via `/gsd:settings`. |
-| `plan_review.source_grounding_authority` | enum | `grep` | Selects the resolver adapter used to verify symbol existence. Allowed values: `grep` (default — ripgrep/grep search of source files, works in any project without additional tooling), `intel` (query the `.planning/intel/api-map.json` index built by `/gsd:map-codebase`; requires `intel.enabled: true`), `treesitter` (reserved for future tree-sitter adapter), `lsp` (reserved for future LSP adapter), `scip` (reserved for future SCIP/LSIF adapter). Use `intel` when you have run `/gsd:map-codebase` and want the faster, pre-indexed lookup. All other values beyond `grep` and `intel` are reserved and have no effect in the current release. |
+| `plan_review.source_grounding` | boolean | `true` | Enable the plan drift guard. When `true` (the default), plan review resolves every symbol reference cited in a PLAN.md against the live source tree. Plans that cite a non-existent function, class, decorator, or CLI flag produce a `needs-acknowledgement` notice before the plan is approved. Disable with `false` to skip symbol verification entirely. Toggle during setup (`/gsd-new-project`) or at any time via `/gsd-settings`. |
+| `plan_review.source_grounding_authority` | enum | `grep` | Selects the resolver adapter used to verify symbol existence. Allowed values: `grep` (default — ripgrep/grep search of source files, works in any project without additional tooling), `intel` (query the `.planning/intel/api-map.json` index built by `/gsd-map-codebase`; requires `intel.enabled: true`), `treesitter` (reserved for future tree-sitter adapter), `lsp` (reserved for future LSP adapter), `scip` (reserved for future SCIP/LSIF adapter). Use `intel` when you have run `/gsd-map-codebase` and want the faster, pre-indexed lookup. All other values beyond `grep` and `intel` are reserved and have no effect in the current release. |
+
+<a id="mempalace-settings"></a>
+### MemPalace Settings
+
+MemPalace is an opt-in, default-resilient memory capability. Every hook is `onError: skip` — a missing or unreachable MemPalace installation never halts or fails the loop. Enable with `mempalace.enabled: true` after installing MemPalace (`pip install mempalace`).
+
+`mempalace.enabled` is the **master gate**: all five loop hooks (discuss, plan, execute-wave, verify, ship) and both curator contributions are gated on this key. When it is `false` (the default), nothing fires and the GSD loop is byte-for-byte unchanged. The remaining keys only refine behavior when `mempalace.enabled` is `true`; they are honored at runtime by the skills, curator, and fragments — they do not add independent hook gating.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `mempalace.enabled` | boolean | `false` | Master gate for the MemPalace memory capability. When `false` (the default) every recall/capture hook is inactive and the loop is unchanged. All other `mempalace.*` keys are inert while this is `false`. |
+| `mempalace.memory_mode` | enum: `augment`, `kg_backend`, `replace` | `augment` | How authoritative MemPalace is during recall/capture. `augment` (default — an additive recall layer alongside GSD's native graphs/learnings; native memory stays authoritative; lowest coupling). `kg_backend` (knowledge-graph queries resolve against MemPalace's temporal graph as the primary source, with `.planning/graphs/` as fallback; non-KG drawer recall stays additive). `replace` (recall resolves through the palace as the source of truth, native artifacts as fallback). Every mode is `onError:skip` and default-resilient: an unreachable palace degrades to native memory and GSD keeps writing `.planning/graphs/`, so no memory is lost. Cross-mode migration of existing `.planning/graphs/` into the palace is a separate, not-yet-implemented concern. |
+| `mempalace.wing` | string | `""` | Palace wing name for this project. Empty (the default) derives the wing from `project_code` or the project directory name. |
+| `mempalace.recall_on_discuss` | boolean | `true` | When `mempalace.enabled` is `true`: inject a wake-up + semantic-search recall fragment into the orchestrator at `discuss:pre`. Surfaces prior decisions, patterns, and surprises before the discussion starts. |
+| `mempalace.recall_on_plan` | boolean | `true` | When `mempalace.enabled` is `true`: run the `mempalace-recall` skill at `plan:pre` to produce `MEMORY-RECALL.md` from prior decisions, patterns, and surprises relevant to the plan. |
+| `mempalace.capture_artifacts` | boolean | `true` | When `mempalace.enabled` is `true`: file phase artifacts (`CONTEXT.md`, `PLAN.md`, `SUMMARY.md`) verbatim into MemPalace at their respective phase boundaries (`discuss:post`, `plan:post`, `verify:post`). Also captures confirmed bug→fix pairs at `execute:wave:post`. |
+| `mempalace.mirror_kg` | boolean | `true` | When `mempalace.enabled` is `true`: mirror decisions and learnings into MemPalace's temporal knowledge graph (`mempalace_kg_add` with `valid_from` = phase date) alongside drawer capture. |
+| `mempalace.cross_project_tunnels` | boolean | `false` | When `mempalace.enabled` is `true`: at `ship:post`, propose and create tunnels between this wing's rooms and semantically related wings in other projects (`mempalace_find_tunnels`, `mempalace_create_tunnel`). |
+| `mempalace.diary_journal` | boolean | `true` | When `mempalace.enabled` is `true`: at `ship:post`, write a per-agent diary entry (`mempalace_diary_write`) summarising the session. |
+| `mempalace.auto_capture_hooks` | boolean | `false` | **Reserved — not yet implemented.** Intended to install MemPalace's native Claude Code hooks (`session-start`, `stop`, `precompact`) for passive mid-session capture between loop points. The capability's `hooks` array is currently empty; no native hooks are installed by setting this key. This key is forward-declared for the future "Connected Capability" phase. |
+
+#### Memory modes in detail
+
+| Mode | KG-query source | Recall source | Coupling |
+|------|-----------------|---------------|---------|
+| `augment` (default) | GSD native + palace (additive) | GSD native + palace search | lowest |
+| `kg_backend` | palace temporal KG primary, `.planning/graphs/` fallback | GSD native + palace search | medium |
+| `replace` | palace primary, native fallback | palace as source of truth, native fallback | highest |
+
+Mode is read at hook-render time; switching modes is a config change, not a reinstall. In every mode the palace is `onError:skip` and default-resilient — an unreachable palace degrades to native memory, and GSD keeps writing `.planning/graphs/` so no memory is lost. Switching an established project to `kg_backend`/`replace` changes how new recall/capture resolve but does not backfill existing `.planning/graphs/` into the palace (a separate, not-yet-implemented concern).
+
+#### Example
+
+```bash
+# Enable MemPalace (augment is the default mode)
+gsd-tools query config-set mempalace.enabled true
+
+# Optional: route knowledge-graph recall through the palace's temporal KG (native as fallback)
+# gsd-tools query config-set mempalace.memory_mode kg_backend
+
+# Enable cross-project tunnel proposals at ship:post
+gsd-tools query config-set mempalace.cross_project_tunnels true
+```
 
 <a id="graphify-settings"></a>
 ### Graphify Settings
@@ -564,6 +789,7 @@ The `plan_review.*` namespace controls the plan drift guard, which verifies that
 | `graphify.enabled` | boolean | `false` | Enable the project knowledge graph. When `true`, `/gsd-graphify` builds and queries a graph in `.planning/graphs/`. Added in v1.36 |
 | `graphify.build_timeout` | number (seconds) | `300` | Maximum seconds allowed for a `/gsd-graphify build` run before it aborts. Added in v1.36 |
 | `graphify.auto_update` | boolean | `false` | **Opt-in (issue #3347).** When `true` (and `graphify.enabled` is also `true`), the bundled PostToolUse hook `hooks/gsd-graphify-update.sh` auto-rebuilds the project knowledge graph in a detached background process after `git commit/merge/pull/rebase --continue/cherry-pick` on the default branch (`git.base_branch` override, else `main`/`master`/`trunk`). Hook returns instantly; the rebuild updates `.planning/graphs/{graph.json,graph.html,GRAPH_REPORT.md}` and writes `.planning/graphs/.last-build-status.json` (`{ts, status: "running"\|"ok"\|"failed", exit_code, duration_ms, head_at_build}`). PID-locked, CI-aware (`$CI` env suppresses), bails silently if `graphify` is not on `PATH`. Default `false` so existing behaviour is unchanged after upgrade. |
+| `graphify.graph_path` | string (path) | _unset_ | **Umbrella/multi-repo support (issue #1825).** Overrides where `/gsd-graphify query\|status\|diff` read the knowledge graph from. Set to a path (relative to the project root, or absolute) pointing at a shared umbrella-level `graph.json` so a single curated cross-repo graph serves every sub-project without N drifting mirror copies. The diff snapshot (`.last-build-snapshot.json`) travels with the configured graph (same directory); the auto-update status sidecar stays project-local. Build stays project-scoped (`.planning/graphs/`) — build the umbrella graph in the umbrella project, then point sub-projects at it. When unset, behaviour is byte-identical to the historical `.planning/graphs/graph.json`. A clear, actionable error is returned when the configured file is missing. |
 
 #### Multi-developer setup
 
@@ -596,6 +822,41 @@ gsd-tools query config-set features.thinking_partner false
 ```
 
 The `features.*` namespace is a dynamic key pattern — new feature flags can be added without modifying `VALID_CONFIG_KEYS`. Any key matching `features.<name>` is accepted by the config system.
+
+---
+
+## Capability Overlay (installed third-party capabilities)
+
+GSD supports an **installed overlay** of third-party capability manifests that are composed with the frozen first-party registry at runtime via `loadRegistry({ includeInstalled: true })` (ADR-1244; see [`docs/reference/capability-manifest.md`](reference/capability-manifest.md) and [`docs/how-to/import-a-capability-from-a-url.md`](how-to/import-a-capability-from-a-url.md)).
+
+### Install roots
+
+Capability manifests (`capability.json`) are discovered from two scoped roots:
+
+| Scope | Path |
+|-------|------|
+| Global | `$GSD_HOME/.gsd/capabilities/<id>/capability.json` |
+| Project | `<projectRoot>/.gsd/capabilities/<id>/capability.json` |
+
+`GSD_HOME` defaults to your home directory (`~`) when unset. Both roots are scanned on every `loadRegistry` call; neither requires config changes to activate.
+
+### Composition and first-party-wins invariant
+
+Installed overlay capabilities are merged via the same `buildRegistry` pipeline as first-party capabilities, so all derived views (`bySkill`, `byAgent`, `byLoopPoint`, `configKeys`) cover first-party and overlay entries identically. **First-party always wins**: an overlay entry is rejected at load time if its `id`, any owned skill or agent stem, or any federated config key collides with a first-party entry, or if its `id` uses a reserved prefix (`gsd-`, `gsd-core-`, `anthropic-`). Rejected entries emit a warning and are skipped; they never crash the load loop.
+
+### Load-time `engines.gsd` compatibility gate
+
+Each overlay manifest may declare an `engines.gsd` semver range. At load time GSD evaluates this range against the running GSD version. An overlay that does not satisfy the range is **skipped with a warning** — it is never loaded and never crashes the loop. Manifests without an `engines.gsd` field are accepted unconditionally.
+
+### Gate-kind fail-open policy (#2009)
+
+If a skipped or load-failed overlay capability (for example, one whose `engines.gsd` range is incompatible) declared a `gate`-kind loop hook, the loop resolver does **not** inject a gate at that hook point (fail OPEN): the loop proceeds. Instead it emits a loud warning — to stderr and in the `loop render-hooks` envelope's `warnings` array — naming the load-failure reason and the exact remediation, `gsd capability remove <id>`, so the operator is loudly told how to clear it. Skipped capabilities whose hooks are `step` or `contribution` kind skip open too, as before — the loop proceeds without them.
+
+### Overlay config federation
+
+Config keys declared in an overlay capability's `.config` slice federate into the `loadConfig` return value via the same Federated Config channel as first-party capability keys. They appear as valid keys in `config-schema.cjs` (`isValidConfigKey`) and in the runtime config schema, so overlay capabilities can declare project-local config toggles without editing the central config schema.
+
+> **See also:** [`docs/reference/capability-manifest.md`](reference/capability-manifest.md) for the full `capability.json` schema, [`docs/how-to/import-a-capability-from-a-url.md`](how-to/import-a-capability-from-a-url.md) for installation steps, and [ADR-1244](adr/1244-capability-ecosystem.md) for the design record.
 
 ---
 
@@ -713,7 +974,15 @@ These keys live under `workflow.*` — that is where the workflows and installer
 |---------|------|---------|-------------|
 | `workflow.security_enforcement` | boolean | `true` | Enable threat-model-anchored security verification via `/gsd-secure-phase`. When `false`, security checks are skipped entirely |
 | `workflow.security_asvs_level` | number (1-3) | `1` | OWASP ASVS verification level. Level 1 = opportunistic, Level 2 = standard, Level 3 = comprehensive |
-| `workflow.security_block_on` | string | `"high"` | Minimum severity that blocks phase advancement. Options: `"high"`, `"medium"`, `"low"` |
+| `workflow.security_block_on` | string | `"high"` | Minimum threat severity that blocks phase advancement. The auditor counts only open threats at or above this severity toward the blocking gate; `none` disables severity blocking. Options: `"critical"`, `"high"`, `"medium"`, `"low"`, `"none"` |
+
+### Injection blocking (top-level `security.*`)
+
+Distinct from the `workflow.security_*` keys above: the read-injection scanner reads a **top-level** `security` object (not `workflow.security`). Set it with `gsd config-set security.injection_blocking true` — it persists as a nested key (`security.injection_blocking`), never a flat dotted key.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `security.injection_blocking` | boolean | `false` | Opt-in circuit-breaker for the read-injection scanner hook (`gsd-read-injection-scanner.js`, PostToolUse on `Read`/`WebFetch`/`WebSearch`). Default (`false`) is **advisory**: HIGH-confidence injection detections are logged but not blocked. When `true`, a HIGH detection emits `decision: "block"` to halt the agent's next step. Because the hook runs *after* the fetch, blocking does **not** retroactively redact content already in the transcript — it is a circuit-breaker, not a redactor. See the [security model](explanation/security-model.md) and [ADR-1577](adr/1577-untrusted-input-boundary-and-injection-blocking.md). |
 
 ---
 
@@ -733,7 +1002,9 @@ plans and shipped code (issue #2492).
 existing requirements coverage gate, before plans are committed. For each
 trackable decision in `<decisions>`, it checks that the decision id
 (`D-NN`) or its text appears in at least one plan's `must_haves`,
-`truths`, or body. A miss surfaces the missing decision by id and refuses
+`truths`, or `objective` (front-matter), a `## must_haves`/`truths`/`tasks`/`objective`
+heading, or an `<objective>`/`<tasks>`/`<task>`/`<action>`/`<read_first>`/`<behavior>`/`<verify>`/`<acceptance_criteria>`/`<done>`
+tag body. A miss surfaces the missing decision by id and refuses
 to mark the phase planned.
 
 **Verify-phase validation gate (NON-BLOCKING).** Runs alongside the other
@@ -781,14 +1052,14 @@ Configure per-CLI model selection for `/gsd-review`. When set, overrides the CLI
 | `review.models.claude` | string | (CLI default) | Model used when `--claude` reviewer is invoked |
 | `review.models.codex` | string | (CLI default) | Model used when `--codex` reviewer is invoked |
 | `review.models.opencode` | string | (CLI default) | Model used when `--opencode` reviewer is invoked |
-| `review.models.qwen` | string | (CLI default) | Model used when `--qwen` reviewer is invoked |
-| `review.models.cursor` | string | (CLI default) | Model used when `--cursor` reviewer is invoked |
+| `review.models.agy` | string | (CLI default) | Model used when the `--antigravity` / `--agy` reviewer is invoked. The key suffix is the CLI's own name (`agy`), not the lane slug — the lane declares which key it reads, so the two need not match |
+| `review.models.kimi-code` | string | (CLI default) | Model used when the `--kimi-code` reviewer is invoked (injected into `-m`) |
 | `review.models.ollama` | string | (server default) | Model name passed to Ollama when `--ollama` reviewer is invoked. If unset, the first available model reported by the server is used (e.g. `llama3`). Set to a specific tag: `gsd config-set review.models.ollama codellama` |
 | `review.models.lm_studio` | string | (server default) | Model name passed to LM Studio when `--lm-studio` reviewer is invoked. If unset, the first available model reported by the server is used. |
 | `review.models.llama_cpp` | string | (server default) | Model name passed to llama.cpp when `--llama-cpp` reviewer is invoked. If unset, the first model reported by `/v1/models` is used. |
-| `review.default_reviewers` | string[] \| null | (all detected reviewers) | Default reviewer subset for no-flag `/gsd-review`. Example: `["gemini","codex"]`. Explicit flags and `--all` override this setting. |
+| `review.default_reviewers` | string[] \| null | (all detected reviewers) | Default reviewer subset for no-flag `/gsd-review`. Example: `["gemini","codex"]`. May include configured `review.reviewer_instances` names. Explicit flags and `--all` override this setting. |
 | `review.max_prompt_tokens` | number\|null | null | Default maximum estimated tokens for the assembled review prompt. When set, the prompt is deterministically trimmed before being sent to each reviewer. Per-reviewer overrides via `review.max_prompt_tokens_per_reviewer` take precedence. null = no trim (current behavior). |
-| `review.max_prompt_tokens_per_reviewer` | object | {} | Per-reviewer token budget overrides. Keys are reviewer slugs (ollama, llama_cpp, lm_studio, gemini, claude, codex, opencode, qwen, cursor). Values override `review.max_prompt_tokens` for that reviewer. Recommended for local model servers. |
+| `review.max_prompt_tokens_per_reviewer` | object | {} | Per-reviewer token budget overrides. Keys are reviewer slugs. Only lanes that declare a budget key accept one — today `ollama`, `lm_studio` and `llama_cpp`, the local model servers this exists for. Values override `review.max_prompt_tokens` for that reviewer. A per-lane value of `0` disables trimming for that lane specifically. |
 | `review.ollama_host` | string | `http://localhost:11434` | Base URL of the Ollama server. Override when running Ollama on a non-default port or remote host: `gsd config-set review.ollama_host http://192.168.1.10:11434` |
 | `review.lm_studio_host` | string | `http://localhost:1234` | Base URL of the LM Studio local server. Override when using a non-default port. |
 | `review.llama_cpp_host` | string | `http://localhost:8080` | Base URL of the llama.cpp server (`llama-server`). Override when using a non-default port. |
@@ -822,7 +1093,7 @@ Configure per-step flags that `/gsd-manager` appends to each dispatched command.
 |---------|------|---------|-------------|
 | `manager.flags.discuss` | string | (none) | Flags appended to discuss-phase commands (e.g., `"--auto"`) |
 | `manager.flags.plan` | string | (none) | Flags appended to plan-phase commands (e.g., `"--skip-research"`) |
-| `manager.flags.execute` | string | (none) | Flags appended to execute-phase commands (e.g., `"--validate"`) |
+| `manager.flags.execute` | string | (none) | Flags appended to execute-phase commands (e.g., `"--cross-ai"`) |
 
 **Example:**
 
@@ -832,7 +1103,7 @@ Configure per-step flags that `/gsd-manager` appends to each dispatched command.
     "flags": {
       "discuss": "--auto",
       "plan": "--skip-research",
-      "execute": "--validate"
+      "execute": "--cross-ai"
     }
   }
 }
@@ -924,10 +1195,10 @@ for the change to take effect. See issue #2256.
 | Phase type | Agents |
 |---|---|
 | `planning` | `gsd-planner`, `gsd-roadmapper`, `gsd-pattern-mapper` |
-| `discuss` | (reserved — no subagent today) |
+| `discuss` | `gsd-assumptions-analyzer` |
 | `research` | `gsd-phase-researcher`, `gsd-project-researcher`, `gsd-research-synthesizer`, `gsd-codebase-mapper`, `gsd-ui-researcher` |
 | `execution` | `gsd-executor`, `gsd-debugger`, `gsd-doc-writer` |
-| `verification` | `gsd-verifier`, `gsd-plan-checker`, `gsd-integration-checker`, `gsd-nyquist-auditor`, `gsd-ui-checker`, `gsd-ui-auditor`, `gsd-doc-verifier` |
+| `verification` | `gsd-verifier`, `gsd-plan-checker`, `gsd-integration-checker`, `gsd-nyquist-auditor`, `gsd-ui-checker`, `gsd-ui-auditor`, `gsd-doc-verifier`, `gsd-code-reviewer` |
 | `completion` | (reserved — no subagent today) |
 
 `discuss` and `completion` are accepted by the schema for forward compatibility; setting them today is a no-op until a subagent maps to them.
@@ -953,7 +1224,7 @@ The five layers compose top-down: `model_profile` is the base tier, `models[<pha
 | `"opus"` / `"sonnet"` / `"haiku"` | Standard tier — runtime resolution maps to the active runtime's model for that tier |
 | `"inherit"` | Agents in this phase follow the session model (same semantics as `model_profile: "inherit"`) |
 
-If you need a fully-qualified model ID (`"openai/gpt-5"`, `"google/gemini-2.5-pro"`), use `model_overrides` per agent instead. `models.*` is intentionally tier-only so the runtime-aware mapping stays correct on Codex / OpenCode / Gemini CLI installs.
+If you need a fully-qualified model ID (`"openai/gpt-5"`, `"google/gemini-2.5-pro"`), use `model_overrides` per agent instead. `models.*` is intentionally tier-only so the runtime-aware mapping stays correct on Codex / OpenCode / Antigravity CLI installs.
 
 #### When to use which
 
@@ -1046,7 +1317,40 @@ The `dynamic_routing` block is **disabled by default** — `enabled: false` (or 
 | `dynamic_routing.tier_models.standard` | enum | (none) | Tier alias for standard. Typically `sonnet`. |
 | `dynamic_routing.tier_models.heavy` | enum | (none) | Tier alias for heavy. Typically `opus`. |
 | `dynamic_routing.escalate_on_failure` | boolean | `true` | When false, escalation is disabled (every attempt uses the default tier). |
-| `dynamic_routing.max_escalations` | integer | `1` | Hard cap on retries per agent invocation. Prevents runaway loops. |
+| `dynamic_routing.max_escalations` | integer | `1` | Hard cap on retries per agent invocation. Prevents runaway loops. Also caps the provider ladder below. |
+| `dynamic_routing.provider_escalation` | string[] | (none) | Ordered fallback model IDs tried when a run dies on a provider **quota / rate limit**. Added in v1.43 ([#2296](https://github.com/open-gsd/gsd-core/issues/2296)) |
+
+#### Provider escalation on quota-exceeded — added in v1.43
+
+The tier ladder above escalates *within one provider*. That does not help when the
+provider itself is what ran out: a heavier tier on the same throttled account is still
+throttled. `provider_escalation` is a separate, opt-in ladder for exactly that case.
+
+```json
+{
+  "dynamic_routing": {
+    "enabled": true,
+    "tier_models": { "light": "haiku", "standard": "sonnet", "heavy": "opus" },
+    "provider_escalation": ["gpt-5", "nvidia/llama-3.3"],
+    "max_escalations": 2
+  }
+}
+```
+
+When an executor dies and `gsd-tools agent classify-failure` classifies the error body as
+`quota-exceeded`, `execute-phase` re-resolves the model from this list instead of waiting
+for a quota reset, logs the switch (`sonnet → gpt-5`), and honors any `Retry-After` the
+provider sent. The ladder is capped at `min(max_escalations, provider_escalation.length)`;
+once spent, GSD reports every model it tried and falls back to the manual recovery prompt
+rather than silently retrying the last one.
+
+- **Opt-in.** With no `provider_escalation` configured, quota failures keep today's manual
+  wait-for-reset prompt exactly as before.
+- **Quota only.** Other failure classes (`classify-handoff-bug`, `unknown-failure`) never
+  consult this ladder — they keep the tier ladder.
+- **`escalate_on_failure: false`** disables this ladder too.
+- Entries are opaque model IDs passed to the runtime. Blank and non-string entries are
+  dropped; the surviving order is preserved.
 
 #### When to use which
 
@@ -1112,6 +1416,36 @@ The model-catalog's `reasoning_effort` per-tier hint is a legacy field kept for 
 
 Valid effort values: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 
+#### Where effort actually reaches — added in v1.8.0
+
+Effort resolved from the cascade above reaches a runtime through one of two channels.
+
+**Install-time.** The value is baked into the artifacts the installer generates — the
+`effort:` frontmatter key on a Claude subagent, `model_reasoning_effort` in a generated
+Codex `.toml`. This is fixed at install and changes only on reinstall or sync.
+
+**Invocation-time.** When GSD spawns another CLI as a subprocess — the cross-AI reviewers
+in `/gsd-review` — the effort is appended to that CLI's own command line. Whether a host
+can receive effort this way is a declared capability (`effortSurface`, ADR-1239), not an
+assumption:
+
+| Reviewer CLI | Receives effort as |
+|---|---|
+| `claude` | `--effort <level>` |
+| `opencode` | `--variant <level>` |
+| `codex` | `-c model_reasoning_effort=<level>` |
+
+A host whose documentation states no reasoning setting is left **untouched** — no flag is
+guessed, and GSD never writes into your own CLI's config file to set one. Levels a given
+CLI does not accept are clamped to its nearest supported value (`minimal` → `low` for
+Claude, `max` → `xhigh` for Codex), so a cross-provider value never produces an invalid
+argument.
+
+Before this, a review run inherited whatever effort happened to be configured in your
+personal CLI config, which is why the same project could produce very different review
+times on two machines. Setting `effort.default` (or an agent/tier override) now controls
+review runs too.
+
 ---
 
 ### Fast Mode (`fast_mode`) — added in v1.42
@@ -1176,7 +1510,7 @@ Use `node gsd-tools.cjs resolve-execution <agent-type> [--effort <level>] [--fas
 
 ---
 
-### Non-Claude Runtimes (Codex, OpenCode, Gemini CLI, Kilo)
+### Non-Claude Runtimes (Codex, OpenCode, Antigravity CLI, Kilo)
 
 > **Codex CLI minimum supported version: `0.130.0`** (issue [#3562](https://github.com/open-gsd/gsd-core/issues/3562)).
 >
@@ -1215,7 +1549,7 @@ The intent is the same as the Claude profile tiers -- use a stronger model for p
 |-------|----------|----------|
 | `false` (default) | Returns Claude aliases (`opus`, `sonnet`, `haiku`) | Claude Code with native Anthropic API |
 | `true` | Maps aliases to full Claude model IDs (`claude-opus-4-8`) | Claude Code with API that requires full IDs |
-| `"omit"` | Returns empty string (runtime picks its default) | Non-Claude runtimes (Codex, OpenCode, Gemini CLI, Kilo) |
+| `"omit"` | Returns empty string (runtime picks its default) | Non-Claude runtimes (Codex, OpenCode, Antigravity CLI, Kilo) |
 
 ### Runtime-Aware Profiles (#2517)
 
@@ -1227,14 +1561,17 @@ When `runtime` is set, profile tiers (`opus`/`sonnet`/`haiku`) resolve to runtim
 
 | Runtime | `opus` | `sonnet` | `haiku` | reasoning_effort |
 |---------|--------|----------|---------|------------------|
-| `claude` | `claude-opus-4-8` | `claude-sonnet-4-6` | `claude-haiku-4-5` | (not used) |
-| `codex` | `gpt-5.5` | `gpt-5.3-codex` | `gpt-5.4-mini` | `xhigh` / `medium` / `medium` |
-| `gemini` | `gemini-3-pro` | `gemini-3-flash` | `gemini-2.5-flash-lite` | (not used) |
+| `claude` | `claude-opus-4-8` | `claude-sonnet-5` | `claude-haiku-4-5` | (not used) |
+| `codex` | `gpt-5.6-sol` | `gpt-5.6-terra` | `gpt-5.6-luna` | `xhigh` / `medium` / `medium` |
 | `qwen` | `qwen3-max-2026-01-23` | `qwen3-coder-plus` | `qwen3-coder-next` | (not used) |
-| `opencode` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-4-6` | `anthropic/claude-haiku-4-5` | (not used) |
-| `copilot` | `claude-opus-4-8` | `claude-sonnet-4-6` | `claude-haiku-4-5` | (not used) |
-| `hermes` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-4-6` | `anthropic/claude-haiku-4-5` | (not used) |
-| Group B (`kilo`, `cline`, `cursor`, `windsurf`, `augment`, `trae`, `codebuddy`, `antigravity`) | (no built-in default — your runtime handles model selection) | | | |
+| `opencode` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (not used) |
+| `copilot` | `claude-opus-4-8` | `claude-sonnet-5` | `claude-haiku-4-5` | (not used) |
+| `hermes` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (not used) |
+| `kilo` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (not used) |
+| `pi` | `claude-opus-4-8` | `claude-sonnet-5` | `claude-haiku-4-5` | (not used) |
+| Group B (`cline`, `cursor`, `windsurf` (alias: `devin-desktop`), `augment`, `trae`, `codebuddy`, `antigravity`) | (no built-in default — your runtime handles model selection) | | | |
+
+> **How these model IDs are sourced.** The catalog (`bin/shared/model-catalog.json`) pins each runtime's tier defaults to that provider's current frontier IDs, and may intentionally carry forward-dated IDs ahead of a provider's public docs. To verify an ID is live before changing it, check the provider's own source/API — e.g. Codex: `codex debug models` or the OpenAI Codex models page; Qwen: Alibaba Model Studio model list. Only change an ID that the provider actually rejects — absence from documentation alone is not proof of invalidity.
 
 **Codex example** — one config, tiered models, no large `model_overrides` block:
 
@@ -1245,7 +1582,7 @@ When `runtime` is set, profile tiers (`opus`/`sonnet`/`haiku`) resolve to runtim
 }
 ```
 
-This resolves `gsd-planner` → `gpt-5.5` (xhigh), `gsd-executor` → `gpt-5.3-codex` (medium), `gsd-codebase-mapper` → `gpt-5.4-mini` (medium). The Codex installer embeds `model = "..."` and `model_reasoning_effort = "..."` in each generated agent TOML.
+This resolves `gsd-planner` → `gpt-5.6-sol` (xhigh), `gsd-executor` → `gpt-5.6-terra` (medium), `gsd-codebase-mapper` → `gpt-5.6-luna` (medium). The Codex installer embeds `model = "..."` and `model_reasoning_effort = "..."` in each generated agent TOML.
 
 **Claude example** — explicit opt-in resolves to full Claude IDs (no `resolve_model_ids: true` needed):
 
@@ -1298,7 +1635,7 @@ This resolves `gsd-planner` → `gpt-5.5` (xhigh), `gsd-executor` → `gpt-5.3-c
 
 > **[#49](https://github.com/open-gsd/gsd-core/issues/49)** — provider-neutral model policy config surface. Resolves before legacy `model_profile_overrides`.
 
-`model_policy` provides a simpler, provider-neutral way to configure model tiers across runtimes. It is the preferred surface for non-Anthropic runtimes where `model_profile_overrides` would require manually knowing the right model IDs. Configure it via `/gsd:settings` → Section 8 (Model Policy).
+`model_policy` provides a simpler, provider-neutral way to configure model tiers across runtimes. It is the preferred surface for non-Anthropic runtimes where `model_profile_overrides` would require manually knowing the right model IDs. Configure it via `/gsd-settings` → Section 8 (Model Policy).
 
 ### Known provider preset
 
@@ -1310,14 +1647,14 @@ Choose a provider and budget level via the settings workflow; GSD writes the can
   "model_policy": {
     "provider": "openai",
     "budget": "medium",
-    "high":   "gpt-5.5",
-    "medium": "gpt-5.3-codex",
-    "low":    "gpt-5.4-mini"
+    "high":   "gpt-5.6-sol",
+    "medium": "gpt-5.6-terra",
+    "low":    "gpt-5.6-luna"
   }
 }
 ```
 
-Known providers: `openai`, `anthropic`, `google`, `qwen`. Budget levels: `high`, `medium`, `low`.
+Known providers: `openai`, `anthropic`, `anthropic-fable`, `google`, `qwen`. Budget levels: `high`, `medium`, `low`. Use `anthropic` to keep the Opus 4.8-backed Claude preset, or `anthropic-fable` to opt into Claude Fable 5 for high-budget top-tier routing. On the default `claude` runtime, policy-resolved model IDs are mapped to Claude Code agent aliases (for example `claude-fable-5` → `fable`); an ID with no corresponding Claude alias emits a warning and falls back to the configured tier.
 
 For advanced per-runtime control, `runtime_tiers` accepts explicit entries using the internal profile tier names (`opus`, `sonnet`, `haiku`):
 
@@ -1328,9 +1665,9 @@ For advanced per-runtime control, `runtime_tiers` accepts explicit entries using
     "provider": "openai",
     "runtime_tiers": {
       "codex": {
-        "opus":   { "model": "gpt-5.5",        "reasoning_effort": "high" },
-        "sonnet": { "model": "gpt-5.3-codex",  "reasoning_effort": "medium" },
-        "haiku":  { "model": "gpt-5.4-mini",   "reasoning_effort": "low" }
+        "opus":   { "model": "gpt-5.6-sol",        "reasoning_effort": "high" },
+        "sonnet": { "model": "gpt-5.6-terra",     "reasoning_effort": "medium" },
+        "haiku":  { "model": "gpt-5.6-luna",      "reasoning_effort": "low" }
       }
     }
   }
@@ -1382,6 +1719,7 @@ Use `provider: "generic"` (or `"custom"`) for OpenRouter, LiteLLM, local gateway
 | `GSD_AUDIT_ARGS` | Set to `1` to include command args in audit/error events (omitted by default) |
 | `GSD_PROJECT` | Override project root for multi-project workspace support (v1.32) |
 | `GSD_SKIP_SCHEMA_CHECK` | Skip schema drift detection during execute-phase (v1.31) |
+| `GSD_ALLOW_SYMLINKED_DEST` | Set to `1` (or `true`) to permit install/update when `CLAUDE_CONFIG_DIR` (or any artifact-kind child like `skills/`, `hooks/`) is an **intentional, user-owned symlink** pointing outside the install root. v1.7.x write-confinement (ADR-1239 Phase B) refuses such layouts by default to prevent untrusted `destSubpath` traversal. Opt in only if you manage configHome via symlinked external dirs, multi-account config layouts (`~/.claude-personal`, `~/.claude-team`), or dotfiles-managed configHome (nix-darwin, etc.). Two refusals remain load-bearing even with opt-in: path-traversal in `destSubpath` (`../../etc`-style), and a symlink whose resolved target equals the install root itself (would let the prune pass wipe it). |
 | `WSL_DISTRO_NAME` | Detected by installer for WSL path handling |
 
 ---
@@ -1398,7 +1736,7 @@ When `/gsd-new-project` creates a new `config.json`, it reads global defaults an
 
 ## Observability
 
-The Command Routing Hub emits a structured `DispatchEvent` after every dispatch. Default behaviour is **silent on success** and **one structured JSON line to stderr on error**.
+The Command Routing Hub emits a structured `DispatchEvent` after every dispatch — including capability commands (`graphify`, `intel`, `audit-uat`, `audit-open`) since #1646. Default behaviour is **silent on success** and **one structured JSON line to stderr on error**.
 
 ### Stderr error format
 

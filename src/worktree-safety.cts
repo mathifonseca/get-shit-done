@@ -10,7 +10,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execGit as execGitSeam } from './shell-command-projection.cjs';
+import { execGit as execGitSeam, posixNormalize, type SpawnResultOutput } from './shell-command-projection.cjs';
 
 // Default timeout for worktree-related git subprocess calls.
 // 10 s is generous enough for normal git operations on large repos while still
@@ -18,29 +18,28 @@ import { execGit as execGitSeam } from './shell-command-projection.cjs';
 // remote, stalled NFS mount, etc.).  Callers can override via deps.timeout.
 const DEFAULT_GIT_TIMEOUT_MS = 10000;
 
-interface GitResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  signal?: string | null;
-  error?: NodeJS.ErrnoException | null;
-  timedOut: boolean;
-}
+// #3021: accept the Workflow tool's worktree-wf_<runid>-<n> naming convention
+// (claude-orchestration's isolation:"worktree" emission) alongside the
+// existing agent-<id> / worktree-agent-<id> shapes.
+const WORKTREE_AGENT_BRANCH_RE = /^((worktree-)?agent-|worktree-wf_)[A-Za-z0-9._/-]+$/;
+const WORKTREE_AGENT_BRANCH_PATTERN = WORKTREE_AGENT_BRANCH_RE.source;
 
-type ExecGitFn = (args: string[], opts?: { cwd?: string; timeout?: number }) => GitResult;
+// GitResult now aliases the canonical SpawnResultOutput (shell-command-projection.cts),
+// which already carries `timedOut` — kept as a local name since it is referenced
+// below (gitResultOk).
+type GitResult = SpawnResultOutput;
+
+type ExecGitFn = typeof execGitSeam;
 
 /**
- * Execute a git command via the shell-projection seam, with a derived
- * `timedOut` field. Tests inject mocks via deps.execGit using the new
+ * Execute a git command via the shell-projection seam, applying the module's
+ * default timeout. `timedOut` is now derived by the seam itself
+ * (shell-command-projection.cts's `_spawnResult`), so this is a thin
+ * passthrough. Tests inject mocks via deps.execGit using the same
  * (args, opts) shape — see worktree-safety-policy.test.cjs.
- *
- * Return shape: { exitCode, stdout, stderr, timedOut, error, signal }
- *   - timedOut: true when spawnSync reports SIGTERM + ETIMEDOUT
  */
-function execGitDefault(args: string[], opts: { cwd?: string; timeout?: number } = {}): GitResult {
-  const result = execGitSeam(args, { ...opts, timeout: opts.timeout ?? DEFAULT_GIT_TIMEOUT_MS });
-  const timedOut = result.signal === 'SIGTERM' && (result.error as NodeJS.ErrnoException)?.code === 'ETIMEDOUT';
-  return { ...result, timedOut };
+function execGitDefault(args: string[], opts: { cwd?: string; env?: Record<string, string>; timeout?: number } = {}): GitResult {
+  return execGitSeam(args, { ...opts, timeout: opts.timeout ?? DEFAULT_GIT_TIMEOUT_MS });
 }
 
 interface WorktreeBranchEntry {
@@ -100,6 +99,8 @@ interface WorktreeDeps {
   readFileSafe?: (file: string) => string | null;
   mtimeSafe?: (file: string) => Date | null;
   reapMtimeGuardMs?: number;
+  /** Injected current time in ms since epoch for deterministic tests (#1191). */
+  nowMs?: number;
   parseWorktreePorcelain?: (porcelain: string) => WorktreeBranchEntry[];
 }
 
@@ -143,21 +144,40 @@ interface WorktreeContextResult {
   reason: string;
 }
 
-function resolveWorktreeContext(cwd: string, deps: WorktreeDeps = {}): WorktreeContextResult {
+/**
+ * Shortcut-free git-dir-vs-git-common-dir comparison: the actual primitive
+ * that distinguishes a linked worktree from the main worktree.
+ *
+ * Deliberately factored out of `resolveWorktreeContext` (#3045). That
+ * function's `has_local_planning` shortcut answers a DIFFERENT question ("is
+ * there already a usable project root right here") and must NOT be consulted
+ * for isolation detection: a git worktree created specifically to isolate an
+ * executor is a full checkout, so it normally has its OWN checked-out
+ * `.planning/` too. A caller that ran the shortcut first would read that
+ * correctly-isolated worktree as `current_directory`/`has_local_planning` —
+ * i.e. "not isolated" — a false positive that defeats the very isolation
+ * guard that needs this check (see `hooks/gsd-cursor-subagent-start.js`,
+ * #3045). `resolveWorktreeLinkage` always performs the real git-dir
+ * comparison, independent of whether `.planning` exists locally.
+ */
+function resolveWorktreeLinkage(cwd: string, deps: WorktreeDeps = {}): WorktreeContextResult {
   const execGit = deps.execGit || execGitDefault;
-  const existsSync = deps.existsSync || fs.existsSync;
-
-  // Local .planning takes precedence over linked-worktree remapping.
-  if (existsSync(path.join(cwd, '.planning'))) {
-    return {
-      effectiveRoot: cwd,
-      mode: 'current_directory',
-      reason: 'has_local_planning',
-    };
-  }
 
   const gitDir = execGit(['rev-parse', '--git-dir'], { cwd });
   const commonDir = execGit(['rev-parse', '--git-common-dir'], { cwd });
+  // A TIMEOUT means the command never completed — it is not evidence of "not a
+  // git repository" (which completes fast, with a clean non-zero exit). Surface
+  // it under a distinct reason so callers can tell "genuinely not a repo" apart
+  // from "could not determine" (#3050). effectiveRoot still degrades to cwd
+  // (there is no safer default without a resolved git-dir), but the reason is
+  // no longer indistinguishable from the benign case.
+  if (gitDir.timedOut || commonDir.timedOut) {
+    return {
+      effectiveRoot: cwd,
+      mode: 'current_directory',
+      reason: 'git_timed_out',
+    };
+  }
   if (gitDir.exitCode !== 0 || commonDir.exitCode !== 0) {
     return {
       effectiveRoot: cwd,
@@ -183,6 +203,21 @@ function resolveWorktreeContext(cwd: string, deps: WorktreeDeps = {}): WorktreeC
   };
 }
 
+function resolveWorktreeContext(cwd: string, deps: WorktreeDeps = {}): WorktreeContextResult {
+  const existsSync = deps.existsSync || fs.existsSync;
+
+  // Local .planning takes precedence over linked-worktree remapping.
+  if (existsSync(path.join(cwd, '.planning'))) {
+    return {
+      effectiveRoot: cwd,
+      mode: 'current_directory',
+      reason: 'has_local_planning',
+    };
+  }
+
+  return resolveWorktreeLinkage(cwd, deps);
+}
+
 interface WorktreePrunePlan {
   repoRoot: string;
   action: string;
@@ -204,17 +239,26 @@ function planWorktreePrune(repoRoot: string, options: { allowDestructive?: boole
   }
 
   let worktrees: WorktreeBranchEntry[] = [];
+  let parseFailed = false;
   try {
     worktrees = parsePorcelain(listed.porcelain);
   } catch {
     // Keep historical behavior: still run metadata prune when parsing fails.
+    // #3050/#3057 (B6): but the reason must NOT collide with the
+    // genuinely-empty-list case below — a parser that could not read the
+    // porcelain output is not the same fact as "there are no worktrees", and
+    // this plan drives a PRUNE, so conflating them means a prune decision made
+    // on unread data would be indistinguishable from one made on real data.
     worktrees = [];
+    parseFailed = true;
   }
 
   return {
     repoRoot,
     action: 'metadata_prune_only',
-    reason: worktrees.length === 0 ? 'no_worktrees' : 'worktrees_present',
+    reason: parseFailed
+      ? 'parse_failed'
+      : (worktrees.length === 0 ? 'no_worktrees' : 'worktrees_present'),
     destructiveModeRequested,
   };
 }
@@ -249,8 +293,7 @@ function executeWorktreePrunePlan(plan: WorktreePrunePlan | null, deps: Worktree
 
   const result = execGit(['worktree', 'prune'], { cwd: plan.repoRoot });
   if (result.timedOut) {
-    // AC4: surface timedOut as a first-class field so callers (e.g.
-    // pruneOrphanedWorktrees in core.cjs) can log a structured WARNING rather
+    // AC4: surface timedOut as a first-class field so callers can log a structured WARNING rather
     // than silently ignoring it (PRED.k302 — error-swallowing-empty-sentinel).
     return {
       ok: false,
@@ -295,7 +338,7 @@ function listLinkedWorktreePaths(repoRoot: string, deps: WorktreeDeps = {}): Lin
 }
 
 interface WorktreeFinding {
-  kind: 'orphan' | 'stale';
+  kind: 'orphan' | 'stale' | 'unverified';
   path: string;
   ageMinutes?: number;
 }
@@ -318,9 +361,21 @@ function inspectWorktreeHealth(repoRoot: string, options: { staleAfterMs?: numbe
 
   const findings: WorktreeFinding[] = [];
   for (const entry of inventory.entries) {
-    if (!entry.exists) {
+    if (entry.exists === 'absent') {
       findings.push({
         kind: 'orphan',
+        path: entry.path,
+      });
+      continue;
+    }
+    if (entry.exists === 'unverified') {
+      // #3050/#3057 (B5): existsSync confirmed the path is present but statSync
+      // threw, so age/staleness could not be determined. This is neither
+      // "orphan" (existsSync says it IS there) nor "healthy" (we never verified
+      // it) — surface it as its own finding so a caller can't silently treat an
+      // unverifiable worktree as confirmed present-and-not-stale.
+      findings.push({
+        kind: 'unverified',
         path: entry.path,
       });
       continue;
@@ -343,7 +398,15 @@ function inspectWorktreeHealth(repoRoot: string, options: { staleAfterMs?: numbe
 
 interface InventoryEntry {
   path: string;
-  exists: boolean;
+  /**
+   * Tri-state (#3050/#3057, B5): `'present'` = existsSync AND statSync both
+   * succeeded (confirmed present, age known); `'absent'` = existsSync confirmed
+   * the path is genuinely absent; `'unverified'` = existsSync confirmed presence
+   * but statSync threw — presence could not be fully verified. `'unverified'`
+   * MUST NOT be treated as `'present'`: a caller that could not check must not
+   * report the worktree as confirmed present.
+   */
+  exists: 'present' | 'absent' | 'unverified';
   isStale: boolean;
   ageMinutes: number | null;
 }
@@ -370,7 +433,7 @@ function snapshotWorktreeInventory(repoRoot: string, options: { staleAfterMs?: n
 
   const entries: InventoryEntry[] = [];
   for (const worktreePath of listed.paths) {
-    let exists = false;
+    let exists: 'present' | 'absent' | 'unverified' = 'absent';
     let isStale = false;
     let ageMinutes: number | null = null;
 
@@ -384,16 +447,21 @@ function snapshotWorktreeInventory(repoRoot: string, options: { staleAfterMs?: n
       continue;
     }
 
-    exists = true;
     try {
       const stat = statSync(worktreePath);
+      exists = 'present';
       const ageMs = nowMs - stat.mtimeMs;
       ageMinutes = Math.round(ageMs / 60000);
       if (ageMs > staleAfterMs) {
         isStale = true;
       }
     } catch {
-      // Keep historical behavior: stat failures are ignored.
+      // #3050/#3057 (B5): a statSync throw means presence could not be
+      // verified — do NOT report exists:'present' (a guard that could not
+      // check must not claim the worktree is confirmed present). Distinguish
+      // from the genuinely-absent case above with a third state ('unverified')
+      // rather than silently falling through to the pre-existing 'present' default.
+      exists = 'unverified';
     }
     entries.push({
       path: worktreePath,
@@ -415,6 +483,7 @@ interface CleanupManifestEntry {
   worktree_path: string;
   branch: string;
   expected_base: string;
+  allowed_bases?: string[];
 }
 
 function normalizeCleanupManifestEntry(entry: unknown): CleanupManifestEntry | null {
@@ -426,12 +495,17 @@ function normalizeCleanupManifestEntry(entry: unknown): CleanupManifestEntry | n
   const branch = typeof e.branch === 'string' ? e.branch : '';
   const expectedBase = typeof e.expected_base === 'string' ? e.expected_base : '';
   if (!worktreePath || !branch || !expectedBase) return null;
-  if (!/^worktree-agent-[A-Za-z0-9._/-]+$/.test(branch)) return null;
+  if (!WORKTREE_AGENT_BRANCH_RE.test(branch)) return null;
+  const rawAllowedBases = Array.isArray(e.allowed_bases) ? e.allowed_bases : [];
+  const allowedBases = Array.from(new Set(
+    [expectedBase, ...rawAllowedBases.filter((base): base is string => typeof base === 'string' && base.length > 0)]
+  ));
   return {
     agent_id: typeof e.agent_id === 'string' ? e.agent_id : null,
     worktree_path: worktreePath,
     branch,
     expected_base: expectedBase,
+    allowed_bases: allowedBases,
   };
 }
 
@@ -510,6 +584,36 @@ function gitResultOk(result: GitResult | null | undefined): boolean {
 }
 
 /**
+ * #2852: after a failed `git merge` + a `git merge --abort` attempt, determine
+ * whether `repoRoot` is STILL mid-merge — the only condition that genuinely
+ * invalidates the rest of a cleanup wave.
+ *
+ * `git merge --abort`'s own exit code is NOT a reliable signal here: git refuses
+ * many merges (e.g. "your local changes to the following files would be
+ * overwritten by merge") WITHOUT ever creating a `MERGE_HEAD`, in which case
+ * `repoRoot`'s tree was never touched and `git merge --abort` correctly fails
+ * with "fatal: There is no merge to abort (MERGE_HEAD missing)?" — a SAFE
+ * outcome, not a broken one. Trusting that exit code alone would misclassify an
+ * ordinary per-entry merge failure as a repo-level one and strand the rest of
+ * the wave (caught in review).
+ *
+ * Checked directly via `git rev-parse --verify -q MERGE_HEAD` against the git
+ * ref itself rather than the filesystem: exit 0 means a merge is genuinely still
+ * in progress (unrecoverable — halt); exit 1 (the ref simply doesn't exist) means
+ * repoRoot is clean, whether because no merge state was ever entered or because
+ * abort successfully cleared it (safe — isolate and continue). Anything else
+ * (a timeout, or an unexpected git error) is treated conservatively as "still
+ * mid-merge" — degrade to the safe/halting answer rather than throw or guess.
+ */
+function repoRootStillMidMerge(execGit: ExecGitFn, repoRoot: string): boolean {
+  const check = execGit(['rev-parse', '--verify', '-q', 'MERGE_HEAD'], { cwd: repoRoot });
+  if (check.timedOut) return true; // fail closed — cannot confirm safety
+  if (check.exitCode === 0) return true; // MERGE_HEAD exists — genuinely still mid-merge
+  if (check.exitCode === 1) return false; // ref not found — repoRoot is not mid-merge
+  return true; // any other exit code (e.g. a fatal git error) — fail closed
+}
+
+/**
  * Walk <worktreePath>/.planning/ recursively and collect absolute paths of
  * all files whose names match *SUMMARY.md.  Returns [] when the directory
  * does not exist or cannot be read.
@@ -581,7 +685,7 @@ function rescueSummaryArtifacts(
     // relPath is the path relative to the worktree root (e.g. ".planning/q1-SUMMARY.md")
     // Normalize to forward slashes so the Set comparison against `git status --porcelain`
     // output works on Windows too (git always emits forward slashes in porcelain output).
-    const relPath = absPath.slice(worktreePath.length).replace(/^[/\\]/, '').replace(/\\/g, '/');
+    const relPath = posixNormalize(absPath.slice(worktreePath.length).replace(/^[/\\]/, ''));
 
     // #706: skip rescue when the SUMMARY is already committed on the branch.
     // Use `git cat-file -e HEAD:<relPath>` (not `ls-files --error-unmatch`) so
@@ -591,20 +695,18 @@ function rescueSummaryArtifacts(
     // the executor's content could be lost.  cat-file -e HEAD:<path> returns
     // exit 0 only when the object exists in the committed HEAD tree.
     //
-    // Fail-closed on timeout/fatal git errors: if we cannot determine whether
-    // the file is committed, do NOT rescue it (rescuing an actually-committed
-    // file would re-create the untracked collision; the merge will surface the
-    // issue).  The cleanup will be blocked by merge_failed in the worst case,
-    // which is the observable behaviour before this fix and is recoverable.
+    // #2556: rescue whenever the object is NOT confirmed committed (any non-zero
+    // exit). `git cat-file -e` returns 128 — NOT 1 — for an absent path (the
+    // normal uncommitted-SUMMARY state), so the previous `!== 1` check never
+    // rescued and the untracked file was silently discarded by `worktree remove
+    // --force`. Data safety wins: an un-rescued untracked SUMMARY is lost, while
+    // a spurious rescue is usually a no-op — the destination check below skips the
+    // copy when the main tree already holds identical content (which is also what
+    // guards the #706 merge collision). A divergent dest is overwritten, but only
+    // uncommitted main-tree content could be lost (committed content is git-recoverable).
     const catFileResult = execGit(['-C', worktreePath, 'cat-file', '-e', `HEAD:${relPath}`], { cwd: repoRoot });
-    if (catFileResult.exitCode !== 1) {
-      // Rescue only when cat-file definitively reports the object is absent (exit 1).
-      //   exit 0  → object exists (committed on HEAD) — merge will carry it, skip.
-      //   exit 128 → fatal git error (corrupt store, unborn HEAD, etc.) — uncertain,
-      //              fail-closed: do NOT rescue to avoid recreating the #706 collision.
-      //   timedOut / null / other → unreliable result — same fail-closed policy.
-      // In all non-1 cases the merge will either succeed naturally (0) or surface
-      // the problem safely (128/timeout), which is the recoverable pre-fix behaviour.
+    if (catFileResult.exitCode === 0) {
+      // exit 0 → the SUMMARY is committed on HEAD; the merge will carry it, so skip rescue.
       continue;
     }
 
@@ -671,6 +773,19 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
   const pending: CleanupManifestEntry[] = [];
   let ok = true;
 
+  // #2852: every per-entry failure site marks the SAME shape — status='blocked',
+  // a reason code, the captured stderr, push to results, flip the overall `ok`
+  // flag — and then either `continue` (isolate, the default) or, for the one
+  // repo-level-failure carve-out, `break`. Factored out so the 8 call sites below
+  // don't repeat the assembly; each site still owns its own control-flow decision.
+  function blockEntry(result: WaveCleanupEntryResult, reason: string, stderr: string): void {
+    result.status = 'blocked';
+    result.reason = reason;
+    result.stderr = stderr;
+    results.push(result);
+    ok = false;
+  }
+
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
     const result: WaveCleanupEntryResult = {
@@ -682,44 +797,34 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
 
     const branchCheck = execGit(['-C', entry.worktree_path, 'rev-parse', '--abbrev-ref', 'HEAD'], { cwd: plan.repoRoot });
     if (!gitResultOk(branchCheck) || branchCheck.stdout.trim() !== entry.branch) {
-      result.status = 'blocked';
-      result.reason = 'branch_mismatch';
-      result.stderr = branchCheck?.stderr || '';
-      results.push(result);
-      pending.push(...entries.slice(i + 1));
-      ok = false;
-      break;
+      blockEntry(result, 'branch_mismatch', branchCheck?.stderr || '');
+      // #2852: isolate — this entry's problem does not touch repoRoot's git state,
+      // so every remaining entry is still independently evaluated.
+      continue;
     }
 
     const mergeBase = execGit(['merge-base', 'HEAD', entry.branch], { cwd: plan.repoRoot });
-    if (!gitResultOk(mergeBase) || mergeBase.stdout.trim() !== entry.expected_base) {
-      result.status = 'blocked';
-      result.reason = 'base_mismatch';
-      result.stderr = mergeBase?.stderr || '';
-      results.push(result);
-      pending.push(...entries.slice(i + 1));
-      ok = false;
-      break;
+    const allowedBases = Array.isArray(entry.allowed_bases) && entry.allowed_bases.length > 0
+      ? entry.allowed_bases
+      : [entry.expected_base];
+    if (!gitResultOk(mergeBase) || !allowedBases.includes(mergeBase.stdout.trim())) {
+      blockEntry(result, 'base_mismatch', mergeBase?.stderr || '');
+      continue; // #2852: isolate
     }
 
     const deletions = execGit(['diff', '--diff-filter=D', '--name-only', `HEAD...${entry.branch}`], { cwd: plan.repoRoot });
     if (!gitResultOk(deletions)) {
-      result.status = 'blocked';
-      result.reason = 'deletion_check_failed';
-      result.stderr = deletions?.stderr || '';
-      results.push(result);
-      pending.push(...entries.slice(i + 1));
-      ok = false;
-      break;
+      blockEntry(result, 'deletion_check_failed', deletions?.stderr || '');
+      continue; // #2852: isolate
     }
     if (deletions.stdout) {
-      result.status = 'blocked';
-      result.reason = 'branch_contains_deletions';
-      result.stderr = deletions.stdout;
-      results.push(result);
-      pending.push(...entries.slice(i + 1));
-      ok = false;
-      break;
+      // Unconditional: any deletion in this entry's branch blocks THIS entry. Whether
+      // that guard should have an opt-in for intentional deletions is a deferred
+      // product decision (issue #2852's own triage scoped it out — tracked in #3003);
+      // this fix only isolates the block to this one entry (#2852) instead of aborting
+      // the rest of the wave, same as every other block reason below.
+      blockEntry(result, 'branch_contains_deletions', deletions.stdout);
+      continue; // #2852: isolate
     }
 
     // Safety net: rescue uncommitted SUMMARY.md artifacts before the dirty check.
@@ -727,24 +832,14 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
     // orchestrator commits it.  Mirrors quick.md shell fallback (#2296, #2070, #2838, #3804).
     const { rescuedRelPaths, failures: rescueFailures } = rescueSummaryArtifacts(entry.worktree_path, plan.repoRoot, deps);
     if (rescueFailures.length > 0) {
-      result.status = 'blocked';
-      result.reason = 'summary_rescue_failed';
-      result.stderr = rescueFailures.map((f) => `${f.relPath}: ${f.error}`).join('; ');
-      results.push(result);
-      pending.push(...entries.slice(i + 1));
-      ok = false;
-      break;
+      blockEntry(result, 'summary_rescue_failed', rescueFailures.map((f) => `${f.relPath}: ${f.error}`).join('; '));
+      continue; // #2852: isolate
     }
 
     const worktreeStatus = execGit(['-C', entry.worktree_path, 'status', '--porcelain', '--untracked-files=all'], { cwd: plan.repoRoot });
     if (!gitResultOk(worktreeStatus)) {
-      result.status = 'blocked';
-      result.reason = 'worktree_dirty';
-      result.stderr = worktreeStatus?.stderr || '';
-      results.push(result);
-      pending.push(...entries.slice(i + 1));
-      ok = false;
-      break;
+      blockEntry(result, 'worktree_dirty', worktreeStatus?.stderr || '');
+      continue; // #2852: isolate
     }
     // Filter rescued SUMMARY paths out of the porcelain output before deciding dirty.
     // A line like "?? .planning/q1-SUMMARY.md" should not block when the SUMMARY
@@ -758,24 +853,32 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
         return !rescuedRelPaths.has(filePath);
       });
     if (dirtyLines.length > 0) {
-      result.status = 'blocked';
-      result.reason = 'worktree_dirty';
-      result.stderr = dirtyLines.join('\n');
-      results.push(result);
-      pending.push(...entries.slice(i + 1));
-      ok = false;
-      break;
+      blockEntry(result, 'worktree_dirty', dirtyLines.join('\n'));
+      continue; // #2852: isolate
     }
 
     const merge = execGit(['merge', entry.branch, '--no-ff', '--no-edit', '-m', `chore: merge executor worktree (${entry.branch})`], { cwd: plan.repoRoot });
     if (!gitResultOk(merge)) {
-      result.status = 'blocked';
-      result.reason = 'merge_failed';
-      result.stderr = merge?.stderr || merge?.stdout || '';
-      results.push(result);
-      pending.push(...entries.slice(i + 1));
-      ok = false;
-      break;
+      blockEntry(result, 'merge_failed', merge?.stderr || merge?.stdout || '');
+      // #2852: a failed --no-ff merge MIGHT leave repoRoot itself mid-merge
+      // (MERGE_HEAD set, conflict markers in the tree) — unlike every other block
+      // reason above, that specific state is NOT scoped to this one entry: a second
+      // `git merge` cannot even start while one is in progress, so every remaining
+      // entry would be corrupted by it. But git also refuses many merges WITHOUT ever
+      // entering a merge state (e.g. "your local changes would be overwritten by
+      // merge") — in that case repoRoot's tree was never touched and this failure is
+      // scoped to this entry, same as everything else. Attempt the abort as a
+      // best-effort cleanup, then check repoRoot's ACTUAL state directly — not
+      // `git merge --abort`'s own exit code, which fails "There is no merge to abort"
+      // in the safe case too and would misclassify it as unrecoverable (caught in
+      // review). Only a repo genuinely still mid-merge afterward legitimately halts
+      // the rest of the wave (the brief's "infrastructure-level failure" carve-out).
+      execGit(['merge', '--abort'], { cwd: plan.repoRoot });
+      if (repoRootStillMidMerge(execGit, plan.repoRoot)) {
+        pending.push(...entries.slice(i + 1));
+        break;
+      }
+      continue; // #2852: isolate — repoRoot is not (or no longer) mid-merge
     }
 
     let remove = execGit(['worktree', 'remove', entry.worktree_path, '--force'], { cwd: plan.repoRoot });
@@ -787,13 +890,10 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
       remove = execGit(['worktree', 'remove', entry.worktree_path, '--force'], { cwd: plan.repoRoot });
     }
     if (!gitResultOk(remove)) {
-      result.status = 'blocked';
-      result.reason = 'worktree_remove_failed';
-      result.stderr = remove?.stderr || '';
-      results.push(result);
-      pending.push(...entries.slice(i + 1));
-      ok = false;
-      break;
+      blockEntry(result, 'worktree_remove_failed', remove?.stderr || '');
+      // #2852: isolate — the merge already landed on repoRoot; only this entry's
+      // worktree/branch teardown is affected.
+      continue;
     }
 
     const branchDelete = execGit(['branch', '-D', entry.branch], { cwd: plan.repoRoot });
@@ -858,6 +958,651 @@ function cmdWorktreeCleanupWave(cwd: string, args: string[] = []): void {
   }
 }
 
+interface RecordAgentFields {
+  agentId: string;
+  worktreePath: string;
+  branch: string;
+  base: string;
+}
+
+interface RecordAgentPlan {
+  ok: boolean;
+  reason: string;
+  hint?: string;
+  entry: CleanupManifestEntry | null;
+  /** Serialized manifest to write back (with trailing newline); null when ok === false. */
+  manifest: string | null;
+}
+
+/**
+ * Pure planner for the per-agent wave-manifest append.
+ *
+ * Validates the candidate entry at write time using the SAME rules the
+ * cleanup-wave reader enforces (via `normalizeCleanupManifestEntry`), so an
+ * entry that `record-agent` accepts is guaranteed to survive
+ * `normalizeCleanupManifest` on read — a field that would be silently dropped
+ * at cleanup time fails loudly here instead.
+ *
+ * `agent_id` is treated write-strict (required) even though the reader is
+ * lenient (nullable): the whole point of this verb is to catch an
+ * under-populated entry at write time, and an entry whose author cannot be
+ * identified defeats that. A duplicate `(worktree_path, branch)` is also
+ * rejected loudly — the reader dedups on that key, so a re-record would be
+ * silently dropped (the failure mode this verb exists to eliminate). The
+ * on-disk shape stays the existing 4-field entry (`agent_id`, `worktree_path`,
+ * `branch`, `expected_base`) — no schema change; the reader re-derives
+ * `allowed_bases`.
+ */
+function planWorktreeRecordAgent(manifestRaw: string, fields: RecordAgentFields): RecordAgentPlan {
+  // 1. Write-strict required-field check (loud, with which flag is missing).
+  //    Trim first so a whitespace-only value ("   ") is rejected here rather
+  //    than deferred to a guaranteed `git worktree remove` failure at cleanup.
+  const agentId = (fields.agentId || '').trim();
+  const worktreePath = (fields.worktreePath || '').trim();
+  const branch = (fields.branch || '').trim();
+  const base = (fields.base || '').trim();
+  const missing: string[] = [];
+  if (!agentId) missing.push('--agent-id');
+  if (!worktreePath) missing.push('--path');
+  if (!branch) missing.push('--branch');
+  if (!base) missing.push('--base');
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      reason: 'missing_field',
+      hint: `record-agent requires ${missing.join(', ')}. Re-run with all of --agent-id, --path, --branch, --base set to non-empty (non-whitespace) values.`,
+      entry: null,
+      manifest: null,
+    };
+  }
+
+  // 2. Shared validation: run the candidate through the reader's normalizer.
+  //    If it returns null the reader would drop this entry on read — reject now.
+  const candidate = {
+    agent_id: agentId,
+    worktree_path: worktreePath,
+    branch,
+    expected_base: base,
+  };
+  const entry = normalizeCleanupManifestEntry(candidate);
+  if (!entry) {
+    return {
+      ok: false,
+      reason: 'invalid_entry',
+      hint: `Entry failed cleanup-manifest validation: --path/--branch/--base must be non-empty and --branch must match ${WORKTREE_AGENT_BRANCH_PATTERN} (accepts agent-<id>, worktree-agent-<id>, and worktree-wf_<runid> namespaces; got branch="${branch}"). Fix the field and re-run.`,
+      entry: null,
+      manifest: null,
+    };
+  }
+
+  // 3. Parse the existing manifest. The init shell ({orchestrator_root, worktrees: []})
+  //    is written inline by the orchestrator before any agent spawns; a missing or
+  //    malformed manifest is a loud failure here, not a silent under-populated write.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(manifestRaw);
+  } catch {
+    return {
+      ok: false,
+      reason: 'invalid_manifest_json',
+      hint: 'Manifest is not valid JSON. The orchestrator must initialize it as {"orchestrator_root": "...", "worktrees": []} before recording agents.',
+      entry: null,
+      manifest: null,
+    };
+  }
+
+  // Accept the canonical {worktrees: []} shell or a bare top-level array (both
+  // are read by normalizeCleanupManifest); preserve any other top-level keys.
+  let worktrees: unknown[];
+  let writeBack: unknown;
+  if (Array.isArray(parsed)) {
+    worktrees = parsed;
+    writeBack = worktrees;
+  } else if (parsed && typeof parsed === 'object') {
+    const container = parsed as Record<string, unknown>;
+    if (container.worktrees === undefined) container.worktrees = [];
+    if (!Array.isArray(container.worktrees)) {
+      return {
+        ok: false,
+        reason: 'manifest_shape_invalid',
+        hint: 'Manifest "worktrees" must be an array. Re-initialize as {"orchestrator_root": "...", "worktrees": []}.',
+        entry: null,
+        manifest: null,
+      };
+    }
+    worktrees = container.worktrees;
+    writeBack = container;
+  } else {
+    return {
+      ok: false,
+      reason: 'manifest_shape_invalid',
+      hint: 'Manifest must be a JSON object {"worktrees": []} or a top-level array.',
+      entry: null,
+      manifest: null,
+    };
+  }
+
+  // 4. Reject a duplicate (worktree_path, branch). The reader dedups on this
+  //    exact key, but only over entries that NORMALIZE successfully — so an
+  //    existing malformed same-key entry (which the reader would drop) must NOT
+  //    block recording a valid one. Run each existing entry through the reader's
+  //    own normalizer and compare only the entries the reader would keep; this
+  //    matches its dedup behavior exactly. A real duplicate signals an upstream
+  //    double-spawn — surface it loudly instead of silently dropping it.
+  const dupKey = `${entry.worktree_path}\0${entry.branch}`;
+  const isDuplicate = worktrees.some((existing) => {
+    const normalized = normalizeCleanupManifestEntry(existing);
+    return normalized !== null && `${normalized.worktree_path}\0${normalized.branch}` === dupKey;
+  });
+  if (isDuplicate) {
+    return {
+      ok: false,
+      reason: 'duplicate_entry',
+      hint: `The manifest already records worktree_path="${entry.worktree_path}" branch="${entry.branch}". The cleanup reader dedups on (worktree_path, branch), so re-recording would be silently dropped — this usually signals an upstream double-spawn. Investigate rather than re-record.`,
+      entry: null,
+      manifest: null,
+    };
+  }
+
+  // 5. Append the minimal 4-field entry, matching the existing on-disk format.
+  const recorded: CleanupManifestEntry = {
+    agent_id: entry.agent_id,
+    worktree_path: entry.worktree_path,
+    branch: entry.branch,
+    expected_base: entry.expected_base,
+  };
+  worktrees.push(recorded);
+
+  return {
+    ok: true,
+    reason: 'ok',
+    entry: recorded,
+    manifest: `${JSON.stringify(writeBack, null, 2)}\n`,
+  };
+}
+
+interface RecordAgentCmdDeps {
+  readFile?: (p: string) => string;
+  writeFile?: (p: string, content: string) => void;
+  write?: (s: string) => void;
+  writeErr?: (s: string) => void;
+}
+
+interface RecordAgentCmdResult {
+  ok: boolean;
+  reason: string;
+  hint?: string;
+  entry: CleanupManifestEntry | null;
+  manifest_path?: string;
+}
+
+/**
+ * CLI command: append a validated per-agent entry to a wave cleanup manifest.
+ *
+ * Usage: worktree record-agent --manifest <path> --agent-id <id> --path <worktree> --branch <branch> --base <sha>
+ *
+ * Fails loudly (non-zero exit + recovery hint on stderr) when a field is
+ * missing/garbled or the manifest is absent/malformed, rather than appending an
+ * under-populated entry that the cleanup reader would silently drop.
+ */
+function cmdWorktreeRecordAgent(cwd: string, args: string[] = [], deps: RecordAgentCmdDeps = {}): RecordAgentCmdResult {
+  const flag = (name: string): string => {
+    const i = args.indexOf(name);
+    return i >= 0 && i + 1 < args.length ? args[i + 1] : '';
+  };
+  const write = deps.write || ((s: string) => process.stdout.write(s));
+  const writeErr = deps.writeErr || ((s: string) => process.stderr.write(s));
+
+  const manifestPath = flag('--manifest');
+  if (!manifestPath) {
+    writeErr('Usage: worktree record-agent --manifest <path> --agent-id <id> --path <worktree> --branch <branch> --base <sha>\n');
+    process.exitCode = 2;
+    return { ok: false, reason: 'usage', entry: null };
+  }
+
+  const resolved = path.resolve(cwd, manifestPath);
+  const readFile = deps.readFile || ((p: string) => fs.readFileSync(p, 'utf8'));
+  let manifestRaw: string;
+  try {
+    manifestRaw = readFile(resolved);
+  } catch (err) {
+    const hint = `Manifest not found or unreadable at ${manifestPath}. The orchestrator must initialize it ({"orchestrator_root": "...", "worktrees": []}) before recording agents.`;
+    writeErr(`[gsd] worktree.record-agent: manifest_read_failed — ${hint}\n`);
+    write(`${JSON.stringify({ ok: false, reason: 'manifest_read_failed', hint, error: (err as Error).message }, null, 2)}\n`);
+    process.exitCode = 1;
+    return { ok: false, reason: 'manifest_read_failed', hint, entry: null };
+  }
+
+  const plan = planWorktreeRecordAgent(manifestRaw, {
+    agentId: flag('--agent-id'),
+    worktreePath: flag('--path'),
+    branch: flag('--branch'),
+    base: flag('--base'),
+  });
+
+  if (!plan.ok || plan.manifest === null) {
+    writeErr(`[gsd] worktree.record-agent: ${plan.reason} — ${plan.hint || ''}\n`);
+    write(`${JSON.stringify({ ok: false, reason: plan.reason, hint: plan.hint }, null, 2)}\n`);
+    process.exitCode = 1;
+    return { ok: false, reason: plan.reason, hint: plan.hint, entry: null };
+  }
+
+  const writeFile = deps.writeFile || ((p: string, content: string) => fs.writeFileSync(p, content, 'utf8'));
+  writeFile(resolved, plan.manifest);
+  write(`${JSON.stringify({ ok: true, reason: 'ok', entry: plan.entry, manifest_path: resolved }, null, 2)}\n`);
+  return { ok: true, reason: 'ok', entry: plan.entry, manifest_path: resolved };
+}
+
+// ─── worktree create (#2584 ADR-1239 Codex-binding amendment — Phase 2) ───────
+//
+// The `orchestrator-worktree` isolation ladder value (ADR-1239) requires GSD
+// itself to create + bind the git worktree an executor runs in — this is that
+// git-worktree-creation primitive. UNCONSUMED in Phase 2: no scheduler calls
+// this yet (Phase 3 wires it). Mirrors the plan/execute/cmd split used by
+// cleanup-wave and record-agent above so a created worktree is immediately
+// manageable by cleanup-wave / reap-orphans without a second code path.
+
+interface WorktreeCreateFields {
+  agentId: string;
+  worktreePath: string;
+  branch: string;
+  base: string;
+}
+
+interface WorktreeCreatePlan {
+  ok: boolean;
+  reason: string;
+  hint?: string;
+  entry: CleanupManifestEntry | null;
+}
+
+/**
+ * Pure planner for `worktree create`. Validates the four required fields
+ * (write-strict, same missing-field-hint style as `planWorktreeRecordAgent`),
+ * then runs the candidate entry through the SAME `normalizeCleanupManifestEntry`
+ * validation the cleanup-wave reader and record-agent use — so a worktree this
+ * verb creates is guaranteed manageable by cleanup-wave/reap-orphans, and an
+ * entry that would fail the reader's branch-namespace guard is rejected here,
+ * fail-closed, before any git command runs.
+ */
+function planWorktreeCreate(fields: WorktreeCreateFields): WorktreeCreatePlan {
+  const agentId = (fields.agentId || '').trim();
+  const worktreePath = (fields.worktreePath || '').trim();
+  const branch = (fields.branch || '').trim();
+  const base = (fields.base || '').trim();
+  const missing: string[] = [];
+  if (!agentId) missing.push('--agent-id');
+  if (!worktreePath) missing.push('--path');
+  if (!branch) missing.push('--branch');
+  if (!base) missing.push('--base');
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      reason: 'missing_field',
+      hint: `worktree create requires ${missing.join(', ')}. Re-run with all of --agent-id, --path, --branch, --base set to non-empty (non-whitespace) values.`,
+      entry: null,
+    };
+  }
+
+  const candidate = {
+    agent_id: agentId,
+    worktree_path: worktreePath,
+    branch,
+    expected_base: base,
+  };
+  const entry = normalizeCleanupManifestEntry(candidate);
+  if (!entry) {
+    return {
+      ok: false,
+      reason: 'invalid_entry',
+      hint: `Entry failed cleanup-manifest validation: --path/--branch/--base must be non-empty and --branch must match ${WORKTREE_AGENT_BRANCH_PATTERN} (accepts agent-<id>, worktree-agent-<id>, and worktree-wf_<runid> namespaces; got branch="${branch}"). Fix the field and re-run.`,
+      entry: null,
+    };
+  }
+
+  // #2584 FIX 4 — git argument-injection guard: a value starting with '-'
+  // could be parsed by git as a FLAG rather than a positional argument (e.g.
+  // base="--upload-pack=x", path="-f"). `git worktree add` / `git rev-parse`
+  // support for a `--` end-of-options separator is inconsistent across git
+  // versions, so rejecting a leading dash outright — not relying on `--` — is
+  // the portable fix.
+  if (branch.startsWith('-') || base.startsWith('-') || worktreePath.startsWith('-')) {
+    return {
+      ok: false,
+      reason: 'unsafe_leading_dash',
+      hint: `--branch/--base/--path must not start with "-" (a leading dash would be parsed by git as a flag, not a value). Got branch="${branch}" base="${base}" path="${worktreePath}".`,
+      entry: null,
+    };
+  }
+
+  // #2584 FIX 4 — path-traversal guard: reject a ".." path segment in --path.
+  // Absolute paths ARE allowed (the orchestrator legitimately uses them —
+  // Phase-3 root confinement is out of Phase-2 scope); only a literal ".."
+  // component is rejected. Split on BOTH separators so the guard is effective
+  // on a Windows-style path too.
+  if (worktreePath.split(/[/\\]/).includes('..')) {
+    return {
+      ok: false,
+      reason: 'unsafe_path_traversal',
+      hint: `--path must not contain a ".." path segment (got: "${worktreePath}").`,
+      entry: null,
+    };
+  }
+
+  return { ok: true, reason: 'ok', entry };
+}
+
+interface WorktreeCreateResult {
+  ok: boolean;
+  reason: string;
+  worktree_path?: string;
+  branch?: string;
+  base?: string;
+  cwd?: string;
+  stderr?: string;
+}
+
+/**
+ * Best-effort bounded rollback of a partial/orphaned worktree (#2584 FIX 3,
+ * scope narrowed by FIX 5). Invoked ONLY when a `git worktree add` TIMED OUT
+ * mid-operation — a SIGTERM'd `add` can leave a `.git/worktrees/<name>` admin
+ * entry / directory on disk that got past validation into the file checkout,
+ * so the partial is genuinely THIS call's own creation and is safe to
+ * best-effort remove immediately. It is deliberately NOT invoked on a clean
+ * non-zero `add` exit (see FIX 5) — the most common such failure is a
+ * COLLISION (the path/branch is already a registered worktree), git fails
+ * FAST there having created nothing, and the branch namespace this verb
+ * writes into (`worktree-agent-*`/`agent-*`) is exactly the concurrent-
+ * executor namespace, so a colliding path is very plausibly a LIVE PEER
+ * executor whose uncommitted work `--force` would destroy. Also invoked from
+ * `cmdWorktreeCreate` when a successful `add` is followed by a manifest-write
+ * failure (#2584 FIX 1) — that path proves THIS call created the worktree, so
+ * removing it is safe. This is immediate best-effort hygiene, not the only
+ * safety net: `reapOrphanWorktrees` scans the `.git/worktrees/` admin
+ * directory directly (a genuine directory-scan backstop, not manifest-only),
+ * so any partial this call cannot reach is still eventually discovered and
+ * reaped there. The result is intentionally ignored and a throw is
+ * swallowed: this is best-effort cleanup, never a new source of truth, and
+ * must never mask or block the caller's own degraded-but-honest return.
+ */
+function rollbackPartialWorktree(execGit: ExecGitFn, worktreePath: string, repoRoot: string): void {
+  try {
+    execGit(['worktree', 'remove', '--force', worktreePath], { cwd: repoRoot });
+  } catch {
+    // best-effort only — a throwing rollback must never mask the original failure.
+  }
+}
+
+/**
+ * Execute a `planWorktreeCreate` plan via bounded git. Fail-closed at every
+ * step — a timeout or a non-zero exit degrades to a structured result rather
+ * than throwing, and the base must resolve BEFORE any worktree is created (no
+ * partial/orphaned worktree on a bad base). Returns `cwd` — the working
+ * directory Phase 3's executor spawn will pass through.
+ */
+function executeWorktreeCreatePlan(plan: WorktreeCreatePlan, repoRoot: string, deps: WorktreeDeps = {}): WorktreeCreateResult {
+  const execGit = deps.execGit || execGitDefault;
+  if (!plan || !plan.ok || !plan.entry) {
+    return {
+      ok: false,
+      reason: plan ? plan.reason : 'missing_plan',
+    };
+  }
+
+  const { worktree_path: worktreePath, branch, expected_base: base } = plan.entry;
+  const normalizedPath = posixNormalize(worktreePath);
+
+  // 1. Verify the base resolves BEFORE creating anything (fail-closed). Nothing
+  //    has been created on this path yet, so there is nothing to roll back.
+  const baseCheck = execGit(['rev-parse', '--verify', '--quiet', `${base}^{commit}`], { cwd: repoRoot });
+  if (baseCheck.timedOut) {
+    return { ok: false, reason: 'git_timeout', worktree_path: normalizedPath, branch, base };
+  }
+  if (!gitResultOk(baseCheck)) {
+    return { ok: false, reason: 'base_unresolved', worktree_path: normalizedPath, branch, base, stderr: baseCheck.stderr || '' };
+  }
+
+  // 2. Create the worktree + branch together.
+  const addResult = execGit(['worktree', 'add', '-b', branch, worktreePath, base], { cwd: repoRoot });
+  if (addResult.timedOut) {
+    // #2584 FIX 3: a SIGTERM'd `add` can leave a partial worktree on disk.
+    rollbackPartialWorktree(execGit, worktreePath, repoRoot);
+    return { ok: false, reason: 'git_timeout', worktree_path: normalizedPath, branch, base };
+  }
+  if (addResult.exitCode !== 0) {
+    // #2584 FIX 5: deliberately NO rollback here. A clean non-zero exit is
+    // most commonly a COLLISION (path/branch already a registered worktree),
+    // and git fails FAST on that — it creates nothing. A colliding path in
+    // this branch namespace is very plausibly a LIVE PEER executor;
+    // `git worktree remove --force` on it would destroy real, uncommitted
+    // work. The safe response to a clean failure is to fail loudly and leave
+    // whatever is already on disk untouched.
+    return { ok: false, reason: 'worktree_add_failed', worktree_path: normalizedPath, branch, base, stderr: addResult.stderr || '' };
+  }
+
+  return {
+    ok: true,
+    reason: 'created',
+    worktree_path: normalizedPath,
+    branch,
+    base,
+    cwd: normalizedPath,
+  };
+}
+
+interface WorktreeCreateCmdResult {
+  ok: boolean;
+  reason: string;
+  hint?: string;
+  entry?: CleanupManifestEntry | null;
+  cwd?: string;
+  manifest_path?: string;
+  stderr?: string;
+}
+
+/**
+ * CLI command: create a git worktree + branch off `--base`, then append the
+ * validated manifest entry so the worktree is immediately manageable by
+ * `worktree cleanup-wave` / `worktree reap-orphans`.
+ *
+ * Usage: worktree create --manifest <path> --agent-id <id> --path <worktree> --branch <branch> --base <sha> --root <dir>
+ *
+ * #2584 FIX 1 — ORDERING CONTRACT: every manifest read/parse/shape-validate/
+ * plan step runs BEFORE the git side effect (step 5). The ONLY manifest
+ * operation that can run AFTER `git worktree add` has succeeded is the final
+ * guarded write (step 6), and a failure there triggers a best-effort rollback
+ * of the just-created worktree — so a malformed/mis-shaped manifest, or a
+ * `writeFile` IO error, can never leave a REAL worktree on disk with no
+ * manifest entry (cleanup-wave/reap-orphans only discover worktrees via the
+ * manifest, never a directory scan) or an uncaught throw.
+ */
+function cmdWorktreeCreate(cwd: string, args: string[] = [], deps: RecordAgentCmdDeps & WorktreeDeps = {}): WorktreeCreateCmdResult {
+  const flag = (name: string): string => {
+    const i = args.indexOf(name);
+    return i >= 0 && i + 1 < args.length ? args[i + 1] : '';
+  };
+  const write = deps.write || ((s: string) => process.stdout.write(s));
+  const writeErr = deps.writeErr || ((s: string) => process.stderr.write(s));
+
+  const manifestPath = flag('--manifest');
+  if (!manifestPath) {
+    writeErr('Usage: worktree create --manifest <path> --agent-id <id> --path <worktree> --branch <branch> --base <sha> --root <dir>\n');
+    process.exitCode = 2;
+    return { ok: false, reason: 'usage' };
+  }
+
+  // 1. Read the manifest (no side effect yet).
+  const resolved = path.resolve(cwd, manifestPath);
+  const readFile = deps.readFile || ((p: string) => fs.readFileSync(p, 'utf8'));
+  let manifestRaw: string;
+  try {
+    manifestRaw = readFile(resolved);
+  } catch (err) {
+    const hint = `Manifest not found or unreadable at ${manifestPath}. The orchestrator must initialize it ({"orchestrator_root": "...", "worktrees": []}) before creating agent worktrees.`;
+    writeErr(`[gsd] worktree.create: manifest_read_failed — ${hint}\n`);
+    write(`${JSON.stringify({ ok: false, reason: 'manifest_read_failed', hint, error: (err as Error).message }, null, 2)}\n`);
+    process.exitCode = 1;
+    return { ok: false, reason: 'manifest_read_failed', hint };
+  }
+
+  // 2. Parse + shape-validate the manifest BEFORE any git command runs.
+  //    Mirrors planWorktreeRecordAgent's shell-acceptance rules (canonical
+  //    {worktrees:[]} object OR a bare top-level array).
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(manifestRaw);
+  } catch {
+    const hint = 'Manifest is not valid JSON. The orchestrator must initialize it as {"orchestrator_root": "...", "worktrees": []} before creating agent worktrees.';
+    writeErr(`[gsd] worktree.create: invalid_manifest_json — ${hint}\n`);
+    write(`${JSON.stringify({ ok: false, reason: 'invalid_manifest_json', hint }, null, 2)}\n`);
+    process.exitCode = 1;
+    return { ok: false, reason: 'invalid_manifest_json', hint };
+  }
+
+  let worktrees: unknown[];
+  let writeBack: unknown;
+  if (Array.isArray(parsed)) {
+    worktrees = parsed;
+    writeBack = worktrees;
+  } else if (parsed && typeof parsed === 'object') {
+    const container = parsed as Record<string, unknown>;
+    if (container.worktrees === undefined) container.worktrees = [];
+    if (!Array.isArray(container.worktrees)) {
+      const hint = 'Manifest "worktrees" must be an array. Re-initialize as {"orchestrator_root": "...", "worktrees": []}.';
+      writeErr(`[gsd] worktree.create: manifest_shape_invalid — ${hint}\n`);
+      write(`${JSON.stringify({ ok: false, reason: 'manifest_shape_invalid', hint }, null, 2)}\n`);
+      process.exitCode = 1;
+      return { ok: false, reason: 'manifest_shape_invalid', hint };
+    }
+    worktrees = container.worktrees;
+    writeBack = container;
+  } else {
+    const hint = 'Manifest must be a JSON object {"worktrees": []} or a top-level array.';
+    writeErr(`[gsd] worktree.create: manifest_shape_invalid — ${hint}\n`);
+    write(`${JSON.stringify({ ok: false, reason: 'manifest_shape_invalid', hint }, null, 2)}\n`);
+    process.exitCode = 1;
+    return { ok: false, reason: 'manifest_shape_invalid', hint };
+  }
+
+  // 3. Plan (pure, no I/O) — still before any git command.
+  const plan = planWorktreeCreate({
+    agentId: flag('--agent-id'),
+    worktreePath: flag('--path'),
+    branch: flag('--branch'),
+    base: flag('--base'),
+  });
+
+  if (!plan.ok || !plan.entry) {
+    writeErr(`[gsd] worktree.create: ${plan.reason} — ${plan.hint || ''}\n`);
+    write(`${JSON.stringify({ ok: false, reason: plan.reason, hint: plan.hint }, null, 2)}\n`);
+    process.exitCode = 1;
+    return { ok: false, reason: plan.reason, hint: plan.hint };
+  }
+
+  // 3b. Mandatory root confinement (#2627 Phase 3 introduced it; #3050 made it
+  //     mandatory — the confinement Phase 2 deferred here from
+  //     planWorktreeCreate's path-traversal guard). planWorktreeCreate rejects a
+  //     literal ".." SEGMENT, but a plain absolute path outside the project
+  //     contains no ".." and passes. The orchestrator SPAWNS executor processes
+  //     into these paths, so an unconfined --path is a write primitive aimed
+  //     anywhere on the filesystem.
+  //
+  //     The root is DECLARED by the caller (`--root`) rather than inferred: agent
+  //     worktrees legitimately live outside the orchestrator's own root (a lane
+  //     orchestrator creates siblings under the repo's .claude/worktrees/), so
+  //     there is no layout this module could derive without guessing.
+  //
+  //     Lexical by design: the worktree does not exist yet, so there is nothing
+  //     to realpath, and resolving only the root would not close a symlinked-leaf
+  //     hole. Pairs with the leading-dash and ".."-segment guards above.
+  //
+  //     #3050: confinement does not depend on the caller remembering to pass
+  //     `--root` — it used to be silently skippable, so a caller that forgot the
+  //     flag got an unconfined `--path` with no warning. Fail closed instead:
+  //     absent `--root`, this verb refuses to create anything. The one current
+  //     caller (execute-phase's orchestrator-worktree dispatch) always passes
+  //     `--root`, so this closes the gap without breaking it.
+  const rootFlag = flag('--root');
+  if (!rootFlag) {
+    const hint = '--root is required (fail-closed root confinement, #3050). Pass --root <orchestrator-root-dir> so worktree.create can verify --path resolves inside it before creating anything.';
+    writeErr(`[gsd] worktree.create: root_required — ${hint}\n`);
+    write(`${JSON.stringify({ ok: false, reason: 'root_required', hint }, null, 2)}\n`);
+    process.exitCode = 1;
+    return { ok: false, reason: 'root_required', hint };
+  }
+  {
+    const absRoot = path.resolve(cwd, rootFlag);
+    const absWorktree = path.resolve(cwd, plan.entry.worktree_path);
+    const rel = path.relative(absRoot, absWorktree);
+    // rel === ''           → the worktree IS the root (would clobber the checkout)
+    // rel === '..' / '../…' → escapes the root
+    // path.isAbsolute(rel) → a different Windows drive or UNC root
+    if (rel === '' || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+      const hint = `--path must resolve INSIDE --root (root="${absRoot}", path="${absWorktree}"). A worktree outside the declared root is unreachable by manifest-scoped cleanup and would let a spawned executor write outside the project.`;
+      writeErr(`[gsd] worktree.create: path_outside_root — ${hint}\n`);
+      write(`${JSON.stringify({ ok: false, reason: 'path_outside_root', hint }, null, 2)}\n`);
+      process.exitCode = 1;
+      return { ok: false, reason: 'path_outside_root', hint };
+    }
+  }
+
+  // 4. Compute the deduped final manifest STRING in memory now — the ONLY
+  //    manifest work left is the guarded write in step 6, after git succeeds.
+  //    #2584 FIX 2: the on-disk entry is the SAME minimal 4-field shape
+  //    `cmdWorktreeRecordAgent` writes — never the full normalized entry with
+  //    the derived `allowed_bases` — so the two verbs never write divergent
+  //    shapes into the same manifest (the reader re-derives `allowed_bases`
+  //    from `expected_base` on load, exactly as it does for record-agent).
+  const recorded: CleanupManifestEntry = {
+    agent_id: plan.entry.agent_id,
+    worktree_path: plan.entry.worktree_path,
+    branch: plan.entry.branch,
+    expected_base: plan.entry.expected_base,
+  };
+  const dedupeKey = `${recorded.worktree_path}\0${recorded.branch}`;
+  const alreadyPresent = worktrees.some((existing) => {
+    const normalized = normalizeCleanupManifestEntry(existing);
+    return normalized !== null && `${normalized.worktree_path}\0${normalized.branch}` === dedupeKey;
+  });
+  if (!alreadyPresent) {
+    worktrees.push(recorded);
+  }
+  const manifestToWrite = `${JSON.stringify(writeBack, null, 2)}\n`;
+
+  // 5. NOW run the git side effect. Every manifest problem above is caught
+  //    before this point, so a malformed/mis-shaped manifest can never leave
+  //    an unmanifested worktree on disk. `executeWorktreeCreatePlan` itself
+  //    best-effort rolls back a partial worktree on its own add-timeout /
+  //    add-failed paths (#2584 FIX 3).
+  const result = executeWorktreeCreatePlan(plan, cwd, deps);
+  if (!result.ok) {
+    writeErr(`[gsd] worktree.create: ${result.reason} — ${result.stderr || ''}\n`);
+    write(`${JSON.stringify({ ok: false, reason: result.reason, stderr: result.stderr }, null, 2)}\n`);
+    process.exitCode = 1;
+    return { ok: false, reason: result.reason, stderr: result.stderr };
+  }
+
+  // 6. Write the pre-computed manifest string, guarded. A write failure here
+  //    means a REAL worktree now exists with NO manifest entry — roll it back
+  //    (best-effort) rather than leaving an orphan cleanup-wave/reap-orphans
+  //    can never reach (#2584 FIX 1). Never throws past this function.
+  const writeFile = deps.writeFile || ((p: string, content: string) => fs.writeFileSync(p, content, 'utf8'));
+  try {
+    writeFile(resolved, manifestToWrite);
+  } catch (err) {
+    const execGit = deps.execGit || execGitDefault;
+    rollbackPartialWorktree(execGit, plan.entry.worktree_path, cwd);
+    const hint = `The worktree was created but the manifest write failed (${(err as Error).message}); rolled back the worktree via a best-effort 'git worktree remove --force'.`;
+    writeErr(`[gsd] worktree.create: manifest_write_failed — ${hint}\n`);
+    write(`${JSON.stringify({ ok: false, reason: 'manifest_write_failed', hint, error: (err as Error).message }, null, 2)}\n`);
+    process.exitCode = 1;
+    return { ok: false, reason: 'manifest_write_failed', hint };
+  }
+
+  write(`${JSON.stringify({ ok: true, reason: 'created', entry: recorded, cwd: result.cwd, manifest_path: resolved }, null, 2)}\n`);
+  return { ok: true, reason: 'created', entry: recorded, cwd: result.cwd, manifest_path: resolved };
+}
+
 /**
  * Reap orphaned linked worktrees whose lock owner process is dead, whose
  * branch tip is fully merged into the default branch, and whose lock file
@@ -878,6 +1623,7 @@ function reapOrphanWorktrees(repoRoot: string, deps: WorktreeDeps = {}): ReapRes
   const readFileSafe = deps.readFileSafe || defaultReadFileSafe;
   const mtimeSafe = deps.mtimeSafe || defaultMtimeSafe;
   const reapMtimeGuardMs = deps.reapMtimeGuardMs !== undefined ? deps.reapMtimeGuardMs : REAP_MTIME_GUARD_MS;
+  const nowMs = deps.nowMs ?? Date.now();
 
   const results: ReapResult[] = [];
 
@@ -981,8 +1727,21 @@ function reapOrphanWorktrees(repoRoot: string, deps: WorktreeDeps = {}): ReapRes
     }
 
     // 4a. Stale-lock guard: skip if lock is too fresh (PID recycling / race).
+    //
+    // The two causes are reported SEPARATELY (#3057). A lock whose mtime could
+    // not be read is not "fresh" in any sense: `lock_too_fresh` tells an
+    // operator that waiting will resolve the skip, and waiting never resolves a
+    // stat failure — the lock could be seconds or months old and the sweep has
+    // no way to tell. Conflating them is the same defect this module already
+    // fixed for `parse_failed` vs `no_worktrees` in planWorktreePrune: a
+    // decision made on unread data must not be indistinguishable from one made
+    // on real data.
     const lockMtime = mtimeSafe(lockedFile);
-    if (!lockMtime || Date.now() - lockMtime.getTime() < reapMtimeGuardMs) {
+    if (!lockMtime) {
+      results.push({ path: worktreePath, status: 'skipped', reason: 'lock_age_unknown' });
+      continue;
+    }
+    if (nowMs - lockMtime.getTime() < reapMtimeGuardMs) {
       results.push({ path: worktreePath, status: 'skipped', reason: 'lock_too_fresh' });
       continue;
     }
@@ -994,9 +1753,26 @@ function reapOrphanWorktrees(repoRoot: string, deps: WorktreeDeps = {}): ReapRes
       continue;
     }
     const pid = parseInt(pidStr, 10);
+    // Number.isFinite, not Number.isNaN: pidStr is captured by /^\d+/ above, so
+    // pid can never be NaN. A 309-or-more-digit string parses to Infinity.
+    //
+    // NOT LOAD-BEARING FOR SAFETY — do not delete it as redundant. Fail-closed
+    // liveness now lives in defaultIsPidAlive, which treats every non-ESRCH
+    // outcome (including the TypeError process.kill throws for Infinity) as
+    // ALIVE. This guard survives because it produces a more ACCURATE verdict
+    // for garbage input: `lock_owner_unknown` says "the lock names a PID this
+    // parse could not represent", whereas falling through would report
+    // `pid_alive` — an assertion about an owner that was never probed.
+    // Note this is an EARLIER, DIFFERENT gate than the process.kill range
+    // limit: process.kill accepts up to 2147483647 and rejects 2147483648
+    // (measured), far below the parse cliff this guard catches.
+    if (!Number.isFinite(pid)) {
+      results.push({ path: worktreePath, status: 'skipped', reason: 'lock_owner_unknown' });
+      continue;
+    }
     let pidIsAlive: boolean;
     try {
-      pidIsAlive = Number.isNaN(pid) || isPidAliveCheck(pid);
+      pidIsAlive = isPidAliveCheck(pid);
     } catch {
       pidIsAlive = true; // Cannot determine liveness — treat as alive, do not reap.
     }
@@ -1060,13 +1836,28 @@ function reapOrphanWorktrees(repoRoot: string, deps: WorktreeDeps = {}): ReapRes
 
 // ─── reapOrphanWorktrees deps helpers ─────────────────────────────────────────
 
+/**
+ * Liveness probe for a lock-owner PID — FAILS CLOSED (#3057).
+ *
+ * `ESRCH` ("no such process") is the ONLY outcome that proves the owner is
+ * gone. Every other failure means the probe could not determine liveness:
+ *   - `EPERM` — the process exists, we just may not signal it;
+ *   - `TypeError` / `ERR_INVALID_ARG_TYPE` — `process.kill` accepts a pid up
+ *     to 2147483647 and REJECTS 2147483648 and above (measured), so a finite
+ *     but out-of-range pid never reaches the OS at all;
+ *   - anything else — an outcome this helper does not recognise.
+ *
+ * The return value feeds a DESTRUCTIVE decision (`git worktree remove
+ * --force`), so an unrecognised failure must never read as "dead". Hence the
+ * inversion: only ESRCH returns false; everything else returns true (alive,
+ * do not reap).
+ */
 function defaultIsPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
   } catch (err) {
-    if (err && (err as NodeJS.ErrnoException).code === 'EPERM') return true;
-    return false;
+    return (err as NodeJS.ErrnoException | null | undefined)?.code !== 'ESRCH';
   }
 }
 
@@ -1082,28 +1873,87 @@ function defaultMtimeSafe(file: string): Date | null {
   try { return fs.statSync(file).mtime; } catch { return null; }
 }
 
-function cmdWorktreeReapOrphans(cwd: string): void {
+function cmdWorktreeReapOrphans(cwd: string, deps: RecordAgentCmdDeps & WorktreeDeps = {}): void {
+  const write = deps.write || ((s: string) => process.stdout.write(s));
+  const writeErr = deps.writeErr || ((s: string) => process.stderr.write(s));
   let result: ReapResult[];
   try {
-    result = reapOrphanWorktrees(cwd);
+    result = reapOrphanWorktrees(cwd, deps);
   } catch (err) {
     // Surface failure as a one-line warning; keep exit-zero so workflows don't break.
-    process.stderr.write(`[gsd] worktree.reap-orphans failed: ${err && (err as Error).message ? (err as Error).message : String(err)}\n`);
+    writeErr(`[gsd] worktree.reap-orphans failed: ${err && (err as Error).message ? (err as Error).message : String(err)}\n`);
     result = [];
   }
   const skippedCount = result.filter((r) => r.status === 'skipped').length;
   if (skippedCount > 0) {
     // Surface skipped entries so operators are aware of unresolved orphans.
-    process.stderr.write(`[gsd] worktree.reap-orphans: ${skippedCount} orphan(s) skipped (run with DEBUG=1 for details)\n`);
+    writeErr(`[gsd] worktree.reap-orphans: ${skippedCount} orphan(s) skipped (run with DEBUG=1 for details)\n`);
   }
-  process.stdout.write(`${JSON.stringify({ ok: true, reaped: result.filter((r) => r.status === 'reaped').length, entries: result }, null, 2)}\n`);
+  write(`${JSON.stringify({ ok: true, reaped: result.filter((r) => r.status === 'reaped').length, entries: result }, null, 2)}\n`);
 }
 
 // Unused exports kept for API compatibility
 void parseWorktreeListPaths;
 
+// ─── Moved from core.cjs (ADR-857 T0 #1268 rehome-core-squatters) ─────────────
+
+/**
+ * Resolve the main worktree root when running inside a git worktree, along
+ * with the `reason` that produced it (#3050). Callers MUST inspect `reason`
+ * before trusting `root` unconditionally — a `reason` of `git_timed_out`
+ * means the git subprocess used to distinguish "linked worktree" from
+ * "not a repo" never completed, so `root` is a best-effort fallback (cwd),
+ * not a confirmed worktree root. Degrading to cwd rather than throwing is
+ * intentional (return degraded result on timeout; do not throw) — but the
+ * reason must still reach the caller so it can surface the risk instead of
+ * silently trusting the wrong root.
+ */
+function resolveWorktreeRoot(cwd: string, deps: WorktreeDeps = {}): { root: string; reason: string } {
+  const context = resolveWorktreeContext(cwd, {
+    existsSync: deps.existsSync || fs.existsSync,
+    execGit: deps.execGit,
+  });
+  return { root: context.effectiveRoot, reason: context.reason };
+}
+
+/**
+ * Clear stale worktree metadata references via `git worktree prune`.
+ *
+ * Destructive linked-worktree removal is disabled by default for safety.
+ *
+ * @param repoRoot - absolute path to the main (or any) worktree of
+ *   the repository; used as `cwd` for git commands.
+ * @returns list of worktree paths that were removed (always empty)
+ */
+function pruneOrphanedWorktrees(repoRoot: string, deps: WorktreeDeps & { writeErr?: (s: string) => void } = {}): string[] {
+  const writeErr = deps.writeErr || ((s: string) => process.stderr.write(s));
+  try {
+    // `...deps` comes LAST deliberately: `parseWorktreePorcelain` is a declared
+    // member of WorktreeDeps and planWorktreePrune already reads
+    // `deps.parseWorktreePorcelain` before falling back to the module function,
+    // so a caller-supplied parser is an intended override, not an accident.
+    // The hard-coded key is only a restatement of that same default. Do not
+    // reorder the two — `tests/worktree-safety-reap.test.cjs` pins the override.
+    const plan = planWorktreePrune(
+      repoRoot,
+      { allowDestructive: false },
+      { parseWorktreePorcelain, ...deps }
+    );
+    const pruneResult = executeWorktreePrunePlan(plan, deps) as { timedOut?: boolean } | null;
+    if (pruneResult && pruneResult.timedOut) {
+      writeErr(
+        '[gsd-tools] WARNING: worktree health check degraded' +
+        ' — git worktree prune timed out after 10s.' +
+        ' Orphaned worktree metadata may remain until the next successful run.\n'
+      );
+    }
+  } catch { /* never crash the caller */ }
+  return [];
+}
+
 export = {
   resolveWorktreeContext,
+  resolveWorktreeLinkage,
   parseWorktreePorcelain,
   planWorktreePrune,
   executeWorktreePrunePlan,
@@ -1114,6 +1964,13 @@ export = {
   planWorktreeWaveCleanup,
   executeWorktreeWaveCleanupPlan,
   cmdWorktreeCleanupWave,
+  planWorktreeRecordAgent,
+  cmdWorktreeRecordAgent,
+  planWorktreeCreate,
+  executeWorktreeCreatePlan,
+  cmdWorktreeCreate,
   reapOrphanWorktrees,
   cmdWorktreeReapOrphans,
+  resolveWorktreeRoot,
+  pruneOrphanedWorktrees,
 };

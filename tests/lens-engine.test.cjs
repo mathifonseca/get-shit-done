@@ -1,4 +1,4 @@
-// allow-test-rule: source-text-is-the-product
+// allow-test-rule: source-text-is-the-product (#1190)
 // Agent .md files, config JSON, and fixture markdown files are the deployed contract.
 // Testing text content tests the deployed contract directly.
 // Per CONTRIBUTING.md exception matrix.
@@ -297,7 +297,7 @@ describe('LENS-FIXTURE: canned-position fixture smoke check (AC-6, D-10)', () =>
     //     gsd-lens-synthesizer.md), which rejects malformed bullets like "- planneresque note"
     //   - the two named identities (planner's-eye, executor's-eye) each appear as such a bullet
     //   - they appear inside >=2 distinct `### T{n}` tension blocks
-    const lines = expected.split('\n');
+    const lines = expected.split(/\r?\n/);
     // Canonical disagreement-preserving bullet: "- <lens>'s-eye: <prose> (evidence: ...)"
     const eyeBullets = lines.filter(l => /^- [a-z-]+'s-eye: .+\(evidence: .+\)/.test(l.trim()));
     assert.ok(
@@ -742,7 +742,7 @@ describe('CON-LENS-GENERIC: frozen agents unchanged vs HEAD (PLANLENS-01/CON-len
       // Static string — no user input interpolated. Safe from command injection.
       const diffOutput = execSync(
         'git diff --stat HEAD -- agents/gsd-lens.md agents/gsd-lens-synthesizer.md',
-        { cwd: REPO_ROOT }
+        { cwd: REPO_ROOT, timeout: 15000 }
       ).toString().trim();
       assert.strictEqual(
         diffOutput,

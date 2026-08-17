@@ -51,6 +51,25 @@ v1.40 中，六个命名空间路由器作为第一阶段入口点随附发布�
 
 ---
 
+### `/gsd-onboard`
+
+引导现有代码库完成首次 GSD 接入。该命令检查仓库状态，安全地转到代码库映射、可选文档摄取、项目初始化，并在规划文件齐备后创建 onboarding summary。
+
+| 标志 | 描述 |
+|------|-------------|
+| `--fast` | 优先使用轻量 `/gsd-map-codebase --fast` 映射交接；在 `/gsd-new-project` 前仍需要完整映射 |
+| `--text` | 使用编号纯文本关卡，而不是 TUI 菜单 |
+
+**前提条件：** 现有仓库或规划文档。空的绿地项目请使用 `/gsd-new-project`。
+**产出：** 由 map-codebase 生成的 `.planning/codebase/`，由 new-project 或 ingest-docs 生成的 `.planning/`，以及项目设置后的 `.planning/onboarding/SUMMARY.md`。
+
+```bash
+/gsd-onboard           # 引导式 brownfield 接入
+/gsd-onboard --fast    # 先使用轻量映射，并在项目设置前补全完整映射
+```
+
+---
+
 ### `/gsd-workspace`
 
 管理 GSD 工作区 — 创建、列出或移除隔离的工作区环境，包含仓库副本和独立的 `.planning/` 目录。
@@ -152,7 +171,6 @@ v1.40 中，六个命名空间路由器作为第一阶段入口点随附发布�
 | `--ingest <path-or-glob>` | 使用 ADR 文件代替 discuss-phase 进行上下文综合 |
 | `--ingest-format <auto\|nygard\|madr\|narrative>` | `--ingest` 的可选 ADR 解析器格式覆盖 |
 | `--reviews` | 根据 REVIEWS.md 中的跨 AI 审查反馈重新规划 |
-| `--validate` | 在规划开始前运行状态验证 |
 | `--bounce` | 规划完成后运行外部计划弹回验证（使用 `workflow.plan_bounce_script`） |
 | `--skip-bounce` | 即使配置中已启用也跳过计划弹回 |
 | `--mvp` | 垂直 MVP 模式 — 规划器将任务组织为功能切片（UI→API→DB），而非水平分层。在无先前阶段摘要的新项目第 1 阶段使用时，还会生成 `SKELETON.md`（行走骨架）。可通过在 ROADMAP.md 中设置 `**Mode:** mvp` 持久化应用于某阶段，届时无需标志即可自动应用 `--mvp`。 |
@@ -167,7 +185,7 @@ v1.40 中，六个命名空间路由器作为第一阶段入口点随附发布�
 - 加 `--view`：将现有 RESEARCH.md 打印到标准输出，不生成新报告。RESEARCH.md 不存在时报错。
 
 **包合法性检查门（v1.42.1）：**
-当研究者推荐外部包时，会对每个包运行 `slopcheck install <pkg> --json` 并在 RESEARCH.md 中写入 `## Package Legitimacy Audit` 表格，记录注册表、年龄、下载量、源码仓库和 slopcheck 裁决。裁决结果：
+当研究者推荐外部包时，会对每个包运行 `gsd-tools query package-legitimacy check --ecosystem <npm|pypi|crates> <pkg>` 并在 RESEARCH.md 中写入 `## Package Legitimacy Audit` 表格，记录注册表、年龄、下载量、源码仓库和合法性裁决。裁决结果：
 
 - `[SLOP]` — 包从 RESEARCH.md 中完全移除，永远不会进入规划器
 - `[SUS]` — 包被标记；规划器在安装任务前插入 `checkpoint:human-verify`
@@ -181,7 +199,6 @@ v1.40 中，六个命名空间路由器作为第一阶段入口点随附发布�
 /gsd-plan-phase 1                              # 研究 + 规划 + 验证阶段 1
 /gsd-plan-phase 3 --skip-research              # 无需研究直接规划（熟悉的领域）
 /gsd-plan-phase --auto                         # 非交互式规划
-/gsd-plan-phase 2 --validate                   # 规划前验证状态
 /gsd-plan-phase 1 --bounce                     # 规划 + 外部弹回验证
 /gsd-plan-phase 2 --ingest docs/adr/0010.md   # 使用 ADR 快速通道进行上下文综合
 /gsd-plan-phase 2 --ingest 'docs/adr/00*.md' --ingest-format auto
@@ -201,7 +218,7 @@ v1.40 中，六个命名空间路由器作为第一阶段入口点随附发布�
 | 参数 / 标志 | 必填 | 描述 |
 |-----------------|----------|-------------|
 | `N` | **是** | 要规划和审查的阶段编号 |
-| `--codex` / `--gemini` / `--claude` / `--opencode` | 否 | 单一审查者选择 |
+| 审查者标志 | 否 | 原样传递所有审查者通道标志：`--gemini`、`--claude`、`--codex`、`--coderabbit`、`--opencode`、`--qwen`、`--cursor`、`--agy` / `--antigravity`、`--ollama`、`--lm-studio`、`--llama-cpp`、`--kimi-code` |
 | `--all` | 否 | 并行运行所有已配置的审查者 |
 | `--max-cycles N` | 否 | 覆盖循环上限（默认 3） |
 
@@ -239,7 +256,6 @@ v1.40 中，六个命名空间路由器作为第一阶段入口点随附发布�
 |----------|----------|-------------|
 | `N` | **是** | 要执行的阶段编号 |
 | `--wave N` | 否 | 仅执行阶段中的第 `N` 波 |
-| `--validate` | 否 | 在执行开始前运行状态验证 |
 | `--cross-ai` | 否 | 将执行委托给外部 AI CLI（使用 `workflow.cross_ai_command`） |
 | `--no-cross-ai` | 否 | 即使配置中启用了跨 AI 也强制本地执行 |
 
@@ -251,7 +267,6 @@ v1.40 中，六个命名空间路由器作为第一阶段入口点随附发布�
 ```bash
 /gsd-execute-phase 1                # 执行阶段 1
 /gsd-execute-phase 1 --wave 2       # 仅执行第 2 波
-/gsd-execute-phase 1 --validate     # 执行前验证状态
 /gsd-execute-phase 2 --cross-ai     # 将阶段 2 委托给外部 AI CLI
 ```
 
@@ -569,7 +584,7 @@ ROADMAP.md 中阶段的 CRUD 操作 — 通过单一合并命令添加、插入�
     "flags": {
       "discuss": "--auto",
       "plan": "--skip-research",
-      "execute": "--validate"
+      "execute": "--cross-ai"
     }
   }
 }
@@ -589,7 +604,7 @@ ROADMAP.md 中阶段的 CRUD 操作 — 通过单一合并命令添加、插入�
 /gsd-help --brief <topic>           # 简洁的范围查找 — 签名 + 单行摘要
 ```
 
-完整别名表请参阅 `get-shit-done/workflows/help/modes/topic.md`。未知主题将打印已识别的列表。
+完整别名表请参阅 `gsd-core/workflows/help/modes/topic.md`。未知主题将打印已识别的列表。
 
 ---
 
@@ -1229,6 +1244,7 @@ node gsd-tools.cjs intel api-surface              # 渲染 api-map.json → API-
 | `--qwen` | 包含 Qwen Code 审查（阿里巴巴 Qwen 模型） |
 | `--cursor` | 包含 Cursor 代理审查 |
 | `--agy` / `--antigravity` | 包含 Antigravity CLI 审查（使用 Google 凭证免费） |
+| `--kimi-code` | 包含 Kimi Code CLI 审查（Moonshot AI） |
 | `--ollama` | 包含 Ollama 服务器审查 |
 | `--lm-studio` | 包含 LM Studio 服务器审查 |
 | `--llama-cpp` | 包含 llama.cpp 服务器审查 |
@@ -1509,7 +1525,7 @@ node gsd-tools.cjs state planned-phase --phase 3 --plans 2
 npm run lint:descriptions
 ```
 
-该检查也作为 `npm test` 的一部分通过 `tests/enh-2789-description-budget.test.cjs` 运行。
+该检查也作为 `npm test` 的一部分通过 `tests/skill-frontmatter-contract.test.cjs` 运行。
 
 ---
 

@@ -26,17 +26,38 @@ const STAGE_DIR = path.join(HOOKS_DIR, `.dist-staging-${process.pid}`);
 const HOOKS_TO_COPY = [
   'gsd-check-update-worker.js',
   'gsd-check-update.js',
+  // SessionStart canonical-path bootstrap (#997). In a Claude Code marketplace
+  // plugin install, ~/.claude/gsd-core is never created, so every
+  // `@~/.claude/gsd-core/...` include in agents/commands/templates resolves to
+  // nothing. This hook symlinks the canonical path's immutable subdirs to the
+  // plugin's bundled gsd-core/ tree; no-op in classic installs. Must ship to
+  // dist so the installer copies it into the target hooks/ dir.
+  'gsd-ensure-canonical-path.js',
   // Required by gsd-check-update-worker.js at runtime — must ship alongside it
   // so require('./managed-hooks-registry.cjs') resolves in the installed hooks/ dir.
   'managed-hooks-registry.cjs',
   'gsd-context-monitor.js',
-  // Cursor lifecycle hooks (issue #777): sessionStart context injection + postToolUse monitor
+  // Cursor lifecycle hooks (#777 + ADR-1239/#2089): 6 managed events
   'gsd-cursor-session-start.js',
   'gsd-cursor-post-tool.js',
+  'gsd-cursor-pre-tool.js',
+  'gsd-cursor-stop.js',
+  'gsd-cursor-subagent-start.js',
+  'gsd-cursor-subagent-stop.js',
+  // Windsurf/Cascade lifecycle hooks (ADR-1239/#2100 Stage 2): 2 blocking events
+  'gsd-windsurf-pre-write.js',
+  'gsd-windsurf-pre-command.js',
   // Claude Code FileChanged hook (#770) — hot-reloads gsd config when
   // .planning/config.json changes mid-session. Must ship to dist so the
   // installer can copy it to the target hooks/ dir and register FileChanged.
   'gsd-config-reload.js',
+  // Agent-dispatch isolation guard (#3045): blocks an executor Agent()
+  // dispatch missing its harness isolation parameter when the project
+  // resolves to harness-worktree. Requires the sibling
+  // gsd-core/bin/lib/{runtime-name-policy,capability-registry}.cjs modules
+  // at runtime — those ship as part of the full gsd-core/ tree, not via this
+  // list.
+  'gsd-agent-isolation-guard.js',
   'gsd-prompt-guard.js',
   'gsd-read-guard.js',
   'gsd-read-injection-scanner.js',
@@ -44,6 +65,8 @@ const HOOKS_TO_COPY = [
   'gsd-update-banner.js',
   'gsd-workflow-guard.js',
   'gsd-worktree-path-guard.js',
+  // Catastrophic-shrink guard for curated .planning/ artifacts (#2255, fix 3 of #973)
+  'gsd-write-guard.js',
   // Community hooks (bash, opt-in via .planning/config.json hooks.community)
   'gsd-session-state.sh',
   'gsd-validate-commit.sh',

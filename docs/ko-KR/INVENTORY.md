@@ -78,6 +78,7 @@
 | 명령어 | 역할 | 소스 |
 |---------|------|--------|
 | `/gsd-new-project` | 심층 컨텍스트 수집 및 PROJECT.md로 새 프로젝트 초기화. | [commands/gsd/new-project.md](../../commands/gsd/new-project.md) |
+| `/gsd-onboard` | 기존 코드베이스를 매핑, 문서 수집, 프로젝트 설정, onboarding summary로 안내합니다. | [commands/gsd/onboard.md](../../commands/gsd/onboard.md) |
 | `/gsd-workspace` | GSD 워크스페이스 관리 — 격리된 워크스페이스 환경을 생성(`--new`), 목록(`--list`), 또는 제거(`--remove`). | [commands/gsd/workspace.md](../../commands/gsd/workspace.md) |
 | `/gsd-discuss-phase` | 계획 전 적응형 질문을 통한 단계 컨텍스트 수집. | [commands/gsd/discuss-phase.md](../../commands/gsd/discuss-phase.md) |
 | `/gsd-mvp-phase` | 수직 MVP 슬라이스로 단계 계획 — 사용자 스토리, SPIDR 분할, 이후 plan-phase. | [commands/gsd/mvp-phase.md](../../commands/gsd/mvp-phase.md) |
@@ -168,7 +169,7 @@
 
 ## 워크플로우 (88개 출시)
 
-전체 목록은 `get-shit-done/workflows/*.md`에 있습니다. 워크플로우는 명령어가 내부적으로 참조하는 얇은 오케스트레이터입니다; 대부분은 최종 사용자가 직접 읽지 않습니다. 아래 행은 각 워크플로우 파일을 역할(`<purpose>` 블록에서 도출)과, 해당하는 경우 호출 명령어에 매핑합니다.
+전체 목록은 `gsd-core/workflows/*.md`에 있습니다. 워크플로우는 명령어가 내부적으로 참조하는 얇은 오케스트레이터입니다; 대부분은 최종 사용자가 직접 읽지 않습니다. 아래 행은 각 워크플로우 파일을 역할(`<purpose>` 블록에서 도출)과, 해당하는 경우 호출 명령어에 매핑합니다.
 
 | 워크플로우 | 역할 | 호출자 |
 |----------|------|------------|
@@ -218,6 +219,7 @@
 | `milestone-summary.md` | 마일스톤 아티팩트에서 온보딩 및 검토용 마일스톤 요약 합성. | `/gsd-milestone-summary` |
 | `new-milestone.md` | 새 마일스톤 사이클 시작 — 프로젝트 컨텍스트 로드, 목표 수집, PROJECT.md/STATE.md 업데이트. | `/gsd-new-milestone` |
 | `new-project.md` | 통합 새 프로젝트 플로우 — 질문, 조사(선택), 요구사항, 로드맵. | `/gsd-new-project` |
+| `onboard.md` | Brownfield 온보딩 오케스트레이션 — 코드베이스 매핑, 문서 수집, planning 초기화, 다음 단계 요약. | `/gsd-onboard` |
 | `new-workspace.md` | 저장소 워크트리/클론과 독립적인 `.planning/`이 포함된 격리된 워크스페이스 생성. | `/gsd-workspace --new` |
 | `next.md` | 현재 프로젝트 상태를 감지하고 다음 논리적 단계로 자동 진행. | `/gsd-progress --next` |
 | `node-repair.md` | 실패한 태스크 검증을 위한 자율 수리 오퍼레이터; `execute-plan`에 의해 호출. | `execute-plan.md` (복구) |
@@ -266,7 +268,7 @@
 
 ## 레퍼런스 (62개 출시)
 
-전체 목록은 `get-shit-done/references/*.md`에 있습니다. 레퍼런스는 워크플로우와 에이전트가 `@-참조`하는 공유 지식 문서입니다. 아래 그룹화는 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#references-get-shit-donereferencesmd) — 코어, 워크플로우, 씽킹 모델 클러스터, 모듈식 플래너 분해에 일치합니다.
+전체 목록은 `gsd-core/references/*.md`에 있습니다. 레퍼런스는 워크플로우와 에이전트가 `@-참조`하는 공유 지식 문서입니다. 아래 그룹화는 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#references-gsd-corereferencesmd) — 코어, 워크플로우, 씽킹 모델 클러스터, 모듈식 플래너 분해에 일치합니다.
 
 ### 코어 레퍼런스
 
@@ -298,7 +300,7 @@
 | `continuation-format.md` | 세션 연속/재개 포맷. |
 | `domain-probes.md` | discuss-phase를 위한 도메인별 탐색 질문. |
 | `gate-prompts.md` | 게이트/체크포인트 프롬프트 템플릿. |
-| `scout-codebase.md` | discuss-phase 스카우트 단계를 위한 단계 유형→코드베이스 맵 선택 테이블(#2551로 추출). |
+| `scout-codebase.md` | discuss-phase 스카우트 단계를 위한 단계 유형→코드베이스 맵 선택 테이블(discuss-phase/modes 프로그레시브 디스클로저 분할을 통해 추출, #717). |
 | `revision-loop.md` | 계획 수정 반복 패턴. |
 | `universal-anti-patterns.md` | 감지하고 피해야 할 보편적인 안티패턴. |
 | `worktree-path-safety.md` | 워크트리 가드 스위트: HEAD 어설션, cwd-드리프트 센티널(0a단계, #3097), 절대 경로 가드(0b단계, #3099) — `<execution_context>`를 통해 executor 스폰 프롬프트에 로드됨. |
@@ -361,13 +363,13 @@
 | `user-story-template.md` | MVP 계획을 위한 사용자 스토리 형식 — "As a / I want to / So that" 구조화된 필드. |
 | `spidr-splitting.md` | MVP 모드에서 큰 사용자 스토리 처리를 위한 SPIDR 분할 분해 규칙. |
 
-> **하위 디렉터리:** `get-shit-done/references/few-shot-examples/`에는 특정 에이전트에서 참조되는 추가 퓨샷 예시(`plan-checker.md`, `verifier.md`)가 포함되어 있습니다. 이들은 62개 최상위 레퍼런스 수에 포함되지 않습니다.
+> **하위 디렉터리:** `gsd-core/references/few-shot-examples/`에는 특정 에이전트에서 참조되는 추가 퓨샷 예시(`plan-checker.md`, `verifier.md`)가 포함되어 있습니다. 이들은 62개 최상위 레퍼런스 수에 포함되지 않습니다.
 
 ---
 
 ## CLI 모듈 (81개 출시)
 
-전체 목록: `get-shit-done/bin/lib/*.cjs`.
+전체 목록: `gsd-core/bin/lib/*.cjs`.
 
 | 모듈 | 책임 |
 |--------|----------------|
@@ -380,7 +382,7 @@
 | `cjs-command-router-adapter.cjs` | 매니페스트 기반 CJS 명령어 패밀리 라우터를 위한 공유 호환성 어댑터 |
 | `clock.cjs` | 결정론적 잠금 테스트를 위한 주입 가능한 클록 심(now/sleep) |
 | `clusters.cjs` | 런타임 표면 모듈을 위한 스킬 클러스터 정의(ADR-0011 Phase 2) |
-| `code-review-flags.cjs` | `/gsd:code-review`를 위한 타입 플래그 파서; `parseCodeReviewFlags(argv)` (→ `{ fix, all, auto, depth, files }`) 및 `resolveCodeReviewWorkflow(flags)` (→ `'code-review.md' \| 'code-review-fix.md'`) 내보내기; `--fix`/`--all`/`--auto` 라우팅을 위한 표준 디스패치 심 |
+| `code-review-flags.cjs` | `/gsd-code-review`를 위한 타입 플래그 파서; `parseCodeReviewFlags(argv)` (→ `{ fix, all, auto, depth, files }`) 및 `resolveCodeReviewWorkflow(flags)` (→ `'code-review.md' \| 'code-review-fix.md'`) 내보내기; `--fix`/`--all`/`--auto` 라우팅을 위한 표준 디스패치 심 |
 | `command-aliases.cjs` | 매니페스트 기반 패밀리 라우터를 위한 별칭/하위 명령어 메타데이터 |
 | `command-arg-projection.cjs` | 명령어 패밀리 라우터 전반에 공유되는 타입 플래그 및 위치 인수 프로젝션 헬퍼 |
 | `command-routing-hub.cjs` | 모든 명령어 패밀리 라우터를 위한 모드 결정(SDK vs CJS), 오류 분류, 예외 없음 계약을 집중화하는 순수 결과 디스패치 허브(#3788) |
@@ -441,8 +443,8 @@
 | `task-command-router.cjs` | `gsd-tools task`를 위한 얇은 CJS 하위 명령어 라우터 어댑터 |
 | `template.cjs` | 변수 치환을 통한 템플릿 선택 및 채우기 |
 | `uat.cjs` | UAT 파일 파싱, 검증 부채 추적, audit-uat 지원 |
-| `ui-safety-gate.cjs` | 셸 없는 단어 경계 UI 토큰 감지기(#3706, #3718); stdin에서 단계 섹션 텍스트를 읽어 0(UI 발견) 또는 1(UI 없음) 종료; GSD 설치 프로그램이 `$RUNTIME_DIR`에 배포하도록 `get-shit-done/bin/lib/`에도 배포 |
-| `update-context.cjs` | `/gsd:update`를 위한 순수 설치 컨텍스트 해석기 — update.md bash에서 포팅된 런타임/범위/설정 디렉터리/버전 감지(LOCAL/GLOBAL/UNKNOWN); `gsd-tools update-context` 지원(#498) |
+| `ui-safety-gate.cjs` | 셸 없는 단어 경계 UI 토큰 감지기(#3706, #3718); stdin에서 단계 섹션 텍스트를 읽어 0(UI 발견) 또는 1(UI 없음) 종료; GSD 설치 프로그램이 `$RUNTIME_DIR`에 배포하도록 `gsd-core/bin/lib/`에도 배포 |
+| `update-context.cjs` | `/gsd-update`를 위한 순수 설치 컨텍스트 해석기 — update.md bash에서 포팅된 런타임/범위/설정 디렉터리/버전 감지(LOCAL/GLOBAL/UNKNOWN); `gsd-tools update-context` 지원(#498) |
 | `validate-command-router.cjs` | `gsd-tools validate`를 위한 얇은 CJS 하위 명령어 라우터 어댑터 |
 | `validate.cjs` | 순수 단계 변형 정규화 헬퍼(`phaseVariants`, `buildRoadmapPhaseVariants`, `buildNotStartedPhaseVariants`), W006/W007 확인을 위해 `verify.cjs`에서 사용; I/O 없음, 비동기 없음 |
 | `verify-command-router.cjs` | `gsd-tools verify`를 위한 얇은 CJS 하위 명령어 라우터 어댑터 |
@@ -473,6 +475,8 @@
 | `gsd-read-guard.js` | `PreToolUse` | 읽지 않은 파일에 대한 Edit/Write를 방지하는 어드바이저리 가드 |
 | `gsd-read-injection-scanner.js` | `PostToolUse` | 도구 Read 결과에서 프롬프트 주입 패턴 스캔 (v1.36+, PR #2201) |
 | `gsd-worktree-path-guard.js` | `PreToolUse` | 워크트리 루트 외부의 절대 경로로 Edit/Write/MultiEdit를 하드 차단 (PR #579, #260) |
+| `gsd-agent-isolation-guard.js` | `PreToolUse` | 프로젝트의 해석된 디스패치 격리가 `harness-worktree`일 때 하네스 격리 매개변수가 누락된 executor `Agent()` 디스패치를 하드 차단 (#3045) |
+| `gsd-write-guard.js` | `PreToolUse` | 큐레이션된 `.planning/` 아티팩트(ROADMAP.md, 마일스톤 로드맵, STATE.md)를 치명적으로 축소하는 전체 파일 `Write`를 하드 차단. 일회용 센티널 `.planning/.gsd-allow-shrink`(워크플로 단계) 또는 `GSD_ALLOW_PLANNING_SHRINK=1`(대화형)로 우회 가능 (#2255, #973의 수정 3) |
 | `gsd-session-state.sh` | `PostToolUse` | 셸 기반 런타임을 위한 세션 상태 추적 |
 | `gsd-validate-commit.sh` | `PostToolUse` | 컨벤셔널 커밋 적용을 위한 커밋 검증 |
 | `gsd-phase-boundary.sh` | `PostToolUse` | 워크플로우 전환을 위한 단계 경계 감지 |

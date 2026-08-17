@@ -19,27 +19,66 @@ import fs from 'node:fs';
 import childProcess from 'node:child_process';
 
 /**
+ * Convert a filesystem path to POSIX form (forward slashes) by translating the
+ * platform-native separator. Single seam for native→POSIX conversion.
+ *
+ * Prefer this over `p.replace(/\\/g, '/')`: the regex form hardcodes both
+ * separators and corrupts POSIX paths containing a literal backslash (a legal
+ * filename character). Splitting on `path.sep` only ever touches real
+ * separators — a no-op on POSIX, `\`→`/` on Windows.
+ */
+export function toPosixPath(p: string): string {
+  return p.split(path.sep).join(path.posix.sep);
+}
+
+/**
+ * Convert a filesystem path to the platform-native separator form. No-op on
+ * POSIX; `/`→`\` on Windows. Prefer this over a
+ * `process.platform === 'win32' ? p.replace(/\//g, '\\') : p` ternary.
+ */
+export function toNativePath(p: string): string {
+  return p.split(path.posix.sep).join(path.sep);
+}
+
+/**
+ * Normalize ALL backslashes to forward slashes, unconditionally and independent
+ * of the running OS. Use this when emitting a path into a POSIX/bash target
+ * (which may differ from the running platform — e.g. generating a Windows config
+ * on a Linux runner) or when parsing input whose separators are unpredictable.
+ *
+ * Contrast `toPosixPath`, which is running-OS-relative (splits on `path.sep`) and
+ * is for *this machine's* filesystem paths. Do NOT use `toPosixPath` for
+ * target-platform projection — on a Linux runner it would not convert a
+ * Windows-target path's backslashes.
+ */
+export function posixNormalize(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+/**
  * Return true when a managed hook command must be prefixed with PowerShell's
  * call operator so a quoted executable token is invokable by the target
  * runtime/shell combination.
  *
- * Current evidence-backed policy:
- * - Gemini on Windows requires `& ` for quoted node/bash runners.
- * - Claude Code on Windows does NOT: its hook commands execute under bash/Git
- *   Bash and `& ` breaks there (#3413).
+ * The `&`/no-`&` decision is keyed on the **effective hook-execution shell**
+ * (`opts.hookShell`), not on runtime alone — a single runtime (Claude Code)
+ * can host either Git Bash or PowerShell on Windows, and no single static
+ * command string is valid in both (#2236):
+ * - Git Bash: `"node.exe" "hook.js"` works; `& "node.exe" …` → syntax error.
+ * - PowerShell: `& "node.exe" "hook.js"` works; bare `"node.exe" …` →
+ *   `Unexpected token`.
  *
- * Keep the policy conservative until another runtime has a verified need.
+ * Default is `false` (Git Bash form) for backward compatibility. Set
+ * `opts.hookShell = 'powershell'` to emit the PowerShell call-operator form.
  */
-export function hookCommandNeedsPowerShellCallOperator(opts: { platform?: string; runtime?: string } = {}): boolean {
-  const platform = opts.platform || process.platform;
-  const runtime = opts.runtime || 'generic';
-  return platform === 'win32' && runtime === 'gemini';
+export function hookCommandNeedsPowerShellCallOperator(opts: { platform?: string; runtime?: string; hookShell?: string } = {}): boolean {
+  return opts.hookShell === 'powershell';
 }
 
 /**
  * Project a fully-assembled hook command string for the target runtime.
  */
-export function formatHookCommandForRuntime(command: string, opts: { platform?: string; runtime?: string } = {}): string {
+export function formatHookCommandForRuntime(command: string, opts: { platform?: string; runtime?: string; hookShell?: string } = {}): string {
   return hookCommandNeedsPowerShellCallOperator(opts) ? `& ${command}` : command;
 }
 
@@ -91,19 +130,27 @@ export function buildLocalShellHookCommand({ localPrefix, hookFile, bashRunner, 
 export function formatManagedHookScriptToken(scriptPath: string, opts: { platform?: string } = {}): string | null {
   const platform = opts.platform || process.platform;
   if (platform !== 'win32') return null;
-  return JSON.stringify(scriptPath.replace(/\\/g, '/'));
+  return JSON.stringify(posixNormalize(scriptPath));
 }
 
-export function projectLocalHookPrefix({ runtime = 'claude', dirName }: { runtime?: string; dirName?: string | null }): string | undefined | null {
+export function projectLocalHookPrefix({ runtime: _runtime = 'claude', dirName, hookPathStyle }: { runtime?: string; dirName?: string | null; hookPathStyle?: string | null }): string | undefined | null {
   if (!dirName) return dirName;
-  return (runtime === 'gemini' || runtime === 'antigravity')
+  // Descriptor-driven (ADR-1239 / #2096): folded from a hardcoded
+  // `runtime === 'antigravity'` literal into the runtime's declared
+  // `hostBehaviors.hookPathStyle`. Runtimes that always run project hooks
+  // with the project dir as cwd (Antigravity today) declare 'raw' and get
+  // the bare dirName; every other runtime keeps the $CLAUDE_PROJECT_DIR-
+  // anchored prefix. `runtime` itself is now unused here but stays in the
+  // signature for call-site/back-compat parity (kept `_`-prefixed to
+  // satisfy no-unused-vars).
+  return (hookPathStyle === 'raw')
     ? dirName
     : `"$CLAUDE_PROJECT_DIR"/${dirName}`;
 }
 
 export function projectPortableHookBaseDir({ configDir, homeDir }: { configDir?: string | null; homeDir?: string | null }): string {
-  const normalizedConfigDir = String(configDir || '').replace(/\\/g, '/');
-  const normalizedHome = String(homeDir || '').replace(/\\/g, '/');
+  const normalizedConfigDir = posixNormalize(String(configDir || ''));
+  const normalizedHome = posixNormalize(String(homeDir || ''));
   if (!normalizedConfigDir || !normalizedHome) return normalizedConfigDir;
   return normalizedConfigDir.startsWith(normalizedHome)
     ? '$HOME' + normalizedConfigDir.slice(normalizedHome.length)
@@ -115,31 +162,35 @@ export function projectShellCommandText({
   argTokens = [],
   runtime = 'generic',
   platform = process.platform,
+  hookShell,
 }: {
   runnerToken?: string | null;
   argTokens?: (string | null | undefined)[];
   runtime?: string;
   platform?: string;
+  hookShell?: string;
 }): string | null {
   if (!runnerToken) return null;
   const parts = [runnerToken, ...argTokens.filter(Boolean)] as string[];
-  return formatHookCommandForRuntime(parts.join(' '), { platform, runtime });
+  return formatHookCommandForRuntime(parts.join(' '), { platform, runtime, hookShell });
 }
 
-export function projectManagedHookCommand({ absoluteRunner, scriptPath, runtime = 'generic', platform = process.platform }: {
+export function projectManagedHookCommand({ absoluteRunner, scriptPath, runtime = 'generic', platform = process.platform, hookShell }: {
   absoluteRunner?: string | null;
   scriptPath?: string | null;
   runtime?: string;
   platform?: string;
+  hookShell?: string;
 }): string | null {
   if (!absoluteRunner || !scriptPath) return null;
-  const normalizedScriptPath = platform === 'win32' ? scriptPath.replace(/\\/g, '/') : scriptPath;
+  const normalizedScriptPath = platform === 'win32' ? posixNormalize(scriptPath) : scriptPath;
   return projectShellCommandText({
     runnerToken: absoluteRunner,
     argTokens: [JSON.stringify(normalizedScriptPath)],
     runtime,
     platform,
-  });
+    hookShell,
+});
 }
 
 const MANAGED_HOOK_BASENAMES_BY_SURFACE: Record<string, Set<string>> = {
@@ -219,16 +270,29 @@ function managedHookCommandSurfaceSet(surface: string = 'settings-json', include
   return new Set([...base, ...aliases]);
 }
 
-export function isManagedHookCommand(commandText: unknown, opts: { surface?: string; includeLegacyAliases?: boolean; configDir?: string } = {}): boolean {
+export function isManagedHookCommand(commandText: unknown, opts: { surface?: string; includeLegacyAliases?: boolean; configDir?: string; args?: unknown[] } = {}): boolean {
   if (typeof commandText !== 'string') return false;
   const surface = opts.surface || 'settings-json';
   const includeLegacyAliases = opts.includeLegacyAliases === true;
   const managedBasenames = managedHookCommandSurfaceSet(surface, includeLegacyAliases);
   if (!managedBasenames || managedBasenames.size === 0) return false;
-  const normalizedCommand = commandText.replace(/\\/g, '/');
+
+  // args-form check: the managed hook filename may appear in args[] rather than
+  // in command when a windowless launcher wraps the Node invocation. (#976)
+  // Only treat as managed when an arg basename matches the managed hook set —
+  // prevents false-positives for non-GSD entries that happen to share a path segment.
+  if (Array.isArray(opts.args) && opts.args.length > 0) {
+    for (const arg of opts.args) {
+      if (typeof arg !== 'string') continue;
+      const argBasename = posixNormalize(arg).split('/').pop() || '';
+      if (isManagedHookBasename(argBasename, { surface })) return true;
+    }
+  }
+
+  const normalizedCommand = posixNormalize(commandText);
 
   if (typeof opts.configDir === 'string' && opts.configDir.length > 0) {
-    const normalizedHooksDir = `${path.join(opts.configDir, 'hooks').replace(/\\/g, '/')}/`;
+    const normalizedHooksDir = `${posixNormalize(path.join(opts.configDir, 'hooks'))}/`;
     if (!normalizedCommand.includes(normalizedHooksDir)) return false;
   }
 
@@ -239,6 +303,15 @@ export function isManagedHookCommand(commandText: unknown, opts: { surface?: str
   }
   return false;
 }
+
+/**
+ * Detect a `"$VAR"/rest` anchored hook-script token — a path whose leading
+ * shell variable is already double-quoted with the remainder left bare (the
+ * shape `projectLocalHookPrefix` emits for local installs, e.g.
+ * `"$CLAUDE_PROJECT_DIR"/.claude/hooks/gsd-x.js`). Such a token is ALREADY a
+ * valid, correctly-quoted shell argument and must never be re-quoted.
+ */
+const ANCHORED_HOOK_SCRIPT_TOKEN = /^"\$[A-Za-z_][A-Za-z0-9_]*"\//;
 
 /**
  * Projection helper for legacy settings.json hook rewrites.
@@ -261,9 +334,21 @@ export function projectLegacySettingsHookCommand({
   platform?: string;
 }): string | null {
   if (!absoluteRunner || !scriptPath) return null;
-  const normalizedScriptPath = platform === 'win32' ? scriptPath.replace(/\\/g, '/') : scriptPath;
+  const normalizedScriptPath = platform === 'win32' ? posixNormalize(scriptPath) : scriptPath;
+  // #1693: a script path already carrying a `"$CLAUDE_PROJECT_DIR"`-anchored
+  // quoted prefix (local installs) is already a valid shell token — only the
+  // variable is quoted, the rest is bare. JSON.stringify-ing it on Windows
+  // yields `"\"$CLAUDE_PROJECT_DIR\"/..."` (escaped quotes inside an outer
+  // quote); node then receives an argument that *starts* with a `"`, treats it
+  // as relative, and dies with MODULE_NOT_FOUND. Emit anchored tokens verbatim;
+  // only bare absolute paths (which may contain spaces, e.g. "Program Files")
+  // need the JSON.stringify quoting. Scoped to win32: the non-Windows branch
+  // already preserves the caller's `scriptToken` (which is the bare anchored
+  // token for these inputs), so it never had the double-quote bug.
   const commandScriptToken = platform === 'win32'
-    ? JSON.stringify(normalizedScriptPath)
+    ? (ANCHORED_HOOK_SCRIPT_TOKEN.test(normalizedScriptPath)
+        ? normalizedScriptPath
+        : JSON.stringify(normalizedScriptPath))
     : (scriptToken || JSON.stringify(normalizedScriptPath));
   return projectShellCommandText({
     runnerToken: absoluteRunner,
@@ -273,8 +358,35 @@ export function projectLegacySettingsHookCommand({
   });
 }
 
+// Implements the TOML v1.0.0 basic-string escaping grammar (toml.md, "Basic
+// strings" section, https://toml.io/en/v1.0.0#string): a basic string must
+// escape the quotation mark, backslash, and control characters other than
+// tab (U+0000-U+0008, U+000A-U+001F, U+007F). Compact escapes are used where
+// TOML defines them (\b \t \n \f \r \" \\); every other character in the
+// required ranges falls back to \uXXXX. See #3118 — an earlier version
+// escaped only backslash and quote, so a raw newline/CR/NUL in a value
+// produced an unparseable config.toml.
+const TOML_COMPACT_ESCAPES: Record<string, string> = {
+  '\x08': '\\b',
+  '\x09': '\\t',
+  '\x0A': '\\n',
+  '\x0C': '\\f',
+  '\x0D': '\\r',
+};
+
+// U+0000-U+0008, U+000A-U+001F, U+007F — control characters other than tab
+// (U+0009), which the grammar permits unescaped.
+const TOML_MUST_ESCAPE_CONTROL_CHARS = /[\x00-\x08\x0A-\x1F\x7F]/g;
+
 export function escapeTomlDoubleQuotedString(value: unknown): string {
-  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return String(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(TOML_MUST_ESCAPE_CONTROL_CHARS, (ch) => {
+      const compact = TOML_COMPACT_ESCAPES[ch];
+      if (compact) return compact;
+      return `\\u${ch.codePointAt(0)!.toString(16).padStart(4, '0')}`;
+    });
 }
 
 export function projectCodexHookTomlCommand({ absoluteRunner, scriptPath, platform = process.platform }: {
@@ -303,11 +415,34 @@ export function escapeSingleQuotedShellLiteral(value: unknown): string {
   return String(value).replace(/'/g, "'\\''");
 }
 
+/**
+ * The `export PATH="<dir>:$PATH"` line every persistence lane appends, plus the escaped directory
+ * token it embeds. One builder because three lanes emit this line: a lane that re-escapes it
+ * locally is how #3118 shipped a `$(…)` into ~/.bashrc, where it ran on every new shell. The
+ * escaping is for the line's FINAL context — a double-quoted string in an rc file — not for
+ * whatever transport (an `echo`, a paste) it passes through on the way there.
+ */
+export function projectPathExportLine(targetDir: unknown): { escapedDir: string; line: string } {
+  const escapedDir = escapePosixDoubleQuoted(String(targetDir));
+  return { escapedDir, line: `export PATH="${escapedDir}:$PATH"` };
+}
+
 interface ShellAction {
   label: string | null;
   shell: string;
   command: string;
 }
+
+/**
+ * Why a PATH suggestion produced no actions. An empty `shellActions` alone folds two different
+ * facts together — "no target directory was given" and "this target directory cannot be
+ * expressed as a shell command" — and a caller that cannot tell them apart prints a header with
+ * nothing under it (#3118).
+ */
+export const PATH_ACTION_REASON = Object.freeze({
+  NO_TARGET_DIR: 'no_target_dir',
+  WIN32_RESERVED_QUOTE: 'win32_reserved_quote',
+});
 
 export function renderShellActionLines(shellActions: ShellAction[] = []): string[] {
   return shellActions.map((action) => {
@@ -324,15 +459,23 @@ export function projectPathActionProjection({
   mode?: string;
   targetDir?: string | null;
   platform?: string;
-}): { shellActions: ShellAction[]; actionLines: string[] } {
-  if (!targetDir) return { shellActions: [], actionLines: [] };
+}): { shellActions: ShellAction[]; actionLines: string[]; reason?: string } {
+  if (!targetDir) return { shellActions: [], actionLines: [], reason: PATH_ACTION_REASON.NO_TARGET_DIR };
+
+  // #3118: `"` is reserved on Windows, so a path containing one cannot exist — and it would close
+  // cmd's quoted region in the `powershell -Command "…"` lane below, turning the rest into cmd
+  // input. There is no correct command to suggest for an impossible path: fail closed rather than
+  // emit one whose quoting can be broken.
+  if (platform === 'win32' && String(targetDir).includes('"')) return { shellActions: [], actionLines: [], reason: PATH_ACTION_REASON.WIN32_RESERVED_QUOTE };
 
   const isWin32 = platform === 'win32';
 
   let shellActions: ShellAction[];
   if (isWin32) {
     const psTargetDir = escapePowerShellSingleQuoted(targetDir);
-    const bashTargetDir = escapeSingleQuotedShellLiteral(String(targetDir).replace(/\\/g, '/'));
+    const bashExportLine = escapeSingleQuotedShellLiteral(
+      projectPathExportLine(posixNormalize(String(targetDir))).line,
+    );
     shellActions = [
       {
         label: 'PowerShell',
@@ -347,30 +490,49 @@ export function projectPathActionProjection({
       {
         label: 'Git Bash',
         shell: 'bash',
-        command: `echo 'export PATH="${bashTargetDir}:$PATH"' >> ~/.bashrc`,
+        command: `echo '${bashExportLine}' >> ~/.bashrc`,
       },
     ];
   } else if (mode === 'persist') {
-    const bashTargetDir = escapeSingleQuotedShellLiteral(String(targetDir));
+    const exportLine = escapeSingleQuotedShellLiteral(projectPathExportLine(targetDir).line);
+    const fishTargetDir = escapeSingleQuotedShellLiteral(String(targetDir));
     shellActions = [
       {
         label: 'zsh',
         shell: 'zsh',
-        command: `echo 'export PATH="${bashTargetDir}:$PATH"' >> ~/.zshrc`,
+        command: `echo '${exportLine}' >> ~/.zshrc`,
       },
       {
         label: 'bash',
         shell: 'bash',
-        command: `echo 'export PATH="${bashTargetDir}:$PATH"' >> ~/.bashrc`,
+        command: `echo '${exportLine}' >> ~/.bashrc`,
+      },
+      // #323: fish has no `export`/`$PATH`-list syntax. `fish_add_path` is the
+      // fish-native API (>= fish 3.2, 2021) that persists to the universal
+      // variable store and de-duplicates. The directory is single-quoted with
+      // the same POSIX literal escaping as the zsh/bash siblings — `'\''` is
+      // also a valid escaped single quote in fish between quote spans.
+      //
+      // #3118 review MINOR: a `targetDir` with a leading `-` (e.g. `-v`) is a
+      // legal directory name, but fish's argparse-based option scanning
+      // treats a leading-dash token as a flag REGARDLESS of quoting, so
+      // `fish_add_path '-v'` misparses it and prints "No paths to add, not
+      // setting anything." (exit 1) instead of adding the path. `--` is
+      // fish's standard end-of-options separator; verified empirically
+      // against a real fish 4.8.1 install that `fish_add_path -- '-v'`
+      // succeeds where the unseparated form fails.
+      {
+        label: 'fish',
+        shell: 'fish',
+        command: `fish_add_path -- '${fishTargetDir}'`,
       },
     ];
   } else {
-    const posixTargetDir = escapePosixDoubleQuoted(targetDir);
     shellActions = [
       {
         label: null,
         shell: 'posix',
-        command: `export PATH="${posixTargetDir}:$PATH"`,
+        command: projectPathExportLine(targetDir).line,
       },
     ];
   }
@@ -384,36 +546,66 @@ export function projectPathActionProjection({
 export function projectPersistentPathExportActions({ targetDir, platform = process.platform }: {
   targetDir?: string | null;
   platform?: string;
-}): { shellActions: ShellAction[] } {
+}): { shellActions: ShellAction[]; reason?: string } {
   const projected = projectPathActionProjection({
     mode: 'persist',
     targetDir,
     platform,
   });
-  return { shellActions: projected.shellActions };
+  return projected.reason === undefined
+    ? { shellActions: projected.shellActions }
+    : { shellActions: projected.shellActions, reason: projected.reason };
 }
 
 
 // ─── Subprocess dispatch ──────────────────────────────────────────────────────
 
-interface SpawnResultOutput {
+export interface SpawnResultOutput {
   exitCode: number;
   stdout: string;
   stderr: string;
   signal: NodeJS.Signals | null;
   error: Error | null;
+  timedOut: boolean;
+}
+
+/**
+ * Returns true when a spawn/exec result indicates the subprocess was killed
+ * by a timeout, i.e. it never completed and reported a real answer. This is
+ * the single shared definition of "did this subprocess time out" — worktree
+ * safety (src/worktree-safety.cts) and worktree base-ref detection
+ * (src/worktree-base-ref.cts) both call this instead of maintaining their
+ * own copies (#3050 — "Generative Fix Divergence").
+ *
+ * Only `error.code === 'ETIMEDOUT'` is checked. Node.js guarantees this
+ * cross-platform when `spawnSync`'s `timeout` option fires. The `signal ===
+ * 'SIGTERM'` check some earlier code paired with it is platform-fragile —
+ * Windows does not necessarily report SIGTERM the same way — and pairing it
+ * in as a REQUIRED conjunct risks a false NEGATIVE (a timeout that silently
+ * fails to trip the guard) on that platform. There is no false-positive risk
+ * from dropping it: an externally-delivered SIGTERM (not a timeout) leaves
+ * `error` null, so `error.code === 'ETIMEDOUT'` alone still won't match it.
+ */
+export function isSpawnTimeout(result: { error?: unknown }): boolean {
+  return (result.error as NodeJS.ErrnoException | null | undefined)?.code === 'ETIMEDOUT';
 }
 
 function _spawnResult(result: { error?: NodeJS.ErrnoException | null; status?: number | null; stdout?: Buffer | string | null; stderr?: Buffer | string | null; signal?: NodeJS.Signals | null }, program: string): SpawnResultOutput {
   if (result.error && result.error.code === 'ENOENT') {
-    return { exitCode: 127, stdout: '', stderr: `${program}: not found`, signal: null, error: result.error };
+    return { exitCode: 127, stdout: '', stderr: `${program}: not found`, signal: null, error: result.error, timedOut: false };
   }
+  const signal = result.signal ?? null;
+  const error = result.error ?? null;
   return {
     exitCode: result.status ?? 1,
     stdout: (result.stdout ?? '').toString().trim(),
     stderr: (result.stderr ?? '').toString().trim(),
-    signal: result.signal ?? null,
-    error: result.error ?? null,
+    signal,
+    error,
+    // Reuse the single shared timeout predicate (isSpawnTimeout, below) rather
+    // than re-deriving it here — see that function's docstring for why only
+    // error.code === 'ETIMEDOUT' is checked (not signal === 'SIGTERM').
+    timedOut: isSpawnTimeout({ error }),
   };
 }
 
@@ -460,6 +652,136 @@ export function execTool(program: string, args: string[], opts: { cwd?: string; 
     windowsHide: true,
   });
   return _spawnResult(result, program);
+}
+
+/**
+ * Result shape for {@link dispatchGsdCommand}. Modeled on the existing
+ * `{exitCode,stdout,stderr,signal,error}` seam above, but flattened to the
+ * fields callers actually need (never leaks a raw Error/signal — see
+ * `timedOut`), per the "Unbounded Subprocesses" contract (CLAUDE.md):
+ * degrade to a structured result on timeout/ENOENT, never throw.
+ */
+export interface DispatchGsdCommandResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  code: number | null;
+  timedOut: boolean;
+}
+
+/**
+ * Resolve the absolute path to gsd-tools.cjs relative to THIS module.
+ *
+ * This file compiles to gsd-core/bin/lib/shell-command-projection.cjs — a
+ * sibling of gsd-core/bin/gsd-tools.cjs — so the relative walk-up is stable
+ * regardless of install location (global/local/dev-repo layouts all ship
+ * gsd-core/bin/ as a unit).
+ */
+export function resolveGsdToolsPath(): string {
+  return path.resolve(__dirname, '..', 'gsd-tools.cjs');
+}
+
+/**
+ * Subprocess-shim dispatch to gsd-tools.cjs (ADR-1239 #2102 Stage 2).
+ *
+ * No fully-populated in-process command-routing hub exists anywhere in the
+ * tree — every `createHub()` caller (cjs-command-router-adapter.cts,
+ * phase-command-router.cts, command-routing-hub.cts's own tests) builds a
+ * single-family hub for its own narrow purpose. The ONLY dispatch path that
+ * covers the FULL family/subcommand surface is the gsd-tools.cjs CLI itself.
+ * This mirrors the SUBPROCESS-REUSE precedent already established for the
+ * OpenCode/Kilo hook bridge (see .opencode/plugins/gsd-core.js header:
+ * "Architecture: SUBPROCESS REUSE ... spawns existing hook scripts as child
+ * processes") — the same pattern, applied to command dispatch instead of
+ * hook dispatch.
+ *
+ * Output-flag choice (verified by direct invocation — see #2102 dispatch
+ * notes for the sample invocations): always pass `--raw` (undecorated,
+ * programmatically-consumable stdout on success) and `--json-errors` (a
+ * structured `{ok:false,reason,message}` JSON object on stderr, with a
+ * non-zero exit, instead of a free-text "Error: ..." line). Both are global
+ * flags accepted by every gsd-tools.cjs family/subcommand, so passing them
+ * unconditionally is safe for the full command surface.
+ *
+ * `family` maps 1:1 onto gsd-tools.cjs's first positional argv token;
+ * `subcommand` (when present) onto the second — e.g.
+ * `{family:'phase', subcommand:'add'}` → `gsd-tools.cjs phase add`. An empty
+ * `subcommand` is omitted entirely (some families, e.g. `config-path`, take
+ * no subcommand).
+ *
+ * NEVER throws. Degrades to `{ ok:false, ... }` on:
+ *   - a missing/invalid "family" (validated locally, no subprocess spawned)
+ *   - ENOENT / a missing gsd-tools.cjs (via the injectable `gsdToolsPath`)
+ *   - a wall-clock timeout (`timedOut:true`, via the shared `isSpawnTimeout`
+ *     predicate defined above in this file — also used by worktree-safety.cts
+ *     and worktree-base-ref.cts)
+ *   - any other unanticipated throw from the underlying spawn (defensive
+ *     try/catch — execTool itself is spawnSync-based and does not throw).
+ */
+export function dispatchGsdCommand({
+  family,
+  subcommand,
+  args = [],
+  cwd,
+  timeout = 30_000,
+  gsdToolsPath,
+}: {
+  family?: string;
+  subcommand?: string;
+  args?: string[];
+  cwd?: string;
+  timeout?: number;
+  gsdToolsPath?: string;
+} = {}): DispatchGsdCommandResult {
+  if (typeof family !== 'string' || family.length === 0) {
+    return {
+      ok: false,
+      stdout: '',
+      stderr: 'dispatchGsdCommand requires a non-empty string "family".',
+      code: null,
+      timedOut: false,
+    };
+  }
+
+  const resolvedCwd = cwd || process.cwd();
+  const toolsPath = gsdToolsPath || resolveGsdToolsPath();
+  const argv = [
+    toolsPath,
+    family,
+    ...(subcommand ? [subcommand] : []),
+    ...(Array.isArray(args) ? args : []),
+    '--cwd', resolvedCwd,
+    '--raw',
+    '--json-errors',
+  ];
+
+  let result: SpawnResultOutput;
+  try {
+    result = execTool(process.execPath, argv, { cwd: resolvedCwd, timeout });
+  } catch (e) {
+    // Defensive belt-and-suspenders: execTool is spawnSync-based and does not
+    // throw today, but a degraded result here keeps this seam's no-throw
+    // contract true even under an unanticipated future failure mode.
+    return {
+      ok: false,
+      stdout: '',
+      stderr: e instanceof Error ? e.message : String(e),
+      code: null,
+      timedOut: false,
+    };
+  }
+
+  // Delegates to the single shared predicate defined above in this file
+  // (#3050 — "Generative Fix Divergence") instead of a local inline copy.
+  const timedOut = isSpawnTimeout(result);
+
+  return {
+    ok: result.exitCode === 0 && !timedOut,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    code: result.exitCode,
+    timedOut,
+  };
 }
 
 export function probeTty(opts: { platform?: string } = {}): string | null {
@@ -537,17 +859,86 @@ export function normalizeContent(filePath: string, content: string, opts: { enco
   return { content: normalized, encoding };
 }
 
+// Rename errnos that are transient on Windows: a concurrent reader (or an AV
+// scanner / indexer) holding the target open makes renameSync fail briefly.
+// Same idiom as capability-ledger.cts / capability-consent.cts.
+const RENAME_RETRY_ERRNOS = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const RENAME_MAX_ATTEMPTS = 3;
+const RENAME_RETRY_BACKOFF_MS = 50;
+
+/** Synchronous best-effort backoff sleep (Atomics.wait — same idiom as io.cts). */
+let _renameSleepBuf: Int32Array | null = null;
+function renameBackoff(): void {
+  if (_renameSleepBuf === null) _renameSleepBuf = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(_renameSleepBuf, 0, 0, RENAME_RETRY_BACKOFF_MS);
+}
+
+/**
+ * Atomic publish with bounded retry on transient Windows lock errnos.
+ * Returns null on success, or the final error if every attempt failed.
+ */
+function atomicRenameWithRetry(tmpPath: string, filePath: string): NodeJS.ErrnoException | null {
+  let renameErr: NodeJS.ErrnoException | null = null;
+  for (let attempt = 1; attempt <= RENAME_MAX_ATTEMPTS; attempt++) {
+    try {
+      fs.renameSync(tmpPath, filePath);
+      return null;
+    } catch (err) {
+      renameErr = err as NodeJS.ErrnoException;
+      if (attempt < RENAME_MAX_ATTEMPTS && RENAME_RETRY_ERRNOS.has(renameErr.code ?? '')) {
+        renameBackoff();
+        continue;
+      }
+      break;
+    }
+  }
+  return renameErr;
+}
+
+/**
+ * Drop-in replacement for `fs.renameSync(from, to)` that retries the transient
+ * Windows lock errnos (EPERM/EBUSY/EACCES — see DEFECT.WINDOWS-FS-OPS) a bounded
+ * number of times with a short backoff before rethrowing the final error.
+ *
+ * Idempotent on POSIX (the transient errnos do not occur), so callers retain
+ * identical semantics on macOS/Linux while gaining resilience on Windows where
+ * an antivirus scanner, indexer, or concurrent reader may briefly hold the
+ * target open. Enforced by local/require-fs-op-fallback (ADR-1703 Phase 6).
+ */
+export function retryRenameSync(fromPath: string, toPath: string): void {
+  const err = atomicRenameWithRetry(fromPath, toPath);
+  if (err !== null) throw err;
+}
+
 export function platformWriteSync(filePath: string, content: string, opts: { encoding?: BufferEncoding } = {}): void {
   const { content: normalized, encoding } = normalizeContent(filePath, content, opts);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmpPath = filePath + '.tmp.' + process.pid;
+
+  // Step 1: write the sibling tmp file. If THIS fails, nothing was published, so a
+  // direct fallback write cannot truncate a concurrent reader of an existing file.
   try {
     fs.writeFileSync(tmpPath, normalized, encoding);
-    fs.renameSync(tmpPath, filePath);
   } catch {
     try { fs.unlinkSync(tmpPath); } catch { /* already gone */ }
     fs.writeFileSync(filePath, normalized, encoding);
+    return;
   }
+
+  // Step 2: atomic publish, retrying transient Windows locks.
+  const renameErr = atomicRenameWithRetry(tmpPath, filePath);
+  if (renameErr === null) return;
+
+  try { fs.unlinkSync(tmpPath); } catch { /* already gone */ }
+  if (RENAME_RETRY_ERRNOS.has(renameErr.code ?? '')) {
+    // A live reader still holds the target open after every retry. A non-atomic
+    // direct write here would truncate that reader (the exact corruption this seam
+    // exists to prevent), so surface the error instead of falling back.
+    throw renameErr;
+  }
+  // Atomic publish is genuinely impossible here (e.g. EXDEV cross-device move):
+  // fall back to a direct write to preserve write availability.
+  fs.writeFileSync(filePath, normalized, encoding);
 }
 
 export function platformReadSync(filePath: string, opts: { encoding?: BufferEncoding; required?: boolean } = {}): string | null {

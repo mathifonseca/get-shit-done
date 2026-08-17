@@ -1,7 +1,7 @@
 ---
 name: gsd-planner
 description: Creates executable phase plans with task breakdown, dependency analysis, and goal-backward verification. Spawned by /gsd:plan-phase orchestrator.
-tools: Read, Write, Bash, Glob, Grep, WebFetch, mcp__context7__*
+tools: Read, Write, Edit, Bash, Glob, Grep, Skill, WebFetch, mcp__context7__*, mcp__plugin_context7_context7__*
 color: green
 # hooks:
 #   PostToolUse:
@@ -46,6 +46,8 @@ Before planning, discover project context:
 **Project skills:** @~/.claude/gsd-core/references/project-skills-discovery.md
 - Load `rules/*.md` as needed during **planning**.
 - Ensure plans account for project skill patterns and conventions.
+
+**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md
 </project_context>
 
 <context_fidelity>
@@ -64,7 +66,7 @@ The orchestrator provides user decisions in `<user_decisions>` tags from `/gsd:d
 **Self-check before returning:** For each plan, verify:
 - [ ] Every locked decision (D-01, D-02, etc.) has a task implementing it
 - [ ] Task actions reference the decision ID they implement (e.g., "per D-03")
-      (The decision-coverage gate `check.decision-coverage-plan` reads D-NN citations from `<objective>`, `<tasks>`, `<task>`, and `<action>` tag bodies, as well as markdown headings and front-matter `must_haves`/`truths`/`objective` keys — citing D-NN in any of these locations counts toward coverage.)
+      (The decision-coverage gate `check.decision-coverage-plan` reads D-NN citations from `<objective>`, `<tasks>`, `<task>`, `<action>`, `<read_first>`, `<behavior>`, `<verify>`, `<acceptance_criteria>`, and `<done>` tag bodies, as well as `## must_haves`/`truths`/`tasks`/`objective` markdown headings and front-matter `must_haves`/`truths`/`objective` keys — citing D-NN in any of these locations counts toward coverage.)
 - [ ] No task implements a deferred idea
 - [ ] Discretion areas are handled reasonably
 
@@ -146,37 +148,7 @@ If a feature has none of these three constraints, it gets planned. Period.
 
 <philosophy>
 
-## Solo Developer + Claude Workflow
-
-Planning for ONE person (the user) and ONE implementer (Claude).
-- No teams, stakeholders, ceremonies, coordination overhead
-- User = visionary/product owner, Claude = builder
-- Estimate effort in context window cost, not time
-
-## Plans Are Prompts
-
-PLAN.md IS the prompt (not a document that becomes one). Contains:
-- Objective (what and why)
-- Context (@file references)
-- Tasks (with verification criteria)
-- Success criteria (measurable)
-
-## Quality Degradation Curve
-
-| Context Usage | Quality | Claude's State |
-|---------------|---------|----------------|
-| 0-30% | PEAK | Thorough, comprehensive |
-| 30-50% | GOOD | Confident, solid work |
-| 50-70% | DEGRADING | Efficiency mode begins |
-| 70%+ | POOR | Rushed, minimal |
-
-**Rule:** Plans should complete within ~50% context. More plans, smaller scope, consistent quality. Each plan: 2-3 tasks max.
-
-## Ship Fast
-
-Plan -> Execute -> Ship -> Learn -> Repeat
-
-**Anti-enterprise patterns (delete if seen):** team structures, RACI matrices, sprint ceremonies, time estimates in human units, complexity/difficulty as scope justification, documentation for documentation's sake.
+See @~/.claude/gsd-core/references/planner-guidance.md for planning philosophy (Solo Developer workflow, Plans Are Prompts, Quality Degradation Curve, Ship Fast).
 
 </philosophy>
 
@@ -243,14 +215,25 @@ Every task has four required fields:
 
 **Grep gate hygiene:** `grep -c` counts comments, so header prose can be self-invalidating. Use `grep -v '^#' | grep -c token`. Bare `== 0` gates on unfiltered files are forbidden.
 
+<comment_text_discipline>
+**Comment-text discipline (HARD GATE, #429):** A literal an acceptance criterion negative-greps for must NOT appear verbatim in any `<action>` body. Full rules + `<!-- planner-discipline-allow: LIT -->` allowlist + worked examples: @gsd-core/references/planner-antipatterns.md ("Comment-Text Discipline").
+</comment_text_discipline>
+
+<region_scoped_negative_gate>
+**Region-scoped negative gates (WARN, #968)** and **Verify-gate hygiene (#1478/#1479):** @gsd-core/references/planner-antipatterns.md.
+</region_scoped_negative_gate>
+
 **<done>:** Acceptance criteria - measurable state of completion.
 - Good: "Valid credentials return 200 + JWT cookie, invalid credentials return 401"
 - Bad: "Authentication is complete"
+
+**<precondition>** (optional, one prose line): a runnable/checkable fact the task assumes that plan ordering does not guarantee — external setup (`user_setup`), a prior-phase artifact, or an env var. The executor asserts it before running the task and halts on unmet. Emission rules + the contract triad (precondition ↔ `<verify>`/`<done>` ↔ `must_haves.truths`): @~/.claude/gsd-core/references/planner-preconditions.md.
 
 **Outcome-focused guidance** (when `workflow.spec_outcome_enforcement` is enabled):
 
 Read the config:
 ```bash
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
 _GSD_R="$(git rev-parse --show-toplevel 2>/dev/null)"; for _d in "$_GSD_R/gsd-core" "$_GSD_R/.claude/gsd-core" "${HOME}/.claude/gsd-core"; do [ -f "$_d/bin/gsd-tools.cjs" ] && { GSD_TOOLS="$_d/bin/gsd-tools.cjs"; break; }; done; command -v gsd-tools >/dev/null 2>&1 && [ -z "$GSD_TOOLS" ] && GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { node "$GSD_TOOLS" "$@"; }
 SPEC_OUTCOME=$(gsd_run query config-get workflow.spec_outcome_enforcement 2>/dev/null || echo "true")
 ```
@@ -269,50 +252,9 @@ The `<done>` and `<verify>` fields are where specificity belongs — they define
 
 Constraints and non-obvious decisions still belong in `<action>` (e.g., "Use jose library, not jsonwebtoken — CommonJS issues with Edge runtime"). The goal is to eliminate mechanical step-by-step instructions, not useful context.
 
-## Task Types
+**<reversibility>** (optional): `rating="reversible|costly|one-way"` + one-line rationale for a decision this task implements. `one-way` inserts a `checkpoint:decision` before this task; `costly` is flagged only; unsure means `reversible`. Rules: @~/.claude/gsd-core/references/planner-reversibility.md
 
-| Type | Use For | Autonomy |
-|------|---------|----------|
-| `auto` | Everything Claude can do independently | Fully autonomous |
-| `checkpoint:human-verify` | Visual/functional verification | Pauses for user |
-| `checkpoint:decision` | Implementation choices | Pauses for user |
-| `checkpoint:human-action` | Truly unavoidable manual steps (rare) | Pauses for user |
-
-**Automation-first rule:** If Claude CAN do it via CLI/API, Claude MUST do it. Checkpoints verify AFTER automation, not replace it.
-
-## Task Sizing
-
-Each task targets **10–30% context consumption**.
-
-| Context Cost | Action |
-|--------------|--------|
-| < 10% context | Too small — combine with a related task |
-| 10-30% context | Right size — proceed |
-| > 30% context | Too large — split into two tasks |
-
-**Context cost signals (use these, not time estimates):**
-- Files modified: 0-3 = ~10-15%, 4-6 = ~20-30%, 7+ = ~40%+ (split)
-- New subsystem: ~25-35%
-- Migration + data transform: ~30-40%
-- Pure config/wiring: ~5-10%
-
-**Too large signals:** Touches >3-5 files, multiple distinct chunks, action section >1 paragraph.
-
-**Combine signals:** One task sets up for the next, separate tasks touch same file, neither meaningful alone.
-
-## Interface-First Task Ordering
-
-When a plan creates new interfaces consumed by subsequent tasks:
-
-1. **First task: Define contracts** — Create type files, interfaces, exports
-2. **Middle tasks: Implement** — Build against the defined contracts
-3. **Last task: Wire** — Connect implementations to consumers
-
-This prevents the "scavenger hunt" anti-pattern where executors explore the codebase to understand contracts. They receive the contracts in the plan itself.
-
-## Specificity
-
-**Test:** Could a different Claude instance execute without asking clarifying questions? If not, add specificity. See @~/.claude/gsd-core/references/planner-antipatterns.md for vague-vs-specific comparison table.
+See @~/.claude/gsd-core/references/planner-guidance.md for Task Types table, Task Sizing rules, Interface-First Task Ordering, and Specificity guidance.
 
 ## TDD Detection
 
@@ -352,117 +294,55 @@ Exceptions where `tdd="true"` is not needed: `type="checkpoint:*"` tasks, config
 
 `workflow.human_verify_mode=end-of-phase`: no `checkpoint:human-verify`; use `<verify><human-check>`.
 
-## MVP Mode Detection
+## Tracer-First Decomposition (default)
 
-**When `MVP_MODE` is enabled (passed by the plan-phase orchestrator):** Decompose tasks as **vertical feature slices**, not horizontal layers. Required reading: Read `~/.claude/gsd-core/references/planner-mvp-mode.md` for the vertical-slice rules (lazy — only on MVP runs).
+**Every phase plan LEADS with one `type="tracer"` task** — the thinnest path that touches every layer the phase will modify, wired end-to-end, carrying a real runnable `<verify>`. The remaining `<tasks>` are horizontal *expansion* tasks that build out from the proven slice. This is the default for **every** phase; it is not gated behind a flag. Required reading for the full vertical-slice rules and anti-patterns: Read `~/.claude/gsd-core/references/planner-mvp-mode.md`.
 
-**Core rule:** After each task completes, a real user can do something they could not do after the previous task. If a task only "lays foundation," it is horizontal disguised as vertical — restructure.
+**Why tracer-first:** proving the architecture end-to-end on the agent's best early-context tokens catches an architectural dead-end after one commit instead of after ten already-committed layers.
 
-**Plan structure under MVP_MODE:**
+**A tracer is production-quality, not a prototype.** It carries the same `<verify>` and validation as any `auto` task and becomes part of the skeleton of the final system — you write it for keeps. Stubs are allowed ONLY where they can later be filled without an architectural change: functionality gaps are acceptable, architectural gaps are not. (Glossary: `tracer bullet` vs `prototype` in `CONTEXT.md` — GSD ships tracers, never prototypes.)
 
-1. Frame the phase goal as a user story at the top of `PLAN.md`. The user story is sourced from the `**Goal:**` line in ROADMAP.md (set by `mvp-phase`). Emit it with bolded keywords:
+**Tracer task shape:**
 
-   ```
-   ## Phase Goal
+```xml
+<task type="tracer">
+  <name>End-to-end "[capability]" — one path only</name>
+  <files>[one file per layer the phase touches]</files>
+  <action>Wire ONE entry point through every layer to the far end of the stack. No other call sites, no batching. Real error handling on the single path.</action>
+  <verify>[a real, runnable END-TO-END check of the one path — not a per-layer unit test]</verify>
+  <done>The single happy path works end-to-end and is committed.</done>
+</task>
+```
 
-   **As a** [user role], **I want to** [capability], **so that** [outcome].
-   ```
+**Core rule (expansion tasks):** after each task a real user can do something they could not before. A task that only "lays foundation" is horizontal disguised as vertical — restructure.
 
-   Format rules (Read `~/.claude/gsd-core/references/user-story-template.md`):
-   - All three slots required. If the ROADMAP `**Goal:**` line is not in user-story format, surface the discrepancy and ask the user to run `/gsd mvp-phase ${PHASE}` first — do not invent a story.
-   - Bold the three keywords (`**As a**`, `**I want to**`, `**so that**`) when emitting to PLAN.md. The ROADMAP form does not use bolded keywords; the PLAN form does.
-2. First task: failing end-to-end test for the happy path.
-3. Second task: thinnest UI → API → DB slice that makes the test pass (stubs allowed for non-critical branches).
-4. Third+ tasks: replace stubs with real implementations, add validation, error states, polish.
+**`--no-tracer` (`TRACER_MODE=false`):** opt out of tracer-first and decompose into horizontal layers (the legacy default). Use only when the architecture is already proven and a thin slice would add no information. Do not mix a tracer-first plan with horizontal-layer tasks — one shape per phase.
 
-**Mode is all-or-nothing per phase** (PRD decision Q1). Do not produce a plan that mixes vertical-slice tasks with horizontal layer tasks within the same phase.
+**MVP enrichment (`MVP_MODE=true`):** layered on top of the tracer-first ordering above (MVP no longer *turns on* vertical slices — that is now the default). It adds: (1) frame the phase goal as a user story at the top of `PLAN.md`, sourced from the ROADMAP `**Goal:**` line, bolding `**As a**` / `**I want to**` / `**so that**` (Read `~/.claude/gsd-core/references/user-story-template.md`; if the Goal line is not in user-story format, surface it and ask the user to run `/gsd mvp-phase ${PHASE}` first — do not invent a story); and (2) **Walking Skeleton mode** (`WALKING_SKELETON=true`, Phase 1 of a new project) — emit `SKELETON.md` from `~/.claude/gsd-core/references/skeleton-template.md` alongside `PLAN.md`. The Walking Skeleton is the Phase-1 special case of the tracer, recording architectural decisions (framework, DB, auth, deployment, layout) later phases build on.
 
-**Walking Skeleton mode** (`WALKING_SKELETON=true`, set by orchestrator for Phase 1 + new project under `--mvp`): The first deliverable is a Walking Skeleton — the thinnest possible end-to-end stack. In addition to `PLAN.md`, produce `SKELETON.md` using the template at `~/.claude/gsd-core/references/skeleton-template.md` (Read it now). `SKELETON.md` records architectural decisions (framework, DB, auth, deployment, directory layout) that subsequent phases will build on without renegotiating.
+**TDD composition (`workflow.tdd_mode=true`):** the leading tracer task is `type="tracer"` and starts red — its first move is a failing end-to-end test for the happy path — and every behavior-adding expansion task uses `tdd="true"` with a `<behavior>` block.
 
-**Compatibility with TDD detection:** When both `MVP_MODE=true` and `workflow.tdd_mode=true`, every behavior-adding task uses `tdd="true"` and a `<behavior>` block, AND the task ordering follows the vertical-slice structure above. The first task is always a failing end-to-end test.
-
-## User Setup Detection
-
-For tasks involving external services, identify human-required configuration:
-
-External service indicators: New SDK (`stripe`, `@sendgrid/mail`, `twilio`, `openai`), webhook handlers, OAuth integration, `process.env.SERVICE_*` patterns.
-
-For each external service, determine:
-1. **Env vars needed** — What secrets from dashboards?
-2. **Account setup** — Does user need to create an account?
-3. **Dashboard config** — What must be configured in external UI?
-
-Record in `user_setup` frontmatter. Only include what Claude literally cannot do. Do NOT surface in planning output — execute-plan handles presentation.
+See @~/.claude/gsd-core/references/planner-guidance.md for User Setup Detection protocol (external service indicators, env vars, dashboard config).
 
 </task_breakdown>
 
 <dependency_graph>
 
-## Building the Dependency Graph
-
-**For each task, record:**
-- `needs`: What must exist before this runs
-- `creates`: What this produces
-- `has_checkpoint`: Requires user interaction?
-
-**Example:** A→C, B→D, C+D→E, E→F(checkpoint). Waves: {A,B} → {C,D} → {E} → {F}.
-
-**Prefer vertical slices** (User feature: model+API+UI) over horizontal layers (all models → all APIs → all UIs). Vertical = parallel. Horizontal = sequential. Use horizontal only when shared foundation is required.
-
-**Order vertical slices by unknown-unknowns first (tracer-bullet ordering).** When sequencing the slices within a phase, the slice that flushes the most uncertainty should ship first — typically an unfamiliar integration, an unproven assumption about an upstream service contract, or a load-bearing internal abstraction that everything else hangs off. The first slice should function as a tracer bullet: thin, end-to-end, deliberately incomplete on quality dimensions that aren't the unknown, but real enough to prove the integration shape works. Avoid the failure mode of ordering by ease (easy-first) or by mental model (foundations-first when no foundation is actually unknown) — those orderings push risk to the end of the phase, where it can no longer be cheaply absorbed. If two slices are roughly equally risky, prefer the one that unblocks more downstream slices.
-
-## File Ownership for Parallel Execution
-
-Exclusive file ownership prevents conflicts:
-
-```yaml
-# Plan 01 frontmatter
-files_modified: [src/models/user.ts, src/api/users.ts]
-
-# Plan 02 frontmatter (no overlap = parallel)
-files_modified: [src/models/product.ts, src/api/products.ts]
-```
-
-No overlap → can run parallel. File in multiple plans → later plan depends on earlier.
+See @~/.claude/gsd-core/references/planner-guidance.md for dependency graph building rules and file ownership for parallel execution.
 
 </dependency_graph>
 
 <scope_estimation>
 
-## Context Budget Rules
+## Sizing and the Estimate Block
 
-Plans should complete within ~50% context (not 80%). No context anxiety, quality maintained start to finish, room for unexpected complexity.
+Full rules: @~/.claude/gsd-core/references/context-budget.md (Phase Sizing). Read before sizing.
 
-**Each plan: 2-3 tasks maximum.**
-
-| Context Weight | Tasks/Plan | Context/Task | Total |
-|----------------|------------|--------------|-------|
-| Light (CRUD, config) | 3 | ~10-15% | ~30-45% |
-| Medium (auth, payments) | 2 | ~20-30% | ~40-50% |
-| Heavy (migrations, multi-subsystem) | 1-2 | ~30-40% | ~30-50% |
-
-## Split Signals
-
-**ALWAYS split if:**
-- More than 3 tasks
-- Multiple subsystems (DB + API + UI = separate plans)
-- Any task with >5 file modifications
-- Checkpoint + implementation in same plan
-- Discovery + implementation in same plan
-
-**CONSIDER splitting:** >5 files total, natural semantic boundaries, context cost estimate exceeds 40% for a single plan. See `<planner_authority_limits>` for prohibited split reasons.
-
-## Granularity Calibration
-
-The resolved granularity is provided in the planning context as `**Granularity:** <value>`. Read that value and apply the corresponding row below. When no explicit value is present, default to Standard.
-
-| Granularity | Typical Plans/Phase | Tasks/Plan |
-|-------------|---------------------|------------|
-| Coarse | 1-3 | 2-3 |
-| Standard | 3-5 | 2-3 |
-| Fine | 5-10 | 2-3 |
-
-Derive plans from actual work. Granularity determines compression tolerance, not a target.
+- **2-3 tasks per plan.** **ALWAYS split if:** >3 tasks, multiple subsystems, or any task touching >5 files.
+- **Emit `estimate`**: run `estimate-calibration`; `tokens` = raw projection x factor, `raw_tokens` = that
+  projection before the factor (calibration measures actual/raw), `confidence` verbatim — derived from
+  sample count, never self-rated.
+- **Over the smart-zone budget?** Re-slice: tracer + expansion slices. Advisory, never a block.
 
 </scope_estimation>
 
@@ -481,6 +361,12 @@ files_modified: []          # Files this plan touches
 autonomous: true            # false if plan has checkpoints
 requirements: []            # REQUIRED — Requirement IDs from ROADMAP this plan addresses. MUST NOT be empty.
 user_setup: []              # Human-required setup (omit if empty)
+
+estimate:                   # Projected execution cost (see Estimate Emission)
+  tokens: 60000             # calibrated projection
+  raw_tokens: 30000         # pre-factor projection
+  tasks: 3                  # task count the projection assumes
+  confidence: low           # low | med | high — DERIVED from sample count, never self-rated
 
 must_haves:
   truths: []                # Observable behaviors
@@ -532,11 +418,11 @@ Output: [Artifacts created]
 
 ## STRIDE Threat Register
 
-| Threat ID | Category | Component | Disposition | Mitigation Plan |
-|-----------|----------|-----------|-------------|-----------------|
-| T-{phase}-01 | {S/T/R/I/D/E} | {function/endpoint/file} | mitigate | {specific: e.g., "validate input with zod at route entry"} |
-| T-{phase}-02 | {category} | {component} | accept | {rationale: e.g., "no PII, low-value target"} |
-| T-{phase}-SC | Tampering | npm/pip/cargo installs | mitigate | slopcheck + blocking human checkpoint for [ASSUMED]/[SUS] |
+| Threat ID | Category | Component | Severity | Disposition | Mitigation Plan |
+|-----------|----------|-----------|----------|-------------|-----------------|
+| T-{phase}-01 | {S/T/R/I/D/E} | {function/endpoint/file} | {critical\|high\|medium\|low} | mitigate | {specific mitigation action} |
+| T-{phase}-02 | {category} | {component} | low | accept | {rationale for acceptance} |
+| T-{phase}-SC | Tampering | npm/pip/cargo installs | high | mitigate | package-legitimacy gate + blocking human checkpoint for [ASSUMED]/[SUS] |
 </threat_model>
 
 <verification>
@@ -571,6 +457,7 @@ Create `.planning/phases/XX-name/{padded_phase}-{plan}-SUMMARY.md` when done
 | `autonomous` | Yes | `true` if no checkpoints |
 | `requirements` | Yes | **MUST** list requirement IDs from ROADMAP. Every roadmap requirement ID MUST appear in at least one plan. |
 | `user_setup` | No | Human-required setup items |
+| `estimate` | No | Projected cost `{tokens, tasks, confidence}`. See Estimate Emission. |
 | `must_haves` | Yes | Goal-backward verification criteria |
 
 Wave numbers are pre-computed during planning. Execute-phase reads `wave` directly from frontmatter.
@@ -617,7 +504,7 @@ Only include what Claude literally cannot do.
 **Step 0: Extract Requirement IDs**
 Read ROADMAP.md `**Requirements:**` line for this phase. Strip brackets if present (e.g., `[AUTH-01, AUTH-02]` → `AUTH-01, AUTH-02`). Distribute requirement IDs across plans — each plan's `requirements` frontmatter field MUST list the IDs its tasks address. **CRITICAL:** Every requirement ID MUST appear in at least one plan. Plans with an empty `requirements` field are invalid.
 
-**Security (when `security_enforcement` enabled — absent = enabled):** Identify trust boundaries in this phase's scope. Map STRIDE categories to applicable tech stack from RESEARCH.md security domain. For each threat: assign disposition (mitigate if ASVS L1 requires it, accept if low risk, transfer if third-party). Every plan MUST include `<threat_model>` when security_enforcement is enabled.
+**Security (when `security_enforcement` enabled — absent = enabled):** Identify trust boundaries in this phase's scope. Map STRIDE categories to applicable tech stack from RESEARCH.md security domain. For each threat: assign a **severity** (critical|high|medium|low) based on impact × likelihood, and a disposition (`mitigate`/`accept`/`transfer`) per the configured OWASP ASVS level — see @~/.claude/gsd-core/references/security-asvs-levels.md. Every plan MUST include `<threat_model>` when security_enforcement is enabled.
 
 **Package legitimacy gate (npm/pip/cargo only):**
 - Require RESEARCH.md `## Package Legitimacy Audit` before package-manager install tasks.
@@ -635,66 +522,16 @@ Take phase goal from ROADMAP.md. Must be outcome-shaped, not task-shaped.
 **Step 2: Derive Observable Truths**
 "What must be TRUE for this goal to be achieved?" List 3-7 truths from USER's perspective.
 
-For "working chat interface":
-- User can see existing messages
-- User can type a new message
-- User can send the message
-- Sent message appears in the list
-- Messages persist across page refresh
-
-**Test:** Each truth verifiable by a human using the application.
-
 **Step 3: Derive Required Artifacts**
 For each truth: "What must EXIST for this to be true?"
-
-"User can see existing messages" requires:
-- Message list component (renders Message[])
-- Messages state (loaded from somewhere)
-- API route or data source (provides messages)
-- Message type definition (shapes the data)
-
-**Test:** Each artifact = a specific file or database object.
 
 **Step 4: Derive Required Wiring**
 For each artifact: "What must be CONNECTED for this to function?"
 
-Message list component wiring:
-- Imports Message type (not using `any`)
-- Receives messages prop or fetches from API
-- Maps over messages to render (not hardcoded)
-- Handles empty state (not just crashes)
-
 **Step 5: Identify Key Links**
 "Where is this most likely to break?" Key links = critical connections where breakage causes cascading failures.
 
-## Must-Haves Output Format
-
-```yaml
-must_haves:
-  truths:
-    - "User can see existing messages"
-    - "User can send a message"
-    - "Messages persist across refresh"
-  artifacts:
-    - path: "src/components/Chat.tsx"
-      provides: "Message list rendering"
-      min_lines: 30
-    - path: "src/app/api/chat/route.ts"
-      provides: "Message CRUD operations"
-      exports: ["GET", "POST"]
-    - path: "prisma/schema.prisma"
-      provides: "Message model"
-      contains: "model Message"
-  key_links:
-    - from: "src/components/Chat.tsx"
-      to: "/api/chat"
-      via: "fetch in useEffect"
-      pattern: "fetch.*api/chat"
-    - from: "src/app/api/chat/route.ts"
-      to: "prisma.message"
-      via: "database query"
-      pattern: "prisma\\.message\\.(find|create)"
-```
+See @~/.claude/gsd-core/references/planner-guidance.md for a worked example and the `must_haves` YAML format.
 
 </goal_backward>
 
@@ -748,15 +585,9 @@ Do NOT use for: Deploying (use CLI), creating webhooks (use API), creating datab
 
 When Claude tries CLI/API and gets auth error → creates checkpoint → user authenticates → Claude retries. Auth gates are created dynamically, NOT pre-planned.
 
-## Writing Guidelines
+## Writing Guidelines, Anti-Patterns, and Extended Examples
 
-**DO:** Automate everything before checkpoint, be specific ("Visit https://myapp.vercel.app" not "check deployment"), number verification steps, state expected outcomes.
-
-**DON'T:** Ask human to do work Claude can automate, mix multiple verifications, place checkpoints before automation completes.
-
-## Anti-Patterns and Extended Examples
-
-For checkpoint anti-patterns, specificity comparison tables, context section anti-patterns, and scope reduction patterns:
+For checkpoint writing guidelines (DO/DON'T), anti-patterns, specificity comparison tables, context section anti-patterns, and scope reduction patterns:
 @~/.claude/gsd-core/references/planner-antipatterns.md
 
 </checkpoints>
@@ -828,7 +659,7 @@ start of execution when `--reviews` flag is present or reviews mode is active.
 Load planning context:
 
 ```bash
-INIT=$(gsd-tools query init.plan-phase "${PHASE}")
+INIT=$(gsd_run query init.plan-phase "${PHASE}")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
 
@@ -836,7 +667,7 @@ Extract from init JSON: `planner_model`, `researcher_model`, `checker_model`, `c
 
 Also load planning state (position, decisions, blockers) via the SDK — **use `node` to invoke the CLI** (not `npx`):
 ```bash
-gsd-tools query state.load 2>/dev/null
+gsd_run query state.load 2>/dev/null
 ```
 If STATE.md missing but .planning/ exists, offer to reconstruct or continue without.
 </step>
@@ -903,7 +734,7 @@ Apply discovery level protocol (see discovery_levels section).
 
 **Step 1 — Generate digest index:**
 ```bash
-gsd-tools query history-digest
+gsd_run query history-digest
 ```
 
 **Step 2 — Select relevant phases (typically 2-4):**
@@ -948,7 +779,7 @@ Read the most recent milestone retrospective and cross-milestone trends. Extract
 </step>
 
 <step name="inject_global_learnings">
-If `features.global_learnings` is `true`: run `gsd-tools query learnings.query --tag <tag> --limit 5` once per tag from PLAN.md frontmatter `tags` (or use the single most specific keyword). The handler matches one `--tag` at a time. Prefix matches with `[Prior learning from <project>]` as weak priors. Project-local decisions take precedence. Skip silently if disabled or no matches.
+If `features.global_learnings` is `true`: run `gsd_run query learnings.query --tag <tag> --limit 5` once per tag from PLAN.md frontmatter `tags` (or use the single most specific keyword). The handler matches one `--tag` at a time. Prefix matches with `[Prior learning from <project>]` as weak priors. Project-local decisions take precedence. Skip silently if disabled or no matches.
 </step>
 
 <step name="gather_phase_context">
@@ -975,6 +806,8 @@ At decision points during plan creation, apply structured reasoning:
 @~/.claude/gsd-core/references/thinking-models-planning.md
 
 Decompose phase into tasks. **Think dependencies first, not sequence.**
+
+**Lead with the tracer.** Unless `TRACER_MODE=false` (`--no-tracer`), the FIRST task is a `type="tracer"` slice (see **Tracer-First Decomposition**) wiring one path through every layer the phase touches, end-to-end, with a real `<verify>`; the remaining tasks expand out from that proven slice.
 
 For each task:
 1. What does it NEED? (files, types, APIs that must exist)
@@ -1056,6 +889,8 @@ Use template structure for each PLAN.md.
 
 These PLAN.md files are the canonical output of this agent. The orchestrator reads each `.planning/phases/{padded_phase}-{slug}/{padded_phase}-{NN}-PLAN.md` from disk after you return; it does NOT read your return message for the file content.
 
+**Write is for net-new PLAN.md only.** For any existing file (`ROADMAP.md`, `.planning/` files) use `Edit` (scoped replacement), never `Write`. See `update_roadmap`.
+
 1. **Default: write each PLAN.md in a single `Write` call.** On most runtimes this is correct and reliable — do this unless rule 4 applies.
 2. **Do NOT return the PLAN.md content in your response.** Your return message is a brief confirmation (see `<structured_returns>`); the content lives on disk.
 3. **Do NOT use `Bash(cat << 'EOF')` or heredoc** for file creation. Use the `Write` tool.
@@ -1090,23 +925,20 @@ Include all frontmatter fields.
 </step>
 
 <step name="validate_plan">
-Validate each created PLAN.md using `gsd-tools query`:
+`$SCHEMA`: `plan-gap-closure` in gap_closure mode, else `plan`. `gap_closure` must be literal lowercase `true`.
 
 ```bash
-VALID=$(gsd-tools query frontmatter.validate "$PLAN_PATH" --schema plan)
+VALID=$(gsd_run query frontmatter.validate "$PLAN_PATH" --schema "$SCHEMA")
 ```
 
-Returns JSON: `{ valid, missing, present, schema }`
+Returns JSON: `{ valid, missing, present, invalidValue, schema }`
 
-**If `valid=false`:** Fix missing required fields before proceeding.
-
-Required plan frontmatter fields:
-- `phase`, `plan`, `type`, `wave`, `depends_on`, `files_modified`, `autonomous`, `must_haves`
+**If `valid=false`:** `missing` = absent fields, `invalidValue` = present but wrong-valued. Fix either before proceeding.
 
 Also validate plan structure:
 
 ```bash
-STRUCTURE=$(gsd-tools query verify.plan-structure "$PLAN_PATH")
+STRUCTURE=$(gsd_run query verify.plan-structure "$PLAN_PATH")
 ```
 
 Returns JSON: `{ valid, errors, warnings, task_count, tasks }`
@@ -1120,9 +952,11 @@ Returns JSON: `{ valid, errors, warnings, task_count, tasks }`
 <step name="update_roadmap">
 Update ROADMAP.md to finalize phase placeholders:
 
+**CRITICAL — use `Edit` (scoped), NOT `Write`, for ROADMAP.md.** A whole-file `Write` destroys all phase entries outside your diff window. Use `Edit` to replace only the target section; use multiple `Edit` calls if needed. NEVER pass the entire ROADMAP.md content to `Write`.
+
 1. Read `.planning/ROADMAP.md`
 2. Find phase entry (`### Phase {N}:`)
-3. Update placeholders:
+3. Update placeholders using `Edit` (scoped replacement only):
 
 **Goal** (only if placeholder):
 - `[To be planned]` → derive from CONTEXT.md > RESEARCH.md > phase description
@@ -1138,12 +972,12 @@ Plans:
 - [ ] {phase}-02-PLAN.md — {brief objective}
 ```
 
-4. Write updated ROADMAP.md
+4. Apply changes with `Edit` (scoped) — use the `gsd roadmap` subcommands (run by the orchestrator) for structural ROADMAP mutations; reserve direct `Edit` for placeholder fills only.
 </step>
 
 <step name="git_commit">
 ```bash
-gsd-tools query commit "docs($PHASE): create phase plan" --files \
+gsd_run query commit "docs($PHASE): create phase plan" --files \
   .planning/phases/$PHASE-*/$PHASE-*-PLAN.md .planning/ROADMAP.md
 ```
 </step>
@@ -1156,59 +990,7 @@ Return structured planning outcome to orchestrator.
 
 <structured_returns>
 
-## Planning Complete
-
-```markdown
-## PLANNING COMPLETE
-
-**Phase:** {phase-name}
-**Plans:** {N} plan(s) in {M} wave(s)
-
-### Wave Structure
-
-| Wave | Plans | Autonomous |
-|------|-------|------------|
-| 1 | {plan-01}, {plan-02} | yes, yes |
-| 2 | {plan-03} | no (has checkpoint) |
-
-### Plans Created
-
-| Plan | Objective | Tasks | Files |
-|------|-----------|-------|-------|
-| {phase}-01 | [brief] | 2 | [files] |
-| {phase}-02 | [brief] | 3 | [files] |
-
-### Next Steps
-
-Execute: `/gsd:execute-phase {phase}`
-
-<sub>`/clear` first - fresh context window</sub>
-```
-
-## Gap Closure Plans Created
-
-```markdown
-## GAP CLOSURE PLANS CREATED
-
-**Phase:** {phase-name}
-**Closing:** {N} gaps from {VERIFICATION|UAT}.md
-
-### Plans
-
-| Plan | Gaps Addressed | Files |
-|------|----------------|-------|
-| {phase}-04 | [gap truths] | [files] |
-
-### Next Steps
-
-Execute: `/gsd:execute-phase {phase} --gaps-only`
-```
-
-## Checkpoint Reached / Revision Complete
-
-Follow templates in checkpoints and revision_mode sections respectively.
-
-## Chunked Mode Returns
+See @~/.claude/gsd-core/references/planner-guidance.md for `## PLANNING COMPLETE` and `## GAP CLOSURE PLANS CREATED` return format templates.
 
 See @~/.claude/gsd-core/references/planner-chunked.md for `## OUTLINE COMPLETE` and `## PLAN COMPLETE` return formats used in chunked mode.
 
@@ -1245,6 +1027,7 @@ Phase planning complete when:
 - [ ] User knows next steps and wave structure
 - [ ] `<threat_model>` present with STRIDE register (when `security_enforcement` enabled)
 - [ ] Every threat has a disposition (mitigate / accept / transfer)
+- [ ] Every threat has a Severity (critical|high|medium|low)
 - [ ] Mitigations reference specific implementation (not generic advice)
 
 ## Gap Closure Mode

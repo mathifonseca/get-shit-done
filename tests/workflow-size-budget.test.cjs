@@ -39,25 +39,38 @@
  * content Read only at the step that needs it (see the discuss-phase mode/
  * template tests below, which forbid templates in <required_reading>).
  *
- * Tiered the same way as agent budgets (#2361):
+ * ## Enforcement model (issue #1074)
+ *
+ * Two complementary guards, neither of which is a tier-max ceiling:
+ *
+ *   1. Differential attribution size ratchet (the anti-creep): every workflow's
+ *      byte growth against the base ref is reported with its exact delta by
+ *      `tests/emitted-attribution.test.cjs` (via `tests/helpers/emitted-diff.cjs`'s
+ *      size ratchet), which fails unless the growth is acknowledged in
+ *      `tests/emitted-drift-ack.json` (ADR-2719 §4). This REPLACED the per-file
+ *      `tests/workflow-size-baseline.json` snapshot (removed by #2724, ADR-2719
+ *      Phase 4 — it conflicted on 7 of 7 PRs that touched it), which itself had
+ *      replaced the original tier-max tighten-only ratchet (#597), which only
+ *      bound the single largest file per tier and left the other ~85 files able
+ *      to grow silently.
+ *
+ *   2. Tier hard caps (the outer bound): XL/LARGE/DEFAULT are absolute red
+ *      lines with real headroom, never raised in normal work. Crossing one
+ *      means lazy extraction (the `workflows/discuss-phase/modes/`
+ *      progressive-disclosure pattern), not a +N bump. New workflow files get
+ *      the Codex `project_doc_max_bytes` anchor (32 KiB) unless explicitly
+ *      tiered in the same PR — see `NEW_FILE_CAP` in `tests/helpers/emitted-diff.cjs`.
+ *
+ * Tiers:
  *   - XL       : top-level orchestrators (e.g., execute-phase, plan-phase)
  *   - LARGE    : multi-step planners
  *   - DEFAULT  : focused single-purpose workflows (target tier)
  *
- * Raising a budget is a deliberate choice — adjust the constant, write a
- * rationale in the PR, and confirm the bloat is not duplicated content
- * that belongs in `gsd-core/references/` (lazily loaded) or a per-mode
- * subdirectory (see `workflows/discuss-phase/modes/`, #2551).
- *
- * Tighten-only invariant (issue #597): ceilings track the tier high-water mark
- * within GRACE bytes. Budgets may only decrease, never silently creep upward.
- * The assertTightCeiling() call below enforces this automatically.
- *
  * See:
+ *   - https://github.com/open-gsd/gsd-core/issues/1074 (per-file baseline + hard caps)
  *   - https://github.com/open-gsd/gsd-core/issues/717  (bytes re-base + rationale)
- *   - https://github.com/open-gsd/gsd-core/issues/2551 (this test)
- *   - https://github.com/open-gsd/gsd-core/issues/2361 (agent budget)
- *   - https://developers.openai.com/codex/guides/agents-md (Codex 32 KB cap)
+ *   - https://github.com/open-gsd/gsd-core/issues/683  (LF-normalized byte count)
+ *   - https://developers.openai.com/codex/guides/agents-md (Codex 32 KiB cap)
  *   - https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
  */
 
@@ -66,62 +79,52 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('node:os');
 const path = require('path');
-const { assertTightCeiling } = require('../scripts/lib/allowlist-ratchet.cjs');
+const { lfByteCount: byteCount, listWorkflowStems, measureWorkflows } = require('../scripts/workflow-size.cjs');
 const { cleanup } = require('./helpers.cjs');
 
 const WORKFLOWS_DIR = path.join(__dirname, '..', 'gsd-core', 'workflows');
 
-// Grace band: maximum allowed slack (ceiling − actualMax) in BYTES before a
-// ceiling is considered too loose. 3000 bytes ≈ the prior 60-line grace
-// re-expressed for the #717 unit swap (these files run ~36–50 bytes/line, so
-// ~60–80 lines of breathing room) without permitting gross inflation.
-const GRACE = 3000;
+// Tier HARD CAPS (#1074) — absolute red lines, not high-water-hugging ceilings.
+// Day-to-day creep is caught per-file by the baseline guard below; these exist
+// only as the outer bound where the correct response is lazy extraction, never
+// a raise. Each sits above its tier's current high-water mark with real
+// headroom (vs the old GRACE=3000 hug):
+//   XL     108 KiB — high-water execute-phase.md 104,097 → ~6.3 KB headroom
+//   LARGE   64 KiB — high-water discuss-phase.md 62,240 → ~3.2 KB headroom
+//   DEFAULT 40 KiB — high-water verify-phase.md 40,931 → ~0 KB headroom
+// (DEFAULT is deliberately the tightest: a single-purpose workflow approaching
+// 40 KiB is the strongest extraction signal of the three.)
+//
+// **Fork ratchet (SDLC-aligned).** execute-phase / plan-phase / new-project /
+// discuss-phase carry opinionated blocks upstream does not ship (test_contracts,
+// adversarial_validation, dead_code_scan, playwright_verification,
+// definition_of_done, design_spec, Round 3 project integration + Round 4
+// scaffolding). XL and LARGE are each raised once here to bound the merged fork
+// sizes at v1.10.0. Tighten-only from this point — these are red lines, not
+// budgets. Follow-up: extract fork-added blocks via the `*/steps/` +
+// `discuss-phase/modes/` progressive-disclosure precedent and shrink back toward
+// upstream's ceilings.
+const XL_CAP = 110592;      // 108 KiB (fork: raised from upstream's 96 KiB)
+const LARGE_CAP = 65536;    // 64 KiB  (fork: raised from upstream's 60 KiB)
+const DEFAULT_CAP = 40960;  // 40 KiB
 
-// Byte ceilings (#717 re-base from lines). Each tier's ceiling tracks the
-// current high-water mark within GRACE (#597 tighten-only ratchet).
-//
-// **Fork ratchet (SDLC-aligned).** The fork's execute-phase, plan-phase, and
-// new-project carry additional opinionated blocks (test_contracts,
-// adversarial_validation, dead_code_scan, definition_of_done, design_spec,
-// scaffolding rounds, etc.) that upstream does not have. XL high-water mark
-// is execute-phase.md at ~103181 bytes (was ~92525 upstream). The fork-side
-// ceilings below are bumped to absorb these blocks while preserving the
-// tighten-only ratchet against unrelated growth. Follow-up: when discuss-phase
-// modes precedent is applied to the SDLC blocks, these can shrink back toward
-// upstream's values.
-//
-// XL: fork high-water mark execute-phase.md = ~103181 bytes; plan-phase.md = ~96251;
-// new-project.md = ~70469. Slack ≤ GRACE.
-const XL_BUDGET = 105000;
-// LARGE: fork high-water mark docs-update.md = ~54410 (#891 launcher shim expansion);
-// quick.md = ~45710; autonomous.md = ~38030. Slack ≤ GRACE.
-const LARGE_BUDGET = 56000;
-// DEFAULT: fork high-water mark settings-advanced.md = ~38409 (#891 launcher shim expansion);
-// verify-work.md = ~33630; settings.md = ~33600. Slack ≤ GRACE.
-const DEFAULT_BUDGET = 40000;
 
 // Top-level orchestrators that own end-to-end multi-phase rubrics.
-// Grandfathered at current sizes — see PR #2551 for the progressive-disclosure
+// Grandfathered at current sizes — see the discuss-phase/modes split (#717) for the progressive-disclosure
 // pattern that future shrinks should follow. Byte counts noted for reference.
 const XL_WORKFLOWS = new Set([
-  'execute-phase',  // ~103181 bytes on the fork (tier high-water mark; fork carries test_contracts + adversarial_validation + dead_code_scan + playwright_verification blocks on top of upstream)
-  'plan-phase',     // ~96251 bytes on the fork (Devil's Advocate review 12.6 + plan_bounce 12.5 + design_spec on top of upstream)
-  'new-project',    // ~70469 bytes on the fork (Round 3 Project Integration + Round 4 Scaffolding on top of upstream's onboarding)
-  // Fork classification: discuss-phase belongs in XL on this fork — the design_spec
-  // generation + SDLC checkpoint + questions_per_area="all" + key-decisions
-  // propagation blocks push it to ~61750 bytes, well above DEFAULT_BUDGET and
-  // LARGE_BUDGET. The dedicated DISCUSS_PHASE_TARGET test (below) keeps a tighter
-  // ratchet specific to this file. On upstream the file is a thin dispatcher
-  // (~28000 bytes) and would sit naturally in DEFAULT — once the fork extracts
-  // its added blocks per the discuss-phase/modes/ precedent, move it back out
-  // of XL_WORKFLOWS.
-  'discuss-phase',
+  'execute-phase',  // 104097 bytes on the fork (tier high-water; + test_contracts, adversarial_validation, dead_code_scan, playwright_verification)
+  'plan-phase',     // 91988 bytes on the fork (+ §12.6 Devil's Advocate, §13c.5 plan-lens review, design_spec)
+  'new-project',    // 66780 bytes on the fork (+ Round 3 Project Integration, Round 4 Scaffolding)
 ]);
 
 // Multi-step planners and bigger feature workflows. Grandfathered.
 // Byte counts updated in #891 (launcher shim expanded with 17 runtime home arms).
 const LARGE_WORKFLOWS = new Set([
-  'docs-update',           // 54410 bytes (tier high-water mark)
+  // Fork: discuss-phase carries design_spec generation, the SDLC checkpoint, and
+  // questions_per_area="all" behaviour; it outgrew DEFAULT and is the LARGE high-water.
+  'discuss-phase',         // 62240 bytes on the fork (tier high-water mark)
+  'docs-update',           // 55468 bytes
   'autonomous',            // 38030
   'complete-milestone',    // 29510
   'verify-work',           // 30122
@@ -132,98 +135,98 @@ const LARGE_WORKFLOWS = new Set([
   'update',                // 20766
   'quick',                 // 45710
   'code-review',           // 28726
+  'review',                // multi-reviewer orchestration; outgrew DEFAULT (was at the 40960 ceiling) when the OpenCode reviewer gained JSON reconstruction + a diagnosable empty-output stub (#1936)
 ]);
 
-const ALL_WORKFLOWS = fs.readdirSync(WORKFLOWS_DIR)
-  .filter(f => f.endsWith('.md'))
-  .map(f => f.replace('.md', ''));
+// Single source of truth for BOTH enumeration and measurement (#1074; finishes
+// the consolidation flagged in trek-e's #1089 review). The tier guards below
+// iterate exactly the files measureWorkflows() measured and read their bytes
+// from the same map, so enumeration and byte-counting can never split-brain.
+// `byteCount` (lfByteCount) is retained only for the single-file discuss-phase
+// checks below, which target files outside the workflow root.
+const SIZES = measureWorkflows();           // { 'execute-phase.md': 92880, ... }
+const ALL_WORKFLOWS = listWorkflowStems();  // ['execute-phase', ...] — same source
 
-function budgetFor(workflow) {
-  if (XL_WORKFLOWS.has(workflow)) return { tier: 'XL', limit: XL_BUDGET };
-  if (LARGE_WORKFLOWS.has(workflow)) return { tier: 'LARGE', limit: LARGE_BUDGET };
-  return { tier: 'DEFAULT', limit: DEFAULT_BUDGET };
+function capFor(workflow) {
+  if (XL_WORKFLOWS.has(workflow)) return { tier: 'XL', cap: XL_CAP };
+  if (LARGE_WORKFLOWS.has(workflow)) return { tier: 'LARGE', cap: LARGE_CAP };
+  return { tier: 'DEFAULT', cap: DEFAULT_CAP };
 }
 
-function byteCount(filePath) {
-  // Count bytes as on an LF checkout, so the budget is platform-independent.
-  // The tier ceilings are calibrated against `wc -c` on a Unix (LF) checkout,
-  // but these .md files have no `eol=lf` in .gitattributes, so Windows checks
-  // them out as CRLF. Counting raw on-disk bytes there adds one byte per line,
-  // which fails CI on the high-water-mark file (execute-phase.md) on Windows
-  // ONLY — a false positive that diverges from the LF calibration basis (#683).
-  // Stripping CR yields the same LF byte count on every platform. Still a raw
-  // byte count (not the old trailing-newline-stripping lineCount()).
-  const content = fs.readFileSync(filePath, 'utf-8');
-  return Buffer.byteLength(content.replace(/\r\n/g, '\n'), 'utf-8');
-}
+// byteCount (LF-normalized, #683) is imported as `lfByteCount` from
+// scripts/workflow-size.cjs — the single source of truth shared with the
+// baseline generator so the guard and the snapshot can never measure
+// differently. See the #683 regression test at the bottom of this file.
 
-describe('SIZE: workflow byte-size budget', () => {
+describe('SIZE: workflow tier hard caps (issue #1074)', () => {
+  // Absolute outer bound per tier. Unlike the old tighten-only ceiling, a cap
+  // is NOT raised when a file approaches it — crossing it means extract, not
+  // bump. Per-file creep is handled by the baseline guard below; this only
+  // catches a file that has grown to the point where lazy extraction is the
+  // only correct answer.
   for (const workflow of ALL_WORKFLOWS) {
-    const { tier, limit } = budgetFor(workflow);
-    test(`${workflow} (${tier}) stays under ${limit} bytes`, () => {
-      const filePath = path.join(WORKFLOWS_DIR, workflow + '.md');
-      const bytes = byteCount(filePath);
+    const { tier, cap } = capFor(workflow);
+    test(`${workflow} (${tier}) stays under the ${tier} hard cap (${cap} bytes)`, () => {
+      const bytes = SIZES[`${workflow}.md`];
       assert.ok(
-        bytes <= limit,
-        `${workflow}.md is ${bytes} bytes — exceeds ${tier} budget of ${limit}. ` +
-        `Extract per-mode bodies to a workflows/${workflow}/modes/ subdirectory, ` +
-        `templates to workflows/${workflow}/templates/, or shared references ` +
-        `to gsd-core/references/ — and load them LAZILY (not via @-required_reading, ` +
-        `which would shrink this file's bytes without shrinking loaded context). ` +
-        `See workflows/discuss-phase/ for the pattern.`
+        bytes <= cap,
+        `${workflow}.md is ${bytes} bytes — exceeds the ${tier} hard cap of ${cap}. ` +
+        `This cap is a red line, NOT a budget to raise: extract per-mode bodies to a ` +
+        `workflows/${workflow}/modes/ subdirectory, templates to ` +
+        `workflows/${workflow}/templates/, or shared references to gsd-core/references/ — ` +
+        `and load them LAZILY (not via @-required_reading, which would shrink this ` +
+        `file's bytes without shrinking loaded context). See workflows/discuss-phase/.`
       );
     });
   }
+
+  // A prior "new workflow files (not yet baselined) stay under the 32 KiB Codex
+  // anchor" test lived here, keyed on `tests/workflow-size-baseline.json` to tell a
+  // brand-new file (not yet in the baseline) from an existing grandfathered one
+  // (ADR-1610 Decision point 3). #2724 (ADR-2719 Phase 4) deletes that baseline, but
+  // the cap is NOT lost: it is revived as `NEW_FILE_CAP` inside the differential
+  // attribution check's size ratchet (tests/helpers/emitted-diff.cjs), which already
+  // computes "present in sizeCurrent, absent from sizeBaseline" for its own reasons —
+  // exactly the same "is this file new" signal, with no additional git dependency.
+  // It could not live here: this test is pure and fast (no baseline/base-ref of any
+  // kind), and the differential's real-tree test is the only place that dependency
+  // already exists. Narrower than the original — the pure differential module cannot
+  // see XL_WORKFLOWS/LARGE_WORKFLOWS tiering, so a legitimately large new file must
+  // extract rather than tier in — a disclosed, deliberate simplification.
 });
 
-describe('SIZE: tier anti-creep (tighten-only ceilings, issue #597)', () => {
-  // For each tier, compute the high-water mark (in bytes) across all files in
-  // that tier and assert the ceiling stays tight. Prevents budgets from
-  // silently drifting upward: ceiling − actualMax must not exceed GRACE.
-  test('XL tier: ceiling tracks high-water mark within GRACE', () => {
-    const values = ALL_WORKFLOWS
-      .filter(w => XL_WORKFLOWS.has(w))
-      .map(w => byteCount(path.join(WORKFLOWS_DIR, w + '.md')));
-    const actualMax = Math.max(...values);
-    assertTightCeiling({ label: 'XL', actualMax, ceiling: XL_BUDGET, grace: GRACE, fail: assert.fail });
-  });
+// A prior "SIZE: per-file workflow baseline (issue #1074)" describe block lived here,
+// asserting every workflow file's exact byte count against the committed
+// `tests/workflow-size-baseline.json` snapshot. #2724 (ADR-2719 Phase 4) deletes that
+// snapshot: it was a pure function of the source tree, conflicted on 7 of 7 PRs that
+// touched it, and its purpose — "growth must be noticed and justified" — is now served
+// by the same differential machine that replaced the golden-install-parity fixtures
+// (tests/emitted-attribution.test.cjs's real-tree test, via `emitted-diff.cjs`'s size
+// ratchet: growth is reported with its exact byte delta and requires an entry in
+// tests/emitted-drift-ack.json, ADR-2719 §4 / must-have 6). The tier hard caps above
+// are unaffected — they are independent of the deleted baseline and remain the outer
+// bound.
 
-  test('LARGE tier: ceiling tracks high-water mark within GRACE', () => {
-    const values = ALL_WORKFLOWS
-      .filter(w => LARGE_WORKFLOWS.has(w))
-      .map(w => byteCount(path.join(WORKFLOWS_DIR, w + '.md')));
-    const actualMax = Math.max(...values);
-    assertTightCeiling({ label: 'LARGE', actualMax, ceiling: LARGE_BUDGET, grace: GRACE, fail: assert.fail });
-  });
-
-  test('DEFAULT tier: ceiling tracks high-water mark within GRACE', () => {
-    const values = ALL_WORKFLOWS
-      .filter(w => !XL_WORKFLOWS.has(w) && !LARGE_WORKFLOWS.has(w))
-      .map(w => byteCount(path.join(WORKFLOWS_DIR, w + '.md')));
-    const actualMax = Math.max(...values);
-    assertTightCeiling({ label: 'DEFAULT', actualMax, ceiling: DEFAULT_BUDGET, grace: GRACE, fail: assert.fail });
-  });
-});
-
-describe('SIZE: discuss-phase progressive disclosure (issue #2551)', () => {
-  // Issue #2551 targets discuss-phase.md as a thin dispatcher, separate from
+describe('SIZE: discuss-phase progressive disclosure (#717 byte budget)', () => {
+  // The discuss-phase progressive-disclosure split (#717) targets discuss-phase.md as a thin dispatcher, separate from
   // the per-tier grandfathered budgets above. Originally expressed as <500
   // lines; re-based to bytes for #717 (500 lines ≈ 28 KB at these files'
-  // density; upstream sets to 32000 bytes preserving the thin-dispatcher intent).
-  //
-  // **Fork ratchet.** The fork's discuss-phase carries additional blocks
-  // (design_spec generation, SDLC checkpoint, questions_per_area="all"
-  // behaviour, key-decisions propagation) that upstream does not have. Current
-  // fork actual ~61750 bytes — set ceiling at 64000 (slack ≤ GRACE). Follow-up:
-  // extract fork-added blocks via the discuss-phase/modes/ precedent and
-  // shrink toward upstream's 32000.
+  // density; set to 30 KB to preserve the thin-dispatcher intent with modest
+  // headroom). This is the headline metric of the refactor — every other
+  // workflow above its tier is grandfathered and may shrink later via the
+  // same pattern.
+  // Target raised from 30000 to 32000 in #891 (launcher shim expansion added 17 runtime home arms,
+  // adding ~960 bytes to the preamble; the thin-dispatcher intent is preserved — actual=30935).
+  // Fork ratchet: upstream targets 32000; the fork's discuss-phase carries the
+  // design_spec + SDLC-checkpoint blocks. Actual 62240 → ceiling 64000.
+  // Follow-up: extract the fork blocks via discuss-phase/modes/ and shrink.
   const DISCUSS_PHASE_TARGET = 64000;
-  test(`discuss-phase.md is under ${DISCUSS_PHASE_TARGET} bytes (issue #2551 target)`, () => {
+  test(`discuss-phase.md is under ${DISCUSS_PHASE_TARGET} bytes (#717 byte budget)`, () => {
     const filePath = path.join(WORKFLOWS_DIR, 'discuss-phase.md');
     const bytes = byteCount(filePath);
     assert.ok(
       bytes < DISCUSS_PHASE_TARGET,
-      `discuss-phase.md is ${bytes} bytes — must be under ${DISCUSS_PHASE_TARGET} per #2551. ` +
+      `discuss-phase.md is ${bytes} bytes — must be under ${DISCUSS_PHASE_TARGET} per #717. ` +
       `Per-mode logic belongs in workflows/discuss-phase/modes/<mode>.md, ` +
       `templates in workflows/discuss-phase/templates/.`
     );

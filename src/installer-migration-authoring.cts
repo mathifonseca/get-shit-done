@@ -8,6 +8,7 @@
  */
 
 import path from 'node:path';
+import { posixNormalize } from './shell-command-projection.cjs';
 
 /** An unvalidated migration record supplied by the caller. */
 export type MigrationRecord = Record<string, unknown>;
@@ -64,7 +65,7 @@ function requireActionEvidence(action: MigrationAction, field: string, migration
 
 function validateSafeRelPath(relPath: string, migration: MigrationRecord, actionType: string): void {
   const source = actionSource(migration, { relPath });
-  const normalized = relPath.replace(/\\/g, '/');
+  const normalized = posixNormalize(relPath);
   if (path.isAbsolute(normalized) || path.win32.isAbsolute(normalized)) {
     throw new Error(`migration action ${actionType} relPath must stay inside configDir: ${source}`);
   }
@@ -121,7 +122,9 @@ export function validateInstallerMigrationActions(actions: unknown, migration: M
     // Ownership and runtime-contract evidence are required by
     // docs/installer-migrations.md#action-types and
     // docs/adr/0008-installer-migration-module.md#runtime-contract-decision.
-    if (actType === 'remove-managed' || actType === 'rewrite-json') {
+    // `remove-empty-dir` carries the same evidence bar as `remove-managed`: it is
+    // still a destructive removal, just of a directory node instead of a file.
+    if (actType === 'remove-managed' || actType === 'rewrite-json' || actType === 'remove-empty-dir') {
       requireActionEvidence(act, 'ownershipEvidence', migration);
     }
     if (actType === 'rewrite-json') {

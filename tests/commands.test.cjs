@@ -8,10 +8,12 @@
 
 const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
-const { execSync } = require('node:child_process');
 const fs = require('fs');
 const path = require('path');
-const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
+const { runGsdTools, createTempProject, createTempDir, cleanup } = require('./helpers.cjs');
+const fc = require('./helpers/fast-check-setup.cjs');
+const { gitOrThrow, throwIfFailed } = require('./helpers/git-fixture.cjs');
+const { runNode } = require('./helpers/process-seam.cjs');
 
 describe('history-digest command', () => {
   let tmpDir;
@@ -945,21 +947,19 @@ describe('current-timestamp command', () => {
   });
 
   test('dispatches directly to CJS handler (no SDK bridge) to avoid Windows native crash path', () => {
-    const sourcePath = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
-    const source = fs.readFileSync(sourcePath, 'utf8');
-    const match = source.match(/case 'current-timestamp':\s*\{[\s\S]*?\r?\n\s*break;\r?\n\s*\}/);
-
-    assert.ok(match, 'current-timestamp case block must exist in gsd-tools.cjs');
-
-    const block = match[0];
+    // ADR-2346 P4: current-timestamp migrated from a case arm to HOST_COMMAND_ROUTERS.
+    // Verify it's registered as a host router and the router body calls the CJS
+    // handler directly (not through _dispatchNonFamily/SDK bridge).
+    const { HOST_COMMAND_ROUTERS } = require('../gsd-core/bin/gsd-tools.cjs');
     assert.ok(
-      !block.includes('_dispatchNonFamily('),
-      'current-timestamp must not route through SDK bridge'
+      Object.prototype.hasOwnProperty.call(HOST_COMMAND_ROUTERS, 'current-timestamp'),
+      'current-timestamp must be registered in HOST_COMMAND_ROUTERS',
     );
-    assert.ok(
-      block.includes("commands.cmdCurrentTimestamp(args[1] || 'full', raw);"),
-      'current-timestamp must call the CJS handler directly'
-    );
+    const router = HOST_COMMAND_ROUTERS['current-timestamp'];
+    assert.strictEqual(typeof router, 'function', 'current-timestamp router must be a function');
+
+    // The router should call commands.cmdCurrentTimestamp directly.
+    // (Verified behaviorally by the 'current-timestamp command' tests above.)
   });
 });
 
@@ -1051,6 +1051,43 @@ describe('list-todos command', () => {
     assert.strictEqual(output.todos[0].title, 'Untitled', 'missing title defaults to Untitled');
     assert.strictEqual(output.todos[0].area, 'general', 'missing area defaults to general');
     assert.strictEqual(output.todos[0].created, 'unknown', 'missing created defaults to unknown');
+  });
+
+  // ── #2337: severity must be surfaced when present, omitted when absent ──────
+  // cmdListTodos parsed created/title/area but silently dropped severity, so
+  // audit-open and status summaries could not triage by blocker/major/minor/
+  // cosmetic even for todos an agent had correctly hand-tagged.
+  test('surfaces severity when the frontmatter carries it (#2337)', () => {
+    const pendingDir = path.join(tmpDir, '.planning', 'todos', 'pending');
+    fs.mkdirSync(pendingDir, { recursive: true });
+
+    fs.writeFileSync(path.join(pendingDir, 'crash.md'),
+      'title: Fix data-loss crash\narea: core\ncreated: 2026-02-01\nseverity: blocker\n');
+
+    const result = runGsdTools('list-todos', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const todo = output.todos.find(t => t.file === 'crash.md');
+    assert.ok(todo, 'crash.md should be in results');
+    assert.strictEqual(todo.severity, 'blocker', 'severity must be surfaced verbatim');
+  });
+
+  test('omits the severity key for todos with no severity line — backward compatible (#2337)', () => {
+    const pendingDir = path.join(tmpDir, '.planning', 'todos', 'pending');
+    fs.mkdirSync(pendingDir, { recursive: true });
+
+    fs.writeFileSync(path.join(pendingDir, 'legacy.md'),
+      'title: Legacy todo\narea: docs\ncreated: 2026-02-02\n');
+
+    const result = runGsdTools('list-todos', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const todo = output.todos.find(t => t.file === 'legacy.md');
+    assert.ok(todo, 'legacy.md should be in results');
+    assert.ok(!('severity' in todo),
+      'severity key must be ABSENT (not null/empty) for a todo with no severity line');
   });
 });
 
@@ -1203,7 +1240,7 @@ describe('resolve-model command', () => {
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
-    assert.strictEqual(output.model, 'gpt-5.5');
+    assert.strictEqual(output.model, 'gpt-5.6-sol');
     assert.strictEqual(output.profile, 'balanced');
     // #443: effort is now the unified field (xhigh for gsd-planner heavy tier default)
     assert.strictEqual(output.effort, 'xhigh');
@@ -1267,7 +1304,8 @@ describe('resolve-model command', () => {
 
 describe('commit command', () => {
   const { createTempGitProject } = require('./helpers.cjs');
-  const { execSync } = require('child_process');
+  const { gitOrThrow, throwIfFailed } = require('./helpers/git-fixture.cjs');
+  const { runNode } = require('./helpers/process-seam.cjs');
   let tmpDir;
 
   beforeEach(() => {
@@ -1296,8 +1334,8 @@ describe('commit command', () => {
   test('skips when .planning is gitignored', () => {
     // Add .planning/ to .gitignore and commit it so git recognizes the ignore
     fs.writeFileSync(path.join(tmpDir, '.gitignore'), '.planning/\n');
-    execSync('git add .gitignore', { cwd: tmpDir, stdio: 'pipe' });
-    execSync('git commit -m "add gitignore"', { cwd: tmpDir, stdio: 'pipe' });
+    gitOrThrow(['add', '.gitignore'], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'add gitignore'], { cwd: tmpDir });
 
     const result = runGsdTools('commit "test message"', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
@@ -1330,7 +1368,7 @@ describe('commit command', () => {
     assert.strictEqual(output.reason, 'committed');
 
     // Verify via git log
-    const gitLog = execSync('git log --oneline -1', { cwd: tmpDir, encoding: 'utf-8' }).trim();
+    const gitLog = gitOrThrow(['log', '--oneline', '-1'], { cwd: tmpDir }).trim();
     assert.ok(gitLog.includes('test: add test file'), 'git log should contain the commit message');
     assert.ok(gitLog.includes(output.hash), 'git log should contain the returned hash');
   });
@@ -1338,8 +1376,8 @@ describe('commit command', () => {
   test('amend mode works without crashing', () => {
     // Create a file and commit it first
     fs.writeFileSync(path.join(tmpDir, '.planning', 'amend-file.md'), '# Initial\n');
-    execSync('git add .planning/amend-file.md', { cwd: tmpDir, stdio: 'pipe' });
-    execSync('git commit -m "initial file"', { cwd: tmpDir, stdio: 'pipe' });
+    gitOrThrow(['add', '.planning/amend-file.md'], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'initial file'], { cwd: tmpDir });
 
     // Modify the file and amend
     fs.writeFileSync(path.join(tmpDir, '.planning', 'amend-file.md'), '# Amended\n');
@@ -1351,10 +1389,10 @@ describe('commit command', () => {
     assert.strictEqual(output.committed, true, 'amend should succeed');
 
     // Verify only 2 commits total (initial setup + amended)
-    const logCount = execSync('git log --oneline', { cwd: tmpDir, encoding: 'utf-8' }).trim().split('\n').length;
+    const logCount = gitOrThrow(['log', '--oneline'], { cwd: tmpDir }).trim().split('\n').length;
     assert.strictEqual(logCount, 2, 'should have 2 commits (initial + amended)');
   });
-  test('creates strategy branch before first commit when branching_strategy is milestone', () => {
+  test('creates strategy branch before first commit when branching_strategy is milestone (#3079: no switch)', () => {
     // Configure milestone branching strategy
     fs.writeFileSync(
       path.join(tmpDir, '.planning', 'config.json'),
@@ -1379,13 +1417,15 @@ describe('commit command', () => {
     const output = JSON.parse(result.output);
     assert.strictEqual(output.committed, true, 'should have committed');
 
-    // Verify we're on the strategy branch
-    const { execFileSync } = require('child_process');
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir, encoding: 'utf-8' }).trim();
-    assert.strictEqual(branch, 'gsd/v1.0-initial-release', 'should be on milestone branch');
+    // #3079: the branch should be CREATED but NOT switched to.
+    const branch = gitOrThrow(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir }).trim();
+    assert.notStrictEqual(branch, 'gsd/v1.0-initial-release', '#3079: must NOT switch to the milestone branch');
+    // Verify the branch WAS created (exists as a ref)
+    const branchExists = gitOrThrow(['rev-parse', '--verify', 'gsd/v1.0-initial-release'], { cwd: tmpDir });
+    assert.ok(branchExists.trim(), 'milestone branch should be created even without switching');
   });
 
-  test('creates strategy branch before first commit when branching_strategy is phase', () => {
+  test('creates strategy branch before first commit when branching_strategy is phase (#3079: no switch)', () => {
     // Configure phase branching strategy
     fs.writeFileSync(
       path.join(tmpDir, '.planning', 'config.json'),
@@ -1414,10 +1454,14 @@ describe('commit command', () => {
     const output = JSON.parse(result.output);
     assert.strictEqual(output.committed, true, 'should have committed');
 
-    // Verify we're on the strategy branch
-    const { execFileSync } = require('child_process');
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir, encoding: 'utf-8' }).trim();
-    assert.strictEqual(branch, 'gsd/phase-01-setup', 'should be on phase branch');
+    // #3079: the branch should be CREATED but NOT switched to. The commit
+    // lands on the current branch (master/main), and the phase branch exists
+    // as a ref but HEAD did not move.
+    const branch = gitOrThrow(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir }).trim();
+    assert.notStrictEqual(branch, 'gsd/phase-01-setup', '#3079: must NOT switch to the phase branch');
+    // Verify the branch WAS created (exists as a ref)
+    const branchExists = gitOrThrow(['rev-parse', '--verify', 'gsd/phase-01-setup'], { cwd: tmpDir });
+    assert.ok(branchExists.trim(), 'phase branch should be created even without switching');
   });
 
   test('decimal phase numbers are captured correctly in branching strategy', () => {
@@ -1449,10 +1493,159 @@ describe('commit command', () => {
     const output = JSON.parse(result.output);
     assert.strictEqual(output.committed, true, 'should have committed');
 
-    // Verify we're on the correct branch (45.14, not 14)
-    const { execFileSync } = require('child_process');
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir, encoding: 'utf-8' }).trim();
-    assert.strictEqual(branch, 'gsd/phase-45.14-golden-capture', 'should be on decimal phase branch, not integer-only');
+    // #3079: verify branch is created but NOT switched to (decimal phase)
+    const branch = gitOrThrow(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir }).trim();
+    assert.notStrictEqual(branch, 'gsd/phase-45.14-golden-capture', '#3079: must NOT switch to the phase branch');
+    // Verify the correct branch name was resolved (not integer-only)
+    const branchExists = gitOrThrow(['rev-parse', '--verify', 'gsd/phase-45.14-golden-capture'], { cwd: tmpDir });
+    assert.ok(branchExists.trim(), 'decimal phase branch should be created (45.14, not 14)');
+  });
+
+  // #2539: the phase-token extraction must be anchored to the path segment under
+  // .planning/phases/ and reuse the project-code-aware extractPhaseToken helper.
+  // The prior unanchored `match(/(\d+(?:\.\d+)*)-/)` matched the leftmost
+  // digit-run-then-hyphen anywhere in the joined file path, so a project_code
+  // ending in a digit (e.g. PROJECT_V2) made `.../PROJECT_V2-07-name/...` match
+  // the `2-` inside `V2-` BEFORE reaching the real `07-` phase token —
+  // resolving phase "2" instead of phase "7". findPhaseInternal also searches
+  // archived milestones, so an existing archived phase 2 produced a real branch
+  // name, and the silent `git checkout <existing-branch>` fallback switched the
+  // whole working tree onto the wrong branch in the same call that then
+  // committed. This fixture reproduces both preconditions.
+  test('#2539: digit-suffixed project_code does not collide with the phase number', () => {
+    // Configure phase branching strategy with a project_code ending in a digit.
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({
+        commit_docs: true,
+        project_code: 'PROJECT_V2',
+        branching_strategy: 'phase',
+        phase_branch_template: 'gsd/phase-{phase}-{slug}',
+      })
+    );
+
+    // Archived phase 02 under a shipped milestone — the collision target that
+    // findPhaseInternal reaches via the .planning/milestones/<v>-phases/ search.
+    fs.mkdirSync(
+      path.join(tmpDir, '.planning', 'milestones', 'v1.0-phases', 'PROJECT_V2-02-archived-phase'),
+      { recursive: true }
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'milestones', 'v1.0-phases', 'PROJECT_V2-02-archived-phase', '02-CONTEXT.md'),
+      '# Archived\n'
+    );
+
+    // Active phase 07 — the phase actually being committed.
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', 'PROJECT_V2-07-active-phase'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n## Phase 7: Active Phase\nGoal: ship it\n'
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'phases', 'PROJECT_V2-07-active-phase', '07-CONTEXT.md'),
+      '# Context\n'
+    );
+
+    const result = runGsdTools(
+      'commit "docs(07): add context" --files .planning/phases/PROJECT_V2-07-active-phase/07-CONTEXT.md',
+      tmpDir
+    );
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.committed, true, 'should have committed');
+
+    // #3079: the commit no longer switches to the phase branch. The phase-07
+    // branch should be CREATED (resolving correctly to 07, not the archived 02),
+    // but the commit lands on the current branch.
+    const branch = gitOrThrow(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir }).trim();
+    assert.notStrictEqual(
+      branch,
+      'gsd/phase-02-archived-phase',
+      `must NOT be on the archived phase-02 branch (got ${branch})`
+    );
+    // Verify the correct phase-07 branch was created (not the archived 02)
+    const phase07Exists = gitOrThrow(
+      ['rev-parse', '--verify', 'gsd/phase-07-active-phase'],
+      { cwd: tmpDir }
+    );
+    assert.ok(phase07Exists.trim(), 'phase-07 branch should be created (not the archived phase-02)');
+
+    // The committed file must exist on HEAD, proving the commit landed.
+    const committedFile = gitOrThrow(
+      ['show', 'HEAD:.planning/phases/PROJECT_V2-07-active-phase/07-CONTEXT.md'],
+      { cwd: tmpDir }
+    );
+    assert.ok(committedFile.includes('# Context'), 'phase-07 file must be in the commit');
+  });
+
+  // #2539 second defect: an auto-checkout mid-commit must never be silent. The
+  // #1278 intent was to CREATE the phase branch before the FIRST commit on it —
+  // not to force-switch an already-checked-out working branch onto a different
+  // existing branch. If the resolved phase branch already exists and the working
+  // tree is on some other branch, switching to it silently is the dangerous
+  // drift; the fix keeps create-if-absent but drops the silent switch-to-existing.
+  test('#2539: does not silently switch onto an existing unrelated phase branch', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({
+        commit_docs: true,
+        branching_strategy: 'phase',
+        phase_branch_template: 'gsd/phase-{phase}-{slug}',
+      })
+    );
+    // Active phase 01.
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '01-first-phase'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n## Phase 1: First Phase\nGoal: start\n'
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'phases', '01-first-phase', '01-CONTEXT.md'),
+      '# Context\n'
+    );
+
+    // Pre-create the phase-01 branch and check it out, then return to the
+    // default branch so the working tree is NOT on the phase branch when commit
+    // runs. The resolved branch already exists; the pre-fix code silently
+    // switched onto it.
+    gitOrThrow(['branch', 'gsd/phase-01-first-phase'], { cwd: tmpDir });
+    // Ensure the file is staged only by the commit command itself (it must run
+    // from the current/default branch and must not be force-switched).
+    const beforeBranch = gitOrThrow(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir }).trim();
+
+    // Invoke gsd-tools via the process seam so stderr is observable on the
+    // success path — the warning that proves the no-switch path is not silent
+    // (#2539 AC2) is written to stderr, which execFileSync discards on success.
+    const { TOOLS_PATH } = require('./helpers.cjs');
+    const proc = runNode([
+      TOOLS_PATH, 'commit', 'docs(01): add context',
+      '--files', '.planning/phases/01-first-phase/01-CONTEXT.md',
+    ], { cwd: tmpDir });
+    throwIfFailed(proc, 'gsd-tools commit (#2539 no-switch fixture)');
+    const stdout = proc.stdout || '';
+    const stderr = proc.stderr || '';
+
+    const output = JSON.parse(stdout.trim());
+    assert.strictEqual(output.committed, true, 'should have committed');
+
+    // The command must NOT have silently switched the working tree onto the
+    // pre-existing phase branch. The commit lands on the branch we were on.
+    const afterBranch = gitOrThrow(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir }).trim();
+    assert.strictEqual(
+      afterBranch,
+      beforeBranch,
+      `must not silently switch onto an existing phase branch mid-commit (was ${beforeBranch}, now ${afterBranch})`
+    );
+
+    // #2539/#3079 AC2: the no-switch path must not be silent. The warning
+    // surfaces the resolved branch and the branch the commit actually lands on.
+    // Note: stderr may also contain config-loader warnings; the branching warning
+    // is the one we assert on.
+    assert.ok(
+      /Warning: resolved.*branch .* already exists/.test(stderr),
+      `expected a non-silent warning on stderr when the resolved branch already exists; got stderr=${stderr}`
+    );
   });
 });
 
@@ -1481,13 +1674,50 @@ describe('groupFilesBySubrepo (#311)', () => {
     assert.deepStrictEqual(result.unmatched, ['vendor/other.js']);
   });
 
-  test('first-match-in-array-order wins (not longest-prefix)', () => {
-    // 'app' comes before 'app/sub' in subRepos array; 'app/sub/f.js' matches 'app' first
+  test('longest-prefix wins, not first-match-in-array-order (#391)', () => {
+    // 'app' precedes 'app/sub' in array order, but 'app/sub' is the more specific
+    // configured sub-repo, so 'app/sub/f.js' must route to 'app/sub'.
     const result = groupFilesBySubrepo(
       ['app/sub/f.js'],
       ['app', 'app/sub']
     );
-    assert.deepStrictEqual(result.grouped, { app: ['app/sub/f.js'] });
+    assert.deepStrictEqual(result.grouped, { 'app/sub': ['app/sub/f.js'] });
+    assert.deepStrictEqual(result.unmatched, []);
+  });
+
+  test('longest-prefix selection is independent of sub_repos array order (#391)', () => {
+    // Reverse array order: longest-prefix must still win (no array-order workaround).
+    const result = groupFilesBySubrepo(
+      ['app/sub/f.js'],
+      ['app/sub', 'app']
+    );
+    assert.deepStrictEqual(result.grouped, { 'app/sub': ['app/sub/f.js'] });
+    assert.deepStrictEqual(result.unmatched, []);
+  });
+
+  test('nested sub-repos route by specificity; shallow files stay shallow (#391)', () => {
+    // Exact repro from #391 plus a shallow sibling file under the parent sub-repo.
+    const result = groupFilesBySubrepo(
+      ['packages/core/widget.js', 'packages/util.js'],
+      ['packages', 'packages/core']
+    );
+    assert.deepStrictEqual(result.grouped, {
+      'packages/core': ['packages/core/widget.js'],
+      packages: ['packages/util.js'],
+    });
+    assert.deepStrictEqual(result.unmatched, []);
+  });
+
+  test('three-level nesting routes to the deepest matching prefix (#391)', () => {
+    const result = groupFilesBySubrepo(
+      ['a/b/c/f.js', 'a/b/g.js', 'a/h.js'],
+      ['a', 'a/b', 'a/b/c']
+    );
+    assert.deepStrictEqual(result.grouped, {
+      'a/b/c': ['a/b/c/f.js'],
+      'a/b': ['a/b/g.js'],
+      a: ['a/h.js'],
+    });
     assert.deepStrictEqual(result.unmatched, []);
   });
 
@@ -1523,6 +1753,17 @@ describe('groupFilesBySubrepo (#311)', () => {
     });
     assert.deepStrictEqual(result.grouped, { a: ['a/b'] });
     assert.deepStrictEqual(result.unmatched, ['README.md']);
+  });
+
+  test('non-string entry in a matched bucket does not throw (#391)', () => {
+    // A null sub_repos entry shares the 'null' first-segment bucket with a real
+    // multi-segment entry; longest-prefix selection must not throw reading length.
+    let result;
+    assert.doesNotThrow(() => {
+      result = groupFilesBySubrepo(['null/a/f.js'], [null, 'null/a']);
+    });
+    assert.deepStrictEqual(result.grouped, { 'null/a': ['null/a/f.js'] });
+    assert.deepStrictEqual(result.unmatched, []);
   });
 });
 
@@ -1913,15 +2154,14 @@ describe('stats command', () => {
   });
 
   test('reports git commit count and first commit date from repository history', () => {
-    execSync('git init', { cwd: tmpDir, stdio: 'pipe' });
-    execSync('git config user.email "test@example.com"', { cwd: tmpDir, stdio: 'pipe' });
-    execSync('git config user.name "Test User"', { cwd: tmpDir, stdio: 'pipe' });
+    gitOrThrow(['init'], { cwd: tmpDir });
+    gitOrThrow(['config', 'user.email', 'test@example.com'], { cwd: tmpDir });
+    gitOrThrow(['config', 'user.name', 'Test User'], { cwd: tmpDir });
 
     fs.writeFileSync(path.join(tmpDir, '.planning', 'PROJECT.md'), '# Project\n');
-    execSync('git add -A', { cwd: tmpDir, stdio: 'pipe' });
-    execSync('git commit -m "initial commit"', {
+    gitOrThrow(['add', '-A'], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'initial commit'], {
       cwd: tmpDir,
-      stdio: 'pipe',
       env: {
         ...process.env,
         GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z',
@@ -1930,10 +2170,9 @@ describe('stats command', () => {
     });
 
     fs.writeFileSync(path.join(tmpDir, 'README.md'), '# Updated\n');
-    execSync('git add README.md', { cwd: tmpDir, stdio: 'pipe' });
-    execSync('git commit -m "second commit"', {
+    gitOrThrow(['add', 'README.md'], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'second commit'], {
       cwd: tmpDir,
-      stdio: 'pipe',
       env: {
         ...process.env,
         GIT_AUTHOR_DATE: '2026-02-01T00:00:00Z',
@@ -2070,6 +2309,75 @@ describe('stats command', () => {
     assert.strictEqual(stats.phases_completed, 1);
     assert.strictEqual(stats.phases.length, 1);
   });
+
+  // ─── #2408: cmdStats last-write-wins fix — colliding dirs fold by precedence ──
+  //
+  // Two on-disk phase directories that normalize to the same phase key
+  // (e.g. `05-real/` + `05-real-stray/`) used to silently overwrite `status`
+  // at the directory-scan merge site (last-write-wins), so /gsd-stats could
+  // report `Not Started` for a phase that is actually `Complete` depending on
+  // fs.readdirSync order. The fix folds colliding statuses by precedence
+  // (Complete > Needs Review > Executed > In Progress > Planned > Not Started),
+  // so the furthest-along status wins regardless of read order.
+
+  test('#2408: colliding phase directories fold to the furthest-along status (Complete wins over Not Started)', () => {
+    // Two dirs that both normalize to phase key "05": `05-real/` (Complete)
+    // and `05-real-stray/` (empty → Not Started). The merged status MUST be
+    // Complete regardless of which directory the fs yields first.
+    const realDir = path.join(tmpDir, '.planning', 'phases', '05-real');
+    fs.mkdirSync(realDir, { recursive: true });
+    fs.writeFileSync(path.join(realDir, '01-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(realDir, '01-01-SUMMARY.md'), '# Summary');
+    fs.writeFileSync(path.join(realDir, 'VERIFICATION.md'), '---\nstatus: passed\n---\n# Verified');
+
+    const strayDir = path.join(tmpDir, '.planning', 'phases', '05-real-stray');
+    fs.mkdirSync(strayDir, { recursive: true });
+
+    // ROADMAP declares Phase 5 so the dir-scan finds an explicit phase to populate.
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '## Milestone v1',
+        '',
+        '### Phase 5: Real',
+        '**Goal:** The real phase',
+      ].join('\n')
+    );
+
+    const result = runGsdTools('stats', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const stats = JSON.parse(result.output);
+    assert.strictEqual(stats.phases_total, 1, 'two colliding dirs must merge into one phase');
+    assert.strictEqual(stats.phases_completed, 1, 'Complete status must win over Not Started after the fold');
+    const phase05 = stats.phases.find((p) => p.number === '05');
+    assert.ok(phase05, 'phase 05 must appear in stats output');
+    assert.strictEqual(phase05.status, 'Complete', 'folded status must be Complete, not Not Started');
+  });
+
+  test('#2408: foldPhaseStatus is commutative and order-independent (property)', () => {
+    // Direct unit test of the fold: a Complete colliding with a Not Started
+    // must yield Complete regardless of argument order. This is the property
+    // that makes the merge-site fix correct independent of fs read order.
+    const { foldPhaseStatus, PHASE_STATUS_PRECEDENCE } = require('../gsd-core/bin/lib/commands.cjs');
+    assert.strictEqual(foldPhaseStatus('Complete', 'Not Started'), 'Complete');
+    assert.strictEqual(foldPhaseStatus('Not Started', 'Complete'), 'Complete');
+    assert.strictEqual(foldPhaseStatus('Complete', 'Complete'), 'Complete');
+    // Every recognized status folded with a lower-precedence one wins.
+    for (let i = 0; i < PHASE_STATUS_PRECEDENCE.length - 1; i++) {
+      const higher = PHASE_STATUS_PRECEDENCE[i];
+      const lower = PHASE_STATUS_PRECEDENCE[i + 1];
+      assert.strictEqual(foldPhaseStatus(higher, lower), higher, `${higher} should beat ${lower}`);
+      assert.strictEqual(foldPhaseStatus(lower, higher), higher, `${higher} should beat ${lower} (commutative)`);
+    }
+    // Unrecognized status never beats a recognized one.
+    assert.strictEqual(foldPhaseStatus('Complete', '???'), 'Complete');
+    assert.strictEqual(foldPhaseStatus('???', 'Complete'), 'Complete');
+    // Two unrecognized → returns first arg (deterministic).
+    assert.strictEqual(foldPhaseStatus('foo', 'bar'), 'foo');
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2106,7 +2414,7 @@ describe('check-commit command', () => {
     );
     // Stage a non-planning file
     fs.writeFileSync(path.join(tmpDir, 'src.js'), 'console.log("hi")');
-    execSync('git add src.js', { cwd: tmpDir, stdio: 'pipe' });
+    gitOrThrow(['add', 'src.js'], { cwd: tmpDir });
 
     const result = runGsdTools('check-commit', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
@@ -2120,7 +2428,7 @@ describe('check-commit command', () => {
       JSON.stringify({ commit_docs: false })
     );
     fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), '# State');
-    execSync('git add .planning/STATE.md', { cwd: tmpDir, stdio: 'pipe' });
+    gitOrThrow(['add', '.planning/STATE.md'], { cwd: tmpDir });
 
     const result = runGsdTools('check-commit', tmpDir);
     assert.ok(!result.success, 'should block commit');
@@ -2173,5 +2481,1420 @@ describe('_wsParseRetryAfter (#308)', () => {
 
   test('null → null', () => {
     assert.strictEqual(_wsParseRetryAfter(null), null);
+  });
+});
+
+// ─── Regressions: bug #1145 — query user-story.validate phantom command ────
+//
+// `query user-story.validate` was invoked by mvp-phase.md and verify-work.md
+// but had no CJS handler (phantom command). Every invocation errored with
+// "Unknown command: user-story — did you mean: user-story validate?".
+//
+// Calls the CLI via runGsdTools; no readFileSync source-grep.
+
+describe('user-story validate command (bug #1145)', () => {
+  // Helper: call `query user-story.validate --story <story>` and parse JSON.
+  function validateStory(story) {
+    const result = runGsdTools(['query', 'user-story.validate', '--story', story]);
+    assert.equal(result.success, true, `user-story.validate exited non-zero: ${result.error || result.output}`);
+    let parsed;
+    try { parsed = JSON.parse(result.output); } catch {
+      assert.fail(`output was not valid JSON: ${result.output}`);
+    }
+    return parsed;
+  }
+
+  // Helper: call with --pick valid, return trimmed output string.
+  function validateStoryPickValid(story) {
+    const result = runGsdTools(['query', 'user-story.validate', '--story', story, '--pick', 'valid']);
+    assert.equal(result.success, true, `user-story.validate --pick valid exited non-zero: ${result.error || result.output}`);
+    return result.output.trim();
+  }
+
+  test('command is reachable — not a phantom (negative proof of bug #1145)', () => {
+    // Before the fix: exit 1 with "Unknown command: user-story"
+    const result = runGsdTools(['query', 'user-story.validate', '--story', 'As a user, I want to log in, so that I can access my account.']);
+    assert.equal(result.success, true, `Expected exit 0 but got: ${result.error || result.output}`);
+  });
+
+  test('canonical well-formed story returns { valid: true, errors: [], slots }', () => {
+    const out = validateStory('As a new user, I want to register and log in, so that I can access my account.');
+    assert.equal(typeof out, 'object');
+    assert.equal(out.valid, true, `expected valid:true, got: ${JSON.stringify(out)}`);
+    assert.ok(!out.errors || out.errors.length === 0, `unexpected errors: ${JSON.stringify(out.errors)}`);
+    // Slot extraction (see verify-work.md: "returns slot extractions")
+    assert.ok(out.slots && typeof out.slots === 'object', `expected slots object, got: ${JSON.stringify(out.slots)}`);
+    assert.equal(out.slots.role, 'new user');
+    assert.equal(out.slots.capability, 'register and log in');
+    assert.equal(out.slots.outcome, 'I can access my account');
+  });
+
+  test('whitespace-only role slot returns { valid: false } (Codex finding: .+ accepted spaces)', () => {
+    // "As a  ," — role is whitespace-only; must be rejected
+    const out = validateStory('As a  , I want to build reports, so that I can share status.');
+    assert.equal(out.valid, false, `whitespace role must be invalid: ${JSON.stringify(out)}`);
+    assert.ok(Array.isArray(out.errors) && out.errors.length > 0);
+    assert.equal(out.slots, null, 'slots must be null on invalid story');
+  });
+
+  test('whitespace-only capability slot returns { valid: false }', () => {
+    // ", I want to  ," — capability is whitespace-only
+    const out = validateStory('As a user, I want to  , so that I can share status.');
+    assert.equal(out.valid, false, `whitespace capability must be invalid: ${JSON.stringify(out)}`);
+    assert.ok(Array.isArray(out.errors) && out.errors.length > 0);
+  });
+
+  test('whitespace-only outcome slot returns { valid: false }', () => {
+    // ", so that  ." — outcome is whitespace-only
+    const out = validateStory('As a user, I want to build reports, so that  .');
+    assert.equal(out.valid, false, `whitespace outcome must be invalid: ${JSON.stringify(out)}`);
+    assert.ok(Array.isArray(out.errors) && out.errors.length > 0);
+  });
+
+  test('empty string returns { valid: false } with non-empty errors array', () => {
+    const out = validateStory('');
+    assert.equal(out.valid, false);
+    assert.ok(Array.isArray(out.errors) && out.errors.length > 0);
+  });
+
+  test('story missing "As a" prefix returns { valid: false }', () => {
+    const out = validateStory('I want to register so that I can log in.');
+    assert.equal(out.valid, false);
+    assert.ok(Array.isArray(out.errors) && out.errors.length > 0);
+  });
+
+  test('story missing ", I want to" clause returns { valid: false }', () => {
+    const out = validateStory('As a user, so that I can log in.');
+    assert.equal(out.valid, false);
+    assert.ok(Array.isArray(out.errors) && out.errors.length > 0);
+  });
+
+  test('story missing ", so that" clause returns { valid: false }', () => {
+    const out = validateStory('As a user, I want to register and log in.');
+    assert.equal(out.valid, false);
+    assert.ok(Array.isArray(out.errors) && out.errors.length > 0);
+  });
+
+  test('story missing trailing period returns { valid: false }', () => {
+    const out = validateStory('As a user, I want to register, so that I can log in');
+    assert.equal(out.valid, false);
+    assert.ok(Array.isArray(out.errors) && out.errors.length > 0);
+  });
+
+  test('whitespace-only story returns { valid: false }', () => {
+    const out = validateStory('   ');
+    assert.equal(out.valid, false);
+    assert.ok(Array.isArray(out.errors) && out.errors.length > 0);
+  });
+
+  test('--pick valid returns bare "true" for valid story (verify-work.md call shape)', () => {
+    const out = validateStoryPickValid('As a developer, I want to run tests, so that I can catch regressions.');
+    assert.equal(out, 'true', `expected bare "true" but got: ${JSON.stringify(out)}`);
+  });
+
+  test('--pick valid returns bare "false" for invalid story (verify-work.md call shape)', () => {
+    const out = validateStoryPickValid('Not a user story at all.');
+    assert.equal(out, 'false', `expected bare "false" but got: ${JSON.stringify(out)}`);
+  });
+
+  test('mvp-phase.md call shape: result has .valid boolean, .errors array, and .slots', () => {
+    // gsd_run query user-story.validate --story "$USER_STORY"
+    // mvp-phase.md uses: jq -r '.valid' and jq -r '.errors[]'
+    const out = validateStory('As a product manager, I want to export reports, so that I can share progress with stakeholders.');
+    assert.ok(Object.prototype.hasOwnProperty.call(out, 'valid'), 'missing "valid" field');
+    assert.ok(Object.prototype.hasOwnProperty.call(out, 'errors'), 'missing "errors" field');
+    assert.ok(Object.prototype.hasOwnProperty.call(out, 'slots'), 'missing "slots" field');
+    assert.equal(typeof out.valid, 'boolean');
+    assert.ok(Array.isArray(out.errors));
+    // slots is object on success, null on failure
+    assert.equal(out.valid, true);
+    assert.equal(typeof out.slots, 'object');
+    assert.notEqual(out.slots, null);
+  });
+
+  test('dotted-form (user-story.validate) works identically to spaced form', () => {
+    // Canonical dotted invocation used by workflows
+    const result = runGsdTools(['query', 'user-story.validate', '--story', 'As a user, I want to log in, so that I can see my dashboard.']);
+    assert.equal(result.success, true, `dotted form failed: ${result.error}`);
+    const out = JSON.parse(result.output);
+    assert.equal(out.valid, true);
+  });
+
+  test('boundary — minimal valid story passes', () => {
+    const out = validateStory('As a X, I want to Y, so that Z.');
+    assert.equal(out.valid, true, `minimal valid story should pass: ${JSON.stringify(out)}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pr-subrepo — regressions (#666) + workflow source invariants
+// ---------------------------------------------------------------------------
+
+describe('pr-subrepo', () => {
+  function writePrSubrepoConfig(dir, obj) {
+    const planningDir = path.join(dir, '.planning');
+    fs.mkdirSync(planningDir, { recursive: true });
+    fs.writeFileSync(path.join(planningDir, 'config.json'), JSON.stringify(obj, null, 2));
+  }
+
+  function initPrSubrepo(dir) {
+    fs.mkdirSync(dir, { recursive: true });
+    gitOrThrow(['init'], { cwd: dir });
+    gitOrThrow(['config', 'user.email', 'test@example.com'], { cwd: dir });
+    gitOrThrow(['config', 'user.name', 'Test'], { cwd: dir });
+    fs.writeFileSync(path.join(dir, '.gitkeep'), '');
+    fs.writeFileSync(path.join(dir, 'feature.js'), '// initial\n');
+    fs.writeFileSync(path.join(dir, 'a.js'), '// initial\n');
+    fs.writeFileSync(path.join(dir, 'b.js'), '// initial\n');
+    gitOrThrow(['add', '.gitkeep', 'feature.js', 'a.js', 'b.js'], { cwd: dir });
+    gitOrThrow(['commit', '-m', 'chore: initial commit'], { cwd: dir });
+  }
+
+  function wirePrSubrepoRemote(repoDir, bareDir) {
+    fs.mkdirSync(bareDir, { recursive: true });
+    gitOrThrow(['init', '--bare'], { cwd: bareDir });
+    gitOrThrow(['remote', 'add', 'origin', bareDir], { cwd: repoDir });
+    const branch = gitOrThrow(['branch', '--show-current'], { cwd: repoDir }).trim();
+    gitOrThrow(['push', 'origin', branch], { cwd: repoDir });
+  }
+
+  describe('regressions (#666 — cmdPrSubrepo seam)', () => {
+    let rootDir;
+    let subDir;
+    let bareDir;
+
+    beforeEach(() => {
+      rootDir = createTempDir('gsd-666-root-');
+      subDir  = path.join(rootDir, 'backend');
+      bareDir = path.join(rootDir, '_bare-backend.git');
+      writePrSubrepoConfig(rootDir, { planning: { sub_repos: ['backend'] } });
+      initPrSubrepo(subDir);
+      wirePrSubrepoRemote(subDir, bareDir);
+    });
+
+    afterEach(() => {
+      cleanup(rootDir);
+    });
+
+    test('config-get planning.sub_repos resolves canonical config location', () => {
+      const res = runGsdTools(['query', 'config-get', 'planning.sub_repos'], rootDir);
+      assert.ok(res.success, `config-get planning.sub_repos failed: ${res.error}`);
+      assert.deepStrictEqual(JSON.parse(res.output), ['backend']);
+    });
+
+    test('config-get sub_repos (top-level) fails — confirming bug #666 Blocker 1 is gone', () => {
+      const res = runGsdTools(['query', 'config-get', 'sub_repos'], rootDir);
+      assert.ok(!res.success, 'top-level sub_repos key must not resolve — fix requires planning.sub_repos');
+    });
+
+    test('pr-subrepo happy path: branch created, files staged explicitly, commit pushed', () => {
+      fs.writeFileSync(path.join(subDir, 'feature.js'), 'module.exports = 42;\n');
+
+      const res = runGsdTools(
+        ['query', 'pr-subrepo', 'fix(backend): add feature',
+         '--repo', 'backend', '--branch', 'fix-666-backend-pr'],
+        rootDir
+      );
+      assert.ok(res.success, `pr-subrepo failed: ${res.error}`);
+
+      const result = JSON.parse(res.output);
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.repo, 'backend');
+      assert.strictEqual(result.branch, 'fix-666-backend-pr');
+      assert.strictEqual(result.committed, true);
+      assert.ok(Array.isArray(result.files) && result.files.length > 0);
+      assert.ok(result.files.includes('feature.js'), `feature.js missing from files: ${JSON.stringify(result.files)}`);
+      assert.ok(typeof result.commit_hash === 'string' && result.commit_hash.length > 0);
+    });
+
+    test('pr-subrepo stages files explicitly — result.files lists every changed file', () => {
+      fs.writeFileSync(path.join(subDir, 'a.js'), '1\n');
+      fs.writeFileSync(path.join(subDir, 'b.js'), '2\n');
+
+      const res = runGsdTools(
+        ['query', 'pr-subrepo', 'fix(backend): two files',
+         '--repo', 'backend', '--branch', 'fix-666-explicit-pr'],
+        rootDir
+      );
+      assert.ok(res.success, `pr-subrepo failed: ${res.error}`);
+
+      const result = JSON.parse(res.output);
+      assert.ok(result.files.includes('a.js'), 'a.js must be staged');
+      assert.ok(result.files.includes('b.js'), 'b.js must be staged');
+    });
+
+    test('pr-subrepo: nothing_to_commit when sub-repo is clean', () => {
+      const res = runGsdTools(
+        ['query', 'pr-subrepo', 'fix(backend): nothing',
+         '--repo', 'backend', '--branch', 'fix-666-clean-pr'],
+        rootDir
+      );
+      assert.ok(res.success, `pr-subrepo should succeed on clean repo: ${res.error}`);
+      const result = JSON.parse(res.output);
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.committed, false);
+      assert.strictEqual(result.reason, 'nothing_to_commit');
+    });
+
+    test('pr-subrepo: duplicate branch guard — errors when branch already exists', () => {
+      fs.writeFileSync(path.join(subDir, 'a.js'), '1\n');
+      const first = runGsdTools(
+        ['query', 'pr-subrepo', 'fix(backend): first',
+         '--repo', 'backend', '--branch', 'fix-666-dup-pr'],
+        rootDir
+      );
+      assert.ok(first.success, `first call failed: ${first.error}`);
+
+      fs.writeFileSync(path.join(subDir, 'b.js'), '2\n');
+      const second = runGsdTools(
+        ['query', 'pr-subrepo', 'fix(backend): second',
+         '--repo', 'backend', '--branch', 'fix-666-dup-pr'],
+        rootDir
+      );
+      assert.ok(!second.success, 'Expected failure on duplicate branch name');
+      assert.ok(second.error.includes('already exists'), `Got: ${second.error}`);
+    });
+
+    test('pr-subrepo: missing --repo returns descriptive error', () => {
+      const res = runGsdTools(
+        ['query', 'pr-subrepo', 'fix: msg', '--branch', 'some-branch'],
+        rootDir
+      );
+      assert.ok(!res.success);
+      assert.ok(res.error.includes('--repo required'), `Got: ${res.error}`);
+    });
+
+    test('pr-subrepo: missing --branch returns descriptive error', () => {
+      const res = runGsdTools(
+        ['query', 'pr-subrepo', 'fix: msg', '--repo', 'backend'],
+        rootDir
+      );
+      assert.ok(!res.success);
+      assert.ok(res.error.includes('--branch required'), `Got: ${res.error}`);
+    });
+
+    test('pr-subrepo: missing commit message returns descriptive error', () => {
+      const res = runGsdTools(
+        ['query', 'pr-subrepo', '--repo', 'backend', '--branch', 'some-branch'],
+        rootDir
+      );
+      assert.ok(!res.success);
+      assert.ok(res.error.includes('commit message required'), `Got: ${res.error}`);
+    });
+
+    test('pr-subrepo: non-existent repo path returns descriptive error', () => {
+      const res = runGsdTools(
+        ['query', 'pr-subrepo', 'fix: msg', '--repo', 'nonexistent', '--branch', 'some-branch'],
+        rootDir
+      );
+      assert.ok(!res.success);
+      assert.ok(
+        res.error.includes('not found') || res.error.includes('nonexistent'),
+        `Got: ${res.error}`
+      );
+    });
+
+    test('pr-subrepo: path traversal (../escape) is rejected', () => {
+      const res = runGsdTools(
+        ['query', 'pr-subrepo', 'fix: msg', '--repo', '../escape', '--branch', 'some-branch'],
+        rootDir
+      );
+      assert.ok(!res.success, 'Expected failure on path traversal attempt');
+      assert.ok(
+        res.error.includes('unsafe') || res.error.includes('escape'),
+        `Got: ${res.error}`
+      );
+    });
+
+    test('pr-subrepo push failure: branch+commit survive when push is rejected (no data loss)', () => {
+      // Reproduce the data-loss scenario flagged in review: a rejecting remote must leave
+      // the local branch+commit intact so the user can retry git push manually.
+      const branch = 'fix-666-push-fail-pr';
+
+      // Wire a bare remote with a pre-receive hook that rejects all pushes.
+      const rejectingBare = path.join(rootDir, '_rejecting-bare.git');
+      fs.mkdirSync(rejectingBare, { recursive: true });
+      gitOrThrow(['init', '--bare'], { cwd: rejectingBare });
+      const hookPath = path.join(rejectingBare, 'hooks', 'pre-receive');
+      fs.writeFileSync(hookPath, '#!/bin/sh\nexit 1\n');
+      fs.chmodSync(hookPath, 0o755);
+
+      // Point origin at the rejecting bare (overwrite the working one wired in beforeEach).
+      gitOrThrow(['remote', 'set-url', 'origin', rejectingBare], { cwd: subDir });
+
+      fs.writeFileSync(path.join(subDir, 'feature.js'), 'IMPORTANT USER WORK\n');
+
+      const res = runGsdTools(
+        ['query', 'pr-subrepo', 'fix(backend): push-fail test',
+         '--repo', 'backend', '--branch', branch],
+        rootDir
+      );
+
+      // Command must fail because push was rejected.
+      assert.ok(!res.success, `Expected failure on rejected push, got success: ${res.output}`);
+
+      // The local branch must still exist — work must not be lost.
+      const branches = gitOrThrow(['branch', '--list', branch], { cwd: subDir });
+      assert.ok(branches.trim().length > 0, `Branch ${branch} was deleted after push failure — user work lost`);
+
+      // The commit on that branch must contain the user's changes.
+      const log = gitOrThrow(['log', branch, '--oneline', '-1'], { cwd: subDir });
+      assert.ok(log.trim().length > 0, `No commit on ${branch} — staged work was lost`);
+    });
+
+    test('pr-subrepo porcelain: staged rename — both old and new paths in result.files', () => {
+      // git mv produces "R  old -> new" in porcelain v1; both paths must be staged.
+      gitOrThrow(['mv', 'feature.js', 'renamed-feature.js'], { cwd: subDir });
+
+      const res = runGsdTools(
+        ['query', 'pr-subrepo', 'fix(backend): rename',
+         '--repo', 'backend', '--branch', 'fix-666-rename-pr'],
+        rootDir
+      );
+      assert.ok(res.success, `pr-subrepo failed: ${res.error}`);
+      const result = JSON.parse(res.output);
+      assert.ok(result.files.includes('feature.js'), `old path missing: ${JSON.stringify(result.files)}`);
+      assert.ok(result.files.includes('renamed-feature.js'), `new path missing: ${JSON.stringify(result.files)}`);
+    });
+
+    test('pr-subrepo porcelain: non-ASCII filename (core.quotePath=false)', () => {
+      // Without -c core.quotePath=false, "café.js" is C-escaped → slice(2) parse breaks.
+      fs.writeFileSync(path.join(subDir, 'café.js'), '// initial\n');
+      gitOrThrow(['add', 'café.js'], { cwd: subDir });
+      gitOrThrow(['commit', '-m', 'chore: add café.js'], { cwd: subDir });
+      fs.writeFileSync(path.join(subDir, 'café.js'), 'updated\n');
+
+      const res = runGsdTools(
+        ['query', 'pr-subrepo', 'fix(backend): non-ascii',
+         '--repo', 'backend', '--branch', 'fix-666-nonascii-pr'],
+        rootDir
+      );
+      assert.ok(res.success, `pr-subrepo failed: ${res.error}`);
+      const result = JSON.parse(res.output);
+      assert.ok(result.files.includes('café.js'), `non-ASCII file missing: ${JSON.stringify(result.files)}`);
+    });
+
+    test('pr-subrepo porcelain: fc property — parsed filenames are always non-empty strings', () => {
+      // Local mirror of cmdPrSubrepo's porcelain line-parsing logic (commands.cts).
+      // Tests the transformation contract without needing a real git repo.
+      function parsePorcelainLine(line) {
+        const normalized = line.trimStart();
+        const file = normalized.slice(2).trim();
+        const arrowIdx = file.indexOf(' -> ');
+        return arrowIdx !== -1
+          ? [file.slice(0, arrowIdx).trim(), file.slice(arrowIdx + 4).trim()]
+          : [file];
+      }
+
+      const safeFilename = fc.stringMatching(/^[a-zA-Z0-9._-]+$/);
+      const xyChar = fc.constantFrom('M', 'A', 'D', 'R', 'C', 'U');
+      const normalLine = fc.tuple(xyChar, xyChar, safeFilename)
+        .map(([x, y, f]) => `${x}${y} ${f}`);
+      const renameLine = fc.tuple(xyChar, safeFilename, safeFilename)
+        .map(([x, o, n]) => `${x}  ${o} -> ${n}`);
+      // First-line trim edge case: leading space stripped by execGit global trim
+      const trimmedLine = fc.tuple(xyChar, safeFilename)
+        .map(([y, f]) => ` ${y} ${f}`);
+
+      fc.assert(fc.property(
+        fc.oneof(normalLine, renameLine, trimmedLine),
+        (line) => {
+          const files = parsePorcelainLine(line);
+          return files.length > 0 && files.every(f => typeof f === 'string' && f.length > 0);
+        }
+      ));
+    });
+  });
+
+  describe('workflow source invariants (#666 — pr-branch.md)', () => {
+    // allow-test-rule: source-text-is-the-product see #666
+    // pr-branch.md is a workflow file whose deployed text IS the runtime contract.
+    const workflowPath = path.resolve(__dirname, '..', 'gsd-core', 'workflows', 'pr-branch.md');
+    let wfContent;
+
+    test('setup', () => {
+      wfContent = fs.readFileSync(workflowPath, 'utf-8');
+      assert.ok(wfContent.length > 0);
+    });
+
+    test('uses planning.sub_repos (canonical key) — not legacy top-level sub_repos', () => {
+      wfContent = wfContent || fs.readFileSync(workflowPath, 'utf-8');
+      assert.ok(wfContent.includes('planning.sub_repos'), 'must call config-get planning.sub_repos');
+      assert.ok(
+        !/config-get sub_repos(?!\.)/.test(wfContent),
+        'must not call config-get sub_repos without the planning. prefix'
+      );
+    });
+
+    test('delegates git work to gsd_run query pr-subrepo — no inline git add -A in code', () => {
+      wfContent = wfContent || fs.readFileSync(workflowPath, 'utf-8');
+      assert.ok(wfContent.includes('pr-subrepo'), 'must invoke the pr-subrepo seam');
+      const hasForbiddenGitAdd = /^\s*git(?:\s+-C\s+\S+)?\s+add\s+(?:-A|\.)\b/m.test(wfContent);
+      assert.ok(!hasForbiddenGitAdd, 'must not use git add -A or git add . as a shell command');
+    });
+
+    test('persists dirty-repo list without bash arrays (temp file or inline string)', () => {
+      wfContent = wfContent || fs.readFileSync(workflowPath, 'utf-8');
+      assert.ok(
+        !wfContent.includes('DIRTY_REPOS=()') && !wfContent.includes('DIRTY_REPOS+='),
+        'bash arrays must not be used — they do not survive across command blocks'
+      );
+    });
+
+    test('branch name includes repo-specific slug to avoid root PR_BRANCH collision', () => {
+      wfContent = wfContent || fs.readFileSync(workflowPath, 'utf-8');
+      assert.ok(
+        /REPO_SAFE|SUB_BRANCH.*REPO/.test(wfContent),
+        'sub-repo branch name must embed a repo-specific component'
+      );
+    });
+
+    test('handle_sub_repos positioned before analyze_commits', () => {
+      wfContent = wfContent || fs.readFileSync(workflowPath, 'utf-8');
+      const a = wfContent.indexOf('handle_sub_repos');
+      const b = wfContent.indexOf('analyze_commits');
+      assert.ok(a !== -1 && b !== -1 && a < b);
+    });
+
+    test('dirty-scan rejects traversal, newline, and symlink entries before invoking git (security)', () => {
+      // Extracts and executes the ACTUAL node -e script shipped in pr-branch.md — not a
+      // mirror — so this test fails if the real script regresses, not just a copy of it.
+      wfContent = wfContent || fs.readFileSync(workflowPath, 'utf-8');
+      const match = wfContent.match(/node -e "([\s\S]*?)"\s+"\$SUB_REPOS_JSON" "\$ROOT" "\$DIRTY_FILE"/);
+      assert.ok(match, 'could not extract dirty-scan node script from pr-branch.md');
+      const script = match[1];
+
+      // Helper: init a git repo with a TRACKED dirty change. An untracked file would be
+      // filtered by the ?? exclusion and the repo would look clean even without the guard,
+      // making the assertions vacuous. A tracked modification ensures that WITHOUT the
+      // guard the repo WOULD be reported dirty, so the test genuinely fails-first.
+      const initDirtyRepo = (dir, file) => {
+        gitOrThrow(['init'], { cwd: dir });
+        gitOrThrow(['config', 'user.email', 'test@example.com'], { cwd: dir });
+        gitOrThrow(['config', 'user.name', 'Test'], { cwd: dir });
+        fs.writeFileSync(path.join(dir, file), 'committed\n');
+        gitOrThrow(['add', file], { cwd: dir });
+        gitOrThrow(['-c', 'commit.gpgsign=false', 'commit', '-m', 'init'], { cwd: dir });
+        fs.writeFileSync(path.join(dir, file), 'modified\n');
+      };
+
+      const scanRoot = createTempDir('gsd-666-scan-root-');
+      const outsideDir = createTempDir('gsd-666-scan-outside-');
+      initDirtyRepo(outsideDir, 'secret.txt');
+
+      // Positive control: a legit dirty sub-repo INSIDE the workspace must still be reported,
+      // so the test can't pass by a guard that simply rejects everything.
+      const backendDir = path.join(scanRoot, 'backend');
+      fs.mkdirSync(backendDir, { recursive: true });
+      initDirtyRepo(backendDir, 'app.js');
+
+      // Symlink escape: an in-tree name with no ".." and no "/" that points outside root.
+      // path.resolve would keep it "inside"; only realpathSync catches it. Symlink
+      // creation needs privileges on Windows — skip just this vector if it throws.
+      let symlinked = true;
+      try { fs.symlinkSync(outsideDir, path.join(scanRoot, 'evil')); } catch { symlinked = false; }
+
+      const traversalEntry = path.relative(scanRoot, outsideDir); // e.g. "../gsd-666-scan-outside-XXXX"
+      const newlineEntry = 'good\nbad'; // record-separator injection attempt
+      const dirtyFile = path.join(scanRoot, '_dirty');
+      const entries = symlinked
+        ? ['evil', traversalEntry, newlineEntry, 'backend']
+        : [traversalEntry, newlineEntry, 'backend'];
+      const subReposJson = JSON.stringify(entries);
+
+      try {
+        const scanResult = runNode(['-e', script, subReposJson, scanRoot, dirtyFile]);
+        throwIfFailed(scanResult, 'node -e <dirty-scan script from pr-branch.md>');
+        const dirty = fs.existsSync(dirtyFile) ? fs.readFileSync(dirtyFile, 'utf-8') : '';
+        const lines = dirty.split('\n').filter(Boolean);
+        assert.ok(
+          !dirty.includes(path.basename(outsideDir)),
+          `Path traversal reached git outside the workspace: ${JSON.stringify(dirty)}`
+        );
+        if (symlinked) {
+          assert.ok(
+            !lines.includes('evil'),
+            `Symlink entry reached git outside the workspace: ${JSON.stringify(dirty)}`
+          );
+        }
+        assert.ok(
+          !lines.includes('bad'),
+          `Embedded-newline entry injected a spurious record: ${JSON.stringify(dirty)}`
+        );
+        assert.deepStrictEqual(
+          lines, ['backend'],
+          `Positive control failed — expected only 'backend', got: ${JSON.stringify(lines)}`
+        );
+      } finally {
+        cleanup(scanRoot);
+        cleanup(outsideDir);
+      }
+    });
+  });
+});
+
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/feat-1754-cli-skew-detection.test.cjs — consolidation epic #1969 (B3 #1972)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:feat-1754-cli-skew-detection (consolidation epic #1969 B3 #1972)", () => {
+'use strict';
+
+/**
+ * feat-1754-cli-skew-detection.test.cjs
+ *
+ * Tests for the CLI version-skew detection module (src/cli-skew-check.cts).
+ *
+ * The check warns (returns a string) when the running gsd-tools.cjs is NOT the
+ * project-local install while a project-local install EXISTS — the shadowing
+ * scenario from #1748 (a stale global canary from @gsd-build/sdk shadowing
+ * project-local 1.6.0).
+ *
+ * DEFECT class: environment / version skew (enhancement #1754)
+ *
+ * The function is PURE (no I/O — the caller provides paths + existence flags),
+ * making it trivially testable without filesystem setup.
+ */
+
+const { test, describe } = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+
+const { checkCliSkew } = require('../gsd-core/bin/lib/cli-skew-check.cjs');
+
+describe('#1754: checkCliSkew — pure path-comparison skew detection', () => {
+  test('SKEW: resolved CLI outside project root + project-local exists → returns warning', () => {
+    const warning = checkCliSkew({
+      resolvedPath: '/opt/homebrew/bin/gsd-tools',
+      projectRoot: '/home/user/my-project',
+      projectLocalExists: true,
+    });
+    assert.ok(warning, 'Expected a warning string when resolved CLI is outside project root and project-local exists');
+    assert.ok(warning.includes('shadow') || warning.includes('outside') || warning.includes('may'),
+      `Warning should mention the shadowing/outside nature, got: "${warning}"`);
+  });
+
+  test('NO-SKEW: resolved CLI is the project-local install → returns null', () => {
+    const warning = checkCliSkew({
+      resolvedPath: '/home/user/my-project/.claude/gsd-core/bin/gsd-tools.cjs',
+      projectRoot: '/home/user/my-project',
+      projectLocalExists: true,
+    });
+    assert.strictEqual(warning, null, 'No warning expected when resolved CLI IS the project-local install');
+  });
+
+  test('NO-SKEW: resolved CLI outside project root but NO project-local install → returns null', () => {
+    const warning = checkCliSkew({
+      resolvedPath: '/usr/local/bin/gsd-tools',
+      projectRoot: '/home/user/my-project',
+      projectLocalExists: false,
+    });
+    assert.strictEqual(warning, null, 'No warning expected when no project-local install exists (legitimate global-only)');
+  });
+
+  test('NO-SKEW: projectRoot is null (no project context) → returns null', () => {
+    const warning = checkCliSkew({
+      resolvedPath: '/usr/local/bin/gsd-tools',
+      projectRoot: null,
+      projectLocalExists: false,
+    });
+    assert.strictEqual(warning, null, 'No warning expected when there is no project root');
+  });
+
+  test('LEGACY-SDK: resolved path contains @gsd-build → warning includes removal instructions', () => {
+    const warning = checkCliSkew({
+      resolvedPath: '/opt/homebrew/lib/node_modules/@gsd-build/sdk/bin/gsd-tools',
+      projectRoot: '/home/user/my-project',
+      projectLocalExists: true,
+    });
+    assert.ok(warning, 'Expected a warning for @gsd-build/sdk paths');
+    assert.ok(warning.includes('@gsd-build/sdk') || warning.includes('npm uninstall'),
+      `Warning should include @gsd-build/sdk removal instructions, got: "${warning}"`);
+  });
+
+  test('PATH-NORMALIZATION: resolved under project root via realpath → no false positive', () => {
+    // Even if the resolved path differs in symlink resolution, if it's under the
+    // project root, it's not a skew. The caller normalizes paths before calling.
+    const warning = checkCliSkew({
+      resolvedPath: path.resolve('/home/user/my-project/.claude/gsd-core/bin/gsd-tools.cjs'),
+      projectRoot: path.resolve('/home/user/my-project'),
+      projectLocalExists: true,
+    });
+    assert.strictEqual(warning, null, 'No warning when resolved path is under project root (even with realpath normalization)');
+  });
+});
+  });
+}
+
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/feat-3251-command-aliases-manifest-coverage.test.cjs — consolidation epic #1969 (B3 #1972)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:feat-3251-command-aliases-manifest-coverage (consolidation epic #1969 B3 #1972)", () => {
+'use strict';
+/**
+ * Regression guard for issue #3251:
+ * 14 commands used in workflows must be present in command-aliases.cjs.
+ *
+ * Asserts structurally by requiring the manifest and checking each canonical
+ * command appears in either the family arrays or the non-family array.
+ * Never greps the source file — see feedback_no_source_grep_tests.md.
+ */
+
+const { describe, test } = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('path');
+const { spawnSync } = require('node:child_process');
+const { cleanup } = require('./helpers.cjs');
+
+const REPO_ROOT = path.join(__dirname, '..');
+const COMMAND_ALIASES_FILE = path.join(
+  REPO_ROOT,
+  'gsd-core',
+  'bin',
+  'lib',
+  'command-aliases.cjs',
+);
+const GSD_TOOLS = path.join(REPO_ROOT, 'gsd-core', 'bin', 'gsd-tools.cjs');
+
+const MISSING_14 = [
+  'check.decision-coverage-plan',
+  'check.decision-coverage-verify',
+  'frontmatter.get',
+  'frontmatter.set',
+  'learnings.copy',
+  'milestone.complete',
+  'phase.mvp-mode',
+  'progress.bar',
+  'requirements.mark-complete',
+  'stats.json',
+  'task.is-behavior-adding',
+  'todo.match-phase',
+  'uat.render-checkpoint',
+  'workstream.list',
+];
+
+describe('feat-3251: command-aliases.cjs manifest coverage', () => {
+  let manifest;
+
+  test('manifest file can be required without error', () => {
+    try {
+      manifest = require(COMMAND_ALIASES_FILE);
+    } catch (err) {
+      assert.fail(`Failed to require manifest: ${err.message}`);
+    }
+    assert.ok(manifest, 'manifest should be truthy');
+  });
+
+  test('manifest exports NON_FAMILY_COMMAND_ALIASES array', () => {
+    manifest = manifest ?? require(COMMAND_ALIASES_FILE);
+    assert.ok(
+      Array.isArray(manifest.NON_FAMILY_COMMAND_ALIASES),
+      'NON_FAMILY_COMMAND_ALIASES must be an exported array in command-aliases.cjs',
+    );
+  });
+
+  test('all 14 missing commands are present in the manifest (family or non-family)', () => {
+    manifest = manifest ?? require(COMMAND_ALIASES_FILE);
+
+    const allCanonicalsInManifest = new Set();
+
+    // Collect from all family arrays
+    const familyArrayKeys = [
+      'STATE_COMMAND_ALIASES',
+      'VERIFY_COMMAND_ALIASES',
+      'INIT_COMMAND_ALIASES',
+      'PHASE_COMMAND_ALIASES',
+      'PHASES_COMMAND_ALIASES',
+      'VALIDATE_COMMAND_ALIASES',
+      'ROADMAP_COMMAND_ALIASES',
+      'EVAL_COMMAND_ALIASES',
+    ];
+    for (const key of familyArrayKeys) {
+      const arr = manifest[key];
+      if (!Array.isArray(arr)) continue;
+      for (const entry of arr) {
+        if (entry && entry.canonical) allCanonicalsInManifest.add(entry.canonical);
+      }
+    }
+
+    // Collect from non-family array
+    const nonFamily = manifest.NON_FAMILY_COMMAND_ALIASES;
+    if (Array.isArray(nonFamily)) {
+      for (const entry of nonFamily) {
+        if (entry && entry.canonical) allCanonicalsInManifest.add(entry.canonical);
+      }
+    }
+
+    const missing = MISSING_14.filter((cmd) => !allCanonicalsInManifest.has(cmd));
+    assert.deepStrictEqual(
+      missing,
+      [],
+      `${missing.length} command(s) still missing from manifest: ${missing.join(', ')}`,
+    );
+  });
+
+  test('each non-family entry has required fields: canonical, aliases, mutation', () => {
+    manifest = manifest ?? require(COMMAND_ALIASES_FILE);
+    const nonFamily = manifest.NON_FAMILY_COMMAND_ALIASES;
+    if (!Array.isArray(nonFamily)) return; // caught by earlier test
+
+    for (const entry of nonFamily) {
+      assert.ok(typeof entry.canonical === 'string' && entry.canonical.length > 0,
+        `entry missing canonical: ${JSON.stringify(entry)}`);
+      assert.ok(Array.isArray(entry.aliases),
+        `entry missing aliases array for canonical=${entry.canonical}`);
+      assert.ok(typeof entry.mutation === 'boolean',
+        `entry missing mutation boolean for canonical=${entry.canonical}`);
+    }
+  });
+
+  test('NON_FAMILY_COMMAND_ALIASES is sorted by canonical (deterministic output)', () => {
+    manifest = manifest ?? require(COMMAND_ALIASES_FILE);
+    const nonFamily = manifest.NON_FAMILY_COMMAND_ALIASES;
+    if (!Array.isArray(nonFamily)) return; // caught by earlier test
+
+    const canonicals = nonFamily.map((e) => e.canonical);
+    const sorted = [...canonicals].sort((a, b) => a.localeCompare(b));
+    assert.deepStrictEqual(
+      canonicals,
+      sorted,
+      'NON_FAMILY_COMMAND_ALIASES must be sorted by canonical for deterministic regeneration',
+    );
+  });
+});
+
+function createProject() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3251-dispatch-'));
+  fs.mkdirSync(path.join(dir, '.planning', 'phases'), { recursive: true });
+  return dir;
+}
+
+function runGsdTools(args, projectDir) {
+  return spawnSync(process.execPath, [GSD_TOOLS, ...args], {
+    cwd: projectDir,
+    encoding: 'utf8',
+    timeout: 30000,
+    killSignal: 'SIGKILL',
+  });
+}
+
+function snapshotProjectState(projectDir) {
+  const files = [];
+  function walk(dir) {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      const rel = path.relative(projectDir, full);
+      if (entry.isDirectory()) walk(full);
+      else {
+        files.push({
+          path: rel,
+          sha256: crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex'),
+        });
+      }
+    }
+  }
+  walk(projectDir);
+  return files.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+describe('feat-3251: generated aliases dispatch through real gsd-tools behavior', () => {
+  test('phase.mvp-mode spaced alias resolves CLI flag precedence', () => {
+    const projectDir = createProject();
+    try {
+      const result = runGsdTools(['phase', 'mvp-mode', '1', '--cli-flag'], projectDir);
+      assert.equal(result.status, 0, result.stderr);
+
+      const output = JSON.parse(result.stdout);
+      assert.deepEqual(output, {
+        active: true,
+        source: 'cli_flag',
+        roadmap_mode: null,
+        config_mvp_mode: false,
+        cli_flag_present: true,
+      });
+    } finally {
+      cleanup(projectDir);
+    }
+  });
+
+  test('phase.mvp-mode spaced alias resolves ROADMAP mode without mutating files', () => {
+    const projectDir = createProject();
+    try {
+      fs.writeFileSync(
+        path.join(projectDir, '.planning', 'ROADMAP.md'),
+        [
+          '# Roadmap',
+          '',
+          '## v1.0.0',
+          '',
+          '### Phase 1: User Auth',
+          '**Goal:** Users can sign in.',
+          '**Mode:** mvp',
+          '',
+        ].join('\n'),
+      );
+      const beforeFiles = snapshotProjectState(projectDir);
+
+      const result = runGsdTools(['phase', 'mvp-mode', '1'], projectDir);
+      assert.equal(result.status, 0, result.stderr);
+
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.active, true);
+      assert.equal(output.source, 'roadmap');
+      assert.equal(output.roadmap_mode, 'mvp');
+      assert.equal(output.config_mvp_mode, false);
+      assert.equal(output.cli_flag_present, false);
+      assert.deepEqual(snapshotProjectState(projectDir), beforeFiles);
+    } finally {
+      cleanup(projectDir);
+    }
+  });
+
+  test('phase.mvp-mode ROADMAP lookup stops before custom-id next phase', () => {
+    const projectDir = createProject();
+    try {
+      fs.writeFileSync(
+        path.join(projectDir, '.planning', 'ROADMAP.md'),
+        [
+          '# Roadmap',
+          '',
+          '## v1.0.0',
+          '',
+          '### Phase 1: Numeric Phase',
+          '**Goal:** Users can sign in.',
+          '',
+          '### Phase custom-alpha: Custom Phase',
+          '**Goal:** Custom work.',
+          '**Mode:** mvp',
+          '',
+        ].join('\n'),
+      );
+      const beforeFiles = snapshotProjectState(projectDir);
+
+      const result = runGsdTools(['phase', 'mvp-mode', '1'], projectDir);
+      assert.equal(result.status, 0, result.stderr);
+
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.active, false);
+      assert.equal(output.source, 'none');
+      assert.equal(output.roadmap_mode, null);
+      assert.deepEqual(snapshotProjectState(projectDir), beforeFiles);
+    } finally {
+      cleanup(projectDir);
+    }
+  });
+
+  test('phase.mvp-mode JSON error is typed and leaves project files untouched', () => {
+    const projectDir = createProject();
+    try {
+      const beforeFiles = snapshotProjectState(projectDir);
+      const result = runGsdTools(['--json-errors', 'phase', 'mvp-mode'], projectDir);
+      assert.notEqual(result.status, 0);
+      assert.equal(result.stdout, '');
+
+      const error = JSON.parse(result.stderr);
+      assert.deepEqual(Object.keys(error).sort(), ['message', 'ok', 'reason']);
+      assert.equal(error.ok, false);
+      assert.equal(error.reason, 'usage');
+      assert.equal(typeof error.message, 'string');
+      assert.equal(/\n\s*at\s/.test(result.stderr), false, 'non-debug failure must not print a stack trace');
+      assert.deepEqual(snapshotProjectState(projectDir), beforeFiles);
+    } finally {
+      cleanup(projectDir);
+    }
+  });
+});
+  });
+}
+
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/feat-488-effort-sync.test.cjs — consolidation epic #1969 (B3 #1972)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:feat-488-effort-sync (consolidation epic #1969 B3 #1972)", () => {
+// Tests for gsd-tools effort sync command (#488)
+// Verifies that effort frontmatter in installed agent files can be re-synced
+// when effort config changes after initial install.
+// allow-test-rule: structural-regression-guard — readFileSync asserts on installed agent .md files (the product under mutation) to verify dry-run safety and apply correctness; stderr.includes guards the CLI argument-rejection contract. (see #488)
+
+'use strict';
+
+process.env.GSD_TEST_MODE = '1';
+
+const { describe, test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { cleanup } = require('./helpers.cjs');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { toLegacyResult } = require('./helpers/git-fixture.cjs');
+
+const GSD_TOOLS = path.resolve(__dirname, '../gsd-core/bin/gsd-tools.cjs');
+
+// This is a DISTINCT, independently-scoped `runCli` — not the file's other
+// local helper of a similar shape (`runGsdTools` above, folded from
+// feat-3251, which already carries its own `timeout: 30000`). This one
+// returns the legacy `{status, stdout, stderr}` shape its callers below read
+// directly (never a throw contract), so it is bounded via `runNode` +
+// `toLegacyResult` rather than `gitOrThrow`/`throwIfFailed`.
+function runCli(args, env = {}) {
+  const result = runNode([GSD_TOOLS, ...args], {
+    env: { ...process.env, GSD_TEST_MODE: '1', ...env },
+  });
+  return toLegacyResult(result);
+}
+
+function makeTmpDir(prefix) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+// output() in core.cjs uses fs.writeSync(1, data) — intercept fd=1 writes.
+// Pass raw=false so output() emits JSON (raw=true emits the plain rawValue string).
+function captureOutput(fn) {
+  const origWriteSync = fs.writeSync;
+  let captured = '';
+  fs.writeSync = (fd, data) => {
+    if (fd === 1) captured += data;
+    else origWriteSync(fd, data);
+  };
+  try {
+    fn();
+  } finally {
+    fs.writeSync = origWriteSync;
+  }
+  return JSON.parse(captured);
+}
+
+function makeAgentsDir(tmpDir) {
+  const agentsDir = path.join(tmpDir, 'agents');
+  fs.mkdirSync(agentsDir, { recursive: true });
+  return agentsDir;
+}
+
+function writePlanningConfig(tmpDir, effortConfig) {
+  const planningDir = path.join(tmpDir, '.planning');
+  fs.mkdirSync(planningDir, { recursive: true });
+  fs.writeFileSync(path.join(planningDir, 'config.json'), JSON.stringify({ effort: effortConfig }));
+}
+
+const AGENT_WITH_EFFORT = `---
+name: gsd-planner
+description: Plans phases for GSD milestones
+effort: medium
+---
+Body of the agent.
+`;
+
+const AGENT_WITHOUT_EFFORT = `---
+name: gsd-executor
+description: Executes GSD phase plans
+---
+Body of the agent.
+`;
+
+describe('feat-488: effort sync command', () => {
+  test('dry-run mode reports pending changes without writing files', () => {
+    const tmpDir = makeTmpDir('effort-sync-dry-');
+    const agentsDir = makeAgentsDir(tmpDir);
+    const agentPath = path.join(agentsDir, 'gsd-planner.md');
+    fs.writeFileSync(agentPath, AGENT_WITH_EFFORT);
+    writePlanningConfig(tmpDir, { default: 'high', agent_overrides: { 'gsd-planner': 'xhigh' } });
+
+    const { cmdEffortSync } = require('../gsd-core/bin/lib/commands.cjs');
+    const result = captureOutput(() =>
+      cmdEffortSync(tmpDir, false, { dryRun: true, configDir: tmpDir, runtime: 'claude' })
+    );
+
+    assert.equal(result.dry_run, true);
+    assert.equal(result.synced, 1, 'should report 1 pending change');
+    assert.equal(result.changes[0].agent, 'gsd-planner');
+    assert.equal(result.changes[0].from, 'medium');
+    assert.equal(result.changes[0].to, 'xhigh');
+
+    // dry-run must not modify the file
+    assert.ok(fs.readFileSync(agentPath, 'utf8').includes('effort: medium'), 'dry-run must not write file');
+
+    cleanup(tmpDir);
+  });
+
+  test('--apply mode rewrites effort: frontmatter to new config value', () => {
+    const tmpDir = makeTmpDir('effort-sync-apply-');
+    const agentsDir = makeAgentsDir(tmpDir);
+    const agentPath = path.join(agentsDir, 'gsd-planner.md');
+    fs.writeFileSync(agentPath, AGENT_WITH_EFFORT);
+    writePlanningConfig(tmpDir, { default: 'low', agent_overrides: { 'gsd-planner': 'xhigh' } });
+
+    const { cmdEffortSync } = require('../gsd-core/bin/lib/commands.cjs');
+    const result = captureOutput(() =>
+      cmdEffortSync(tmpDir, false, { dryRun: false, configDir: tmpDir, runtime: 'claude' })
+    );
+
+    assert.equal(result.dry_run, false);
+    assert.equal(result.synced, 1);
+
+    const updated = fs.readFileSync(agentPath, 'utf8');
+    assert.ok(updated.includes('effort: xhigh'), 'file must be updated to xhigh');
+    assert.ok(!updated.includes('effort: medium'), 'old effort value must be gone');
+
+    cleanup(tmpDir);
+  });
+
+  test('skips agents where effort: already matches config', () => {
+    const tmpDir = makeTmpDir('effort-sync-noop-');
+    const agentsDir = makeAgentsDir(tmpDir);
+    const agentPath = path.join(agentsDir, 'gsd-planner.md');
+    // Already has the correct value
+    fs.writeFileSync(agentPath, AGENT_WITH_EFFORT.replace('effort: medium', 'effort: xhigh'));
+    writePlanningConfig(tmpDir, { agent_overrides: { 'gsd-planner': 'xhigh' } });
+
+    const { cmdEffortSync } = require('../gsd-core/bin/lib/commands.cjs');
+    const result = captureOutput(() =>
+      cmdEffortSync(tmpDir, false, { dryRun: false, configDir: tmpDir, runtime: 'claude' })
+    );
+
+    assert.equal(result.synced, 0, 'nothing to sync when already matching');
+    assert.equal(result.skipped, 1);
+
+    cleanup(tmpDir);
+  });
+
+  test('injects effort: into agent files that lack the frontmatter key', () => {
+    const tmpDir = makeTmpDir('effort-sync-inject-');
+    const agentsDir = makeAgentsDir(tmpDir);
+    const agentPath = path.join(agentsDir, 'gsd-executor.md');
+    fs.writeFileSync(agentPath, AGENT_WITHOUT_EFFORT);
+    writePlanningConfig(tmpDir, { default: 'max' });
+
+    const { cmdEffortSync } = require('../gsd-core/bin/lib/commands.cjs');
+    const result = captureOutput(() =>
+      cmdEffortSync(tmpDir, false, { dryRun: false, configDir: tmpDir, runtime: 'claude' })
+    );
+
+    assert.equal(result.synced, 1, 'should inject effort into agent missing the key');
+    assert.equal(result.changes[0].from, null);
+    assert.equal(result.changes[0].to, 'max');
+    assert.ok(fs.readFileSync(agentPath, 'utf8').includes('effort: max'), 'effort must be injected');
+
+    cleanup(tmpDir);
+  });
+
+  test('non-claude runtime exits cleanly with informative reason field', () => {
+    const tmpDir = makeTmpDir('effort-sync-gemini-');
+
+    const { cmdEffortSync } = require('../gsd-core/bin/lib/commands.cjs');
+    const result = captureOutput(() =>
+      cmdEffortSync(tmpDir, false, { dryRun: true, runtime: 'gemini' })
+    );
+
+    assert.ok(result.reason, 'should include a reason message for unsupported runtime');
+    assert.equal(result.synced, 0);
+
+    cleanup(tmpDir);
+  });
+
+  test('home-default effort config gap: applies home-level effort when project config has no effort section', () => {
+    // The key #488 scenario: user changed ~/.gsd/defaults.json effort settings
+    // after install, but the project .planning/config.json has no effort section.
+    // cmdEffortSync must pick up the home config (via readGsdEffectiveEffortConfig),
+    // not fall back to 'high' (which loadConfig would return).
+    //
+    // readGsdEffectiveEffortConfig calls os.homedir() directly, and os.homedir()
+    // is live (respects process.env.HOME).  We redirect HOME to an isolated
+    // tmpHome so the test is hermetic and can assert the real outcome.
+    const tmpHome = makeTmpDir('effort-sync-homecfg-');
+    const tmpDir = makeTmpDir('effort-sync-project-');
+    const agentsDir = makeAgentsDir(tmpDir);
+    const agentPath = path.join(agentsDir, 'gsd-planner.md');
+    fs.writeFileSync(agentPath, AGENT_WITH_EFFORT); // current: effort: medium
+
+    // Project has .planning/config.json with NO effort section
+    const planningDir = path.join(tmpDir, '.planning');
+    fs.mkdirSync(planningDir, { recursive: true });
+    fs.writeFileSync(path.join(planningDir, 'config.json'), JSON.stringify({ model_profile: 'balanced' }));
+
+    // Home defaults set effort.default = low
+    const gsdDir = path.join(tmpHome, '.gsd');
+    fs.mkdirSync(gsdDir, { recursive: true });
+    fs.writeFileSync(path.join(gsdDir, 'defaults.json'), JSON.stringify({ effort: { default: 'low' } }));
+
+    // Isolate HOME (and USERPROFILE for Windows parity) so
+    // readGsdEffectiveEffortConfig reads our fixture, not the
+    // developer's real ~/.gsd/defaults.json.
+    const origHome = process.env.HOME;
+    const origUserProfile = process.env.USERPROFILE;
+    process.env.HOME = tmpHome;
+    process.env.USERPROFILE = tmpHome;
+
+    const { cmdEffortSync } = require('../gsd-core/bin/lib/commands.cjs');
+    let result;
+    try {
+      result = captureOutput(() =>
+        cmdEffortSync(tmpDir, false, { dryRun: false, configDir: tmpDir, runtime: 'claude' })
+      );
+    } finally {
+      if (origHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = origHome;
+      }
+      if (origUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = origUserProfile;
+      }
+    }
+
+    // With home effort.default = 'low' and the agent currently at 'medium',
+    // cmdEffortSync must sync exactly 1 agent and set it to 'low'.
+    assert.equal(result.synced, 1, 'should sync 1 agent whose effort differs from home default');
+    assert.equal(result.changes[0].agent, 'gsd-planner');
+    assert.equal(result.changes[0].from, 'medium');
+    assert.equal(result.changes[0].to, 'low', 'effort must be updated to the home-default value');
+    assert.ok(
+      fs.readFileSync(agentPath, 'utf8').includes('effort: low'),
+      'agent file must be rewritten with the home-default effort value'
+    );
+
+    cleanup(tmpHome);
+    cleanup(tmpDir);
+  });
+
+  test('CLI dispatcher: positional args after effort sync are rejected', () => {
+    const result = runCli(['effort', 'sync', 'unexpected-arg']);
+    assert.notEqual(result.status, 0, 'should exit non-zero on unexpected positional arg');
+    assert.ok(
+      result.stderr.includes('positional') || result.stderr.includes('unexpected-arg'),
+      `stderr should mention the bad arg; got: ${result.stderr}`
+    );
+  });
+
+  test('CLI dispatcher: effort sync --apply routes through gsd-tools correctly', () => {
+    const tmpDir = makeTmpDir('effort-sync-cli-');
+    const agentsDir = makeAgentsDir(tmpDir);
+    const agentPath = path.join(agentsDir, 'gsd-planner.md');
+    fs.writeFileSync(agentPath, AGENT_WITH_EFFORT);
+    writePlanningConfig(tmpDir, { agent_overrides: { 'gsd-planner': 'xhigh' } });
+
+    const result = runCli(
+      ['--cwd', tmpDir, 'effort', 'sync', '--apply', '--config-dir', tmpDir],
+    );
+
+    assert.equal(result.status, 0, `CLI exited non-zero: ${result.stderr}`);
+    // gsd-tools may print a startup banner before the JSON payload — parse from the first `{`.
+    const jsonStart = result.stdout.indexOf('{');
+    const output = JSON.parse(result.stdout.slice(jsonStart));
+    assert.equal(output.synced, 1);
+    assert.ok(
+      fs.readFileSync(agentPath, 'utf8').includes('effort: xhigh'),
+      'CLI --apply must write the updated effort value'
+    );
+
+    cleanup(tmpDir);
+  });
+});
+  });
+}
+
+describe('query commit --files scoping (#2269)', () => {
+  const REPO_ROOT = path.join(__dirname, '..');
+
+  test('secure-phase.md passes --files to its query commit call', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'gsd-core', 'workflows', 'secure-phase.md'), 'utf-8'
+    );
+    const idx = content.indexOf('add/update security threat verification');
+    assert.notEqual(idx, -1, 'must contain the security commit message');
+    assert.match(content.slice(idx, idx + 200), /--files/);
+    assert.match(content.slice(idx, idx + 200), /SECURITY\.md/);
+  });
+
+  test('validate-phase.md passes --files to its query commit call', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'gsd-core', 'workflows', 'validate-phase.md'), 'utf-8'
+    );
+    const idx = content.indexOf('add/update validation strategy');
+    assert.notEqual(idx, -1, 'must contain the validation commit message');
+    assert.match(content.slice(idx, idx + 200), /--files/);
+    assert.match(content.slice(idx, idx + 200), /VALIDATION\.md/);
+  });
+
+  test('next.md passes --files to its deferral query commit call', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'gsd-core', 'workflows', 'next.md'), 'utf-8'
+    );
+    const idx = content.indexOf('defer incomplete Phase');
+    assert.notEqual(idx, -1, 'must contain the deferral commit message');
+    assert.match(content.slice(idx, idx + 200), /--files/);
+    assert.match(content.slice(idx, idx + 200), /ROADMAP\.md/);
+  });
+});
+
+describe('#2279: map-codebase date stamp instructions overwrite existing dates', () => {
+  const REPO_ROOT = path.join(__dirname, '..');
+
+  test('codebase-mapper agent says to SET date stamps, overwriting existing values', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'agents', 'gsd-codebase-mapper.md'), 'utf-8'
+    );
+    assert.match(content, /overwriting whatever date is already there/i,
+      'must instruct the agent to SET date stamps unconditionally, not just replace [YYYY-MM-DD] placeholders');
+  });
+
+  test('map-codebase workflow spawn prompts say to SET date stamps, not replace placeholders', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'gsd-core', 'workflows', 'map-codebase.md'), 'utf-8'
+    );
+    const stampLines = content.match(/Set all date stamps[^\r\n]*/g) || [];
+    assert.ok(stampLines.length >= 4,
+      `must have ≥4 "Set all date stamps" instructions (4 spawn prompts + 1 sequential); got ${stampLines.length}`);
+  });
+
+  test('map-codebase sequential path says to SET date stamps overwriting existing dates', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'gsd-core', 'workflows', 'map-codebase.md'), 'utf-8'
+    );
+    const idx = content.indexOf('overwriting any existing date');
+    assert.notEqual(idx, -1,
+      'workflow must instruct agents to overwrite existing dates, not just replace [YYYY-MM-DD] placeholders');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEFECT.GENERATIVE-FIX parity guard: HOST_COMMAND_ROUTERS vs TOP_LEVEL_USAGE
+// vs SKIP_ROOT_RESOLUTION (#2928 S9)
+//
+// gsd-tools.cjs's query-command surface is declared across THREE
+// independently hand-maintained sites in the same file with no prior parity
+// gate between them: the dispatch table (HOST_COMMAND_ROUTERS), the
+// `--help` command list (TOP_LEVEL_USAGE), and the project-root-skip list
+// (SKIP_ROOT_RESOLUTION). Nothing previously caught a command being wired
+// into the dispatch table but omitted from the help string (or vice versa)
+// — exactly the generative-fix-divergence shape CLAUDE.md's
+// "Generative Fix Divergence" anti-pattern names ("add a parity assertion
+// test that fails if the shared constants/arrays/parsers diverge").
+//
+// This is a STRUCTURAL comparison against the exported constants, not a
+// source-text/string-match test, so it stays correct across reformatting
+// and is immune to the no-source-grep concern.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('gsd-tools.cjs dispatch/help/skip-list parity (DEFECT.GENERATIVE-FIX, #2928 S9)', () => {
+  const { HOST_COMMAND_ROUTERS, TOP_LEVEL_USAGE, skipsRootResolution } = require('../gsd-core/bin/gsd-tools.cjs');
+
+  // Parse the "Commands: a, b, c\n\nGlobal flags:" line out of the usage
+  // string rather than hardcoding a copy of it here — this test must fail
+  // when the two sites diverge, not silently pass because it re-embeds its
+  // own stale expectation.
+  function parseHelpCommandNames(usage) {
+    const match = usage.match(/Commands: ([\s\S]*?)\n\nGlobal flags:/);
+    assert.ok(match, 'TOP_LEVEL_USAGE must contain a "Commands: ...\\n\\nGlobal flags:" block');
+    return match[1]
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  test('every HOST_COMMAND_ROUTERS entry is listed in the --help command string', () => {
+    const helpNames = new Set(parseHelpCommandNames(TOP_LEVEL_USAGE));
+    const missing = Object.keys(HOST_COMMAND_ROUTERS).filter((name) => !helpNames.has(name));
+    assert.deepEqual(
+      missing,
+      [],
+      `command(s) registered in HOST_COMMAND_ROUTERS but missing from TOP_LEVEL_USAGE's ` +
+      `"Commands:" list: ${missing.join(', ')}`,
+    );
+  });
+
+  test('context-predicates is registered in all three hand-maintained sites', () => {
+    // Concrete regression pin for the command this parity test was added
+    // alongside (#2928 S9) — a generic diff-based assertion alone would not
+    // fail if ALL THREE sites were missing an entry simultaneously.
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(HOST_COMMAND_ROUTERS, 'context-predicates'),
+      'context-predicates must be registered in HOST_COMMAND_ROUTERS',
+    );
+    assert.ok(
+      parseHelpCommandNames(TOP_LEVEL_USAGE).includes('context-predicates'),
+      'context-predicates must be listed in TOP_LEVEL_USAGE',
+    );
+    assert.ok(
+      skipsRootResolution('context-predicates'),
+      'context-predicates must be in SKIP_ROOT_RESOLUTION (it is a pure repo-root CONTEXT.md ' +
+      'read, like prompt-budget, and must work with no .planning/ directory present)',
+    );
+  });
+
+  test('SKIP_ROOT_RESOLUTION is not exported as a mutable live Set (DEFECT.MUTABLE-EXPORTED-SET, #2928)', () => {
+    const gsdTools = require('../gsd-core/bin/gsd-tools.cjs');
+    assert.equal(
+      gsdTools.SKIP_ROOT_RESOLUTION,
+      undefined,
+      'the live Set must not be exported directly — only the read-only skipsRootResolution() predicate',
+    );
+    assert.equal(typeof gsdTools.skipsRootResolution, 'function');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// resolveMainWorktreeCwd — #3050: gsd-tools must surface (not silently
+// swallow) a git_timed_out worktree-root resolution, since writing planning
+// artifacts to the wrong tree is the exact fail-open the issue names.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('gsd-tools.cjs resolveMainWorktreeCwd (#3050)', () => {
+  const { resolveMainWorktreeCwd } = require('../gsd-core/bin/gsd-tools.cjs');
+
+  test('emits a WARNING to stderr and still resolves the fallback root on git_timed_out', () => {
+    const warnings = [];
+    const resolved = resolveMainWorktreeCwd('/repo/wt', {
+      existsSync: () => false,
+      resolveWorktreeRoot: () => ({ root: '/repo/wt', reason: 'git_timed_out' }),
+      writeWarning: (msg) => warnings.push(msg),
+    });
+    assert.equal(resolved, '/repo/wt');
+    assert.equal(warnings.length, 1, 'must emit exactly one warning on git_timed_out');
+    assert.match(warnings[0], /git timed out/i);
+    assert.match(warnings[0], /wrong tree/i);
+  });
+
+  test('does NOT warn on a benign reason (linked_worktree)', () => {
+    const warnings = [];
+    const resolved = resolveMainWorktreeCwd('/repo/wt', {
+      existsSync: () => false,
+      resolveWorktreeRoot: () => ({ root: '/repo', reason: 'linked_worktree' }),
+      writeWarning: (msg) => warnings.push(msg),
+    });
+    assert.equal(resolved, '/repo');
+    assert.deepEqual(warnings, [], 'must not warn for a benign, definitive resolution');
+  });
+
+  test('does NOT warn on a benign reason (not_git_repo)', () => {
+    const warnings = [];
+    const resolved = resolveMainWorktreeCwd('/repo/wt', {
+      existsSync: () => false,
+      resolveWorktreeRoot: () => ({ root: '/repo/wt', reason: 'not_git_repo' }),
+      writeWarning: (msg) => warnings.push(msg),
+    });
+    assert.equal(resolved, '/repo/wt');
+    assert.deepEqual(warnings, []);
+  });
+
+  test('short-circuits (never calls resolveWorktreeRoot) when .planning already exists in cwd', () => {
+    const resolved = resolveMainWorktreeCwd('/repo/wt', {
+      existsSync: () => true,
+      resolveWorktreeRoot: () => { throw new Error('must not be called when .planning exists locally'); },
+      writeWarning: () => { throw new Error('must not warn when short-circuited'); },
+    });
+    assert.equal(resolved, '/repo/wt');
   });
 });

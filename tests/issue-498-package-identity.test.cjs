@@ -5,17 +5,17 @@ process.env.GSD_TEST_MODE = '1';
 // The package coordinates (npm name, bin name, repo slug, changelog URL) are
 // DERIVED from package.json, not re-typed. deriveIdentity is the pure core;
 // the generated runtime module gsd-core/bin/lib/package-identity.cjs
-// bakes those values at build time so it survives the install layout where
-// the only package.json present is the synthetic {"type":"commonjs"} marker.
+// bakes those values at build time so it survives the install layout, where no
+// package.json carries a .name — the only ones GSD stages are synthetic
+// {"type":"commonjs"} markers, and since #2544 those live in GSD's own
+// directories (hooks/, the native plugin dir) rather than the config root.
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-const fs = require('node:fs');
-
 const ROOT = path.join(__dirname, '..');
-const { deriveIdentity, formatManualInstall, render, slugifyPackageName } = require(
+const { deriveIdentity, formatManualInstall, slugifyPackageName } = require(
   path.join(ROOT, 'scripts', 'generate-package-identity.cjs'),
 );
 const GENERATED = path.join(ROOT, 'gsd-core', 'bin', 'lib', 'package-identity.cjs');
@@ -105,19 +105,11 @@ describe('Issue #498: formatManualInstall (the npx fallback command)', () => {
   });
 });
 
-describe('Issue #498: generated runtime module (baked, drift-checked)', () => {
-  test('the committed generated file is in sync with package.json (no drift)', () => {
-    // Normalize line endings: on Windows the file is checked out with CRLF
-    // (no .gitattributes eol rule), while render() emits LF. The repo's
-    // convention is to compare normalized content (see autonomous-decomposition,
-    // bug-3707). The sync check is about content, not the checkout's eol.
-    const norm = (s) => s.replace(/\r\n/g, '\n');
-    const expected = render(deriveIdentity(require(path.join(ROOT, 'package.json'))));
-    // allow-test-rule: architectural-invariant
-    const actual = fs.readFileSync(GENERATED, 'utf8');
-    assert.equal(norm(actual), norm(expected),
-      'package-identity.cjs is stale — run `node scripts/generate-package-identity.cjs`');
-  });
+describe('Issue #498: generated runtime module (baked)', () => {
+  // The committed-generated-file freshness guard moved to
+  // `npm run lint:generated-sync` (generate-package-identity.cjs --check), where
+  // it runs against the committed file in both local and CI lint lanes instead
+  // of being masked by gsd-test's `npm run build` leg regenerating the artifact.
 
   test('requiring the generated module exposes the real coordinates', () => {
     const id = require(GENERATED);

@@ -1,6 +1,6 @@
 # CONTEXT.md スキーマリファレンス
 
-フェーズごとの `CONTEXT.md` は、`/gsd:discuss-phase` 中に収集された実装上の意思決定を格納する GSD Core のキャリアファイルです。リサーチエージェントとプランニングエージェントの両方にとって主要な上流インプットです。このページではそのスキーマを説明します。[ドキュメントインデックス](../../README.md) も参照してください。
+フェーズごとの `CONTEXT.md` は、`/gsd-discuss-phase` 中に収集された実装上の意思決定を格納する GSD Core のキャリアファイルです。リサーチエージェントとプランニングエージェントの両方にとって主要な上流インプットです。このページではそのスキーマを説明します。[ドキュメントインデックス](../../README.md) も参照してください。
 
 ---
 
@@ -14,7 +14,7 @@
 
 例: `.planning/phases/03-post-feed/03-CONTEXT.md`
 
-このファイルは `get-shit-done/workflows/discuss-phase.md` の `write_context`（または PRD / ADR インジェストのエクスプレスパス）によって生成されます。通常の運用中は手動で編集されません — discuss-phase ワークフローが書き込み、下流エージェントが封印された信頼できる情報源として読み取ります。
+このファイルは `gsd-core/workflows/discuss-phase.md` の `write_context`（または PRD / ADR インジェストのエクスプレスパス）によって生成されます。通常の運用中は手動で編集されません — discuss-phase ワークフローが書き込み、下流エージェントが封印された信頼できる情報源として読み取ります。
 
 ---
 
@@ -107,7 +107,7 @@ No external specs — requirements fully captured in decisions above
 
 ## SPEC.md との統合
 
-フェーズをディスカッションする前に `/gsd:spec-phase` が実行された場合、`check_spec` ステップが `*-SPEC.md` ファイルを見つけ `<spec_lock>` を有効にします：
+フェーズをディスカッションする前に `/gsd-spec-phase` が実行された場合、`check_spec` ステップが `*-SPEC.md` ファイルを見つけ `<spec_lock>` を有効にします：
 
 ```markdown
 <spec_lock>

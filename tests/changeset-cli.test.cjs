@@ -6,8 +6,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const cp = require('node:child_process');
 const { cleanup } = require('./helpers.cjs');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { toLegacyResult } = require('./helpers/git-fixture.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const SCRIPT = path.join(ROOT, 'scripts', 'changeset', 'cli.cjs');
@@ -24,21 +26,20 @@ function writeFragment(name, type, pr, body) {
 }
 
 function runRender(args = []) {
-  const r = cp.spawnSync(
-    process.execPath,
+  const r = runNode(
     [SCRIPT, 'render', '--repo', tmp, ...args, '--json'],
-    { encoding: 'utf8' },
+    { timeoutMs: PROBE_TIMEOUT_MS },
   );
   return {
-    status: r.status,
+    status: r.exitCode,
     report: r.stdout && r.stdout.length ? JSON.parse(r.stdout) : null,
     stderr: r.stderr || '',
   };
 }
 
 function runRenderRaw(args = []) {
-  const r = cp.spawnSync(process.execPath, [SCRIPT, 'render', '--repo', tmp, ...args], { encoding: 'utf8' });
-  return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+  const r = runNode([SCRIPT, 'render', '--repo', tmp, ...args], { timeoutMs: PROBE_TIMEOUT_MS });
+  return toLegacyResult(r);
 }
 
 before(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-changeset-')); });
@@ -82,15 +83,15 @@ function runExtract(args = [], changelogText = null) {
   if (changelogText !== null) {
     fs.writeFileSync(changelogFile, changelogText);
   }
-  const r = cp.spawnSync(
-    process.execPath,
+  const r = runNode(
     [SCRIPT, 'extract', '--changelog', changelogFile, ...args],
-    { encoding: 'utf8' },
+    { timeoutMs: PROBE_TIMEOUT_MS },
   );
+  // Composes toLegacyResult with the site-specific parsed-JSON `json` field
+  // rather than folding it into the shared helper — see git-fixture.cjs's
+  // toLegacyResult JSDoc.
   return {
-    status: r.status,
-    stdout: r.stdout || '',
-    stderr: r.stderr || '',
+    ...toLegacyResult(r),
     json: (() => {
       try { return JSON.parse(r.stdout); } catch { return null; }
     })(),
@@ -327,7 +328,8 @@ describe('changeset cli extract: version-range changelog extraction (#3496)', ()
   });
 
   // F1: workflows/update.md must reference the extract subcommand invocation.
-  // allow-test-rule: reads a product workflow .md file (not CJS source) to verify
+  // allow-test-rule: source-text-is-the-product
+  // Reads a product workflow .md file (not CJS source) to verify
   // the user-facing instruction was wired; there is no behavioural runtime to invoke.
   test('F1: workflows/update.md contains concrete extract subcommand invocation', (_t) => {
     const workflowPath = path.join(ROOT, 'gsd-core', 'workflows', 'update.md');
@@ -359,7 +361,8 @@ describe('changeset cli extract: version-range changelog extraction (#3496)', ()
   // NOT the old broken path ($GSD_DIR/gsd-core/scripts/changeset/cli.cjs).
   // The installer copies scripts/changeset/ into <configDir>/scripts/changeset/,
   // so the runtime path is $GSD_DIR/scripts/changeset/cli.cjs (#935).
-  // allow-test-rule: reads a product workflow .md file (not CJS source) to verify
+  // allow-test-rule: source-text-is-the-product
+  // Reads a product workflow .md file (not CJS source) to verify
   // the runtime install path contract; there is no behavioural runtime to invoke.
   test('F2: update.md CLI path is $GSD_DIR/scripts/changeset/cli.cjs (not gsd-core/scripts/…) (#935)', (_t) => {
     const workflowPath = path.join(ROOT, 'gsd-core', 'workflows', 'update.md');
@@ -377,7 +380,8 @@ describe('changeset cli extract: version-range changelog extraction (#3496)', ()
   });
 
   // F3: update.md must guard against the CLI being missing (not pure silent-swallow)
-  // allow-test-rule: reads a product workflow .md file (not CJS source) to verify
+  // allow-test-rule: source-text-is-the-product
+  // Reads a product workflow .md file (not CJS source) to verify
   // the guard is present; there is no behavioural runtime to invoke.
   test('F3: update.md has an explicit guard when changeset CLI is missing (#935)', (_t) => {
     const workflowPath = path.join(ROOT, 'gsd-core', 'workflows', 'update.md');
@@ -447,13 +451,12 @@ describe('changeset cli #690 regression: CHANGELOG.md has 1.3.0 and 1.3.1 entrie
   });
 
   test('extract 1.2.0->1.3.1 against repo CHANGELOG returns both 1.3.x releases (regression #690)', () => {
-    const r = cp.spawnSync(
-      process.execPath,
+    const r = runNode(
       [SCRIPT, 'extract', '--from', '1.2.0', '--to', '1.3.1', '--changelog', CHANGELOG_PATH, '--json'],
-      { encoding: 'utf8' },
+      { timeoutMs: PROBE_TIMEOUT_MS },
     );
     const json = (() => { try { return JSON.parse(r.stdout); } catch { return null; } })();
-    assert.equal(r.status, 0, `expected exit 0 but got ${r.status}; stderr=${r.stderr}; stdout=${r.stdout}`);
+    assert.equal(r.exitCode, 0, `expected exit 0 but got ${r.exitCode}; stderr=${r.stderr}; stdout=${r.stdout}`);
     assert.ok(json, 'stdout must be valid JSON');
     const versions = (json.releases || []).map((rel) => rel.version);
     assert.ok(versions.includes('1.3.0'), `releases array must include 1.3.0; got: ${JSON.stringify(versions)}`);
@@ -468,16 +471,11 @@ describe('changeset cli #690 regression: CHANGELOG.md has 1.3.0 and 1.3.1 entrie
 function runVerify(args, changelogText) {
   const changelogFile = path.join(tmp, 'CHANGELOG-verify-test.md');
   fs.writeFileSync(changelogFile, changelogText);
-  const r = cp.spawnSync(
-    process.execPath,
+  const r = runNode(
     [SCRIPT, 'verify', '--changelog', changelogFile, ...args],
-    { encoding: 'utf8' },
+    { timeoutMs: PROBE_TIMEOUT_MS },
   );
-  return {
-    status: r.status,
-    stdout: r.stdout || '',
-    stderr: r.stderr || '',
-  };
+  return toLegacyResult(r);
 }
 
 describe('changeset cli verify subcommand (not yet implemented — TDD red step)', () => {
@@ -600,12 +598,11 @@ describe('changeset cli verify subcommand (not yet implemented — TDD red step)
     ].join('\n');
     const changelogFile = path.join(tmp, 'CHANGELOG-verify-test.md');
     fs.writeFileSync(changelogFile, FIXTURE_DATED);
-    const r = cp.spawnSync(
-      process.execPath,
+    const r = runNode(
       [SCRIPT, 'verify', '--version', '1.3.1', '--json', '--changelog', changelogFile],
-      { encoding: 'utf8' },
+      { timeoutMs: PROBE_TIMEOUT_MS },
     );
-    assert.equal(r.status, 0, `expected exit 0; stderr=${r.stderr}`);
+    assert.equal(r.exitCode, 0, `expected exit 0; stderr=${r.stderr}`);
     const json = (() => { try { return JSON.parse(r.stdout); } catch { return null; } })();
     assert.ok(json, 'stdout must be valid JSON');
     assert.strictEqual(json.ok, true, 'json.ok must be true');
@@ -627,13 +624,12 @@ describe('changeset cli verify subcommand (not yet implemented — TDD red step)
 describe('changeset cli render --allow-empty', () => {
   // Helper: run render for a specific test-local tmp directory.
   function runRenderIn(dir, args = []) {
-    const r = cp.spawnSync(
-      process.execPath,
+    const r = runNode(
       [SCRIPT, 'render', '--repo', dir, ...args, '--json'],
-      { encoding: 'utf8' },
+      { timeoutMs: PROBE_TIMEOUT_MS },
     );
     return {
-      status: r.status,
+      status: r.exitCode,
       report: r.stdout && r.stdout.length ? JSON.parse(r.stdout) : null,
       stderr: r.stderr || '',
     };
@@ -641,12 +637,11 @@ describe('changeset cli render --allow-empty', () => {
 
   function runVerifyIn(dir, version) {
     const changelogPath = path.join(dir, 'CHANGELOG.md');
-    const r = cp.spawnSync(
-      process.execPath,
+    const r = runNode(
       [SCRIPT, 'verify', '--version', version, '--changelog', changelogPath],
-      { encoding: 'utf8' },
+      { timeoutMs: PROBE_TIMEOUT_MS },
     );
-    return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+    return toLegacyResult(r);
   }
 
   // Test 1: --allow-empty with zero fragments writes a dated heading +
@@ -1072,5 +1067,43 @@ describe('changeset cli render --preview (#759)', () => {
       before,
       'CHANGELOG.md must be byte-identical after --preview',
     );
+  });
+
+  // Regression (#939 / rc-job crash): a fragment that fails to parse (e.g. an
+  // un-backfilled `pr: 0` placeholder) makes cmdRender early-return WITHOUT a
+  // `preview` key. Before the fix, main() wrote report.preview unguarded, so
+  // `process.stdout.write(undefined)` threw ERR_INVALID_ARG_TYPE and the rc
+  // "Preview CHANGELOG" step died with a cryptic TypeError that masked the real
+  // cause. The preview failure path must now exit non-zero and NAME the bad
+  // fragment, identical to a non-preview render.
+  test('render --preview with an unparseable fragment fails cleanly (names the file, no TypeError crash)', () => {
+    // pr: 0 is the never-backfilled placeholder → parseFragment returns invalid_pr.
+    writeFragment('bad-fragment', 'Fixed', 0, '**Bad** — placeholder never backfilled. (#123)');
+
+    // The crash lived on the NON-json path: process.stdout.write(report.preview)
+    // with report.preview === undefined. Exercise it directly and assert it no
+    // longer crashes — non-zero exit and NO TypeError stack in the output (QA
+    // matrix: "No stack trace in non-debug failure output").
+    const raw = runRenderRaw(['--version', '9.9.0', '--date', '2026-01-02', '--preview']);
+    assert.notStrictEqual(raw.status, 0, `parse-failure preview must exit non-zero; stdout=${raw.stdout} stderr=${raw.stderr}`);
+    const combined = `${raw.stdout}\n${raw.stderr}`;
+    assert.ok(
+      !combined.includes('ERR_INVALID_ARG_TYPE'),
+      `preview must NOT crash with ERR_INVALID_ARG_TYPE; got: ${combined}`,
+    );
+
+    // Structured surface (--json) proves the failure NAMES the offending fragment
+    // and reports the typed parse reason — asserted on the typed report shape,
+    // not on rendered prose.
+    const json = runRender(['--version', '9.9.0', '--date', '2026-01-02', '--preview']);
+    assert.notStrictEqual(json.status, 0, 'json preview must also exit non-zero on parse failure');
+    assert.ok(Array.isArray(json.report.failures), `report.failures must be an array; got: ${JSON.stringify(json.report)}`);
+    const bad = json.report.failures.find((f) => f.file.endsWith('bad-fragment.md'));
+    assert.ok(bad, `failures must name the offending fragment; got: ${JSON.stringify(json.report.failures)}`);
+    assert.equal(bad.reason, 'invalid_pr', `failure reason must be the typed invalid_pr; got: ${bad && bad.reason}`);
+
+    // Still non-destructive: no CHANGELOG.md written, fragment left in place.
+    assert.ok(!fs.existsSync(path.join(tmp, 'CHANGELOG.md')), 'CHANGELOG.md must NOT be created by a failed preview');
+    assert.ok(fs.existsSync(path.join(tmp, '.changeset', 'bad-fragment.md')), 'fragment must still exist after failed preview');
   });
 });

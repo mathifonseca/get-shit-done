@@ -45,6 +45,7 @@ function makePhase(overrides = {}) {
     cmdPhaseInsert: () => {},
     cmdPhaseRemove: () => {},
     cmdPhaseComplete: () => {},
+    cmdPhaseListPlans: () => {},
     ...overrides,
   };
 }
@@ -280,26 +281,27 @@ describe('phase-command-router — result translation (error path)', () => {
     assert.ok(msg !== null);
     assert.ok(msg.includes('exactly one phase number'));
   });
+
+  // #1437 — phase.list-plans routing
+  test('routes phase list-plans: passes cwd, phaseNum, raw to handler', () => {
+    const calls = [];
+    const phase = makePhase({
+      cmdPhaseListPlans: (cwd, phaseNum, raw) => calls.push({ cwd, phaseNum, raw }),
+    });
+
+    routePhaseCommand({ phase, args: ['phase', 'list-plans', '03'], cwd: '/proj', raw: false, error: (m) => { throw new Error(m); } });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].cwd, '/proj');
+    assert.equal(calls[0].phaseNum, '03');
+    assert.equal(calls[0].raw, false);
+  });
 });
 
 // ─── 3. Unsupported subcommands ────────────────────────────────────────────────
 
 describe('phase-command-router — unsupported subcommands', () => {
-  test('phase list-plans resolves as unknown subcommand', () => {
-    let msg = null;
-    routePhaseCommand({
-      phase: makePhase(),
-      args: ['phase', 'list-plans'],
-      cwd: '/p',
-      raw: false,
-      error: (m) => { msg = m; },
-    });
-
-    assert.ok(msg !== null);
-    assert.ok(msg.includes('Unknown phase subcommand'));
-    assert.ok(msg.includes('Available:'), `expected "Available:" in: ${msg}`);
-  });
-
+  // #1437: phase list-plans is now a supported subcommand — routing test in § 1.
   test('phase list-artifacts resolves as unknown subcommand', () => {
     let msg = null;
     routePhaseCommand({
@@ -363,7 +365,8 @@ describe('phase-command-router — unknown subcommand', () => {
 
     assert.ok(msg.includes('add'), `expected add in available list: ${msg}`);
     assert.ok(msg.includes('complete'), `expected complete in available list: ${msg}`);
-    assert.ok(!msg.includes('list-plans'), `list-plans must not appear in available list: ${msg}`);
+    // #1437: list-plans is now a supported command and appears in the available list
+    assert.ok(msg.includes('list-plans'), `list-plans must appear in available list: ${msg}`);
   });
 });
 
@@ -418,3 +421,222 @@ describe('phase-command-router — integration: real hub + CJS phase handler', (
     assert.deepEqual(calls[0].descriptions, ['Alpha', 'Beta']);
   });
 });
+
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/fix-1437-phase-list-plans.test.cjs — consolidation epic #1969 (B2 #1971)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:fix-1437-phase-list-plans (consolidation epic #1969 B2 #1971)", () => {
+'use strict';
+
+/**
+ * Regression tests for `gsd-tools query phase.list-plans <N>` (#1437).
+ *
+ * Prior to this fix, `phase.list-plans` was not registered in the
+ * phase-command-router, so any invocation produced:
+ *   "Error: Unknown phase subcommand. Available: uat-passed, next-decimal, ..."
+ *
+ * These tests exercise the full dispatch path:
+ *   gsd-tools → phase-command-router → phase.cmdPhaseListPlans
+ */
+
+const { describe, test, beforeEach, afterEach } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
+
+// ─── Fixture helpers ──────────────────────────────────────────────────────────
+
+function setupProject(phaseSlug = '01-feature') {
+  const tmpDir = createTempProject();
+  // Minimal ROADMAP so findPhaseInternal can resolve the phase directory
+  fs.writeFileSync(
+    path.join(tmpDir, '.planning', 'ROADMAP.md'),
+    [
+      '# Roadmap',
+      '',
+      '- [ ] Phase 1: Feature',
+      '',
+      '### Phase 1: Feature',
+      '**Goal:** Build feature',
+      '**Plans:** 1 plans',
+      '',
+    ].join('\n'),
+  );
+  const phaseDir = path.join(tmpDir, '.planning', 'phases', phaseSlug);
+  fs.mkdirSync(phaseDir, { recursive: true });
+  return { tmpDir, phaseDir };
+}
+
+function touch(dir, ...files) {
+  for (const f of files) {
+    fs.writeFileSync(path.join(dir, f), '');
+  }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+let tmpDir;
+let phaseDir;
+// Consolidation #1969: the host suite forces GSD_WORKSTREAM=test-unit, which
+// runGsdTools propagates into child processes and redirects the project lookup.
+// Clear it for these tests (unset when this file ran standalone); restore after.
+let __savedWorkstream;
+
+beforeEach(() => {
+  __savedWorkstream = process.env.GSD_WORKSTREAM;
+  delete process.env.GSD_WORKSTREAM;
+  const proj = setupProject('01-feature');
+  tmpDir = proj.tmpDir;
+  phaseDir = proj.phaseDir;
+});
+
+afterEach(() => {
+  cleanup(tmpDir);
+  if (__savedWorkstream === undefined) delete process.env.GSD_WORKSTREAM;
+  else process.env.GSD_WORKSTREAM = __savedWorkstream;
+});
+
+describe('bug-1437 — phase.list-plans is wired in gsd-tools', () => {
+  test('command no longer returns Unknown phase subcommand error', () => {
+    touch(phaseDir, '01-01-PLAN.md');
+    const result = runGsdTools(['query', 'phase.list-plans', '1'], tmpDir);
+    // Previously this would fail with "Unknown phase subcommand"
+    assert.ok(result.success, `Command failed: ${result.error}\nOutput: ${result.output}`);
+    assert.ok(!result.error || !result.error.includes('Unknown phase subcommand'),
+      `got unexpected error: ${result.error}`);
+  });
+
+  test('returns JSON with plan_count and plans array when plans exist', () => {
+    touch(phaseDir, '01-01-PLAN.md', '01-02-PLAN.md');
+    const result = runGsdTools(['query', 'phase.list-plans', '1', '--raw'], tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}\nOutput: ${result.output}`);
+    const data = JSON.parse(result.output);
+    assert.equal(data.plan_count, 2, 'plan_count should be 2');
+    assert.equal(data.has_plans, true, 'has_plans should be true');
+    assert.ok(Array.isArray(data.plans), 'plans should be an array');
+    assert.equal(data.plans.length, 2, 'plans array should have 2 entries');
+  });
+
+  test('returns plan_count 0 and empty plans array when phase has no plan files', () => {
+    // Phase directory exists but has no *-PLAN.md files
+    touch(phaseDir, 'CONTEXT.md');
+    const result = runGsdTools(['query', 'phase.list-plans', '1', '--raw'], tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}\nOutput: ${result.output}`);
+    const data = JSON.parse(result.output);
+    assert.equal(data.plan_count, 0);
+    assert.equal(data.has_plans, false);
+    assert.deepEqual(data.plans, []);
+  });
+
+  test('returns has_plans false when phase number is not found', () => {
+    // Phase 99 does not exist in the fixture
+    const result = runGsdTools(['query', 'phase.list-plans', '99', '--raw'], tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}\nOutput: ${result.output}`);
+    const data = JSON.parse(result.output);
+    assert.equal(data.has_plans, false);
+    assert.equal(data.plan_count, 0);
+  });
+
+  test('plan paths are relative to project root and posix-style', () => {
+    touch(phaseDir, '01-01-PLAN.md');
+    const result = runGsdTools(['query', 'phase.list-plans', '1', '--raw'], tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}\nOutput: ${result.output}`);
+    const data = JSON.parse(result.output);
+    assert.equal(data.plans.length, 1);
+    // Paths must be forward-slash separated (posix) and relative (not absolute)
+    const planPath = data.plans[0];
+    assert.ok(!path.isAbsolute(planPath), `expected relative path, got: ${planPath}`);
+    assert.ok(!planPath.includes('\\'), `expected posix path, got: ${planPath}`);
+    assert.ok(planPath.includes('01-01-PLAN.md'), `expected plan filename in path: ${planPath}`);
+  });
+
+  test('dotted form phase.list-plans (without query prefix) also works', () => {
+    touch(phaseDir, '01-01-PLAN.md');
+    const result = runGsdTools(['phase.list-plans', '1', '--raw'], tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}\nOutput: ${result.output}`);
+    const data = JSON.parse(result.output);
+    assert.equal(data.plan_count, 1);
+  });
+});
+  });
+}
+
+// ─── 6. Observability logger wiring (#2620) ──────────────────────────────────
+//
+// The fix wires the reference DispatchLogger at BOTH live createHub() seams.
+// The sibling seam (cjs-command-router-adapter) is covered in its own file;
+// this pins the phase seam so a later refactor that drops the isAuditEnabled()
+// gate or the injection here cannot reintroduce the #2620 defect silently.
+{
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { createTempDir, cleanup } = require('./helpers.cjs');
+
+  describe('phase-command-router — observability logger wiring (#2620)', () => {
+    test('a dispatch through the phase seam writes the opt-in audit trail when GSD_AUDIT=1', (t) => {
+      const tmp = createTempDir('gsd-obs-phase-');
+      const prevAudit = process.env.GSD_AUDIT;
+      t.after(() => {
+        if (prevAudit === undefined) delete process.env.GSD_AUDIT;
+        else process.env.GSD_AUDIT = prevAudit;
+        cleanup(tmp);
+      });
+      process.env.GSD_AUDIT = '1';
+
+      const phase = makePhase({ cmdPhaseNextDecimal: () => {} });
+      routePhaseCommand({
+        phase,
+        args: ['phase', 'next-decimal', '5'],
+        cwd: tmp,
+        raw: false,
+        error: (m) => { throw new Error(m); },
+      });
+
+      const auditPath = path.join(tmp, '.planning', '.gsd-trace.jsonl');
+      assert.ok(
+        fs.existsSync(auditPath),
+        'GSD_AUDIT=1 must produce .planning/.gsd-trace.jsonl — the phase router must build the Hub with a real DispatchLogger (ADR-0174 §6), not createNoOpLogger'
+      );
+
+      const lines = fs.readFileSync(auditPath, 'utf8').trim().split(/\r?\n/).filter(Boolean);
+      assert.ok(lines.length > 0, 'at least one dispatch event must be recorded');
+      assert.equal(lines.length, 1, 'exactly one dispatch event must be recorded');
+
+      const event = JSON.parse(lines[0]);
+      assert.equal(event.result.kind, 'ok', 'a successful dispatch is recorded with result.kind === "ok"');
+      assert.ok(typeof event.command === 'string' && event.command.length > 0, 'event carries the dispatched command');
+      assert.ok(typeof event.traceId === 'string' && event.traceId.length > 0, 'event carries a traceId');
+      assert.ok(typeof event.timestamp === 'string' && event.timestamp.length > 0, 'event carries an ISO timestamp');
+    });
+
+    test('no audit trail is written when GSD_AUDIT is unset (Hub stays silent via the no-op fallback)', (t) => {
+      const tmp = createTempDir('gsd-obs-phase-off-');
+      const prevAudit = process.env.GSD_AUDIT;
+      t.after(() => {
+        if (prevAudit === undefined) delete process.env.GSD_AUDIT;
+        else process.env.GSD_AUDIT = prevAudit;
+        cleanup(tmp);
+      });
+      delete process.env.GSD_AUDIT;
+
+      const phase = makePhase({ cmdPhaseNextDecimal: () => {} });
+      routePhaseCommand({
+        phase,
+        args: ['phase', 'next-decimal', '5'],
+        cwd: tmp,
+        raw: false,
+        error: (m) => { throw new Error(m); },
+      });
+
+      assert.equal(
+        fs.existsSync(path.join(tmp, '.planning', '.gsd-trace.jsonl')),
+        false,
+        'without the opt-in signal the seam must leave no audit artifact'
+      );
+    });
+  });
+}

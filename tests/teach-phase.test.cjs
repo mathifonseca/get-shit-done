@@ -1,4 +1,4 @@
-// allow-test-rule: source-text-is-the-product
+// allow-test-rule: source-text-is-the-product (#1190)
 // Agent .md files, config JSON, and fixture markdown files are the deployed contract.
 // Testing text content tests the deployed contract directly.
 // Per CONTRIBUTING.md exception matrix.

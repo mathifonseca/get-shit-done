@@ -38,6 +38,7 @@
   - [モデルプロファイル](#26-モデルプロファイル)
 - [ブラウンフィールド機能](#ブラウンフィールド機能)
   - [コードベースマッピング](#27-コードベースマッピング)
+  - [既存コードベースオンボーディング](#27b-既存コードベースオンボーディング)
 - [ユーティリティ機能](#ユーティリティ機能)
   - [デバッグシステム](#28-デバッグシステム)
   - [Todo 管理](#29-todo-管理)
@@ -781,7 +782,7 @@
 
 **コマンド:** `/gsd-map-codebase [area]`
 
-**目的:** 新しいプロジェクトを開始する前に既存のコードベースを分析し、GSD が既存の構成を理解できるようにします。
+**目的:** 新しいプロジェクトを開始する前、または `/gsd-onboard` からのマッピングハンドオフとして既存のコードベースを分析し、GSD が既存の構成を理解できるようにします。
 
 **要件:**
 - REQ-MAP-01: システムは各分析領域に対して並列マッパーエージェントを起動しなければならない
@@ -804,6 +805,27 @@
 **増分リマップ — `--paths` (#2003):** マッパーはオプションの
 `--paths <p1,p2,...>` スコープヒントを受け付けます。指定した場合、ツリー全体をスキャンする代わりに、リストされたリポジトリ相対プレフィックスに探索を制限します。
 これはフェーズが実際に変更したサブツリーのみを更新するために、実行後コードベースドリフトゲートが使用するパスウェイです。各生成ドキュメントはその YAML フロントマターに `last_mapped_commit` を持ち、ドリフトを HEAD ではなくマッピング時点と照らし合わせて計測できます。
+
+### 27b. 既存コードベースオンボーディング
+
+**コマンド:** `/gsd-onboard [--fast] [--text]`
+
+**目的:** 既存リポジトリの初回セットアップを案内し、brownfield 状態を確認してコードベースマッピング、docs 取り込み、プロジェクト初期化へ安全にハンドオフします。
+
+**要件:**
+- REQ-ONBOARD-01: 既存コード、package manifest、計画ドキュメント、部分的な `.planning/`、コードベースマップの不足を検出する。
+- REQ-ONBOARD-02: 必要な `.planning/codebase/` マップファイルがない brownfield では `/gsd-map-codebase` または `/gsd-map-codebase --fast` へハンドオフする。fast マップの readiness は部分的であり、`/gsd-new-project` に十分として扱ってはならない。
+- REQ-ONBOARD-03: ADR/PRD/SPEC/RFC 候補があり project がない場合、`/gsd-new-project` の前に `/gsd-ingest-docs` を提示する。
+- REQ-ONBOARD-04: `PROJECT.md`、`REQUIREMENTS.md`、`ROADMAP.md`、`STATE.md` が揃うまで完了扱いにしない。
+- REQ-ONBOARD-05: project setup 後にのみ `.planning/onboarding/SUMMARY.md` を作成または確認する。
+- REQ-ONBOARD-06: 対話型メニューがない runtime 向けに、`--text` で番号付きプレーンテキスト gate をサポートする。
+
+**生成物:**
+| Artifact | 説明 |
+|----------|-------------|
+| `.planning/codebase/` | `/gsd-map-codebase` handoff が生成するコードベースマップ |
+| `.planning/PROJECT.md`, `REQUIREMENTS.md`, `ROADMAP.md`, `STATE.md` | `/gsd-new-project` または `/gsd-ingest-docs` が生成する planning setup |
+| `.planning/onboarding/SUMMARY.md` | Onboarding status、artifact index、next-command summary |
 
 ### 27a. 実行後コードベースドリフト検出
 
@@ -1141,9 +1163,9 @@ fix(03-01): correct auth token expiry
 
 ### 42. クロス AI ピアレビュー
 
-**コマンド:** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--all]`
+**コマンド:** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--antigravity] [--ollama] [--lm-studio] [--llama-cpp] [--kimi-code] [--all]`
 
-**目的:** 外部の AI CLI（Gemini、Claude、Codex、CodeRabbit、OpenCode、Qwen Code、Cursor、Antigravity）を呼び出して、フェーズプランを独立してレビューします。レビュアーごとのフィードバックを含む構造化された REVIEWS.md を生成します。
+**目的:** 外部の AI CLI（Gemini、Claude、Codex、CodeRabbit、OpenCode、Qwen Code、Cursor、Antigravity、Kimi Code）とローカルの OpenAI 互換サーバー（Ollama、LM Studio、llama.cpp）を呼び出して、フェーズプランを独立してレビューします。レビュアーごとのフィードバックを含む構造化された REVIEWS.md を生成します。
 
 **要件:**
 - REQ-REVIEW-01: システムはシステム上で利用可能な AI CLI を検出しなければならない
@@ -1227,7 +1249,7 @@ fix(03-01): correct auth token expiry
 **3. ワークフローガードフック**（`gsd-workflow-guard.js`）
 Claude が GSD ワークフローコンテキスト外でファイル編集を試行した際に検出する PreToolUse フック。直接編集の代わりに `/gsd-quick` や `/gsd-fast` の使用をアドバイスします。`hooks.workflow_guard`（デフォルト: false）で設定可能です。
 
-**4. CI 対応インジェクションスキャナー**（`prompt-injection-scan.test.cjs`）
+**4. CI 対応インジェクションスキャナー**（`prompt-injection-scan.security.test.cjs`）
 すべてのエージェント、ワークフロー、コマンドファイルに埋め込まれたインジェクションベクターをスキャンするテストスイート。
 
 **要件:**
@@ -1762,7 +1784,7 @@ Claude が GSD ワークフローコンテキスト外でファイル編集を�
 - REQ-CTXRED-01: システムはコンテキスト予算内に収まるよう、大きすぎる Markdown アーティファクトを切り詰めなければならない
 - REQ-CTXRED-02: キャッシュフレンドリーなアセンブリのためにプロンプトを順序付けなければならない（安定したプレフィックスを先頭に）
 - REQ-CTXRED-03: 削減は必須情報（見出し、要件、タスク構造）を保持しなければならない
-- REQ-CTXRED-04: スキルの `description:` フィールドは ≤ 100 文字でなければならない；`npm run lint:descriptions` で強制（`scripts/lint-descriptions.cjs` と `tests/enh-2789-description-budget.test.cjs` 参照）
+- REQ-CTXRED-04: スキルの `description:` フィールドは ≤ 100 文字でなければならない；`npm run lint:descriptions` で強制（`scripts/lint-descriptions.cjs` と `tests/skill-frontmatter-contract.test.cjs` 参照）
 
 **プロセス:**
 1. **計測** — ワークフローの総プロンプトサイズを計算
@@ -2057,7 +2079,7 @@ Claude が GSD ワークフローコンテキスト外でファイル編集を�
 
 ### 92. ゲート分類法
 
-**参照:** `get-shit-done/references/gates.md`
+**参照:** `gsd-core/references/gates.md`
 **エージェント:** plan-checker、verifier
 
 **目的:** すべてのワークフロー決定ポイントを構造化する 4 つの正規ゲートタイプを定義し、plan-checker と verifier エージェントが一貫したゲートロジックを適用できるようにします。
@@ -2173,15 +2195,15 @@ Claude が GSD ワークフローコンテキスト外でファイル編集を�
 
 ### 99. 改善されたプロンプトインジェクションスキャナー
 
-**フック:** `gsd-prompt-guard.js`
-**スクリプト:** `scripts/prompt-injection-scan.sh`
+**フック:** `gsd-prompt-guard.js`、`gsd-read-injection-scanner.js`
+**スクリプト:** `scripts/prompt-injection-scan.sh`、`scripts/base64-scan.sh`
 
-**目的:** プランニングアーティファクト内のプロンプトインジェクション試みの検出を強化し、不可視 Unicode 文字検出、エンコードの難読化パターン、エントロピーベースの分析を追加します。
+**目的:** プランニングアーティファクトおよび取り込んだコンテンツ内のプロンプトインジェクション試行の多層防御検出。ライブフックはフック独立性のために独自のパターンサブセットをインライン化します（`security.cts` からインポートしません）。CIスキャナー（`security.cts` の `scanForInjection`）は、テストでのコードベース全体スキャン用の集中エンジンを提供します。
 
 **要件:**
-- REQ-SCAN-INJ-01: スキャナーは不可視 Unicode 文字（ゼロ幅スペース、ソフトハイフンなど）を検出しなければならない
-- REQ-SCAN-INJ-02: スキャナーはエンコードの難読化パターン（base64 エンコードされた命令、ホモグリフ）を検出しなければならない
-- REQ-SCAN-INJ-03: スキャナーは予期しない位置の高エントロピー文字列にフラグを立てるためにエントロピー分析を適用しなければならない
+- REQ-SCAN-INJ-01: ライブフックは不可視 Unicode 文字（ゼロ幅スペース、ソフトハイフン、Unicode タグブロック U+E0000–E007F）を検出しなければならない
+- REQ-SCAN-INJ-02: ライブフックは既知のインジェクションパターン（命令オーバーライド、ロール操作、システムプロンプト抽出、偽のメッセージ境界）を検出しなければならない。Base64 デコードスキャンは CI 時制御（`scripts/base64-scan.sh`）であり、ライブフックではない — ライブフックは base64 持ち出しフレーズ正規表現のみを一致させ、デコードはしない。
+- REQ-SCAN-INJ-03: ~~スキャナーはエントロピー分析を適用しなければならない~~ — エントロピー分析（`scanEntropyAnomalies`）は #2198 でデッドコードとして削除された（本番呼び出し元ゼロ；ライブフックはエントロピー分析を実行しない）。この要件は保守可能なライブ実装まで保留。
 - REQ-SCAN-INJ-04: スキャナーは勧告的のみでなければならない — 検出はログに記録されるが、ブロッキングではない
 
 ---
@@ -2654,10 +2676,10 @@ capture_thought({
 | スロット | 割り当てられたエージェント |
 |---------|----------------------|
 | `planning` | `gsd-planner`、`gsd-roadmapper`、`gsd-pattern-mapper` |
-| `discuss` | （将来のサブエージェント用に予約） |
+| `discuss` | `gsd-assumptions-analyzer` |
 | `research` | `gsd-phase-researcher`、`gsd-project-researcher`、`gsd-research-synthesizer`、`gsd-codebase-mapper`、`gsd-ui-researcher` |
 | `execution` | `gsd-executor`、`gsd-debugger`、`gsd-doc-writer` |
-| `verification` | `gsd-verifier`、`gsd-plan-checker`、`gsd-integration-checker`、`gsd-nyquist-auditor`、`gsd-ui-checker`、`gsd-ui-auditor`、`gsd-doc-verifier` |
+| `verification` | `gsd-verifier`、`gsd-plan-checker`、`gsd-integration-checker`、`gsd-nyquist-auditor`、`gsd-ui-checker`、`gsd-ui-auditor`、`gsd-doc-verifier`、`gsd-code-reviewer` |
 | `completion` | （将来のサブエージェント用に予約） |
 
 **受け入れられる値:** `"opus"` / `"sonnet"` / `"haiku"` / `"inherit"`
@@ -2783,7 +2805,7 @@ Source commit: abc1234 (3 commits behind HEAD)
 - Executor のインストール失敗は、同様の名前のパッケージを自動的に試みる代わりに人間の確認のために停止する。
 
 **要件:**
-- REQ-PKG-GATE-01: リサーチはパッケージレジストリ、年齢、ダウンロード/ソースシグナル、スロップチェック verdict、および処分を記録しなければならない。
+- REQ-PKG-GATE-01: リサーチはパッケージレジストリ、年齢、ダウンロード/ソースシグナル、正当性判定、および処分を記録しなければならない。
 - REQ-PKG-GATE-02: プランナーは実行前に未検証または疑わしいパッケージのインストールをゲートしなければならない。
 - REQ-PKG-GATE-03: Executor はパッケージマネージャーのインストール失敗後にパッケージ名を自動置換してはならない。
 
@@ -2802,7 +2824,7 @@ Source commit: abc1234 (3 commits behind HEAD)
 | `standard` | コアに加えて一般的なフェーズ管理コマンド |
 | `full` | 完全なサーフェス；デフォルト |
 
-**ランタイムコントロール:** `/gsd:surface` はプロファイル状態をリストし、再インストールなしにスキルクラスターを有効化、無効化、またはリセットします。
+**ランタイムコントロール:** `/gsd-surface` はプロファイル状態をリストし、再インストールなしにスキルクラスターを有効化、無効化、またはリセットします。
 
 **要件:**
 - REQ-SURFACE-01: インストーラーは `--profile=<name>` を解決し、アクティブなプロファイルを `.gsd-profile` に永続化しなければならない。
@@ -2906,7 +2928,7 @@ Source commit: abc1234 (3 commits behind HEAD)
 - REQ-HUMAN-VERIFY-02: 人間が必要な検証はフェーズ終了時のレビューが解決するまで保留のまま。
 - REQ-HUMAN-VERIFY-03: キーのない設定は `"end-of-phase"` を使用しなければならない。
 
-**参照:** [チェックポイントリファレンス](../../get-shit-done/references/checkpoints.md)
+**参照:** [チェックポイントリファレンス](../../gsd-core/references/checkpoints.md)
 
 ---
 

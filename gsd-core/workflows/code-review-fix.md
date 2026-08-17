@@ -17,10 +17,16 @@ Read all files referenced by the invoking prompt's execution_context before star
 Parse arguments and load project state:
 
 ```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "$HOME/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="$HOME/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
 PHASE_ARG="${1}"
 INIT=$(gsd_run query init.phase-op "${PHASE_ARG}")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
+AGENT_SKILLS_FIXER=$(gsd_run query agent-skills gsd-code-fixer)
+AGENT_SKILLS_REVIEWER=$(gsd_run query agent-skills gsd-code-reviewer)
+# #2072: resolve the routed models so model_overrides / models.<phaseType> are honored
+# (gsd-code-reviewer → "verification", gsd-code-fixer → "execution"); thread them below.
+REVIEWER_MODEL=$(gsd_run query resolve-model gsd-code-reviewer --raw)
+FIXER_MODEL=$(gsd_run query resolve-model gsd-code-fixer --raw)
 ```
 
 Parse from init JSON: `phase_found`, `phase_dir`, `phase_number`, `phase_name`, `padded_phase`, `commit_docs`.
@@ -72,21 +78,23 @@ FIX_REPORT_PATH="${PHASE_DIR}/${PADDED_PHASE}-REVIEW-FIX.md"
 </step>
 
 <step name="check_config_gate">
-Check if code review is enabled via config:
+Check if code review is active via the capability registry:
 
 ```bash
-CODE_REVIEW_ENABLED=$(gsd_run query config-get workflow.code_review 2>/dev/null || echo "true")
+EXECUTE_POST_HOOKS_JSON=$(gsd_run loop render-hooks execute:post --raw)
 ```
 
-If CODE_REVIEW_ENABLED is "false":
+Resolve active step hooks from `EXECUTE_POST_HOOKS_JSON` where `kind == "step"` and `ref.skill == "code-review"`.
+
+If no active code-review step hook exists:
 ```
-Code review fix skipped (workflow.code_review=false in config)
+Code review fix skipped (code-review capability inactive)
 ```
 Exit workflow.
 
-Default is true — only skip on explicit false. This check runs AFTER phase validation so invalid phase errors are shown first.
+Default is active through the Capability Registry schema — only skip when the registry resolves no active code-review step hook. This check runs AFTER phase validation so invalid phase errors are shown first.
 
-Note: This reuses the `workflow.code_review` config key rather than introducing a separate `workflow.code_review_fix` key. Rationale: fixes are meaningless without review, so a single toggle makes sense. If independent control is needed later, a separate key can be added in v2.
+Note: This reuses the code-review capability activation rather than introducing a separate code-review-fix capability. Rationale: fixes are meaningless without review, so a single activation boundary makes sense. If independent control is needed later, a separate key can be added in v2.
 </step>
 
 <step name="check_review_exists">
@@ -110,7 +118,7 @@ Parse REVIEW.md frontmatter to check status and extract context for --auto loop:
 REVIEW_STATUS=$(REVIEW_PATH="${REVIEW_PATH}" node -e "
   const fs = require('fs');
   const content = fs.readFileSync(process.env.REVIEW_PATH, 'utf-8');
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  const match = content.replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---/);
   if (match && /status:\s*(\S+)/.test(match[1])) {
     console.log(match[1].match(/status:\s*(\S+)/)[1]);
   } else {
@@ -136,7 +144,7 @@ Extract review depth for --auto re-review:
 REVIEW_DEPTH=$(REVIEW_PATH="${REVIEW_PATH}" node -e "
   const fs = require('fs');
   const content = fs.readFileSync(process.env.REVIEW_PATH, 'utf-8');
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  const match = content.replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---/);
   if (match && /depth:\s*(\S+)/.test(match[1])) {
     console.log(match[1].match(/depth:\s*(\S+)/)[1]);
   } else {
@@ -155,7 +163,7 @@ while IFS= read -r line; do
 done < <(REVIEW_PATH="${REVIEW_PATH}" node -e "
   const fs = require('fs');
   const content = fs.readFileSync(process.env.REVIEW_PATH, 'utf-8');
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  const match = content.replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---/);
   if (match) {
     const fm = match[1];
     // Try YAML array format: files_reviewed_list: [file1, file2]
@@ -189,8 +197,16 @@ echo "Fix scope: ${FIX_SCOPE}"
 
 Use Agent() to spawn agent:
 
+<!-- #2508 runtime-aware-dispatch -->
+
+> **Runtime-aware dispatch (#2508 Phase 4).** GSD workflows dispatch specialized subagents by role. Before dispatching on a built-in-only runtime (kimi-code — three built-ins only), resolve the role to a built-in via `gsd_run query resolve-dispatch-type --requested <role> --raw`. On named-dispatch runtimes (Claude/OpenCode/…) the role is returned unchanged; on kimi-code it maps to `coder`/`explore`/`plan` by role-suffix. The persona rides `${AGENT_SKILLS_<ROLE>}` (Phase 3) regardless. See @gsd-core/references/runtime-aware-dispatch.md.
+
+<!-- #2517 model-omit-on-inherit -->
+
+> **Model omission (#2517).** Omit the `model` parameter entirely when the value it would carry (`FIXER_MODEL`, `REVIEWER_MODEL`) is `"inherit"` or empty. An empty value 404s on runtimes without native tier aliases — the default on non-Claude runtimes. Omitting it inherits the orchestrator's model. See @gsd-core/references/model-profile-resolution.md.
+
 ```text
-Agent(subagent_type="gsd-code-fixer", prompt="
+Agent(subagent_type="gsd-code-fixer", model="{FIXER_MODEL}", prompt="
 <files_to_read>
 ${REVIEW_PATH}
 </files_to_read>
@@ -205,7 +221,7 @@ iteration: 1
 </config>
 
 Read REVIEW.md findings, apply fixes, commit each atomically, write REVIEW-FIX.md. Do NOT commit REVIEW-FIX.md (orchestrator handles that).
-")
+${AGENT_SKILLS_FIXER}")
 ```
 
 > **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
@@ -273,7 +289,7 @@ if [ "$AUTO_MODE" = "true" ]; then
     
     # Spawn gsd-code-reviewer agent to re-review (runs in a subagent — no output until it returns, ~1–5 min; expected, not a freeze)
     # (This overwrites REVIEW_PATH with latest review state)
-    Agent(subagent_type="gsd-code-reviewer", prompt="
+    Agent(subagent_type="gsd-code-reviewer", model="{REVIEWER_MODEL}", prompt="
 <config>
 depth: ${REVIEW_DEPTH}
 phase_dir: ${PHASE_DIR}
@@ -283,14 +299,14 @@ ${FILES_CONFIG}
 
 Re-review the phase at ${REVIEW_DEPTH} depth. Write findings to ${REVIEW_PATH}.
 Do NOT commit the output — the orchestrator handles that.
-")
+${AGENT_SKILLS_REVIEWER}")
     # ORCHESTRATOR RULE — CODEX RUNTIME: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result before proceeding.
     
     # Check new REVIEW.md status
     NEW_STATUS=$(REVIEW_PATH="${REVIEW_PATH}" node -e "
       const fs = require('fs');
       const content = fs.readFileSync(process.env.REVIEW_PATH, 'utf-8');
-      const match = content.match(/^---\n([\s\S]*?)\n---/);
+      const match = content.replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---/);
       if (match && /status:\s*(\S+)/.test(match[1])) {
         console.log(match[1].match(/status:\s*(\S+)/)[1]);
       } else {
@@ -307,7 +323,7 @@ Do NOT commit the output — the orchestrator handles that.
     # Still has issues — spawn fixer again (runs in a subagent — no output until it returns, ~1–5 min; expected, not a freeze)
     echo "Issues remain. Applying fixes for iteration ${ITERATION}..."
     
-    Agent(subagent_type="gsd-code-fixer", prompt="
+    Agent(subagent_type="gsd-code-fixer", model="{FIXER_MODEL}", prompt="
 <files_to_read>
 ${REVIEW_PATH}
 </files_to_read>
@@ -322,7 +338,7 @@ iteration: ${ITERATION}
 </config>
 
 Read REVIEW.md findings, apply fixes, commit each atomically, write REVIEW-FIX.md (overwrite previous). Do NOT commit REVIEW-FIX.md.
-")
+${AGENT_SKILLS_FIXER}")
     # ORCHESTRATOR RULE — CODEX RUNTIME: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result before proceeding.
     
     # Check if fixer succeeded
@@ -356,7 +372,7 @@ if [ -f "${FIX_REPORT_PATH}" ]; then
   HAS_STATUS=$(REVIEW_PATH="${REVIEW_PATH}" node -e "
     const fs = require('fs');
     const content = fs.readFileSync(process.env.FIX_REPORT_PATH, 'utf-8');
-    const match = content.match(/^---\n([\s\S]*?)\n---/);
+    const match = content.replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---/);
     if (match && /status:/.test(match[1])) { console.log('valid'); } else { console.log('invalid'); }
   " 2>/dev/null)
   
@@ -413,7 +429,7 @@ Extract frontmatter fields:
 FIX_FRONTMATTER=$(REVIEW_PATH="${REVIEW_PATH}" node -e "
   const fs = require('fs');
   const content = fs.readFileSync(process.env.FIX_REPORT_PATH, 'utf-8');
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  const match = content.replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---/);
   if (match) process.stdout.write(match[1]);
 " 2>/dev/null)
 
@@ -489,7 +505,7 @@ echo "════════════════════════�
 
 <success_criteria>
 - [ ] Phase validated before config gate check
-- [ ] Config gate checked (workflow.code_review)
+- [ ] Capability gate checked (execute:post code-review hook)
 - [ ] REVIEW.md existence verified (error if missing)
 - [ ] REVIEW.md status checked (skip if clean/skipped)
 - [ ] Agent spawned with correct config (review_path, fix_scope, fix_report_path)

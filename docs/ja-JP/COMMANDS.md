@@ -51,6 +51,25 @@ v1.40 では、最初のステージエントリーポイントとして6つの�
 
 ---
 
+### `/gsd-onboard`
+
+既存コードベースの初回 GSD オンボーディングを案内します。リポジトリ状態を確認し、コードベースマッピング、任意のドキュメント取り込み、プロジェクト初期化へ安全にハンドオフし、計画が揃った後にオンボーディング summary を作成します。
+
+| フラグ | 説明 |
+|------|-------------|
+| `--fast` | 軽量な `/gsd-map-codebase --fast` マッピングハンドオフを優先。ただし `/gsd-new-project` 前には完全なマップが必要 |
+| `--text` | TUI メニューではなく番号付きプレーンテキストのゲートを使用 |
+
+**前提条件:** 既存リポジトリまたは計画ドキュメント。空のグリーンフィールドプロジェクトには `/gsd-new-project` を使用します。
+**生成物:** map-codebase による `.planning/codebase/`、new-project または ingest-docs による `.planning/`、セットアップ後の `.planning/onboarding/SUMMARY.md`。
+
+```bash
+/gsd-onboard           # ガイド付き brownfield オンボーディング
+/gsd-onboard --fast    # 先に軽量マップを使い、その後プロジェクト設定前に完全マップを作成
+```
+
+---
+
 ### `/gsd-workspace`
 
 GSD ワークスペースを管理 — リポジトリコピーと独立した `.planning/` ディレクトリを持つ隔離されたワークスペース環境を作成、一覧表示、または削除します。
@@ -152,7 +171,6 @@ GSD ワークスペースを管理 — リポジトリコピーと独立した `
 | `--ingest <path-or-glob>` | コンテキスト統合に discuss-phase の代わりに ADR ファイルを使用 |
 | `--ingest-format <auto\|nygard\|madr\|narrative>` | `--ingest` のオプション ADR パーサーフォーマットの上書き |
 | `--reviews` | REVIEWS.md のクロス AI レビューフィードバックで再計画 |
-| `--validate` | 計画開始前に状態検証を実行 |
 | `--bounce` | 計画後に外部プランバウンス検証を実行（`workflow.plan_bounce_script` を使用） |
 | `--skip-bounce` | 設定で有効になっている場合でもプランバウンスをスキップ |
 | `--mvp` | 垂直 MVP モード — プランナーはタスクを水平レイヤーではなく機能スライス（UI→API→DB）として整理します。以前のフェーズサマリーがない新規プロジェクトのフェーズ1では、`SKELETON.md`（Walking Skeleton）も生成します。ROADMAP.md の `**Mode:** mvp` でフェーズごとに永続化でき、フラグなしで `--mvp` が自動適用されます。 |
@@ -167,13 +185,13 @@ GSD ワークスペースを管理 — リポジトリコピーと独立した `
 - `--view` 付き: 既存の RESEARCH.md を標準出力に表示し、起動なし。RESEARCH.md がない場合はエラー。
 
 **パッケージ正当性ゲート（v1.42.1）:**
-リサーチャーが外部パッケージを推奨する場合、各パッケージに対して `slopcheck install <pkg> --json` を実行し、Registry、Age、Downloads、Source Repo、および slopcheck の評決を記録した `## Package Legitimacy Audit` テーブルを RESEARCH.md に書き込みます。評決:
+リサーチャーが外部パッケージを推奨する場合、各パッケージに対して `gsd-tools query package-legitimacy check --ecosystem <npm|pypi|crates> <pkg>` を実行し、Registry、Age、Downloads、Source Repo、および正当性評決を記録した `## Package Legitimacy Audit` テーブルを RESEARCH.md に書き込みます。評決はライブのレジストリ API（npm、PyPI、crates.io）から計算されます:
 
 - `[SLOP]` — パッケージは RESEARCH.md から完全に削除され、プランナーには届かない
 - `[SUS]` — パッケージにフラグが付けられ、プランナーはインストールタスクの前に `checkpoint:human-verify` を挿入
 - `[OK]` — パッケージが承認され、チェックポイントは追加されない
 
-WebSearch から取得したパッケージは `[ASSUMED]`（`[VERIFIED]` ではない）とタグ付けされ、`[SUS]` と同様に扱われます — インストール前に人間によるチェックポイントが設けられます。`slopcheck` がインストールできない場合、すべての推奨パッケージは `[ASSUMED]` とタグ付けされ、ゲートが設けられます。
+WebSearch から取得したパッケージは `[ASSUMED]`（`[VERIFIED]` ではない）とタグ付けされ、`[SUS]` と同様に扱われます — インストール前に人間によるチェックポイントが設けられます。レジストリルックアップが失敗した場合はスローせず `[SUS]` にデグレードされるため、サイレントに承認されることはありません。`slopcheck` はオプションのエスカレート専用アダプターであり、出荷される設定では配線されていません。ゲートの動作に必須ではありません。
 
 詳細については、[ユーザーガイドのパッケージ正当性ゲート](../USER-GUIDE.md#package-legitimacy-gate-v1421)（チェックポイント形式、評決テーブル、トラブルシューティングを含む）を参照してください。
 
@@ -181,7 +199,6 @@ WebSearch から取得したパッケージは `[ASSUMED]`（`[VERIFIED]` では
 /gsd-plan-phase 1                              # フェーズ1のリサーチ + 計画 + 検証
 /gsd-plan-phase 3 --skip-research              # リサーチなしの計画（既知のドメイン）
 /gsd-plan-phase --auto                         # 非インタラクティブな計画
-/gsd-plan-phase 2 --validate                   # 計画前に状態を検証
 /gsd-plan-phase 1 --bounce                     # 計画 + 外部バウンス検証
 /gsd-plan-phase 2 --ingest docs/adr/0010.md   # コンテキスト統合のための ADR エクスプレスパス
 /gsd-plan-phase 2 --ingest 'docs/adr/00*.md' --ingest-format auto
@@ -201,7 +218,7 @@ WebSearch から取得したパッケージは `[ASSUMED]`（`[VERIFIED]` では
 | 引数 / フラグ | 必須 | 説明 |
 |-----------------|----------|-------------|
 | `N` | **Yes** | 計画およびレビューするフェーズ番号 |
-| `--codex` / `--gemini` / `--claude` / `--opencode` | No | 単一レビュアーの選択 |
+| レビュアーフラグ | No | すべてのレビュアーレーンフラグをそのまま渡す: `--gemini`、`--claude`、`--codex`、`--coderabbit`、`--opencode`、`--qwen`、`--cursor`、`--agy` / `--antigravity`、`--ollama`、`--lm-studio`、`--llama-cpp`、`--kimi-code` |
 | `--all` | No | 設定済みのすべてのレビュアーを並列で実行 |
 | `--max-cycles N` | No | サイクル上限を上書き（デフォルト3） |
 
@@ -239,7 +256,6 @@ WebSearch から取得したパッケージは `[ASSUMED]`（`[VERIFIED]` では
 |----------|----------|-------------|
 | `N` | **Yes** | 実行するフェーズ番号 |
 | `--wave N` | No | フェーズ内の波 `N` のみを実行 |
-| `--validate` | No | 実行開始前に状態検証を実行 |
 | `--cross-ai` | No | 外部 AI CLI に実行を委任（`workflow.cross_ai_command` を使用） |
 | `--no-cross-ai` | No | 設定でクロス AI が有効な場合でもローカル実行を強制 |
 
@@ -251,7 +267,6 @@ WebSearch から取得したパッケージは `[ASSUMED]`（`[VERIFIED]` では
 ```bash
 /gsd-execute-phase 1                # フェーズ1を実行
 /gsd-execute-phase 1 --wave 2       # 波2のみを実行
-/gsd-execute-phase 1 --validate     # 実行前に状態を検証
 /gsd-execute-phase 2 --cross-ai     # フェーズ2を外部 AI CLI に委任
 ```
 
@@ -569,7 +584,7 @@ Nyquist 検証ギャップを事後的に監査して埋めます。
     "flags": {
       "discuss": "--auto",
       "plan": "--skip-research",
-      "execute": "--validate"
+      "execute": "--cross-ai"
     }
   }
 }
@@ -589,7 +604,7 @@ Nyquist 検証ギャップを事後的に監査して埋めます。
 /gsd-help --brief <topic>           # コンパクトなスコープ付きルックアップ — シグネチャ + 1行サマリー
 ```
 
-完全なエイリアステーブルについては `get-shit-done/workflows/help/modes/topic.md` を参照してください。不明なトピックは認識されたリストを表示します。
+完全なエイリアステーブルについては `gsd-core/workflows/help/modes/topic.md` を参照してください。不明なトピックは認識されたリストを表示します。
 
 ---
 
@@ -1229,6 +1244,7 @@ AI システムの構築を含むフェーズの AI-SPEC.md デザインコン�
 | `--qwen` | Qwen Code レビューを含める（Alibaba Qwen モデル） |
 | `--cursor` | Cursor エージェントレビューを含める |
 | `--agy` / `--antigravity` | Antigravity CLI レビューを含める（Google 認証情報で無料） |
+| `--kimi-code` | Kimi Code CLI レビューを含める（Moonshot AI） |
 | `--ollama` | Ollama サーバーレビューを含める |
 | `--lm-studio` | LM Studio サーバーレビューを含める |
 | `--llama-cpp` | llama.cpp サーバーレビューを含める |
@@ -1509,7 +1525,7 @@ GSD Discord コミュニティに参加するには、GSD README 内のリンク
 npm run lint:descriptions
 ```
 
-このチェックは `tests/enh-2789-description-budget.test.cjs` を介して `npm test` の一部としても実行されます。
+このチェックは `tests/skill-frontmatter-contract.test.cjs` を介して `npm test` の一部としても実行されます。
 
 ---
 

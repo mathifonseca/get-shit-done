@@ -19,8 +19,11 @@ import roadmapUpgrade = require('./roadmap-upgrade.cjs');
 import planningWorkspace = require('./planning-workspace.cjs');
 const { planningDir } = planningWorkspace;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-import core = require('./core.cjs');
-const { loadConfig } = core;
+import configLoaderMod = require('./config-loader.cjs');
+const { loadConfig } = configLoaderMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import cliExitMod = require('./cli-exit.cjs');
+const { ExitError } = cliExitMod;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -67,12 +70,14 @@ function checkW021(content: string): W021Warning[] {
   // Milestone section heading: ## [GSD] v2.0 — Label  OR  ## v2.0: Label  OR  ## Roadmap v2.0
   //   OR  ## ✅ v2.0  OR  ## 🚧 v2.0  (emoji-prefixed variants used by roadmap templates)
   // Capture the major integer.
-  const MILESTONE_RE = /^#{1,3}\s+(?:\[[^\]]+\]\s+|Roadmap\s+|[✅🚧]\s*)?v(\d+)\.\d+(?:\s|:|\s*—)/iu;
+  const MILESTONE_RE = /^#{1,3}\s+(?:\[[^\]]{1,200}\]\s+|Roadmap\s+|[✅🚧]\s*)?v(\d+)\.\d+(?:\s|:|\s*—)/iu;
 
   // Migrated phase heading: ### Phase M-NN: Name  (M-NN or unpadded M-N form)
-  const PHASE_RE = /^#{2,4}\s*(?:\[[^\]]+\]\s*)?Phase\s+(\d+)-(\d+)(?:-\d+)*\s*:/i;
+  // #1729: `(?:\s*\([^)\n]{0,200}\))?` tolerates a pre-colon ( ) tag (literal mirror of OPTIONAL_PHASE_TAG_SOURCE).
+  const PHASE_RE = /^#{2,4}\s*(?:\[[^\]]{1,200}\]\s*)?Phase\s+(\d+)-(\d+)(?:-\d+)*(?:\s*\([^)\n]{0,200}\))?\s*:/i;
   // Unprefixed legacy phase heading: ### Phase N: Name  (no hyphen sub-index)
-  const UNPREFIXED_PHASE_RE = /^#{2,4}\s*(?:\[[^\]]+\]\s*)?Phase\s+(\d+[A-Za-z]?(?:\.\d+)*)\s*:/i;
+  // phase-id-owner: UNPREFIXED_PHASE_RE token uses the [A-Za-z] case-variant (identical to the canonical [A-Z] token under /i); kept literal, not source-byte-equal to PHASE_NUMBER_TOKEN_SOURCE.
+  const UNPREFIXED_PHASE_RE = /^#{2,4}\s*(?:\[[^\]]{1,200}\]\s*)?Phase\s+(\d+[A-Za-z]?(?:\.\d+)*)(?:\s*\([^)\n]{0,200}\))?\s*:/i;
 
   let currentMilestoneMajor: number | null = null;
   const lines = content.split('\n');
@@ -141,11 +146,43 @@ function routeRoadmapCommand({ roadmap, args, cwd, raw, error }: RouteRoadmapCom
       'annotate-dependencies': () => roadmap.cmdRoadmapAnnotateDependencies(cwd, args[2], raw),
       'validate': () => {
         const roadmapPath = path.join(planningDir(cwd), 'ROADMAP.md');
-        let roadmapContent = '';
+        const warnings: Array<{ code: string; message: string }> = [];
+
+        // #2978: structural validation. A verb named "validate" that cannot
+        // produce a negative result provides false assurance. Before the
+        // opt-in milestone-prefix check, verify the file is structurally a
+        // roadmap at all.
+        let roadmapContent: string;
         try {
           roadmapContent = fs.readFileSync(roadmapPath, 'utf8');
         } catch {
-          // ROADMAP.md missing — return empty warnings
+          // ROADMAP.md missing — not silent success.
+          warnings.push({ code: 'V001', message: 'ROADMAP.md not found or unreadable' });
+          const result = { warnings };
+          process.stdout.write(raw ? JSON.stringify(result) : JSON.stringify(result, null, 2));
+          throw new ExitError(1);
+        }
+
+        // Empty or whitespace-only.
+        if (roadmapContent.trim() === '') {
+          warnings.push({ code: 'V002', message: 'ROADMAP.md is empty' });
+        }
+
+        // Malformed frontmatter — a `---` opener with no matching closer.
+        // Tolerate a leading BOM (#3057) before the fence.
+        const contentAfterBom = roadmapContent.replace(/^\uFEFF/, '');
+        if (contentAfterBom.startsWith('---')) {
+          const closeMatch = contentAfterBom.slice(3).match(/\r?\n---\s*(\r?\n|$)/);
+          if (!closeMatch) {
+            warnings.push({ code: 'V003', message: 'ROADMAP.md frontmatter is malformed (unterminated --- fence)' });
+          }
+        }
+
+        // No recognizable phase structure — at least one `### Phase N:` heading.
+        // Mirrors the phase-heading pattern used across roadmap-parser.cts.
+        const hasPhaseEntry = /^#{2,4}\s*Phase\s+\S/im.test(roadmapContent);
+        if (!hasPhaseEntry && !warnings.some((w) => w.code === 'V002')) {
+          warnings.push({ code: 'V004', message: 'ROADMAP.md contains no recognizable phase entries (no "### Phase N:" headings)' });
         }
 
         // W021 only fires when phase_id_convention is explicitly 'milestone-prefixed'.
@@ -171,20 +208,39 @@ function routeRoadmapCommand({ roadmap, args, cwd, raw, error }: RouteRoadmapCom
             }
           }
         }
-        const warnings = (convention === 'milestone-prefixed')
-          ? checkW021(roadmapContent)
-          : [];
+        if (convention === 'milestone-prefixed') {
+          warnings.push(...checkW021(roadmapContent));
+        }
 
         const result = { warnings };
-        if (raw) process.stdout.write(JSON.stringify(result));
-        else process.stdout.write(JSON.stringify(result, null, 2));
+        process.stdout.write(raw ? JSON.stringify(result) : JSON.stringify(result, null, 2));
+        // #2978: exit non-zero on any warning, per the documented contract
+        // ("exits non-zero on any error or warning").
+        if (warnings.length > 0) {
+          throw new ExitError(1);
+        }
       },
       'upgrade': () => {
         const dryRun = !args.includes('--apply');
-        const convention = args.find((_a, i) => args[i - 1] === '--convention') || 'milestone-prefixed';
+        // Parse `--convention <value>` and `--convention=<value>`. When the flag is
+        // absent entirely, default to the only supported convention; when present
+        // with a missing/unsupported value, fall through to the rejection below
+        // (fail-closed — never silently run a migration the user did not request).
+        let convention = 'milestone-prefixed';
+        const conventionFlagIdx = args.findIndex(
+          (a) => a === '--convention' || a.startsWith('--convention='),
+        );
+        if (conventionFlagIdx !== -1) {
+          const token = args[conventionFlagIdx];
+          convention = token.includes('=')
+            ? token.slice(token.indexOf('=') + 1)
+            : (args[conventionFlagIdx + 1] ?? '');
+        }
         if (convention !== 'milestone-prefixed') {
-          process.stderr.write('Only --convention milestone-prefixed is supported\n');
-          process.exit(1);
+          // No-throw hub contract (ADR-0012): a hub-dispatched handler must not call
+          // process.exit. Throw instead — the hub converts this to HandlerFailure and
+          // the adapter routes it through the injected error() boundary.
+          throw new Error('Only --convention milestone-prefixed is supported');
         }
         const plan = roadmapUpgrade.computeMigrationPlan(cwd);
         roadmapUpgrade.applyMigration(cwd, plan, { dryRun });

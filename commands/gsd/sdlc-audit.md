@@ -13,6 +13,6 @@ allowed-tools:
   - AskUserQuestion
 ---
 
-Read and execute @~/.claude/get-shit-done/workflows/sdlc-audit.md end-to-end.
+Read and execute @~/.claude/gsd-core/workflows/sdlc-audit.md end-to-end.
 
 Pass through any arguments: $ARGUMENTS

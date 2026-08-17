@@ -43,7 +43,7 @@ O GSD Core é um **framework de meta-prompting** que fica entre o usuário e os 
                       │
 ┌─────────────────────▼────────────────────────────────┐
 │              CAMADA DE WORKFLOWS                      │
-│   get-shit-done/workflows/*.md — Lógica de            │
+│   gsd-core/workflows/*.md — Lógica de            │
 │   orquestração                                        │
 │   (Lê referências, cria agentes, gerencia estado)     │
 └──────┬──────────────┬─────────────────┬──────────────┘
@@ -77,7 +77,7 @@ Cada agente criado por um orquestrador recebe uma janela de contexto limpa (até
 
 ### 2. Orquestradores Leves
 
-Os arquivos de workflow (`get-shit-done/workflows/*.md`) nunca fazem trabalho pesado. Eles:
+Os arquivos de workflow (`gsd-core/workflows/*.md`) nunca fazem trabalho pesado. Eles:
 
 - Carregam contexto via `gsd-tools.cjs init <workflow>`
 - Criam agentes especializados com prompts focados
@@ -132,7 +132,7 @@ As descrições dos roteadores usam tags de palavras-chave separadas por pipe (�
 
 A listagem de skills antecipada é um dos dois custos recorrentes de tokens por turno. O outro é o schema de ferramenta MCP injetado por cada servidor MCP habilitado em `.claude/settings.json`. Servidores MCP pesados (browser/playwright, Mac-tools, Windows-tools) podem custar mais de 20 mil tokens por turno cada — muitas vezes eclipsando o que o ajuste do `model_profile` economiza. O controle fica no harness do Claude Code (`enabledMcpjsonServers` / `disabledMcpjsonServers` em `.claude/settings.json`) e **não** é uma preocupação do GSD. Juntos, a camada de roteamento em dois estágios (#2792) e o controle criterioso do MCP são as maiores alavancas de custo por turno. Consulte [`docs/USER-GUIDE.md`](USER-GUIDE.md) e `references/context-budget.md` para o checklist de auditoria.
 
-### Workflows (`get-shit-done/workflows/*.md`)
+### Workflows (`gsd-core/workflows/*.md`)
 
 Lógica de orquestração que os comandos referenciam. Contém o processo passo a passo, incluindo:
 
@@ -149,7 +149,7 @@ Lógica de orquestração que os comandos referenciam. Contém o processo passo 
 Os arquivos de workflow são carregados verbatim no contexto do Claude cada vez que o
 comando `/gsd-*` correspondente é invocado. Para manter esse custo limitado, o
 orçamento de tamanho de workflow aplicado por `tests/workflow-size-budget.test.cjs`
-espelha o orçamento de agentes de #2361:
+espelha a convenção de orçamento de tamanho de agentes:
 
 | Tier      | Limite de linhas por arquivo |
 |-----------|------------------------------|
@@ -157,11 +157,11 @@ espelha o orçamento de agentes de #2361:
 | `LARGE`   | 1500 — planejadores com múltiplas etapas e workflows de funcionalidades grandes |
 | `DEFAULT` | 1000 — workflows simples e de propósito único (o tier alvo) |
 
-`workflows/discuss-phase.md` é mantido em um teto mais restrito de <500 linhas conforme
-a issue #2551. Quando um workflow cresce além de seu tier, extraia os corpos por modo
+`workflows/discuss-phase.md` é mantido em um teto mais restrito conforme
+o orçamento de bytes do discuss-phase (#717; a divisão discuss-phase/modes mantém ≈32000 bytes). Quando um workflow cresce além de seu tier, extraia os corpos por modo
 em `workflows/<workflow>/modes/<mode>.md`, templates em
 `workflows/<workflow>/templates/`, e conhecimento compartilhado em
-`get-shit-done/references/`. O arquivo pai se torna um despachante leve que
+`gsd-core/references/`. O arquivo pai se torna um despachante leve que
 lê apenas os arquivos de modo e template necessários para a invocação atual.
 
 `workflows/discuss-phase/` é o exemplo canônico deste padrão —
@@ -182,7 +182,7 @@ Definições de agentes especializados com frontmatter especificando:
 
 **Total de agentes:** 33
 
-### Referências (`get-shit-done/references/*.md`)
+### Referências (`gsd-core/references/*.md`)
 
 Documentos de conhecimento compartilhado que workflows e agentes `@-referenciam` (consulte [`docs/INVENTORY.md`](INVENTORY.md#references-41-shipped) para a contagem oficial e o roster completo):
 
@@ -236,7 +236,7 @@ O agente planner (`agents/gsd-planner.md`) foi decomposto de um único arquivo m
 - `planner-reviews.md` — Integração de revisão entre IAs (lê REVIEWS.md do `/gsd-review`)
 - `planner-revision.md` — Padrões de revisão de plano para refinamento iterativo
 
-### Templates (`get-shit-done/templates/`)
+### Templates (`gsd-core/templates/`)
 
 Templates Markdown para todos os artefatos de planejamento. Usados por `gsd-tools.cjs template fill` / `phase.scaffold` (e `scaffold` de nível superior) para criar arquivos pré-estruturados:
 - `project.md`, `requirements.md`, `roadmap.md`, `state.md` — Arquivos principais do projeto
@@ -268,13 +268,13 @@ Hooks de runtime que se integram ao agente de IA anfitrião:
 
 Consulte [`docs/INVENTORY.md`](INVENTORY.md#hooks-11-shipped) para o roster oficial de 11 hooks.
 
-### Hub de Roteamento de Comandos (`get-shit-done/bin/lib/command-routing-hub.cjs`)
+### Hub de Roteamento de Comandos (`gsd-core/bin/lib/command-routing-hub.cjs`)
 
 Os roteadores de família de comandos CJS despacham através do `CommandRoutingHub`. O hub possui o contrato de resultado puro sem lançamento de exceções (`hub.dispatch()` captura exceções internas e retorna `{ ok: false, kind, ...typedPayload }`) e a taxonomia fechada de erros de runtime (`UnknownCommand`, `InvalidArgs`, `HandlerRefusal`, `HandlerFailure`). Os adaptadores de roteador permanecem como tradutores CLI leves — eles constroem o hub, chamam `dispatch` e depois mapeiam o Result para chamadas `output()`/`error()`. O runtime é de caminho único (sem seleção de modo de runtime duplo). Consulte `docs/adr/0174-retire-gsd-sdk-package-boundary.md`.
 
-### Ferramentas CLI (`get-shit-done/bin/`)
+### Ferramentas CLI (`gsd-core/bin/`)
 
-Utilitário CLI Node.js (`gsd-tools.cjs`) com módulos de domínio distribuídos em `get-shit-done/bin/lib/` (consulte [`docs/INVENTORY.md`](INVENTORY.md#cli-modules-33-shipped) para o roster oficial):
+Utilitário CLI Node.js (`gsd-tools.cjs`) com módulos de domínio distribuídos em `gsd-core/bin/lib/` (consulte [`docs/INVENTORY.md`](INVENTORY.md#cli-modules-33-shipped) para o roster oficial):
 
 
 | Módulo                 | Responsabilidade                                                                                      |
@@ -428,7 +428,7 @@ ui-phase → UI-SPEC.md (contrato de design, opcional)
 plan-phase
     ├── Portão de pesquisa (bloqueia se RESEARCH.md tiver perguntas abertas não resolvidas)
     ├── Pesquisador de Fase → RESEARCH.md
-    │       └── Portão de Legitimidade de Pacotes: slopcheck em cada pacote; [SLOP] removido,
+    │       └── Portão de Legitimidade de Pacotes: veredicto da API de registro em cada pacote; [SLOP] removido,
     │           [SUS]/[ASSUMED] sinalizados; tabela de Auditoria escrita no RESEARCH.md
     ├── Planner (com verificação de alcançabilidade) → arquivos PLAN.md
     │       └── checkpoint:human-verify injetado antes de instalações [ASSUMED]/[SUS];
@@ -481,7 +481,7 @@ UI-SPEC.md (por fase) ───────────────────�
 ~/.claude/                          # Claude Code (instalação global)
 ├── skills/gsd-*/SKILL.md           # Skills globais (roster oficial: docs/INVENTORY.md)
 ├── commands/gsd/*.md               # Instalações locais do Claude usam slash commands em vez de skills globais
-├── get-shit-done/
+├── gsd-core/
 │   ├── bin/gsd-tools.cjs           # Utilitário CLI
 │   ├── bin/lib/*.cjs               # Módulos de domínio (roster oficial: docs/INVENTORY.md)
 │   ├── workflows/*.md              # Definições de workflow (roster oficial: docs/INVENTORY.md)
@@ -527,7 +527,8 @@ Caminhos equivalentes para outros runtimes:
 │   ├── FEATURES.md
 │   ├── ARCHITECTURE.md
 │   └── PITFALLS.md
-├── codebase/               # Mapeamento de brownfield (do /gsd-map-codebase)
+├── codebase/               # Mapeamento de brownfield (do /gsd-map-codebase ou /gsd-onboard)
+├── onboarding/             # Resumo de onboarding brownfield (do /gsd-onboard)
 │   ├── STACK.md            # Frontmatter YAML carrega `last_mapped_commit`
 │   ├── ARCHITECTURE.md     # para o portão de desvio pós-execução (#2003)
 │   ├── CONVENTIONS.md
@@ -552,7 +553,7 @@ Caminhos equivalentes para outros runtimes:
 │       └── SUMMARY.md
 ├── todos/
 │   ├── pending/            # Ideias capturadas
-│   └── done/               # Todos concluídos
+│   └── completed/          # Todos concluídos
 ├── threads/               # Threads de contexto persistentes (do /gsd-thread)
 ├── seeds/                 # Ideias prospectivas (do /gsd-capture --seed)
 ├── debug/                  # Sessões de depuração ativas
@@ -686,7 +687,7 @@ O pipeline pesquisador → planner → executor inclui um portão de cadeia de s
 
 | Camada | Componente | Ação |
 |--------|------------|------|
-| Pesquisa | `gsd-phase-researcher` | Executa `slopcheck install <pkgs> --json`; escreve tabela `## Package Legitimacy Audit` no RESEARCH.md; remove pacotes `[SLOP]` antes de o RESEARCH.md ser escrito |
+| Pesquisa | `gsd-phase-researcher` | Executa `gsd-tools query package-legitimacy check --ecosystem <npm\|pypi\|crates> <pkgs>`; escreve tabela `## Package Legitimacy Audit` no RESEARCH.md; remove pacotes `[SLOP]` antes de o RESEARCH.md ser escrito |
 | Planejamento | `gsd-planner` | Lê a tabela de Auditoria; insere `checkpoint:human-verify` antes de qualquer tarefa de instalação `[ASSUMED]` ou `[SUS]`; adiciona linha STRIDE `T-{phase}-SC` supply-chain ao `<threat_model>` |
 | Execução | `gsd-executor` | REGRA 3 exclui a instalação de pacotes do escopo de correção automática; instalações com falha surgem como checkpoints, nunca substituições silenciosas |
 

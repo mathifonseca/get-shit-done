@@ -2,22 +2,21 @@
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('node:os');
 const { cleanup } = require('./helpers.cjs');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { gitOrThrow } = require('./helpers/git-fixture.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const SCRIPT = path.join(ROOT, 'scripts', 'ci-test-scope.cjs');
 const WORKFLOWS_DIR = path.join(ROOT, '.github', 'workflows');
 
 function scopeFor(files) {
-  const r = spawnSync(process.execPath, [SCRIPT, '--files', files.join(' ')], {
-    cwd: ROOT,
-    encoding: 'utf8',
-  });
-  assert.strictEqual(r.status, 0, `stderr: ${r.stderr}\nstdout: ${r.stdout}`);
+  const r = runNode([SCRIPT, '--files', files.join(' ')], { cwd: ROOT, timeoutMs: PROBE_TIMEOUT_MS });
+  assert.strictEqual(r.exitCode, 0, `stderr: ${r.stderr}\nstdout: ${r.stdout}`);
   return JSON.parse(r.stdout);
 }
 
@@ -161,18 +160,24 @@ describe('ci-test-scope.cjs', () => {
       `expected product_changed=true for bin/gsd, got: ${JSON.stringify(result)}`);
     assert.strictEqual(result.full_matrix, true);
     assert.ok(result.targeted_tests.includes('tests/install.test.cjs'));
-    assert.ok(result.targeted_tests.includes('tests/release-tarball-smoke.install.test.cjs'));
+    // release-tarball-smoke.install.test.cjs is intentionally EXCLUDED from the
+    // scoped/targeted lane (SCOPED_LANE_EXCLUDE in ci-test-scope.cjs): it is a
+    // 3–6 min npm-pack + global-install integration test that runs via its own
+    // install-smoke.yml workflow, not here — running it in the scoped lane too is
+    // redundant and overran the per-chunk Windows timeout (epic #1969).
+    assert.ok(!result.targeted_tests.includes('tests/release-tarball-smoke.install.test.cjs'),
+      `release-tarball-smoke.install.test.cjs must not be in the scoped targeted lane; got: ${JSON.stringify(result.targeted_tests)}`);
   });
 
   test('missing required CLI values fail with usage', () => {
-    const r = spawnSync(process.execPath, [SCRIPT, '--files'], {
-      cwd: ROOT,
-      encoding: 'utf8',
-    });
-    assert.notStrictEqual(r.status, 0);
-    // allow-test-rule: CLI usage failure text is user-facing contract for this parser guard.
+    const r = runNode([SCRIPT, '--files'], { cwd: ROOT, timeoutMs: PROBE_TIMEOUT_MS });
+    assert.notStrictEqual(r.exitCode, 0);
+    // allow-test-rule: pending-migration-to-typed-ir [#3090]
+    // Regex-matches the CLI's human-readable stderr formatter (usage banner +
+    // arg-parser Error#message) — CONTRIBUTING's own BAD example verbatim.
+    // scripts/ci-test-scope.cjs has no --json / frozen-reason-enum error mode
+    // yet; adding one is a production change out of scope here. Tracked under #3090.
     assert.match(r.stderr, /--files requires a value/);
-    // allow-test-rule: CLI usage banner presence is a user-facing contract.
     assert.match(r.stderr, /Usage:/);
   });
 
@@ -205,7 +210,6 @@ describe('ci-test-scope.cjs', () => {
     // A plain source file that matches no RULES entry but is under gsd-core/ (code path)
     const result = scopeFor(['gsd-core/src/some-util.js']);
     assert.strictEqual(result.code_changed, true);
-    // allow-test-rule: the unit-fallback contract is the exact subject of bug #408.
     assert.deepStrictEqual(result.targeted_tests, ['unit'],
       'targeted_tests must be [\'unit\'] when code changed but no rule matched');
   });
@@ -218,11 +222,7 @@ describe('ci-test-scope.cjs', () => {
     // GitHub's PR semantics) must see ONLY the docs change.
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-scope-837-'));
     try {
-      const git = (...a) => {
-        const r = spawnSync('git', a, { cwd: tmp, encoding: 'utf8' });
-        assert.strictEqual(r.status, 0, `git ${a.join(' ')} failed: ${r.stderr}`);
-        return r.stdout.trim();
-      };
+      const git = (...a) => gitOrThrow(a, { cwd: tmp }).trim();
       git('init', '-q');
       git('config', 'user.email', 'test@example.com');
       git('config', 'user.name', 'Test');
@@ -251,11 +251,8 @@ describe('ci-test-scope.cjs', () => {
       git('commit', '-qm', 'chore: bump version on next');
       const base = git('rev-parse', 'HEAD');
 
-      const r = spawnSync(process.execPath, [SCRIPT, '--base', base, '--head', head], {
-        cwd: tmp,
-        encoding: 'utf8',
-      });
-      assert.strictEqual(r.status, 0, `script failed: stderr=${r.stderr}\nstdout=${r.stdout}`);
+      const r = runNode([SCRIPT, '--base', base, '--head', head], { cwd: tmp, timeoutMs: PROBE_TIMEOUT_MS });
+      assert.strictEqual(r.exitCode, 0, `script failed: stderr=${r.stderr}\nstdout=${r.stdout}`);
       const result = JSON.parse(r.stdout);
 
       assert.deepStrictEqual(
@@ -279,18 +276,36 @@ describe('ci-test-scope.cjs', () => {
   });
 });
 
-describe('ci-test-scope superset invariant (#494)', () => {
-  // Facet A: any tests/** change → full_matrix === true
-  test('A1: a specific changed test file forces full_matrix', () => {
-    const result = scopeFor(['tests/bug-1974-context-exhaustion-record.test.cjs']);
-    assert.strictEqual(result.full_matrix, true,
-      `expected full_matrix=true for tests/** change, got: ${JSON.stringify(result)}`);
+describe('ci-test-scope superset invariant (#494, narrowed)', () => {
+  // Facet A (narrowed): a changed test file no longer triggers the full
+  // parity matrix — instead it must ALWAYS run on the scoped windows lane,
+  // so OS-specific breakage in the changed test (the #482 class) is still
+  // exercised pre-merge. Ubuntu 22/24 coverage comes via targeted_tests.
+  test('A1: a changed test file joins the windows scoped lane without full_matrix', () => {
+    const result = scopeFor(['tests/perf-317-context-monitor-fs.test.cjs']);
+    assert.strictEqual(result.full_matrix, false,
+      `expected full_matrix=false for a tests/**-only change, got: ${JSON.stringify(result)}`);
+    assert.ok(result.targeted_tests.includes('tests/perf-317-context-monitor-fs.test.cjs'),
+      `expected the changed test in targeted_tests, got: ${JSON.stringify(result.targeted_tests)}`);
+    assert.ok(result.windows_tests.includes('tests/perf-317-context-monitor-fs.test.cjs'),
+      `expected the changed test in windows_tests, got: ${JSON.stringify(result.windows_tests)}`);
   });
 
-  test('A2: any tests/** path forces full_matrix', () => {
+  test('A2: a changed test file with no windows hint still joins the windows lane', () => {
+    // commands.test.cjs matches none of the WINDOWS_HINTS substrings — the
+    // unconditional changed-test → windows lane rule must include it anyway.
+    const result = scopeFor(['tests/commands.test.cjs']);
+    assert.strictEqual(result.full_matrix, false);
+    assert.ok(result.windows_tests.includes('tests/commands.test.cjs'),
+      `expected hint-less changed test in windows_tests, got: ${JSON.stringify(result.windows_tests)}`);
+  });
+
+  test('A3: a deleted/nonexistent test path falls back to the unit token, no full_matrix', () => {
     const result = scopeFor(['tests/some-new.test.cjs']);
-    assert.strictEqual(result.full_matrix, true,
-      `expected full_matrix=true for tests/** change, got: ${JSON.stringify(result)}`);
+    assert.strictEqual(result.full_matrix, false);
+    // The nonexistent file is filtered by existingTests(); with nothing left,
+    // the #408 fallback applies so the targeted lane still runs something.
+    assert.deepStrictEqual(result.targeted_tests, ['unit']);
   });
 
   // Facet B: commands/**, agents/** → code_changed AND docs-parity selected
@@ -413,7 +428,7 @@ describe('test.yml changes job contract (#837)', () => {
   test('changes job checkout step sets fetch-depth: 0 (required for three-dot diff merge-base)', () => {
     const workflowPath = path.join(WORKFLOWS_DIR, 'test.yml');
     const text = fs.readFileSync(workflowPath, 'utf8');
-    const lines = text.split('\n');
+    const lines = text.split(/\r?\n/);
 
     // Locate the `changes:` job (two-space-indented top-level job key).
     const jobStart = lines.findIndex(l => /^ {2}changes:\s*$/.test(l));
@@ -436,6 +451,362 @@ describe('test.yml changes job contract (#837)', () => {
       'in ci-test-scope.cjs can resolve the merge-base locally (#837). ' +
       'Reducing fetch-depth breaks the three-dot diff and causes incorrect scope detection.',
     );
+  });
+});
+
+describe('test-full shard matrix parity (#1212)', () => {
+  // DEFECT.GENERATIVE-FIX: the sharded windows full-test lane has TWO surfaces
+  // that must agree — the `shard:` matrix array (how many parallel jobs run)
+  // and the `/N` denominator in `run-tests.cjs --suite unit --shard i/N` (how
+  // many slices the runner partitions the suite into). If they diverge (e.g.
+  // someone grows `shard: [1,2,3,4]` but leaves `--shard ${{ matrix.shard }}/3`),
+  // shards silently overlap and one shard errors out. This parity assertion
+  // fails the moment the two drift.
+  const yaml = require('js-yaml');
+
+  function loadTestFull() {
+    const text = fs.readFileSync(path.join(WORKFLOWS_DIR, 'test.yml'), 'utf8');
+    const doc = yaml.load(text);
+    return { text, job: doc.jobs['test-full'] };
+  }
+
+  test('distinct shard values are 1..N matching the --shard /N denominator, on every leg', () => {
+    const { job } = loadTestFull();
+    const include = job.strategy.matrix.include;
+    assert.ok(Array.isArray(include), 'test-full matrix must enumerate `include:` rows');
+    assert.ok(
+      include.every(r => Number.isInteger(r.shard)),
+      'every include row must carry an integer `shard:` key',
+    );
+
+    const distinctShards = [...new Set(include.map(r => r.shard))].sort((a, b) => a - b);
+    const n = distinctShards.length;
+
+    // Distinct shard values must be exactly 1..n (1-based, contiguous) so the
+    // runner's cost-balanced shard selection covers every file with no gaps/overlaps.
+    assert.deepStrictEqual(
+      distinctShards,
+      Array.from({ length: n }, (_, i) => i + 1),
+      `distinct shard values must be 1..${n} (1-based, contiguous), got ${JSON.stringify(distinctShards)}`,
+    );
+
+    // Every OS/node leg must appear once per shard (full cross-product) — no
+    // leg may silently skip a shard, which would drop a third of its coverage.
+    const legs = [...new Set(include.map(r => `${r.os}|${r['node-version']}`))];
+    for (const leg of legs) {
+      const [os, node] = leg.split('|');
+      const shardsForLeg = include
+        .filter(r => r.os === os && String(r['node-version']) === node)
+        .map(r => r.shard)
+        .sort((a, b) => a - b);
+      assert.deepStrictEqual(
+        shardsForLeg,
+        distinctShards,
+        `leg ${leg} must run all shards ${JSON.stringify(distinctShards)}, got ${JSON.stringify(shardsForLeg)}`,
+      );
+    }
+    // Full cross-product: every (leg, shard) pair is present exactly once, so
+    // the row count equals legs × shards with no duplicate/missing combination.
+    const pairKey = r => `${r.os}|${r['node-version']}|${r.shard}`;
+    assert.strictEqual(new Set(include.map(pairKey)).size, legs.length * n);
+    assert.strictEqual(include.length, legs.length * n);
+
+    // Find the `--shard ${{ matrix.shard }}/<N>` denominator in the unit step.
+    const unitStep = job.steps.find(
+      s => typeof s.run === 'string' && s.run.includes('run-tests.cjs') && s.run.includes('--shard'),
+    );
+    assert.ok(unitStep, 'test-full must have a step running run-tests.cjs --shard');
+    const m = /--shard\s+\$\{\{\s*matrix\.shard\s*\}\}\/(\d+)/.exec(unitStep.run);
+    assert.ok(m, `could not parse --shard i/N denominator from: ${unitStep.run}`);
+    const denominator = Number(m[1]);
+
+    assert.strictEqual(
+      denominator,
+      n,
+      `shard count (${n}) and --shard /N denominator (${denominator}) must match — ` +
+      `update both the per-row \`shard:\` values and the \`/N\` in the run command together.`,
+    );
+  });
+
+  // #2472: every job of a run must merge ONE base commit. Each job runs the
+  // rebase-check step independently, minutes apart across the matrix, so
+  // merging the moving branch ref lets jobs see different trees when the base
+  // advances mid-run. The sharded lane makes jobs agree on a PARTITION, and
+  // disagreement there places a file in two shards or none — silently, because
+  // each job stays internally consistent and CI stays green.
+  describe('#2472 base-commit pin', () => {
+    const { resolveBaseRefs } = require('../scripts/ci-rebase-check.cjs');
+    const SHA = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+
+    test('every rebase-check step pins CI_REBASE_BASE_SHA', () => {
+      const doc = yaml.load(fs.readFileSync(path.join(WORKFLOWS_DIR, 'test.yml'), 'utf8'));
+      const steps = Object.values(doc.jobs)
+        .flatMap(j => j.steps || [])
+        .filter(s => typeof s.run === 'string' && s.run.includes('ci-rebase-check.cjs'));
+      assert.ok(steps.length > 0, 'expected at least one rebase-check step');
+      for (const s of steps) {
+        assert.ok(
+          s.env && typeof s.env.CI_REBASE_BASE_SHA === 'string' && s.env.CI_REBASE_BASE_SHA.includes('base.sha'),
+          'each rebase-check step must pin CI_REBASE_BASE_SHA to the PR base sha; '
+          + 'an unpinned job can merge a different tree than its siblings',
+        );
+      }
+    });
+
+    test('a full 40-hex sha pins both fetch and merge to that commit', () => {
+      const r = resolveBaseRefs({ GITHUB_BASE_REF: 'next', CI_REBASE_BASE_SHA: SHA }, 'main');
+      assert.strictEqual(r.fetchRef, SHA);
+      assert.strictEqual(r.mergeRef, SHA, 'fetch and merge must target the same pinned commit');
+      assert.strictEqual(r.pinned, true);
+    });
+
+    test('no pin falls back to the branch ref (push / workflow_dispatch)', () => {
+      const r = resolveBaseRefs({ GITHUB_BASE_REF: 'next' }, 'main');
+      assert.strictEqual(r.fetchRef, 'next');
+      assert.strictEqual(r.mergeRef, 'origin/next');
+      assert.strictEqual(r.pinned, false);
+    });
+
+    // A non-sha value must never reach `git fetch` as a refspec.
+    for (const [label, value] of [
+      ['short sha', 'abc123'],
+      ['uppercase sha', 'A'.repeat(40)],
+      ['argument injection', 'next --upload-pack=evil'],
+      ['ref expression', 'next^{commit}'],
+      ['empty', ''],
+    ]) {
+      test(`rejects ${label} and falls back to the branch ref`, () => {
+        const r = resolveBaseRefs({ GITHUB_BASE_REF: 'next', CI_REBASE_BASE_SHA: value }, 'main');
+        assert.strictEqual(r.pinned, false, `"${value}" must not be accepted as a pin`);
+        assert.strictEqual(r.fetchRef, 'next');
+        assert.strictEqual(r.mergeRef, 'origin/next');
+      });
+    }
+  });
+
+  test('required-tests fan-in still needs test-full and keeps the protected name', () => {
+    // Hyrum's Law: branch protection requires a status check literally named
+    // "Required tests". Renaming it (or dropping test-full from its needs)
+    // would silently break the gate. Pin both.
+    const text = fs.readFileSync(path.join(WORKFLOWS_DIR, 'test.yml'), 'utf8');
+    const doc = yaml.load(text);
+    const fanIn = doc.jobs['required-tests'];
+    assert.ok(fanIn, 'required-tests job must exist');
+    assert.strictEqual(fanIn.name, 'Required tests', 'the branch-protection check name must stay "Required tests"');
+    assert.ok(
+      Array.isArray(fanIn.needs) && fanIn.needs.includes('test-full'),
+      'required-tests must `needs: test-full` so all shard legs aggregate into the gate',
+    );
+  });
+});
+
+describe('emitted-provenance selection (#1691 drift guard, retargeted by #2724)', () => {
+  // Regression: a src/*.cts-only edit recompiles bin/lib/*.cjs (changing installed
+  // hashes), but the scoped CI lane was not re-running the drift guard — causing
+  // emitted state to silently drift (#1691 milestone/roadmap cts change). Both the
+  // 'TS runtime sources' and 'installer and package layout' rules must select
+  // tests/emitted-provenance.test.cjs. Originally asserted against
+  // tests/golden-install-parity.test.cjs, deleted by #2724 (ADR-2719 Phase 4); the
+  // differential attribution check is the sole replacement, so this now asserts
+  // its selection directly instead of "travels with the golden".
+
+  test('src/*.cts change selects emitted-provenance (TS runtime sources rule)', () => {
+    const result = scopeFor(['src/milestone.cts']);
+    assert.strictEqual(result.code_changed, true,
+      `expected code_changed=true for src/ change, got: ${JSON.stringify(result)}`);
+    assert.ok(
+      result.targeted_tests.includes('tests/emitted-provenance.test.cjs'),
+      `expected emitted-provenance in targeted_tests for src/*.cts change, got: ${JSON.stringify(result.targeted_tests)}`,
+    );
+  });
+
+  test('bin/install.js change selects emitted-provenance (installer and package layout rule)', () => {
+    const result = scopeFor(['bin/install.js']);
+    assert.strictEqual(result.code_changed, true,
+      `expected code_changed=true for bin/ change, got: ${JSON.stringify(result)}`);
+    assert.ok(
+      result.targeted_tests.includes('tests/emitted-provenance.test.cjs'),
+      `expected emitted-provenance in targeted_tests for bin/install.js change, got: ${JSON.stringify(result.targeted_tests)}`,
+    );
+  });
+});
+
+describe('shipped install content (emitted-attribution drift guard, #2267, retargeted by #2724)', () => {
+  // #2266 regression: hooks/gsd-statusline.js changed installed output but no
+  // RULES entry selected the drift guard, so stale emitted state merged to `next`
+  // undetected. The installer emits hooks/*, commands/*, agents/*, skills/*,
+  // gsd-core/workflows/*, gsd-core/templates/*, gsd-core/references/*,
+  // gsd-core/bin/shared/*.json, and a handful of shipped scripts/* files — every
+  // one of those paths must additionally select the emitted gates AND the
+  // install-tree snapshot (union semantics: this rule ADDS to whatever
+  // content-specific rule already matched the path). Originally asserted the now-
+  // deleted tests/golden-install-parity.test.cjs (#2724, ADR-2719 Phase 4).
+  // One path per prefix the rule handles — every installed-source dir the
+  // installer emits. gsd-core/contexts/ is the regression for the review miss
+  // (a real shipped dir that the initial enumeration omitted).
+  const SHIPPED_PATHS = [
+    'hooks/gsd-statusline.js', // exact #2266 regression
+    'gsd-core/workflows/plan-phase.md',
+    'gsd-core/templates/config.json',
+    'gsd-core/references/ui-brand.md',
+    'gsd-core/contexts/dev.md', // regression: initially omitted from the rule
+    'agents/gsd-planner.md',
+    'commands/gsd/mempalace-capture.md',
+    'skills/gsd-explore/SKILL.md',
+    'gsd-core/bin/shared/model-catalog.json',
+    'scripts/changeset/lint.cjs',
+    'scripts/lib/cli-exit.cjs',
+    'scripts/fix-slash-commands.cjs',            // exact-match allowlist entry
+    'scripts/gen-capability-registry.cjs',       // exact-match allowlist entry
+    'scripts/gen-loop-host-contract.cjs',        // exact-match allowlist entry
+  ];
+
+  for (const file of SHIPPED_PATHS) {
+    test(`${file} selects emitted-provenance + golden-install-tree`, () => {
+      const result = scopeFor([file]);
+      assert.strictEqual(result.code_changed, true,
+        `expected code_changed=true for ${file}, got: ${JSON.stringify(result)}`);
+      assert.ok(
+        result.targeted_tests.includes('tests/emitted-provenance.test.cjs'),
+        `expected emitted-provenance in targeted_tests for ${file}, got: ${JSON.stringify(result.targeted_tests)}`,
+      );
+      assert.ok(
+        result.targeted_tests.includes('tests/golden-install-tree.test.cjs'),
+        `expected golden-install-tree in targeted_tests for ${file}, got: ${JSON.stringify(result.targeted_tests)}`,
+      );
+    });
+  }
+
+  test('docs/ change does NOT select emitted-provenance (negative case)', () => {
+    const result = scopeFor(['docs/usage.md']);
+    assert.strictEqual(result.code_changed, false,
+      `expected code_changed=false for docs-only change, got: ${JSON.stringify(result)}`);
+    assert.ok(
+      !result.targeted_tests.includes('tests/emitted-provenance.test.cjs'),
+      `docs-only change must NOT select emitted-provenance, got: ${JSON.stringify(result.targeted_tests)}`,
+    );
+  });
+
+  test('non-shipped scripts/ file does NOT select golden-install-tree (allowlist is exact)', () => {
+    // The rule allowlists only 3 named scripts + scripts/changeset|lib/. A
+    // sibling script that is code but NOT installed verbatim must NOT pull in
+    // the install-tree snapshot — proving this is not a blanket 'scripts/'
+    // prefix that would re-run the guard on every script edit. Assert on
+    // golden-install-TREE (the rule's dedicated test), not the emitted gates: many
+    // scripts/ paths legitimately select those via the installer rule's
+    // path.includes('install') substring.
+    const result = scopeFor(['scripts/build-hooks.js']);
+    assert.ok(
+      !result.targeted_tests.includes('tests/golden-install-tree.test.cjs'),
+      `non-shipped script must NOT select golden-install-tree, got: ${JSON.stringify(result.targeted_tests)}`,
+    );
+  });
+});
+
+describe('the two emitted gates always travel together (#2758, simplified by #2724)', () => {
+  // #2758: a shipped-content-only PR — the archetypal emitted ripple — must select
+  // BOTH tests/emitted-provenance.test.cjs and tests/emitted-attribution.test.cjs.
+  // Originally phrased as "gates travel with the golden" during the #2723 dual-run
+  // window; #2724 (ADR-2719 Phase 4) deleted tests/golden-install-parity.test.cjs,
+  // so there is no longer a third file for the gates to travel alongside — this
+  // now asserts the pairing directly, on the same rule table.
+  const { RULES } = require('../scripts/ci-test-scope.cjs');
+  const GATES = ['tests/emitted-provenance.test.cjs', 'tests/emitted-attribution.test.cjs'];
+
+  test('every RULES entry selecting one emitted gate selects both', () => {
+    const partial = RULES.filter(r => GATES.some(g => r.tests.includes(g)));
+    // Guards the guard: if this count ever drops to 0, the assertion below is
+    // vacuously true and would silently stop meaning anything.
+    assert.ok(
+      partial.length >= 3,
+      `expected at least 3 RULES entries selecting an emitted gate, found ${partial.length}: ` +
+      `${partial.map(r => r.name).join(', ')}`,
+    );
+    const offenders = partial.filter(r => !GATES.every(g => r.tests.includes(g)));
+    assert.deepStrictEqual(
+      offenders.map(r => r.name),
+      [],
+      `rule(s) select one emitted gate without the other: ${offenders.map(r => r.name).join(', ')}`,
+    );
+  });
+
+  test('a pure shipped-content path selects both emitted gates', () => {
+    // #2758 AC: "a pure shipped-content path (e.g. gsd-core/workflows/plan-phase.md)
+    // selects the differential." The archetypal emitted ripple.
+    const result = scopeFor(['gsd-core/workflows/plan-phase.md']);
+    assert.strictEqual(result.code_changed, true);
+    for (const g of GATES) {
+      assert.ok(
+        result.targeted_tests.includes(g),
+        `expected ${g} in targeted_tests for a shipped-content-only change, got: ${JSON.stringify(result.targeted_tests)}`,
+      );
+    }
+  });
+
+  test('a src/*.cts-only change selects both emitted gates (TS runtime sources rule)', () => {
+    const result = scopeFor(['src/milestone.cts']);
+    for (const g of GATES) {
+      assert.ok(
+        result.targeted_tests.includes(g),
+        `expected ${g} in targeted_tests for src/ change, got: ${JSON.stringify(result.targeted_tests)}`,
+      );
+    }
+  });
+
+  test('bin/install.js selects both emitted gates (installer and package layout rule)', () => {
+    const result = scopeFor(['bin/install.js']);
+    for (const g of GATES) {
+      assert.ok(
+        result.targeted_tests.includes(g),
+        `expected ${g} in targeted_tests for bin/install.js, got: ${JSON.stringify(result.targeted_tests)}`,
+      );
+    }
+  });
+
+  test('docs-only change still does NOT select the emitted gates (negative case)', () => {
+    const result = scopeFor(['docs/usage.md']);
+    for (const g of GATES) {
+      assert.ok(!result.targeted_tests.includes(g), `docs-only must NOT select ${g}, got: ${JSON.stringify(result.targeted_tests)}`);
+    }
+  });
+});
+
+describe('RULES totality guard: no rule names a test file absent from disk (#2758)', () => {
+  // #2758: Phase 4 (#2724) deletes tests/golden-install-parity.test.cjs. Without an
+  // independent guard, a rule still naming it would produce no signal at all —
+  // existingTests() (scripts/ci-test-scope.cjs) silently filters missing files out
+  // of targeted_tests, so the gate simply stops being selected while CI stays
+  // green. This exists independently of the fix above: it catches ANY rule naming
+  // ANY absent file, not only the two gate filenames this issue is about.
+  const { RULES, missingRuleTestFiles } = require('../scripts/ci-test-scope.cjs');
+
+  test('no RULES entry today references a test file absent from disk', () => {
+    assert.deepStrictEqual(
+      missingRuleTestFiles(RULES), [],
+      'RULES reference test file(s) that do not exist — see missingRuleTestFiles() in scripts/ci-test-scope.cjs',
+    );
+  });
+
+  test('the guard mechanism itself catches a phantom entry (hostile input)', () => {
+    // Runs the REAL checker function used by the module-load assertion in
+    // scripts/ci-test-scope.cjs — not a hand-copied reimplementation of it — against
+    // a synthetic rule table, proving the mechanism would have caught exactly the
+    // Phase-4 shape: a rule naming a file that no longer exists on disk.
+    const phantomFile = 'tests/does-not-exist-2758.test.cjs';
+    assert.ok(
+      !fs.existsSync(path.join(ROOT, phantomFile)),
+      'precondition: the phantom file must genuinely not exist for this test to discriminate',
+    );
+    const synthetic = [
+      { name: 'real', tests: ['tests/commands.test.cjs'] },
+      { name: 'phantom', tests: [phantomFile, 'tests/commands.test.cjs'] },
+    ];
+    assert.deepStrictEqual(missingRuleTestFiles(synthetic), [phantomFile]);
+  });
+
+  test('an all-real synthetic table reports nothing missing (negative case)', () => {
+    const synthetic = [{ name: 'real', tests: ['tests/commands.test.cjs', 'tests/ci-test-scope.test.cjs'] }];
+    assert.deepStrictEqual(missingRuleTestFiles(synthetic), []);
   });
 });
 
@@ -493,3 +864,268 @@ describe('code_changed=false implies clean output invariant', () => {
     }
   });
 });
+
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/bug-641-files-from-suite-token.test.cjs — consolidation epic #1969 (B6 #1975)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:bug-641-files-from-suite-token (consolidation epic #1969 B6 #1975)", () => {
+// Regression test for issue #641:
+// `--files-from` with a bare suite token (e.g. "unit") crashes with
+// "requested test file(s) not found: unit" instead of expanding the token
+// to the matching suite's files.
+//
+// The bug: selectExplicitFiles() checked `available.has('unit')` against the
+// set of *.test.cjs filenames. 'unit' is not a filename, so it landed in
+// `missing` and caused exit 2. The fix teaches selectExplicitFiles() to
+// delegate bare SUITES members to selectFiles() before the path-existence
+// check.
+'use strict';
+
+const { describe, test, beforeEach, afterEach } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+
+const { createTempDir, cleanup } = require('./helpers.cjs');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { toLegacyResult } = require('./helpers/git-fixture.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+
+const HARNESS = path.join(__dirname, '..', 'scripts', 'run-tests.cjs');
+
+const PASS_BODY = `'use strict';
+const { test } = require('node:test');
+test('noop', () => {});
+`;
+
+function seed(dir, names) {
+  for (const name of names) {
+    fs.writeFileSync(path.join(dir, name), PASS_BODY, 'utf8');
+  }
+}
+
+function runHarness(testDir, args = [], extraEnv = {}) {
+  const env = { ...process.env, GSD_TEST_DIR: testDir, ...extraEnv };
+  delete env.NODE_TEST_CONTEXT;
+  const result = runNode([HARNESS, ...args], {
+    cwd: path.join(__dirname, '..'),
+    env,
+    timeoutMs: PROBE_TIMEOUT_MS,
+  });
+  return toLegacyResult(result);
+}
+
+describe('bug #641 — --files-from with bare suite token', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempDir('gsd-641-suite-token-');
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('--files-from with bare "unit" token expands to unit suite, does not exit 2', () => {
+    // Seed a mix: one unit file, one security file.
+    seed(tmpDir, ['a.test.cjs', 'b.security.test.cjs']);
+    const listPath = path.join(tmpDir, 'ci-selected-tests.txt');
+    fs.writeFileSync(listPath, 'unit\n', 'utf8');
+
+    const r = runHarness(tmpDir, ['--files-from', listPath]);
+
+    // Must NOT exit 2 with the "not found" error.
+    assert.notStrictEqual(
+      r.status,
+      2,
+      `Expected exit 0 or 1, got 2.\nstderr: ${r.stderr}\nstdout: ${r.stdout}`,
+    );
+    assert.doesNotMatch(
+      r.stderr,
+      /requested test file\(s\) not found: unit/,
+      `Must not emit "not found: unit".\nstderr: ${r.stderr}`,
+    );
+    // The unit suite file (a.test.cjs) must appear in the run.
+    assert.ok(
+      r.stderr.includes('a.test.cjs'),
+      `Expected a.test.cjs (unit suite) to be selected.\nstderr: ${r.stderr}`,
+    );
+    // The security suite file must NOT be included (unit token = unit only).
+    assert.ok(
+      !r.stderr.includes('b.security.test.cjs'),
+      `Expected b.security.test.cjs (security suite) to be excluded.\nstderr: ${r.stderr}`,
+    );
+  });
+
+  test('--files-from with bare "unit" token exits 0 (tests run successfully)', () => {
+    seed(tmpDir, ['a.test.cjs']);
+    const listPath = path.join(tmpDir, 'ci-selected-tests.txt');
+    fs.writeFileSync(listPath, 'unit\n', 'utf8');
+
+    const r = runHarness(tmpDir, ['--files-from', listPath]);
+
+    assert.strictEqual(
+      r.status,
+      0,
+      `Expected exit 0.\nstderr: ${r.stderr}\nstdout: ${r.stdout}`,
+    );
+  });
+
+  test('--files with bare "unit" token also resolves correctly', () => {
+    seed(tmpDir, ['a.test.cjs', 'b.security.test.cjs']);
+    const r = runHarness(tmpDir, ['--files', 'unit']);
+
+    assert.notStrictEqual(
+      r.status,
+      2,
+      `Expected exit 0, got 2.\nstderr: ${r.stderr}`,
+    );
+    assert.doesNotMatch(r.stderr, /requested test file\(s\) not found: unit/);
+    assert.ok(r.stderr.includes('a.test.cjs'), `a.test.cjs must be selected.\nstderr: ${r.stderr}`);
+    assert.ok(!r.stderr.includes('b.security.test.cjs'), `security file must not be selected.\nstderr: ${r.stderr}`);
+  });
+
+  test('mixed: suite token "unit" alongside an explicit file resolves both', () => {
+    seed(tmpDir, ['a.test.cjs', 'b.test.cjs', 'c.security.test.cjs']);
+    const listPath = path.join(tmpDir, 'ci-selected-tests.txt');
+    // 'unit' expands to [a.test.cjs, b.test.cjs]; b.test.cjs is explicit too.
+    fs.writeFileSync(listPath, 'unit\nb.test.cjs\n', 'utf8');
+
+    const r = runHarness(tmpDir, ['--files-from', listPath]);
+
+    assert.strictEqual(r.status, 0, `stderr: ${r.stderr}`);
+    // Both unit files present; security not.
+    assert.ok(r.stderr.includes('a.test.cjs'), `a.test.cjs must be selected.\nstderr: ${r.stderr}`);
+    assert.ok(r.stderr.includes('b.test.cjs'), `b.test.cjs must be selected.\nstderr: ${r.stderr}`);
+    assert.ok(!r.stderr.includes('c.security.test.cjs'), `c.security.test.cjs must be excluded.\nstderr: ${r.stderr}`);
+  });
+
+  test('#408 fallback: ci-test-scope "unit" sentinel does not crash run-tests', () => {
+    // This test simulates the end-to-end #408 fallback path:
+    // ci-test-scope produces "unit" (the fallback sentinel for "code changed
+    // but no rule matched any test"), ci-prepare-test-scope writes it verbatim,
+    // and run-tests must resolve it rather than crash.
+    seed(tmpDir, ['a.test.cjs', 'b.security.test.cjs']);
+    // Simulate what ci-prepare-test-scope writes: "unit\n"
+    const listPath = path.join(tmpDir, '.ci-selected-tests.txt');
+    fs.writeFileSync(listPath, 'unit\n', 'utf8');
+
+    const r = runHarness(tmpDir, ['--files-from', listPath]);
+
+    assert.strictEqual(
+      r.status,
+      0,
+      `#408 fallback: expected exit 0 but got ${r.status}.\nstderr: ${r.stderr}`,
+    );
+    assert.doesNotMatch(r.stderr, /not found: unit/);
+    assert.ok(r.stderr.includes('a.test.cjs'), `unit test must run.\nstderr: ${r.stderr}`);
+  });
+});
+
+// Regression test for issue #1329:
+// ci-prepare-test-scope's empty-detection FALLBACK hardcoded an explicit file
+// list that included tests/core.test.cjs — a file deleted in #1291. Every
+// scoped lane (scope=targeted|windows) that hit the fallback wrote the stale
+// path into .ci-selected-tests.txt and crashed run-tests with
+// "requested test file(s) not found: core.test.cjs". The fix: existence-filter
+// the fallback at write time, fall back to the 'unit' suite sentinel when
+// nothing survives, and guard the FALLBACK constant against disk reality.
+describe('bug #1329 — ci-prepare-test-scope fallback never emits a deleted file', () => {
+  const { FALLBACK, FALLBACK_SENTINEL, SUITE_SENTINELS, resolveSelection } =
+    require('../scripts/ci-prepare-test-scope.cjs');
+  const REPO_ROOT = path.join(__dirname, '..');
+
+  // Generative parity guard (DEFECT.GENERATIVE-FIX): the FALLBACK constant and
+  // the test files on disk are two surfaces that must stay in sync. This fails
+  // the instant a refactor deletes a file still named in FALLBACK — which is
+  // precisely what #1291 did and CI did not catch.
+  test('every FALLBACK entry resolves on disk or is a known suite sentinel', () => {
+    for (const entry of FALLBACK) {
+      const isSentinel = SUITE_SENTINELS.includes(entry);
+      const exists = fs.existsSync(path.join(REPO_ROOT, entry));
+      assert.ok(
+        isSentinel || exists,
+        `FALLBACK entry "${entry}" is neither an existing test file nor a suite sentinel — stale reference will crash scoped CI lanes (see #1329).`,
+      );
+    }
+  });
+
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = createTempDir('gsd-1329-fallback-');
+    fs.mkdirSync(path.join(tmpDir, 'tests'), { recursive: true });
+  });
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('empty detection drops a non-existent fallback entry instead of emitting it', () => {
+    // Create all but the last FALLBACK file under a controlled root, simulating
+    // a since-deleted test (the #1329 mechanism), independent of which files
+    // FALLBACK happens to name today.
+    const present = FALLBACK.slice(0, -1);
+    const absent = FALLBACK[FALLBACK.length - 1];
+    for (const f of present) {
+      fs.writeFileSync(path.join(tmpDir, f), PASS_BODY, 'utf8');
+    }
+
+    const lines = resolveSelection({ scope: 'targeted', targeted: '', windows: '', root: tmpDir });
+
+    assert.ok(!lines.includes(absent), `absent file "${absent}" must be filtered out, got: ${lines.join(', ')}`);
+    for (const f of present) {
+      assert.ok(lines.includes(f), `present file "${f}" must survive, got: ${lines.join(', ')}`);
+    }
+  });
+
+  test('empty detection with no surviving fallback files falls back to the unit sentinel', () => {
+    // tmpDir/tests exists but contains none of the FALLBACK files.
+    const lines = resolveSelection({ scope: 'windows', targeted: '', windows: '', root: tmpDir });
+    assert.deepStrictEqual(lines, [FALLBACK_SENTINEL]);
+  });
+
+  test('detected list passes through verbatim — files and suite sentinels preserved, not existence-filtered', () => {
+    // The detected list is already filtered by affected-tests-lib and may carry
+    // a suite sentinel; ci-prepare-test-scope must not touch it.
+    const lines = resolveSelection({
+      scope: 'targeted',
+      targeted: 'tests/does-not-exist.test.cjs unit',
+      windows: '',
+      root: tmpDir,
+    });
+    assert.deepStrictEqual(lines, ['tests/does-not-exist.test.cjs', 'unit']);
+  });
+
+  test('end-to-end: the real script writes a fallback list whose every entry resolves', () => {
+    // Run the real script (subprocess) with empty detection inside an isolated
+    // root that holds the FALLBACK files, then verify every line it wrote into
+    // .ci-selected-tests.txt resolves — the exact scoped-lane path that crashed
+    // in #1329. Hermetic: the temp root is removed by afterEach's cleanup().
+    for (const f of FALLBACK) {
+      fs.writeFileSync(path.join(tmpDir, f), PASS_BODY, 'utf8');
+    }
+    const prep = runNode(
+      [path.join(REPO_ROOT, 'scripts', 'ci-prepare-test-scope.cjs')],
+      {
+        cwd: tmpDir,
+        env: { ...process.env, TEST_SCOPE: 'targeted', TARGETED_TESTS: '', WINDOWS_TESTS: '' },
+        timeoutMs: PROBE_TIMEOUT_MS,
+      },
+    );
+    assert.strictEqual(prep.exitCode, 0, `prepare step failed: ${prep.stderr}`);
+
+    const selected = fs.readFileSync(path.join(tmpDir, '.ci-selected-tests.txt'), 'utf8');
+    for (const line of selected.split(/\r?\n/).filter(Boolean)) {
+      const isSentinel = SUITE_SENTINELS.includes(line);
+      assert.ok(
+        isSentinel || fs.existsSync(path.join(tmpDir, line)),
+        `selected entry "${line}" does not resolve — would crash run-tests (#1329)`,
+      );
+    }
+    assert.doesNotMatch(selected, /core\.test\.cjs/, 'deleted core.test.cjs must never be selected');
+  });
+});
+  });
+}

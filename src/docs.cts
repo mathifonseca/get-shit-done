@@ -13,8 +13,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-import core = require('./core.cjs');
-const { output, loadConfig, resolveModelInternal, pathExistsInternal, toPosixPath, checkAgentsInstalled } = core;
+import io = require('./io.cjs');
+const { output } = io;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import configLoader = require('./config-loader.cjs');
+const { loadConfig } = configLoader;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import modelResolver = require('./model-resolver.cjs');
+const { resolveModelInternal } = modelResolver;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import coreUtils = require('./core-utils.cjs');
+const { pathExistsInternal, toPosixPath } = coreUtils;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import agentInstallCheck = require('./agent-install-check.cjs');
+const { checkAgentsInstalled } = agentInstallCheck;
+import { resolveRuntime } from './runtime-slash.cjs';
 import { platformReadSync } from './shell-command-projection.cjs';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -270,10 +283,20 @@ function cmdDocsInit(cwd: string, raw: boolean): void {
   };
   // Inject project_root and agent installation status (mirrors withProjectRoot in init.cjs)
   result['project_root'] = cwd;
-  const agentStatus = checkAgentsInstalled();
+  const agentStatus = checkAgentsInstalled(resolveRuntime(cwd), cwd);
   result['agents_installed'] = agentStatus.agents_installed;
   result['missing_agents'] = agentStatus.missing_agents;
+  // #2402: withProjectRoot injects response_language when set; cmdDocsInit predates
+  // that helper and never picked it up, so docs-update's orchestrator-owned prompts
+  // silently stayed English even with response_language configured.
+  if (config.response_language) {
+    result['response_language'] = config.response_language;
+  }
   output(result, raw, undefined);
 }
 
-export = { cmdDocsInit };
+// #2994: `detectMonorepoWorkspaces` is additionally exported so
+// `cmdInitDocsUpdate` (src/init.cts) can reuse the SAME detector that backs
+// this command's own `monorepo_workspaces` field, rather than a second,
+// divergence-prone monorepo-glob scan (DEFECT.GENERATIVE-FIX dual surface).
+export = { cmdDocsInit, detectMonorepoWorkspaces };

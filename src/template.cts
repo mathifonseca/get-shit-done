@@ -8,9 +8,19 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { realClock } from './clock.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-import core = require('./core.cjs');
-const { normalizePhaseName, findPhaseInternal, generateSlugInternal, toPosixPath, output, error } = core;
+import ioMod = require('./io.cjs');
+const { output, error } = ioMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import coreUtilsMod = require('./core-utils.cjs');
+const { toPosixPath, generateSlugInternal } = coreUtilsMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseIdMod = require('./phase-id.cjs');
+const { normalizePhaseName } = phaseIdMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseLocatorMod = require('./phase-locator.cjs');
+const { findPhaseInternal } = phaseLocatorMod;
 import { platformWriteSync } from './shell-command-projection.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
@@ -101,7 +111,7 @@ function cmdTemplateFill(cwd: string, templateType: string | null | undefined, o
   if (!phaseInfo || !phaseInfo.found) { output({ error: 'Phase not found', phase: options.phase }, raw, undefined); return; }
 
   const padded = normalizePhaseName(options.phase);
-  const today = new Date().toISOString().split('T')[0];
+  const today = realClock.localToday();
   const phaseName = options.name || phaseInfo.phase_name || 'Unnamed';
   const phaseSlug = phaseInfo.phase_slug || generateSlugInternal(phaseName);
   const phaseId = `${padded}-${phaseSlug}`;

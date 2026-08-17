@@ -1,6 +1,6 @@
 # CONTEXT.md 结构参考
 
-每个阶段的 `CONTEXT.md` 是 GSD Core 用于保存 `/gsd:discuss-phase` 阶段所收集的实现决策的载体。它是研究代理和规划代理的主要上游输入。本页面记录其结构。参见[文档索引](../README.md)。
+每个阶段的 `CONTEXT.md` 是 GSD Core 用于保存 `/gsd-discuss-phase` 阶段所收集的实现决策的载体。它是研究代理和规划代理的主要上游输入。本页面记录其结构。参见[文档索引](../README.md)。
 
 ---
 
@@ -14,7 +14,7 @@
 
 示例：`.planning/phases/03-post-feed/03-CONTEXT.md`。
 
-该文件由 `get-shit-done/workflows/discuss-phase.md` 中的 `write_context` 步骤生成（或通过 PRD/ADR 摄入快速路径生成）。在正常操作中，该文件不会被手动编辑——讨论阶段工作流负责写入，下游代理将其作为封闭的可信来源读取。
+该文件由 `gsd-core/workflows/discuss-phase.md` 中的 `write_context` 步骤生成（或通过 PRD/ADR 摄入快速路径生成）。在正常操作中，该文件不会被手动编辑——讨论阶段工作流负责写入，下游代理将其作为封闭的可信来源读取。
 
 ---
 
@@ -107,7 +107,7 @@ No external specs — requirements fully captured in decisions above
 
 ## SPEC.md 集成
 
-当 `/gsd:spec-phase` 在讨论阶段之前运行时，`check_spec` 步骤会找到 `*-SPEC.md` 文件并激活 `<spec_lock>`：
+当 `/gsd-spec-phase` 在讨论阶段之前运行时，`check_spec` 步骤会找到 `*-SPEC.md` 文件并激活 `<spec_lock>`：
 
 ```markdown
 <spec_lock>

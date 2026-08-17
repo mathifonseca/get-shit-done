@@ -51,6 +51,25 @@ Inicializa um novo projeto com coleta aprofundada de contexto.
 
 ---
 
+### `/gsd-onboard`
+
+Guia o onboarding inicial de um código existente no GSD. O comando verifica o estado do repositório, encaminha com segurança por mapeamento da base de código, ingestão opcional de documentos, inicialização do projeto e cria um onboarding summary quando o planejamento existe.
+
+| Flag | Descrição |
+|------|-----------|
+| `--fast` | Prefere o handoff leve `/gsd-map-codebase --fast`; um mapa completo ainda é necessário antes de `/gsd-new-project` |
+| `--text` | Usa gates numerados em texto puro em vez de menus TUI |
+
+**Pré-requisitos:** Repositório existente ou documentos de planejamento. Para projetos greenfield vazios, use `/gsd-new-project`.
+**Produz:** `.planning/codebase/` via map-codebase, `.planning/` via new-project ou ingest-docs, e `.planning/onboarding/SUMMARY.md` após a configuração do projeto.
+
+```bash
+/gsd-onboard           # Onboarding brownfield guiado
+/gsd-onboard --fast    # Usa primeiro o mapa leve e depois completa o mapa antes do setup do projeto
+```
+
+---
+
 ### `/gsd-workspace`
 
 Gerencia workspaces do GSD — cria, lista ou remove ambientes de workspace isolados com cópias de repositório e diretórios `.planning/` independentes.
@@ -152,7 +171,6 @@ Pesquisa, planeja e verifica uma fase.
 | `--ingest <path-or-glob>` | Usa arquivo(s) ADR em vez de discuss-phase para síntese de contexto |
 | `--ingest-format <auto\|nygard\|madr\|narrative>` | Substituição opcional do formato do parser ADR para `--ingest` |
 | `--reviews` | Replaneja com feedback de revisão cross-AI do REVIEWS.md |
-| `--validate` | Executa validação de estado antes de iniciar o planejamento |
 | `--bounce` | Executa validação de bounce externo após o planejamento (usa `workflow.plan_bounce_script`) |
 | `--skip-bounce` | Ignora o bounce do plano mesmo se habilitado na configuração |
 | `--mvp` | Modo MVP vertical — o planejador organiza tarefas como fatias de funcionalidade (UI→API→DB) em vez de camadas horizontais. Na Fase 1 de um novo projeto sem resumos de fases anteriores, também emite `SKELETON.md` (Walking Skeleton). Pode ser persistido em uma fase via `**Mode:** mvp` no ROADMAP.md, o que aplica `--mvp` automaticamente sem a flag. |
@@ -167,7 +185,7 @@ Pesquisa, planeja e verifica uma fase.
 - Com `--view`: imprime o RESEARCH.md existente no stdout, sem criar agente. Apresenta erro se RESEARCH.md estiver ausente.
 
 **Portão de Legitimidade de Pacotes (v1.42.1):**
-Quando o pesquisador recomenda pacotes externos, executa `slopcheck install <pkg> --json` em cada um e escreve uma tabela `## Package Legitimacy Audit` no RESEARCH.md com os campos Registry, Age, Downloads, Source Repo e veredicto do slopcheck. Veredictos:
+Quando o pesquisador recomenda pacotes externos, executa `gsd-tools query package-legitimacy check --ecosystem <npm|pypi|crates> <pkg>` em cada um e escreve uma tabela `## Package Legitimacy Audit` no RESEARCH.md com os campos Registry, Age, Downloads, Source Repo e veredicto de legitimidade. Veredictos:
 
 - `[SLOP]` — pacote removido do RESEARCH.md completamente; nunca chega ao planejador
 - `[SUS]` — pacote sinalizado; o planejador insere `checkpoint:human-verify` antes da tarefa de instalação
@@ -181,7 +199,6 @@ Consulte o [Portão de Legitimidade de Pacotes no Guia do Usuário](USER-GUIDE.m
 /gsd-plan-phase 1                              # Pesquisa + plano + verificação da fase 1
 /gsd-plan-phase 3 --skip-research              # Planejar sem pesquisa (domínio familiar)
 /gsd-plan-phase --auto                         # Planejamento não interativo
-/gsd-plan-phase 2 --validate                   # Valida estado antes do planejamento
 /gsd-plan-phase 1 --bounce                     # Plano + validação de bounce externo
 /gsd-plan-phase 2 --ingest docs/adr/0010.md   # Caminho expresso via ADR para síntese de contexto
 /gsd-plan-phase 2 --ingest 'docs/adr/00*.md' --ingest-format auto
@@ -201,7 +218,7 @@ Loop de convergência de planos cross-AI — replaneja com feedback de revisão 
 | Argumento / Flag | Obrigatório | Descrição |
 |------------------|-------------|-----------|
 | `N` | **Sim** | Número da fase a planejar e revisar |
-| `--codex` / `--gemini` / `--claude` / `--opencode` | Não | Seleção de revisor único |
+| Flags de revisor | Não | Repassa todas as flags de lane de revisor: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
 | `--all` | Não | Executa todos os revisores configurados em paralelo |
 | `--max-cycles N` | Não | Substitui o limite de ciclos (padrão 3) |
 
@@ -239,7 +256,6 @@ Executa todos os planos de uma fase com paralelização baseada em waves, ou exe
 |-----------|-------------|-----------|
 | `N` | **Sim** | Número da fase a executar |
 | `--wave N` | Não | Executa somente a Wave `N` da fase |
-| `--validate` | Não | Executa validação de estado antes de iniciar a execução |
 | `--cross-ai` | Não | Delega a execução para uma CLI de IA externa (usa `workflow.cross_ai_command`) |
 | `--no-cross-ai` | Não | Força execução local mesmo se cross-AI estiver habilitado na configuração |
 
@@ -251,7 +267,6 @@ Executa todos os planos de uma fase com paralelização baseada em waves, ou exe
 ```bash
 /gsd-execute-phase 1                # Executa a fase 1
 /gsd-execute-phase 1 --wave 2       # Executa somente a Wave 2
-/gsd-execute-phase 1 --validate     # Valida estado antes da execução
 /gsd-execute-phase 2 --cross-ai     # Delega a fase 2 para CLI de IA externa
 ```
 
@@ -571,7 +586,7 @@ Configure flags por etapa em `.planning/config.json` sob `manager.flags`. Essas 
     "flags": {
       "discuss": "--auto",
       "plan": "--skip-research",
-      "execute": "--validate"
+      "execute": "--cross-ai"
     }
   }
 }
@@ -591,7 +606,7 @@ Exibe os comandos GSD no nível solicitado. O padrão cabe em uma tela; `--full`
 /gsd-help --brief <topic>           # Consulta resumida com escopo — assinatura + resumo em uma linha
 ```
 
-Consulte `get-shit-done/workflows/help/modes/topic.md` para a tabela completa de aliases. Tópicos desconhecidos exibem a lista reconhecida.
+Consulte `gsd-core/workflows/help/modes/topic.md` para a tabela completa de aliases. Tópicos desconhecidos exibem a lista reconhecida.
 
 ---
 
@@ -1232,6 +1247,7 @@ Revisão por pares cross-AI de planos de fase a partir de CLIs de IA externas.
 | `--qwen` | Inclui revisão pelo Qwen Code (modelos Alibaba Qwen) |
 | `--cursor` | Inclui revisão pelo agente Cursor |
 | `--agy` / `--antigravity` | Inclui revisão pelo Antigravity CLI (gratuito com credenciais Google) |
+| `--kimi-code` | Inclui revisão pelo Kimi Code CLI (Moonshot AI) |
 | `--ollama` | Inclui revisão pelo servidor Ollama |
 | `--lm-studio` | Inclui revisão pelo servidor LM Studio |
 | `--llama-cpp` | Inclui revisão pelo servidor llama.cpp |
@@ -1514,7 +1530,7 @@ Um portão de lint impõe o orçamento:
 npm run lint:descriptions
 ```
 
-A verificação também é executada como parte de `npm test` via `tests/enh-2789-description-budget.test.cjs`.
+A verificação também é executada como parte de `npm test` via `tests/skill-frontmatter-contract.test.cjs`.
 
 ---
 

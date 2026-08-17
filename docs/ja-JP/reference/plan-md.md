@@ -14,7 +14,7 @@
 
 例: `.planning/phases/03-post-feed/03-02-PLAN.md`（フェーズ3、プラン2）。
 
-プランは `gsd-planner` エージェント（`/gsd:plan-phase` によって起動）が生成し、`execute-phase` が使用します。通常、フェーズには1〜4つのプランが含まれます。フェーズ内のプランは実行ウェーブに割り当てられ、独立した作業が並行して実行されます。
+プランは `gsd-planner` エージェント（`/gsd-plan-phase` によって起動）が生成し、`execute-phase` が使用します。通常、フェーズには1〜4つのプランが含まれます。フェーズ内のプランは実行ウェーブに割り当てられ、独立した作業が並行して実行されます。
 
 ---
 
@@ -122,8 +122,8 @@ Output: PostFeed and PostCard components wired to /api/feed.
 
 ```xml
 <execution_context>
-@~/.claude/get-shit-done/workflows/execute-plan.md
-@~/.claude/get-shit-done/templates/summary.md
+@~/.claude/gsd-core/workflows/execute-plan.md
+@~/.claude/gsd-core/templates/summary.md
 </execution_context>
 ```
 

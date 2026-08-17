@@ -12,11 +12,16 @@
  * Tests assert on the typed verdict, never on free text.
  */
 
+// #2988: the repo's integration/default branch — the base every PR targets.
+// Used as the local fallback when GITHUB_BASE_REF is unset (CI sets it).
+const DEFAULT_BASE = 'next';
+
 const LINT_REASON = Object.freeze({
   OK_FRAGMENT_PRESENT: 'ok_fragment_present',
   OK_OPT_OUT_LABEL: 'ok_opt_out_label',
   OK_NO_USER_FACING_CHANGES: 'ok_no_user_facing_changes',
   FAIL_MISSING_FRAGMENT: 'fail_missing_fragment',
+  FAIL_INVALID_FRAGMENT: 'fail_invalid_fragment',
 });
 
 const OPT_OUT_LABEL = 'no-changelog';
@@ -26,6 +31,7 @@ const OPT_OUT_LABEL = 'no-changelog';
 const USER_FACING_PREFIXES = [
   'bin/',
   'gsd-core/',
+  'src/',
   'agents/',
   'commands/',
   'hooks/',
@@ -47,7 +53,10 @@ function isFragment(file) {
   return /^\.changeset\/[^/]+\.md$/.test(file) && !file.endsWith('/README.md');
 }
 
-function evaluateLint({ changedFiles, labels }) {
+function evaluateLint({ changedFiles, labels, fragmentFailures = [] }) {
+  if (fragmentFailures.length > 0) {
+    return { ok: false, reason: LINT_REASON.FAIL_INVALID_FRAGMENT, failures: fragmentFailures };
+  }
   if (changedFiles.some(isFragment)) {
     return { ok: true, reason: LINT_REASON.OK_FRAGMENT_PRESENT };
   }
@@ -61,6 +70,7 @@ function evaluateLint({ changedFiles, labels }) {
 }
 
 const { ExitError, runMain } = require('../lib/cli-exit.cjs');
+const { parseFragment } = require('./parse.cjs');
 
 function main() {
   const fs = require('node:fs');
@@ -74,7 +84,10 @@ function main() {
       labels = (event.pull_request?.labels || []).map((l) => l.name);
     } catch { /* fall through */ }
   }
-  const base = process.env.GITHUB_BASE_REF || 'main';
+  // #2988: local fallback must match the repo's integration branch (`next`),
+  // not the release branch (`main`). CI sets GITHUB_BASE_REF explicitly; the
+  // fallback only fires locally, where `next` is the base every PR targets.
+  const base = process.env.GITHUB_BASE_REF || DEFAULT_BASE;
   let changedFiles = [];
   try {
     // Use execFileSync with an argv array — the base ref is interpolated
@@ -92,11 +105,42 @@ function main() {
     throw new ExitError(2, `could not compute diff: ${e.message}`);
   }
 
-  const verdict = evaluateLint({ changedFiles, labels });
+  // Validate the content of every changed fragment file.
+  const fragmentFailures = [];
+  for (const file of changedFiles) {
+    if (!isFragment(file)) continue;
+    // A fragment path in the diff that no longer exists on disk was deleted in
+    // this PR — a deletion can't be malformed, so skip it.
+    if (!fs.existsSync(file)) continue;
+    let src;
+    try {
+      src = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+      // Present in the diff but unreadable (broken symlink, permissions). A
+      // changed fragment we cannot read is suspect — fail closed rather than
+      // letting it slip through to the release-time CHANGELOG render.
+      fragmentFailures.push({ file, reason: 'unreadable', detail: e.code || 'read_error' });
+      continue;
+    }
+    const result = parseFragment(src);
+    if (!result.ok) {
+      fragmentFailures.push({ file, reason: result.reason, detail: result.detail });
+    }
+  }
+
+  const verdict = evaluateLint({ changedFiles, labels, fragmentFailures });
   if (process.argv.includes('--json')) {
     process.stdout.write(JSON.stringify({ ...verdict, changedFiles, labels }, null, 2) + '\n');
   } else if (verdict.ok) {
     process.stdout.write(`ok changeset-lint: ${verdict.reason}\n`);
+  } else if (verdict.reason === LINT_REASON.FAIL_INVALID_FRAGMENT) {
+    process.stderr.write(`\nERROR changeset-lint: ${verdict.reason}\n`);
+    process.stderr.write(`The following .changeset fragment(s) failed content validation:\n`);
+    for (const f of verdict.failures) {
+      const detail = f.detail !== undefined ? ` (${f.detail})` : '';
+      process.stderr.write(`  ${f.file}: ${f.reason}${detail}\n`);
+    }
+    process.stderr.write(`Fix the fragment(s) above before merging.\n`);
   } else {
     process.stderr.write(`\nERROR changeset-lint: ${verdict.reason}\n`);
     process.stderr.write(`PR touches user-facing files but does not include a .changeset/*.md fragment.\n`);
@@ -108,4 +152,4 @@ function main() {
 
 if (require.main === module) runMain(main);
 
-module.exports = { evaluateLint, LINT_REASON, OPT_OUT_LABEL, isUserFacing, isFragment };
+module.exports = { evaluateLint, LINT_REASON, OPT_OUT_LABEL, isUserFacing, isFragment, DEFAULT_BASE };

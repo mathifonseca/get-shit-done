@@ -16,7 +16,7 @@ import {
   type MigrationRecord,
   type MigrationAction,
 } from './installer-migration-authoring.cjs';
-import { platformWriteSync } from './shell-command-projection.cjs';
+import { platformWriteSync, retryRenameSync, posixNormalize } from './shell-command-projection.cjs';
 import { realClock, type Clock } from './clock.cjs';
 
 const MANIFEST_NAME = 'gsd-file-manifest.json';
@@ -44,6 +44,107 @@ function sha256File(filePath: string): string {
 
 function sha256Text(value: string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+/**
+ * Copy a managed path for the rollback snapshot or the user-facing backup,
+ * WITHOUT dereferencing a symlink.
+ *
+ * `fs.copyFileSync` follows symlinks, so a managed path that has been replaced
+ * by a link (tampering, or an unexpected user layout) would have had the
+ * LINK TARGET's bytes copied into `gsd-migration-journal/…-backups/` — e.g. a
+ * `gsd.cjs` symlinked at `~/.ssh/id_rsa` would land that key's contents in the
+ * backup tree. Nothing GSD installs is ever a symlink, so the faithful snapshot
+ * of a symlinked managed path is the link itself: recreating it preserves
+ * rollback fidelity (restore re-creates the same link) while never reading the
+ * referent. Deletion was already safe — `fs.rmSync` unlinks the link, never the
+ * target.
+ *
+ * Windows note: `fs.symlinkSync` can throw EPERM for unprivileged users. That
+ * surfaces as an apply failure and triggers the normal rollback path, which is
+ * the correct outcome — refusing to proceed beats silently copying referent
+ * bytes.
+ */
+/**
+ * Evaluate and, if safe, perform a `remove-empty-dir` action against `fullPath`.
+ *
+ * This is deliberately WEAKER than a recursive directory-removal primitive
+ * (which 003's docblock records as an intentional absence in the ADR-0008
+ * design): it only ever calls `fs.rmdirSync` — never `fs.rmSync`, never
+ * `{ recursive: true }`, never `{ force: true }` — so a non-empty directory
+ * fails the underlying syscall rather than being swept. The emptiness check
+ * immediately above the call is what turns that failure mode into a
+ * deliberate, non-error "left in place" outcome instead of surfacing ENOTEMPTY.
+ *
+ * Guards, in order:
+ *   - lstat (not stat): a symlinked directory is refused outright, never
+ *     followed. A missing target is reported distinctly so callers can tell
+ *     "nothing was ever there" from "something was there and is left alone".
+ *   - must actually be a directory (not a file masquerading under the relPath).
+ *   - containment: the REALPATH of the target must resolve strictly inside the
+ *     REALPATH of configDir — never equal to it (removing the config root
+ *     itself is never in scope) and never escaping it (e.g. via an ancestor
+ *     symlink the lstat check alone would not catch).
+ *   - emptiness, re-checked here rather than trusted from planning time: a
+ *     directory that still holds any entry (managed-but-undeleted, unknown,
+ *     or created between plan and apply) is left in place. This is reported
+ *     as 'skipped-not-empty', a successful no-op, not a failure.
+ *
+ * Any unexpected error along the way (EACCES, EBUSY, a race that removes the
+ * target between the lstat and the rmdir, etc.) degrades to 'left-in-place'.
+ * This action must never throw out of the executor, matching every sibling
+ * action type's failure posture.
+ */
+function evaluateRemoveEmptyDir(configDir: string, fullPath: string): string {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(fullPath);
+  } catch {
+    return 'missing';
+  }
+  if (stat.isSymbolicLink()) return 'left-in-place';
+  if (!stat.isDirectory()) return 'left-in-place';
+
+  let resolvedRoot: string;
+  let resolvedTarget: string;
+  try {
+    resolvedRoot = fs.realpathSync(configDir);
+    resolvedTarget = fs.realpathSync(fullPath);
+  } catch {
+    return 'left-in-place';
+  }
+  if (resolvedTarget === resolvedRoot || !resolvedTarget.startsWith(resolvedRoot + path.sep)) {
+    // Refuses both "target IS configDir" and "target escaped configDir".
+    return 'left-in-place';
+  }
+
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(fullPath);
+  } catch {
+    return 'left-in-place';
+  }
+  if (entries.length > 0) return 'skipped-not-empty';
+
+  try {
+    fs.rmdirSync(fullPath);
+    return 'removed';
+  } catch {
+    return 'left-in-place';
+  }
+}
+
+function copyPreservingSymlink(srcPath: string, destPath: string): void {
+  if (fs.lstatSync(srcPath).isSymbolicLink()) {
+    // symlinkSync fails with EEXIST on an occupied path, so clear it first.
+    // Scoped to this branch on purpose: the regular-file path below keeps
+    // copyFileSync's overwrite-in-place, so a mid-restore failure cannot leave
+    // the destination destroyed.
+    fs.rmSync(destPath, { force: true });
+    fs.symlinkSync(fs.readlinkSync(srcPath), destPath);
+    return;
+  }
+  fs.copyFileSync(srcPath, destPath);
 }
 
 function readJsonIfPresent(filePath: string, fallback: unknown): unknown {
@@ -105,7 +206,7 @@ function atomicWriteInstallState(configDir: string, content: string): void {
   const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
   try {
     fs.writeFileSync(tmpPath, content, 'utf8');
-    fs.renameSync(tmpPath, filePath);
+    retryRenameSync(tmpPath, filePath);
   } catch (error) {
     try { fs.rmSync(tmpPath, { force: true }); } catch { /* best-effort */ }
     throw error;
@@ -139,7 +240,7 @@ function normalizeRelPath(relPath: string): string {
   if (typeof relPath !== 'string' || relPath.trim() === '') {
     throw new Error('migration action relPath must be a non-empty string');
   }
-  const normalized = relPath.replace(/\\/g, '/');
+  const normalized = posixNormalize(relPath);
   if (path.isAbsolute(normalized) || path.win32.isAbsolute(normalized)) {
     throw new Error(`migration action relPath must stay inside configDir: ${relPath}`);
   }
@@ -627,9 +728,12 @@ function rollbackAppliedMigrationResult({ configDir, journal, journalPath, rollb
     const rollbackPath = path.join(configDir, action.rollbackRelPath as string);
     const dest = path.join(configDir, action.relPath as string);
     try {
-      if (fs.existsSync(rollbackPath)) {
+      // lstat-based existence check: a snapshot of a symlinked managed path is
+      // itself a link, and existsSync() follows it — a link whose target is
+      // gone would read as "missing" and silently skip the restore.
+      if (fs.lstatSync(rollbackPath, { throwIfNoEntry: false })) {
         fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.copyFileSync(rollbackPath, dest);
+        copyPreservingSymlink(rollbackPath, dest);
       }
     } catch (error) {
       failures.push({ relPath: action.relPath as string, error: (error as Error).message });
@@ -725,7 +829,8 @@ function applyInstallerMigrationPlan({
         action.type !== 'backup-and-remove' &&
         action.type !== 'rewrite-json' &&
         action.type !== 'record-baseline' &&
-        action.type !== 'baseline-preserve-user'
+        action.type !== 'baseline-preserve-user' &&
+        action.type !== 'remove-empty-dir'
       ) {
         throw new Error(`unsupported migration action type: ${action.type}`);
       }
@@ -741,9 +846,22 @@ function applyInstallerMigrationPlan({
         continue;
       }
 
+      if (action.type === 'remove-empty-dir') {
+        // Directory actions never enter the file-copy/rollback machinery below:
+        // there is nothing to snapshot-and-restore for a directory node itself
+        // (its former CONTENTS were already snapshotted by their own file-level
+        // actions before this one runs), and rollback of a removed empty
+        // directory is simply re-creating it, which the rollback path below
+        // does not model. Non-recursive by construction (evaluateRemoveEmptyDir
+        // only ever calls fs.rmdirSync), so there is nothing destructive to undo
+        // beyond an mkdir the next install/migration run will happily redo.
+        journal.actions.push(journalAction(action, evaluateRemoveEmptyDir(configDir, fullPath)));
+        continue;
+      }
+
       const rollbackPath = path.join(rollbackRoot, normalized);
       fs.mkdirSync(path.dirname(rollbackPath), { recursive: true });
-      fs.copyFileSync(fullPath, rollbackPath);
+      copyPreservingSymlink(fullPath, rollbackPath);
       rollback.push({ relPath: normalized, rollbackPath });
 
       if (action.type === 'rewrite-json') {
@@ -765,7 +883,7 @@ function applyInstallerMigrationPlan({
         const backupRelPath = action.backupRelPath || path.posix.join(backupRootRelPath, normalized);
         const backupPath = path.join(configDir, backupRelPath);
         fs.mkdirSync(path.dirname(backupPath), { recursive: true });
-        fs.copyFileSync(fullPath, backupPath);
+        copyPreservingSymlink(fullPath, backupPath);
         journal.actions.push(journalAction(action, 'removed', {
           backupRelPath,
           rollbackRelPath: path.posix.join(rollbackRootRelPath, normalized),
@@ -817,7 +935,12 @@ function applyInstallerMigrationPlan({
       const dest = path.join(configDir, entry.relPath);
       try {
         fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.copyFileSync(entry.rollbackPath, dest);
+        // Symlink-preserving, same as the forward path: `entry.rollbackPath` is
+        // itself a link whenever the managed path was one, so a raw copy here
+        // would dereference it and write the referent's bytes back to the LIVE
+        // install path — a worse leak than the journal-tree one, since it is
+        // user-visible and at a predictable location.
+        copyPreservingSymlink(entry.rollbackPath, dest);
       } catch (rollbackError) {
         rollbackFailures.push({
           relPath: entry.relPath,
@@ -968,6 +1091,7 @@ export = {
   applyInstallerMigrationPlan,
   classifyArtifact,
   discoverInstallerMigrations,
+  evaluateRemoveEmptyDir,
   migrationChecksum,
   planInstallerMigrations,
   readInstallManifest,

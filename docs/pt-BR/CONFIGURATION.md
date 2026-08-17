@@ -141,7 +141,7 @@ O GSD armazena as configurações do projeto em `.planning/config.json`. Criado 
 | `model_profile` | enum | `quality`, `balanced`, `budget`, `adaptive`, `inherit` | `balanced` | Nível de modelo para cada agente (consulte [Perfis de Modelo](#model-profiles)). `adaptive` foi adicionado conforme [#1713](https://github.com/open-gsd/gsd-core/issues/1713) / [#1806](https://github.com/open-gsd/gsd-core/issues/1806) e resolve da mesma forma que os outros níveis em perfis com reconhecimento de runtime. |
 | `runtime` | string | `claude`, `codex`, ou qualquer string | (nenhum) | Runtime ativo para [resolução de perfil com reconhecimento de runtime](#runtime-aware-profiles-2517). Quando definido, os níveis de perfil (opus/sonnet/haiku) resolvem para IDs de modelo nativos do runtime. Atualmente, apenas o caminho de instalação do Codex emite IDs de modelo por agente a partir deste resolvedor; outros runtimes (`opencode`, `gemini`, `qwen`, `copilot`, …) consomem o resolvedor no momento do spawn e ganham suporte a caminho de instalação dedicado em [#2612](https://github.com/open-gsd/gsd-core/issues/2612). Quando não definido (padrão), o comportamento não se altera em relação às versões anteriores. Adicionado na v1.39 |
 | `model_profile_overrides.<runtime>.<tier>` | string \| object | substituição de nível por runtime | (nenhum) | Substitui o mapeamento de nível com reconhecimento de runtime para um `(runtime, tier)` específico. O nível é um de `opus`, `sonnet`, `haiku`. O valor é uma string de ID de modelo (por exemplo, `"gpt-5-pro"`) ou `{ model, reasoning_effort }`. Consulte [Perfis com Reconhecimento de Runtime](#runtime-aware-profiles-2517). Adicionado na v1.39 |
-| `model_policy.provider` | string | `openai`, `anthropic`, `google`, `qwen`, `generic` | (nenhum) | Declara o provedor de modelo. Provedores conhecidos (`openai`, `anthropic`, `google`, `qwen`) desbloqueiam predefinições baseadas em catálogo. `generic` trata todos os IDs de modelo como strings opacas — sem inferência de prefixo, sem padrões de esforço de raciocínio. `model_policy.runtime_tiers` resolve antes do legado `model_profile_overrides`. Consulte [Predefinições de Política de Modelo](#model-policy-presets-model_policy--added-in-v142). Adicionado na v1.42 ([#49](https://github.com/open-gsd/gsd-core/issues/49)) |
+| `model_policy.provider` | string | `openai`, `anthropic`, `anthropic-fable`, `google`, `qwen`, `generic` | (nenhum) | Declara o provedor de modelo. Provedores conhecidos (`openai`, `anthropic`, `anthropic-fable`, `google`, `qwen`) desbloqueiam predefinições baseadas em catálogo. `generic` trata todos os IDs de modelo como strings opacas — sem inferência de prefixo, sem padrões de esforço de raciocínio. `model_policy.runtime_tiers` resolve antes do legado `model_profile_overrides`. Consulte [Predefinições de Política de Modelo](#model-policy-presets-model_policy--added-in-v142). Adicionado na v1.42 ([#49](https://github.com/open-gsd/gsd-core/issues/49)) |
 | `model_policy.budget` | enum | `high`, `medium`, `low` | (nenhum) | Seleciona um nível de orçamento ao usar um provedor conhecido. O GSD materializa a predefinição de catálogo correspondente em mapeamentos de nível explícitos no momento da resolução. Ignorado quando `provider` é `generic` ou `custom`. Adicionado na v1.42 ([#49](https://github.com/open-gsd/gsd-core/issues/49)) |
 | `model_policy.high` | string | ID do modelo | (nenhum) | ID do modelo de nível de custo alto para provedor `generic`/`custom`. Usado quando `provider: "generic"` ou `"custom"`. Adicionado na v1.42 ([#49](https://github.com/open-gsd/gsd-core/issues/49)) |
 | `model_policy.medium` | string | ID do modelo | (nenhum) | ID do modelo de nível de custo médio para provedor `generic`/`custom`. Adicionado na v1.42 ([#49](https://github.com/open-gsd/gsd-core/issues/49)) |
@@ -155,7 +155,7 @@ O GSD armazena as configurações do projeto em `.planning/config.json`. Criado 
 | `project_code` | string | qualquer string curta | (nenhum) | Prefixo para nomes de diretórios de fase (por exemplo, `"ABC"` produz `ABC-01-setup/`). Adicionado na v1.31 |
 | `phase_id_convention` | enum | `"milestone-prefixed"`, `null` | `null` | Convenção de nomenclatura para IDs de fase. `null` = IDs numéricos legados (`Phase 1`, `Phase 2`). `"milestone-prefixed"` = IDs globalmente únicos que codificam o marco envolvente (`Phase 1-01`, `Phase 1-02`). Execute `gsd-tools roadmap upgrade --convention milestone-prefixed` para migrar um ROADMAP.md existente. |
 | `response_language` | string | código de idioma | (nenhum) | Idioma para respostas dos agentes (por exemplo, `"pt"`, `"ko"`, `"ja"`). Propagado para todos os agentes gerados para consistência de idioma entre fases. Adicionado na v1.32 |
-| `context_window` | number | qualquer inteiro | `200000` | Tamanho da janela de contexto em tokens. Defina `1000000` para modelos com contexto de 1M (por exemplo, `claude-opus-4-7[1m]`). Valores `>= 500000` habilitam enriquecimento adaptativo de contexto (leituras completas de SUMMARY.md anteriores, leituras mais profundas de antipadrões). Configurado via `/gsd-config --advanced`. |
+| `context_window` | number | qualquer inteiro | `200000` | Tamanho da janela de contexto em tokens. Defina `1000000` para modelos com contexto de 1M (por exemplo, `claude-fable-5`). Valores `>= 500000` habilitam enriquecimento adaptativo de contexto (leituras completas de SUMMARY.md anteriores, leituras mais profundas de antipadrões). Configurado via `/gsd-config --advanced`. |
 | `context_profile` | string | `dev`, `research`, `review` | (nenhum) | Predefinição de contexto de execução que aplica um conjunto pré-configurado de configurações de modo, modelo e fluxo de trabalho para o tipo atual de trabalho. Adicionado na v1.34 |
 | `claude_md_path` | string | qualquer caminho de arquivo | `./CLAUDE.md` | Caminho de saída personalizado para o arquivo CLAUDE.md gerado. Útil para monorepos ou projetos que precisam do CLAUDE.md em um local fora da raiz. Padrão é `./CLAUDE.md` na raiz do projeto. Adicionado na v1.36 |
 | `claude_md_assembly.mode` | enum | `embed`, `link` | `embed` | Controla como as seções gerenciadas são escritas no CLAUDE.md. `embed` (padrão) incorpora conteúdo entre marcadores GSD. `link` escreve `@.planning/<source-path>` — o Claude Code expande a referência em tempo de execução, reduzindo o tamanho do CLAUDE.md em ~65% em projetos típicos. `link` aplica-se apenas a seções que possuem um arquivo-fonte real; as seções `workflow` e fallback sempre são incorporadas. Substituições por bloco: `claude_md_assembly.blocks.<section>` (por exemplo `claude_md_assembly.blocks.architecture: link`). Adicionado na v1.38 |
@@ -184,7 +184,7 @@ Os campos de chave de API aceitam um valor string (a própria chave). Também po
 | `firecrawl` | string \| boolean \| null | `null` | Chave de API Firecrawl para raspagem profunda. Mascarada na exibição |
 | `exa_search` | string \| boolean \| null | `null` | Chave de API Exa Search para busca semântica. Mascarada na exibição |
 
-**Convenção de mascaramento (`get-shit-done/bin/lib/secrets.cjs`):** chaves com 8 ou mais caracteres são renderizadas como `****<últimos-4>`; chaves menores são renderizadas como `****`; `null`/vazio é renderizado como `(unset)`. O texto simples é escrito como está em `.planning/config.json` — esse arquivo é o limite de segurança — mas a CLI, tabelas de confirmação, logs e descrições de `AskUserQuestion` nunca exibem o texto simples. Isso se aplica à própria saída do comando `config-set`: `config-set brave_search <chave>` retorna um payload JSON com o valor mascarado.
+**Convenção de mascaramento (`gsd-core/bin/lib/secrets.cjs`):** chaves com 8 ou mais caracteres são renderizadas como `****<últimos-4>`; chaves menores são renderizadas como `****`; `null`/vazio é renderizado como `(unset)`. O texto simples é escrito como está em `.planning/config.json` — esse arquivo é o limite de segurança — mas a CLI, tabelas de confirmação, logs e descrições de `AskUserQuestion` nunca exibem o texto simples. Isso se aplica à própria saída do comando `config-set`: `config-set brave_search <chave>` retorna um payload JSON com o valor mascarado.
 
 ### Roteamento de CLI para Revisão de Código
 
@@ -256,7 +256,7 @@ Todos os controles de fluxo de trabalho seguem o padrão **ausente = habilitado*
 | `workflow.plan_chunked` | boolean | `false` | Habilita o modo de planejamento em chunks. Quando `true` (ou quando a flag `--chunked` é passada para `/gsd-plan-phase`), o orquestrador divide a única Task de planejamento de longa duração em uma Task curta de esboço seguida de N Tasks curtas por plano (~3-5 min cada). Cada plano é commitado individualmente para resiliência a falhas. Se uma Task travar e o terminal for forçado a fechar, reexecutar com `--chunked` retoma a partir do último plano concluído. Particularmente útil no Windows onde Tasks de longa duração podem travar em stdio. Adicionado na v1.38 |
 | `workflow.code_review_command` | string | (nenhum) | Comando shell para integração de revisão de código externa em `/gsd-ship`. Recebe caminhos de arquivos alterados via stdin. Saída diferente de zero bloqueia o fluxo de trabalho de ship. Adicionado na v1.36 |
 | `workflow.tdd_mode` | boolean | `false` | Habilita o pipeline TDD como modo de execução de primeira classe. Quando `true`, o planejador aplica agressivamente `type: tdd` a tarefas elegíveis (lógica de negócios, APIs, validações, algoritmos) e o executor impõe a sequência de gate RED/GREEN/REFACTOR. Um ponto de revisão colaborativa ao final da fase verifica a conformidade com o gate. Adicionado na v1.36 |
-| `workflow.human_verify_mode` | string | `'end-of-phase'` | Controla os pontos de verificação humana. `'end-of-phase'` (padrão desde #3309) suprime as tasks `checkpoint:human-verify` e incorpora verificações nos blocos `<verify><human-check>` para revisão ao final da fase. `'mid-flight'` restaura as tasks de checkpoint bloqueantes. `checkpoint:decision` e `checkpoint:human-action` não são afetados. Consulte [Referência de Checkpoints](../../get-shit-done/references/checkpoints.md#checkpoint_types). |
+| `workflow.human_verify_mode` | string | `'end-of-phase'` | Controla os pontos de verificação humana. `'end-of-phase'` (padrão desde #3309) suprime as tasks `checkpoint:human-verify` e incorpora verificações nos blocos `<verify><human-check>` para revisão ao final da fase. `'mid-flight'` restaura as tasks de checkpoint bloqueantes. `checkpoint:decision` e `checkpoint:human-action` não são afetados. Consulte [Referência de Checkpoints](../../gsd-core/references/checkpoints.md#checkpoint_types). |
 | `workflow.cross_ai_execution` | boolean | `false` | Delega a execução de fase para uma CLI de IA externa em vez de gerar agentes executores locais. Útil para aproveitar os pontos fortes de um modelo diferente para fases específicas. Adicionado na v1.36 |
 | `workflow.cross_ai_command` | string | (nenhum) | Template de comando shell para execução cross-AI. Recebe o prompt de fase via stdin. Deve produzir saída compatível com SUMMARY.md. Obrigatório quando `cross_ai_execution` é `true`. Adicionado na v1.36 |
 | `workflow.cross_ai_timeout` | number | `300` | Timeout em segundos para comandos de execução cross-AI. Previne processos externos que não terminam. Adicionado na v1.36 |
@@ -285,7 +285,7 @@ O namespace `code_quality.*` controla ferramentas opcionais de análise estrutur
 
 ## Configurações de Ship
 
-`ship.pr_body_sections` adiciona seções adicionais ao corpo do PR para conteúdo de PRD/corpo do PR específico do projeto em `/gsd-ship` sem editar `get-shit-done/workflows/ship.md`.
+`ship.pr_body_sections` adiciona seções adicionais ao corpo do PR para conteúdo de PRD/corpo do PR específico do projeto em `/gsd-ship` sem editar `gsd-core/workflows/ship.md`.
 
 Para um guia do usuário com exemplos de integração e solução de problemas, consulte [Seções Personalizadas do Corpo do PR](../ship-pr-body-sections.md).
 
@@ -471,8 +471,8 @@ O namespace `plan_review.*` controla o guardião de deriva de plano, que verific
 
 | Configuração | Tipo | Padrão | Descrição |
 |---------|------|---------|-------------|
-| `plan_review.source_grounding` | boolean | `true` | Habilita o guardião de deriva de plano. Quando `true` (padrão), a revisão de plano resolve cada referência de símbolo citada em um PLAN.md em relação à árvore de fontes ativa. Planos que citam uma função, classe, decorador ou flag CLI inexistente produzem um aviso `needs-acknowledgement` antes do plano ser aprovado. Desabilite com `false` para ignorar completamente a verificação de símbolo. Ative durante a configuração (`/gsd:new-project`) ou a qualquer momento via `/gsd:settings`. |
-| `plan_review.source_grounding_authority` | enum | `grep` | Seleciona o adaptador de resolução usado para verificar a existência de símbolos. Valores permitidos: `grep` (padrão — busca ripgrep/grep de arquivos de fonte, funciona em qualquer projeto sem ferramental adicional), `intel` (consulta o índice `.planning/intel/api-map.json` construído por `/gsd:map-codebase`; requer `intel.enabled: true`), `treesitter` (reservado para adaptador tree-sitter futuro), `lsp` (reservado para adaptador LSP futuro), `scip` (reservado para adaptador SCIP/LSIF futuro). Use `intel` quando tiver executado `/gsd:map-codebase` e quiser a busca mais rápida e pré-indexada. Todos os outros valores além de `grep` e `intel` são reservados e não têm efeito na versão atual. |
+| `plan_review.source_grounding` | boolean | `true` | Habilita o guardião de deriva de plano. Quando `true` (padrão), a revisão de plano resolve cada referência de símbolo citada em um PLAN.md em relação à árvore de fontes ativa. Planos que citam uma função, classe, decorador ou flag CLI inexistente produzem um aviso `needs-acknowledgement` antes do plano ser aprovado. Desabilite com `false` para ignorar completamente a verificação de símbolo. Ative durante a configuração (`/gsd-new-project`) ou a qualquer momento via `/gsd-settings`. |
+| `plan_review.source_grounding_authority` | enum | `grep` | Seleciona o adaptador de resolução usado para verificar a existência de símbolos. Valores permitidos: `grep` (padrão — busca ripgrep/grep de arquivos de fonte, funciona em qualquer projeto sem ferramental adicional), `intel` (consulta o índice `.planning/intel/api-map.json` construído por `/gsd-map-codebase`; requer `intel.enabled: true`), `treesitter` (reservado para adaptador tree-sitter futuro), `lsp` (reservado para adaptador LSP futuro), `scip` (reservado para adaptador SCIP/LSIF futuro). Use `intel` quando tiver executado `/gsd-map-codebase` e quiser a busca mais rápida e pré-indexada. Todos os outros valores além de `grep` e `intel` são reservados e não têm efeito na versão atual. |
 
 <a id="graphify-settings"></a>
 ### Configurações do Graphify
@@ -734,7 +734,7 @@ Configure flags por etapa que `/gsd-manager` acrescenta a cada comando despachad
 |---------|------|---------|-------------|
 | `manager.flags.discuss` | string | (nenhum) | Flags acrescidas a comandos de discuss-phase (por exemplo, `"--auto"`) |
 | `manager.flags.plan` | string | (nenhum) | Flags acrescidas a comandos de plan-phase (por exemplo, `"--skip-research"`) |
-| `manager.flags.execute` | string | (nenhum) | Flags acrescidas a comandos de execute-phase (por exemplo, `"--validate"`) |
+| `manager.flags.execute` | string | (nenhum) | Flags acrescidas a comandos de execute-phase (por exemplo, `"--cross-ai"`) |
 
 **Exemplo:**
 
@@ -744,7 +744,7 @@ Configure flags por etapa que `/gsd-manager` acrescenta a cada comando despachad
     "flags": {
       "discuss": "--auto",
       "plan": "--skip-research",
-      "execute": "--validate"
+      "execute": "--cross-ai"
     }
   }
 }
@@ -779,7 +779,7 @@ Tokens de flag inválidos são sanitizados e registrados como avisos. Apenas fla
 | gsd-doc-writer | Opus | Sonnet | Haiku | Sonnet | Inherit |
 | gsd-doc-verifier | Sonnet | Sonnet | Haiku | Haiku | Inherit |
 
-> **Todos os 33 agentes incluídos possuem atribuições explícitas de nível por perfil** no catálogo (`sdk/shared/model-catalog.json`). A tabela acima mostra um subconjunto representativo dos agentes mais usados. Para agentes não listados aqui, `model_overrides` aceita qualquer nome de agente incluído. Os dados autoritativos de perfil são derivados de `sdk/shared/model-catalog.json` via `get-shit-done/bin/lib/model-catalog.cjs` e `sdk/src/model-catalog.ts`.
+> **Todos os 33 agentes incluídos possuem atribuições explícitas de nível por perfil** no catálogo (`sdk/shared/model-catalog.json`). A tabela acima mostra um subconjunto representativo dos agentes mais usados. Para agentes não listados aqui, `model_overrides` aceita qualquer nome de agente incluído. Os dados autoritativos de perfil são derivados de `sdk/shared/model-catalog.json` via `gsd-core/bin/lib/model-catalog.cjs` e `sdk/src/model-catalog.ts`.
 
 ### Substituições por Agente
 
@@ -836,10 +836,10 @@ para que a alteração entre em vigor. Consulte a issue #2256.
 | Tipo de fase | Agentes |
 |---|---|
 | `planning` | `gsd-planner`, `gsd-roadmapper`, `gsd-pattern-mapper` |
-| `discuss` | (reservado — sem subagente atualmente) |
+| `discuss` | `gsd-assumptions-analyzer` |
 | `research` | `gsd-phase-researcher`, `gsd-project-researcher`, `gsd-research-synthesizer`, `gsd-codebase-mapper`, `gsd-ui-researcher` |
 | `execution` | `gsd-executor`, `gsd-debugger`, `gsd-doc-writer` |
-| `verification` | `gsd-verifier`, `gsd-plan-checker`, `gsd-integration-checker`, `gsd-nyquist-auditor`, `gsd-ui-checker`, `gsd-ui-auditor`, `gsd-doc-verifier` |
+| `verification` | `gsd-verifier`, `gsd-plan-checker`, `gsd-integration-checker`, `gsd-nyquist-auditor`, `gsd-ui-checker`, `gsd-ui-auditor`, `gsd-doc-verifier`, `gsd-code-reviewer` |
 | `completion` | (reservado — sem subagente atualmente) |
 
 `discuss` e `completion` são aceitos pelo esquema para compatibilidade futura; defini-los hoje é um no-op até que um subagente seja mapeado para eles.
@@ -994,7 +994,7 @@ O hint `reasoning_effort` por nível do catálogo de modelos é um campo legado 
 2. `effort.agent_overrides[<agent-id>]`
 3. `effort.routing_tier_defaults[<light|standard|heavy>]`
 4. `effort.default`
-5. `"high"` (padrão universal do Anthropic Opus 4.8)
+5. `"high"` (padrão universal do Claude)
 
 ```json
 {
@@ -1139,13 +1139,13 @@ A saída JSON de `resolve-model` inclui `reasoning_effort` quando o nível de ru
 
 | Runtime | `opus` | `sonnet` | `haiku` | reasoning_effort |
 |---------|--------|----------|---------|------------------|
-| `claude` | `claude-opus-4-8` | `claude-sonnet-4-6` | `claude-haiku-4-5` | (não usado) |
-| `codex` | `gpt-5.5` | `gpt-5.3-codex` | `gpt-5.4-mini` | `xhigh` / `medium` / `medium` |
+| `claude` | `claude-opus-4-8` | `claude-sonnet-5` | `claude-haiku-4-5` | (não usado) |
+| `codex` | `gpt-5.6-sol` | `gpt-5.6-terra` | `gpt-5.6-luna` | `xhigh` / `medium` / `medium` |
 | `gemini` | `gemini-3-pro` | `gemini-3-flash` | `gemini-2.5-flash-lite` | (não usado) |
 | `qwen` | `qwen3-max-2026-01-23` | `qwen3-coder-plus` | `qwen3-coder-next` | (não usado) |
-| `opencode` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-4-6` | `anthropic/claude-haiku-4-5` | (não usado) |
-| `copilot` | `claude-opus-4-8` | `claude-sonnet-4-6` | `claude-haiku-4-5` | (não usado) |
-| `hermes` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-4-6` | `anthropic/claude-haiku-4-5` | (não usado) |
+| `opencode` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (não usado) |
+| `copilot` | `claude-opus-4-8` | `claude-sonnet-5` | `claude-haiku-4-5` | (não usado) |
+| `hermes` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (não usado) |
 | Grupo B (`kilo`, `cline`, `cursor`, `windsurf`, `augment`, `trae`, `codebuddy`, `antigravity`) | (sem padrão integrado — seu runtime trata da seleção de modelo) | | | |
 
 **Exemplo Codex** — uma configuração, modelos em nível, sem bloco grande de `model_overrides`:
@@ -1157,7 +1157,7 @@ A saída JSON de `resolve-model` inclui `reasoning_effort` quando o nível de ru
 }
 ```
 
-Isso resolve `gsd-planner` → `gpt-5.5` (xhigh), `gsd-executor` → `gpt-5.3-codex` (medium), `gsd-codebase-mapper` → `gpt-5.4-mini` (medium). O instalador do Codex incorpora `model = "..."` e `model_reasoning_effort = "..."` em cada TOML de agente gerado.
+Isso resolve `gsd-planner` → `gpt-5.6-sol` (xhigh), `gsd-executor` → `gpt-5.6-terra` (medium), `gsd-codebase-mapper` → `gpt-5.6-luna` (medium). O instalador do Codex incorpora `model = "..."` e `model_reasoning_effort = "..."` em cada TOML de agente gerado.
 
 **Exemplo Claude** — opt-in explícito resolve para IDs Claude completos (sem necessidade de `resolve_model_ids: true`):
 
@@ -1210,7 +1210,7 @@ Isso resolve `gsd-planner` → `gpt-5.5` (xhigh), `gsd-executor` → `gpt-5.3-co
 
 > **[#49](https://github.com/open-gsd/gsd-core/issues/49)** — superfície de configuração de política de modelo neutra em relação ao provedor. Resolve antes do legado `model_profile_overrides`.
 
-`model_policy` fornece uma maneira mais simples e neutra em relação ao provedor de configurar níveis de modelo entre runtimes. É a superfície preferida para runtimes não-Anthropic onde `model_profile_overrides` exigiria conhecer manualmente os IDs de modelo corretos. Configure via `/gsd:settings` → Seção 8 (Model Policy).
+`model_policy` fornece uma maneira mais simples e neutra em relação ao provedor de configurar níveis de modelo entre runtimes. É a superfície preferida para runtimes não-Anthropic onde `model_profile_overrides` exigiria conhecer manualmente os IDs de modelo corretos. Configure via `/gsd-settings` → Seção 8 (Model Policy).
 
 ### Predefinição de provedor conhecido
 
@@ -1222,14 +1222,14 @@ Escolha um provedor e nível de orçamento via o fluxo de configurações; o GSD
   "model_policy": {
     "provider": "openai",
     "budget": "medium",
-    "high":   "gpt-5.5",
-    "medium": "gpt-5.3-codex",
-    "low":    "gpt-5.4-mini"
+    "high":   "gpt-5.6-sol",
+    "medium": "gpt-5.6-terra",
+    "low":    "gpt-5.6-luna"
   }
 }
 ```
 
-Provedores conhecidos: `openai`, `anthropic`, `google`, `qwen`. Níveis de orçamento: `high`, `medium`, `low`.
+Provedores conhecidos: `openai`, `anthropic`, `anthropic-fable`, `google`, `qwen`. Níveis de orçamento: `high`, `medium`, `low`. Use `anthropic` para manter a predefinição Claude baseada em Opus 4.8, ou `anthropic-fable` para optar pelo Claude Fable 5 no roteamento de alto orçamento.
 
 Para controle avançado por runtime, `runtime_tiers` aceita entradas explícitas usando os nomes internos de nível de perfil (`opus`, `sonnet`, `haiku`):
 
@@ -1240,9 +1240,9 @@ Para controle avançado por runtime, `runtime_tiers` aceita entradas explícitas
     "provider": "openai",
     "runtime_tiers": {
       "codex": {
-        "opus":   { "model": "gpt-5.5",        "reasoning_effort": "high" },
-        "sonnet": { "model": "gpt-5.3-codex",  "reasoning_effort": "medium" },
-        "haiku":  { "model": "gpt-5.4-mini",   "reasoning_effort": "low" }
+        "opus":   { "model": "gpt-5.6-sol",        "reasoning_effort": "high" },
+        "sonnet": { "model": "gpt-5.6-terra",     "reasoning_effort": "medium" },
+        "haiku":  { "model": "gpt-5.6-luna",      "reasoning_effort": "low" }
       }
     }
   }

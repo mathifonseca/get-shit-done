@@ -16,12 +16,18 @@
  * stale warnings for users who haven't cleaned up manually (#1750).
  */
 const MANAGED_HOOKS = [
+  'gsd-agent-isolation-guard.js',
   'gsd-check-update-worker.js',
   'gsd-check-update.js',
   'gsd-config-reload.js',
   'gsd-context-monitor.js',
   'gsd-cursor-post-tool.js',
+  'gsd-cursor-pre-tool.js',
   'gsd-cursor-session-start.js',
+  'gsd-cursor-stop.js',
+  'gsd-cursor-subagent-start.js',
+  'gsd-cursor-subagent-stop.js',
+  'gsd-ensure-canonical-path.js',
   'gsd-graphify-update.sh',
   'gsd-phase-boundary.sh',
   'gsd-prompt-guard.js',
@@ -31,8 +37,11 @@ const MANAGED_HOOKS = [
   'gsd-statusline.js',
   'gsd-update-banner.js',
   'gsd-validate-commit.sh',
+  'gsd-windsurf-pre-command.js',
+  'gsd-windsurf-pre-write.js',
   'gsd-workflow-guard.js',
   'gsd-worktree-path-guard.js',
+  'gsd-write-guard.js',
 ];
 
 module.exports = { MANAGED_HOOKS };

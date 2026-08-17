@@ -159,7 +159,8 @@ describe('issue-57 AC2 — config-mutation dispatch is closed over the explicit 
     }
   });
 
-  // allow-test-rule: structural guard over bin/install.js source. Behavioral assertions
+  // allow-test-rule: structural-regression-guard
+  // structural guard over bin/install.js source. Behavioral assertions
   // cannot observe inline `runtime === '...'` config branching, so this enforces that
   // every inline per-runtime branch references a runtime the adapter registry knows
   // about — a NEW branch against an unregistered runtime name fails here. It matches
@@ -184,7 +185,39 @@ describe('issue-57 AC2 — config-mutation dispatch is closed over the explicit 
     );
   });
 
-  // allow-test-rule: delegation-presence guard. Catches wholesale removal of the registry
+  // allow-test-rule: structural-regression-guard (#2103)
+  // structural guard over bin/install.js source. VS Code
+  // (capabilities/vscode/capability.json) is a registry runtime (role:runtime, for
+  // validator/host-integration coverage) but is NEVER CLI-installed — it is a
+  // Marketplace/VSIX extension with no --vscode flag and no allRuntimes membership
+  // (see NON_INSTALLABLE_RUNTIMES in tests/runtime-flags.test.cjs). It must stay
+  // fully descriptor-driven: bin/install.js must never special-case it by name.
+  // This is a stricter, clearer-failure-message sibling of the generic
+  // "every inline runtime === ..." guard above (which would also catch this, but
+  // with a misleading "register it in the adapter registry" suggestion — vscode
+  // must never be registered there at all, see the ALLOWED_CONFIG_RUNTIMES filter
+  // in src/runtime-config-adapter-registry.cts).
+  test('#2103: bin/install.js has ZERO runtime === "vscode" / isVscode branches (vscode stays fully descriptor-driven)', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'bin', 'install.js'), 'utf8');
+    const runtimeComparisons = [...src.matchAll(/runtime === (?:'vscode'|"vscode")/g)];
+    assert.deepStrictEqual(
+      runtimeComparisons.map((m) => m[0]),
+      [],
+      'bin/install.js must not special-case vscode via `runtime === "vscode"` — vscode has no '
+        + 'install surface at all (installSurface: "none") and is never CLI-installed; any '
+        + 'vscode-specific behavior belongs in capabilities/vscode/capability.json, not an inline branch.',
+    );
+    const isVscodeRefs = [...src.matchAll(/\bisVscode\b/g)];
+    assert.deepStrictEqual(
+      isVscodeRefs.map((m) => m[0]),
+      [],
+      'bin/install.js must not introduce an isVscode flag — vscode is intentionally excluded '
+        + 'from runtimeFlags (Marketplace-distributed, never CLI-installed).',
+    );
+  });
+
+  // allow-test-rule: structural-regression-guard
+  // delegation-presence guard. Catches wholesale removal of the registry
   // dispatch (a regression to scattered per-runtime config branching). Presence-style, not
   // absence-grep, so it does not bite on incidental non-config `runtime === '...'` checks.
   test('bin/install.js requires the config adapter registry and dispatches through it', () => {
@@ -194,8 +227,8 @@ describe('issue-57 AC2 — config-mutation dispatch is closed over the explicit 
       'bin/install.js no longer requires the runtime config adapter registry',
     );
     assert.ok(
-      src.includes('resolveRuntimeConfigIntent('),
-      'bin/install.js no longer dispatches config through resolveRuntimeConfigIntent',
+      src.includes('resolveInstallPlan('),
+      'bin/install.js no longer dispatches config through resolveInstallPlan',
     );
   });
 });

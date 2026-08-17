@@ -369,7 +369,7 @@ O GSD gera arquivos markdown que se tornam prompts de sistema de LLM. Isso signi
 - `gsd-prompt-guard.js` — Verifica chamadas Write/Edit para `.planning/` em busca de padrões de injeção (sempre ativo, somente consultivo)
 - `gsd-workflow-guard.js` — Avisa sobre edições de arquivos fora do contexto do workflow GSD (opt-in via `hooks.workflow_guard`)
 
-**Scanner de CI:** `prompt-injection-scan.test.cjs` verifica todos os arquivos de agentes, workflows e comandos em busca de vetores de injeção incorporados.
+**Scanner de CI:** `prompt-injection-scan.security.test.cjs` verifica todos os arquivos de agentes, workflows e comandos em busca de vetores de injeção incorporados.
 
 ---
 
@@ -382,8 +382,8 @@ Ferramentas de codificação com IA alucinam nomes de pacotes. Atacantes pré-re
 ```markdown
 ## Package Legitimacy Audit
 
-| Package | Registry | Age | Downloads | Source Repo | slopcheck | Disposition |
-|---------|----------|-----|-----------|-------------|-----------|-------------|
+| Package | Registry | Age | Downloads | Source Repo | Verdict | Disposition |
+|---------|----------|-----|-----------|-------------|---------|-------------|
 | express | npm | 13 yrs | 100M+/wk | github.com/expressjs/express | [OK] | Approved |
 | some-new-util | npm | 3 days | 47 | none | [SLOP] | REMOVED |
 | api-bridge | npm | 6 mo | 1.2k/wk | github.com/user/api-bridge | [SUS] | Flagged |
@@ -395,7 +395,7 @@ Pacotes com `[SLOP]` são removidos do RESEARCH.md inteiramente e nunca chegam a
 
 **Durante a execução** — se uma instalação falhar, o executor apresenta um checkpoint e para em vez de tentar silenciosamente uma alternativa.
 
-**Veredictos do slopcheck:**
+**Veredictos de legitimidade:**
 
 | Veredicto | Significado | Ação do GSD |
 |---------|---------|------------|
@@ -463,6 +463,13 @@ claude --dangerously-skip-permissions
 /gsd-pause-work --report         # Generate session summary
 ```
 
+> [!CAUTION]
+> **The permissions flag is optional.** It skips per-file confirmation while
+> GSD's sub-agents read and write files. Use it only in low-stakes or
+> throwaway contexts. To keep confirmations enabled, start with `claude` instead.
+> For real work, read the [security model](../explanation/security-model.md) first.
+
+
 ### Novo projeto a partir de um documento existente
 
 ```bash
@@ -474,8 +481,8 @@ claude --dangerously-skip-permissions
 ### Base de código existente
 
 ```bash
-/gsd-map-codebase           # Analyse what exists (parallel agents)
-/gsd-new-project            # Questions focus on what you're ADDING
+/gsd-onboard                # Safely map, ingest docs, and initialize planning
+# Follow printed handoff commands, then rerun /gsd-onboard
 # (normal phase workflow from here)
 ```
 
@@ -499,7 +506,7 @@ claude --dangerously-skip-permissions
 
 **Comportamento de needs-acknowledgement.** Quando o protetor encontra um símbolo ausente, ele emite um aviso de needs-acknowledgement na saída da revisão do plano em vez de bloquear permanentemente. Você pode reconhecer e prosseguir (o símbolo pode ser intencionalmente novo) ou solicitar uma revisão do plano. O protetor não rejeita planos automaticamente — ele apresenta sinais para decisão humana.
 
-**Funciona sem intel.** Por padrão, o protetor usa `grep`/`ripgrep` para pesquisar arquivos de código-fonte — não requer pré-indexação. Se você executou `/gsd:map-codebase` com `intel.enabled: true`, defina `plan_review.source_grounding_authority: intel` para usar o índice pré-construído `api-map.json` mais rápido.
+**Funciona sem intel.** Por padrão, o protetor usa `grep`/`ripgrep` para pesquisar arquivos de código-fonte — não requer pré-indexação. Se você executou `/gsd-map-codebase` com `intel.enabled: true`, defina `plan_review.source_grounding_authority: intel` para usar o índice pré-construído `api-map.json` mais rápido.
 
 ```bash
 # Enable/disable (default: on)
@@ -511,7 +518,7 @@ claude --dangerously-skip-permissions
 /gsd-settings plan_review.source_grounding_authority intel  # pre-indexed api-map.json
 ```
 
-Alterne na configuração do projeto (`/gsd:new-project` pergunta durante as preferências de workflow) ou a qualquer momento via `/gsd:settings` (seção Planning → Drift Guard).
+Alterne na configuração do projeto (`/gsd-new-project` pergunta durante as preferências de workflow) ou a qualquer momento via `/gsd-settings` (seção Planning → Drift Guard).
 
 ### Correção rápida de bug
 
@@ -562,14 +569,14 @@ Para um guia abrangente de solução de problemas, consulte [Recuperar e solucio
 
 ### CLI programática (`gsd-tools query` vs `gsd-tools.cjs`)
 
-Para automação, prefira **`gsd-tools query`** com um subcomando registrado (consulte [CLI-TOOLS.md — SDK e acesso programático](CLI-TOOLS.md#sdk-and-programmatic-access) e QUERY-HANDLERS.md). O CLI legado `node $HOME/.claude/get-shit-done/bin/gsd-tools.cjs` continua sendo suportado.
+Para automação, prefira **`gsd-tools query`** com um subcomando registrado (consulte [CLI-TOOLS.md — SDK e acesso programático](CLI-TOOLS.md#sdk-and-programmatic-access) e QUERY-HANDLERS.md). O CLI legado `node $HOME/.claude/gsd-core/bin/gsd-tools.cjs` continua sendo suportado.
 
 ### STATE.md fora de sincronia
 
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state validate          # Detect drift
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state sync --verify     # Preview changes
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state sync              # Reconstruct STATE.md
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state validate          # Detect drift
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state sync --verify     # Preview changes
+node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" state sync              # Reconstruct STATE.md
 ```
 
 ### Um comando parece congelado após "Spawning..."
@@ -667,7 +674,7 @@ Auditoria rápida antes de uma fase longa:
 
 Cada servidor desabilitado remove seu esquema de cada turno subsequente. Reduzir MCPs **compõe** com o ajuste de `model_profile` — ambas as alavancas são aditivas, e as economias de MCP aparecem imediatamente em cada subagente que o orquestrador gera.
 
-Para a auditoria completa, referência do harness e a nota de composição com `model_profile`, consulte [Custo de esquema de ferramentas MCP](../../get-shit-done/references/context-budget.md#mcp-tool-schema-cost-harness-concern) na referência `context-budget.md` incluída.
+Para a auditoria completa, referência do harness e a nota de composição com `model_profile`, consulte [Custo de esquema de ferramentas MCP](../../gsd-core/references/context-budget.md#mcp-tool-schema-cost-harness-concern) na referência `context-budget.md` incluída.
 
 ### Usando runtimes não-Claude (Codex, OpenCode, Gemini CLI, Kilo)
 
@@ -853,7 +860,7 @@ Para desativar a execução paralela completamente: `/gsd-settings` → defina `
   reports/                # Session reports (from /gsd-pause-work --report)
   todos/
     pending/              # Captured ideas awaiting work
-    done/                 # Completed todos
+    completed/             # Completed todos
   debug/                  # Active debug sessions
     resolved/             # Archived debug sessions
   spikes/                 # Feasibility experiments (from /gsd-spike)
@@ -864,7 +871,8 @@ Para desativar a execução paralela completamente: `/gsd-settings` → defina `
     themes/
       default.css         # Shared CSS variables for all sketches
     MANIFEST.md           # Index of all sketches with winners
-  codebase/               # Brownfield codebase mapping (from /gsd-map-codebase)
+  codebase/               # Brownfield codebase mapping (from /gsd-map-codebase or /gsd-onboard)
+  onboarding/             # Brownfield onboarding summary (from /gsd-onboard)
   phases/
     XX-phase-name/
       XX-YY-PLAN.md       # Atomic execution plans
