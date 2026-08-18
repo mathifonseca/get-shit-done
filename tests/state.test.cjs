@@ -2433,6 +2433,17 @@ describe('progress counters correct after plan execution (#1589)', () => {
     return JSON.parse(jsonResult.output).progress;
   }
 
+  // RETAINED AS A GUARD ON UPSTREAM'S FIX, not on a fork clamp.
+  // The fork briefly carried a per-phase `Math.min(summaryCount, planCount)` clamp in
+  // src/state.cts (99d649b0) because at v1.4.3 `scanPhasePlans` set
+  // `summaryCount = summaryFiles.length` — every stray `*-SUMMARY.md` inflated the
+  // numerator and pushed completed_plans past total_plans (measured 64 > 59).
+  // Upstream fixed the ROOT CAUSE in ed31e52b6 (#1988): countMatchedSummaries walks
+  // planFiles and matches each at most once, so summaryCount <= planCount by
+  // construction and the clamp became a no-op. The clamp is gone; these two tests
+  // stay, because they still fail if that protection ever regresses (verified by
+  // negative control: stubbing summaryCount back to summaryFiles.length turns the
+  // first test red).
   test('a phase with MORE summaries than plans cannot push completed_plans over total_plans', () => {
     const phases = path.join(tmpDir, '.planning', 'phases');
     // Phase 01 ordinary: 2 plans / 2 summaries.
