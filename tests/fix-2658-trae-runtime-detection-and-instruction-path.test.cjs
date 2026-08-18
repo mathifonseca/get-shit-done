@@ -210,14 +210,20 @@ describe('#2658: end-to-end --trae install never emits the malformed path (accep
   test('local install: no emitted .md/.js/.cjs file contains the malformed strings; the rules file is concrete', () => {
     const { configDir, root } = runMinimalInstall({ runtime: 'trae', scope: 'local' });
     try {
-      // CHANGELOG.md is historical prose that legitimately QUOTES the malformed
-      // path while describing the #2658 fix; the installer copies it verbatim to
-      // <target>/gsd-core/CHANGELOG.md. It is documentation, not an emitted
-      // instruction path, so it is out of scope for this acceptance criterion.
-      // (Upstream v1.10.0 is red on this for the same reason — report upstream.)
       const files = walk(configDir)
         .filter((f) => /\.(md|js|cjs)$/.test(f))
-        .filter((f) => path.basename(f) !== 'CHANGELOG.md');
+        // gsd-core/CHANGELOG.md is excluded by exact relative path (not a blanket
+        // .md skip — the emitted agent/command/workflow markdown this gate exists
+        // to guard stays fully scanned). CHANGELOG.md legitimately QUOTES the
+        // malformed `.claude/.trae/rules` / `.trae/.trae/rules` strings while
+        // documenting the #2658 fix itself (#3006) — that historical-value
+        // citation is not a regression of the installer's actual output.
+        //
+        // Kept identical in intent to upstream's own fix on `next`: upstream main
+        // has been red on this since the v1.10.0 CHANGELOG promotion (68a04ccf8),
+        // and next fixes it the same way. Matching their form means the next sync
+        // is a no-op here instead of a conflict.
+        .filter((f) => f.split(path.sep).join('/').indexOf('gsd-core/CHANGELOG.md') === -1);
       assert.ok(files.length > 0, 'expected at least one emitted .md/.js/.cjs file');
       for (const file of files) {
         const content = fs.readFileSync(file, 'utf8');
