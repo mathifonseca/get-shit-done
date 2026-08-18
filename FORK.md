@@ -149,6 +149,13 @@ So in an installed fork you type the **hyphen** form even though the source (cor
 - `README.md` — "Why this fork?" section, "Getting Started" guide, config table
 - `LICENSE` — added fork copyright line
 
+## Operations
+
+Day-to-day maintenance — the sync loop, what we are waiting on upstream, process
+lessons, and the queue for next sessions — lives in
+[FORK-OPERATIONS.md](FORK-OPERATIONS.md). This file stays the record of *what* the
+fork changes and the full sync history.
+
 ## Upstream tracking
 
 This fork tracks the active upstream at `open-gsd/gsd-core` (was `gsd-build/get-shit-done` until that repo was retired in 2026). The `upstream` remote is configured against the new repo. The new upstream uses a two-branch model: `main` is the stable release line (currently v1.10.x, latest tag `v1.10.0`); `next` is the integration branch (the repo's default). This fork tracks **`upstream/main`** — released versions only — matching the prior fork pattern of syncing to tagged releases.
