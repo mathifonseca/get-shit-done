@@ -57,7 +57,7 @@ register so findings inherit its blocking `ship:pre` gate and waiver trail.
 
 ## 2. What we are waiting on upstream
 
-### `open-gsd/gsd-core#3613` — filed, awaiting triage
+### `open-gsd/gsd-core#3613` — confirmed-bug 2026-08-18; superseded by external PR #3627. Watch the merge, then adopt.
 
 The `C2` plugin-validate gate symlinks its fixture component dirs; `claude` CLI
 >= 2.1.233 warns on symlinked component directories and `--strict` turns that into
@@ -65,18 +65,23 @@ exit 1. Compounding it, the test is guarded by `skip: !claudeAvailable` and no
 workflow installs the CLI — so it is **permanently skipped in CI**: green on every
 PR, red on every contributor machine.
 
-- Unfixed on **both** `main` and `next` (`tests/plugin-manifest.test.cjs:406-408`).
-- Fix is written and verified locally: `fs.cpSync(src, dest, { recursive: true })`.
-  A/B on clean upstream — symlinked → exit 1 with 3 warnings; copied → exit 0.
-- **Blocked on a label, not on the code.** Their `auto-close-unsolicited-prs.yml`
-  closes non-member PRs unless the linked issue carries a maintainer-applied
-  `confirmed-bug` / `approved-enhancement` / `approved-feature`. Ours currently has
-  `needs-triage`. Opening a PR before the label gets it robo-closed.
-- A daily cloud routine checks the label and reports. **Do not open the PR until an
-  approval label lands.** If it stalls for several days, a short comment offering
-  the patch is the low-friction way to get triage attention.
+- **We do NOT open a PR for this.** `confirmed-bug` landed 2026-08-18, and hours
+  later @behruznassre opened [#3627](https://github.com/open-gsd/gsd-core/pull/3627)
+  ("fix(#3613): copy component dirs into the plugin-validate fixture") — same
+  `cpSync` approach we verified, done better: entry-by-entry copy through
+  `shouldCopyHookEntry` (closes the #3656 build-staging race our bare recursive
+  copy is still exposed to) plus an unconditional `C3` symlink-free tripwire so a
+  regression goes red in CI without the CLI. All checks green incl. Windows shards.
+- We posted our independent A/B verification as a supporting comment 2026-08-19
+  (symlinked → exit 1 with 3 warnings; copied → exit 0; CLI 2.1.233). Only act
+  again if #3627 stalls or is abandoned — then offer to take it over in a comment.
+- **At the first sync containing the merge: drop our local variant and take
+  theirs.** Ours is the bare `fs.cpSync` at
+  `tests/issue-766-plugin-manifest.test.cjs:386-388`; upstream renamed the file to
+  `tests/plugin-manifest.test.cjs`, so the diff will not line up automatically.
+  Adopting removes one modified-upstream-test entry (§3, 23 → 22).
 
-### `open-gsd/gsd-core#3660` — filed, awaiting triage
+### `open-gsd/gsd-core#3660` — confirmed-bug 2026-08-19; our PR [#3681](https://github.com/open-gsd/gsd-core/pull/3681) is open. Watch review feedback.
 
 Every bounded prohibition check that hangs orphans a busy-spinning process. `node --test`
 defaults to `--test-isolation=process`, so the child we spawn is a *runner* that re-execs a
@@ -91,8 +96,25 @@ closed, so the suite stays green and the leak is invisible. Found from the outsi
   `next` @ `1adf6d224` in place reproduces the orphan.
 - Fix is on `fix/prohibition-enforcement-subprocess-reap` (pushed): all four sites routed
   through one `runBoundedCapture` that spawns `detached` and SIGKILLs the process group.
-- **Blocked on the same label mechanic as #3613** — `auto-close-unsolicited-prs.yml` will
-  robo-close the PR until a maintainer applies `confirmed-bug`. Do not open it before then.
+- **Upstream PR #3681 opened 2026-08-19**, base `next` @ `4e60dba71` (v1.11.0), head
+  `mathifonseca/gsd-core:fix/3660-bounded-check-orphans-worker` — a clean cherry-pick of
+  `09d4d83a9` plus the `.changeset/tidy-jays-wander.md` fragment (fragment committed
+  AFTER open: it must carry the real PR number or `changeset/lint.cjs` fails it).
+  Verified on that base before opening: files still byte-identical pre-fix, 71/71 in the
+  target file, negative control red/green in both directions, full suite 30,594/30,611
+  pass with the single failure being #3613's `C2` (pre-existing, disclosed in the PR
+  body). Survived `auto-close-unsolicited-prs.yml`; early gates green at open.
+- **PR-network gotcha (bit us 2026-08-19):** `mathifonseca/get-shit-done` sits in the
+  archived `gsd-build/get-shit-done` fork network and CANNOT open PRs against
+  `open-gsd/gsd-core` — the 2026-06 migration was a fresh repo, not a transfer. Upstream
+  PRs go through the fresh fork `mathifonseca/gsd-core` (remote `gsdfork` in this
+  checkout). The PR branch also lives locally as `fix/3660-bounded-check-orphans-worker`;
+  its verify worktrees were removed after push — recreate one from the branch (NOT from
+  a path under `/tmp`: `tests/helpers-cleanup.test.cjs`'s out-of-tmpdir refusal test
+  trips its own safety precondition in any tmp-rooted checkout) for review-feedback work.
+- The daily cloud routine that watched the #3613/#3660 labels should now watch two
+  things instead: #3627 merging (triggers the §3613 sync adoption above) and #3681
+  review feedback / CI.
 - **Load-bearing check** (§3) — revert the `src/` half, then
   `node --test --test-name-pattern="leaves NO orphaned descendant" tests/prohibition-enforcement.test.cjs`
   must go **red** with the orphan diagnostic. Verified in both directions 2026-08-19. If it
