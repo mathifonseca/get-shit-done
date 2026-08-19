@@ -76,6 +76,36 @@ PR, red on every contributor machine.
   approval label lands.** If it stalls for several days, a short comment offering
   the patch is the low-friction way to get triage attention.
 
+### `open-gsd/gsd-core#3660` — filed, awaiting triage
+
+Every bounded prohibition check that hangs orphans a busy-spinning process. `node --test`
+defaults to `--test-isolation=process`, so the child we spawn is a *runner* that re-execs a
+per-file *worker*; `execFileSync`'s `timeout` signals the direct child only. The runner dies
+at the bound and the worker — the process actually executing the subject — is never
+signalled at all, is reparented to PID 1, and burns a core forever. The verdict still fails
+closed, so the suite stays green and the leak is invisible. Found from the outside as
+**~6.4 cores of unexplained load over two days**, never from a red test.
+
+- Unfixed on **both** `main` and `next` (`src/prohibition-enforcement.cts`, four
+  `execFileSync` sites). Their file is byte-identical to our pre-fix copy, and building
+  `next` @ `1adf6d224` in place reproduces the orphan.
+- Fix is on `fix/prohibition-enforcement-subprocess-reap` (pushed): all four sites routed
+  through one `runBoundedCapture` that spawns `detached` and SIGKILLs the process group.
+- **Blocked on the same label mechanic as #3613** — `auto-close-unsolicited-prs.yml` will
+  robo-close the PR until a maintainer applies `confirmed-bug`. Do not open it before then.
+- **Load-bearing check** (§3) — revert the `src/` half, then
+  `node --test --test-name-pattern="leaves NO orphaned descendant" tests/prohibition-enforcement.test.cjs`
+  must go **red** with the orphan diagnostic. Verified in both directions 2026-08-19. If it
+  stays green after the revert, the guard is dead — and this leak is silent by nature, so
+  nothing else will tell you.
+- **Do not "simplify" this to `--test-isolation=none`.** It looks like the smaller fix and
+  was measured to be strictly worse: with no worker the subject runs inside the runner,
+  whose SIGTERM queues behind the blocked event loop, so the bound stops firing entirely
+  and verify hangs instead of failing closed. Rationale is in the `runBoundedCapture`
+  comment block and in #3660.
+- Puts `tests/prohibition-enforcement.test.cjs` onto the modified-upstream-test surface
+  (§3) — it was pristine upstream before this, so it is now a sync conflict point.
+
 ### Also true, needs no action
 
 Upstream `main` has been **red since 2026-08-08** (run `31240989206`) on the trae
