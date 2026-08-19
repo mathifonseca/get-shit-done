@@ -104,7 +104,7 @@ closed, so the suite stays green and the leak is invisible. Found from the outsi
   and verify hangs instead of failing closed. Rationale is in the `runBoundedCapture`
   comment block and in #3660.
 - Puts `tests/prohibition-enforcement.test.cjs` onto the modified-upstream-test surface
-  (§3) — it was pristine upstream before this, so it is now a sync conflict point.
+  (§3, 22 → 23) — it was pristine upstream before this, so it is now a sync conflict point.
 
 ### Also true, needs no action
 
@@ -170,7 +170,14 @@ re-investigates:
   *after* the gates they exist to precede. Moving them changes behaviour.
 - `retro` — `complete-milestone.md` is not a declared loop host.
 
-Plus **22 modified upstream test files**, the single largest surface.
+Plus **23 modified upstream test files**, the single largest surface.
+
+Counting rule (so this is not re-derived wrongly): `.test.cjs` files only, modified
+relative to the upstream side of the sync merge — `git diff --diff-filter=M --name-only
+$(git rev-parse 031a3846c^2) HEAD -- tests/ | grep -c '\.test\.cjs$'`. A plain file count
+returns 41, because 19 modified `tests/fixtures/install-tree/*.json` are **generated** by
+`scripts/gen-install-tree-fixtures.cjs` — regenerated output, not divergence anyone
+maintains.
 
 ---
 
@@ -196,7 +203,7 @@ brought both workflow tier caps back to upstream parity: move blocks into
 
 ### Then
 
-- Reduce the 22-file test divergence where upstream now covers the same ground
+- Reduce the 23-file test divergence where upstream now covers the same ground
   (apply the load-bearing check to each before removing).
 - Watch whether `two_stage_review` / `questions_per_area` converge with upstream's
   `code_review_depth` / `max_discuss_passes`.
