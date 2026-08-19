@@ -4,12 +4,19 @@
 // Detects when Claude attempts file edits outside a GSD workflow context
 // (no active /gsd- skill or Task subagent) and injects an advisory warning.
 //
-// This is a SOFT guard — it advises, not blocks. The edit still proceeds.
-// The warning nudges Claude to use /gsd:quick or /gsd:fast instead of
-// making direct edits that bypass state tracking.
+// This is a SOFT guard by default — it advises, not blocks. The edit still
+// proceeds. The warning nudges Claude to use /gsd:quick or /gsd:fast instead
+// of making direct edits that bypass state tracking.
 //
 // Enable via config: hooks.workflow_guard: true (default: false)
 // Only triggers on Write/Edit tool calls to non-.planning/ files.
+//
+// Strict mode: hooks.workflow_guard_strict: true (default: false, requires
+// hooks.workflow_guard: true) upgrades the advisory to a hard block —
+// exit 2 with a `decision: 'block'` payload instead of additionalContext.
+// Written instructions get ignored; a deterministic block cannot be. See
+// wiki/sources/zarar-dev-agent-hooks-deterministic-guardrails-for-ai-generated-code
+// (LifeOS, ingested 2026-07-06) for the source pattern.
 
 const fs = require('fs');
 const path = require('path');
@@ -67,15 +74,26 @@ function currentBranch(cwd) {
   return result.stdout.trim();
 }
 
-function workflowGuardEnabled(cwd) {
+function readHooksConfig(cwd) {
   const configPath = path.join(cwd, '.planning', 'config.json');
-  if (!fs.existsSync(configPath)) return false;
+  if (!fs.existsSync(configPath)) return {};
   try {
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    return Boolean(config.hooks?.workflow_guard);
+    return config.hooks || {};
   } catch (e) {
-    return false;
+    return {};
   }
+}
+
+function workflowGuardEnabled(cwd) {
+  return Boolean(readHooksConfig(cwd).workflow_guard);
+}
+
+// Strict mode requires workflow_guard itself to be on — it upgrades that
+// guard's behavior, it doesn't stand alone.
+function workflowGuardStrictEnabled(cwd) {
+  const hooks = readHooksConfig(cwd);
+  return Boolean(hooks.workflow_guard) && Boolean(hooks.workflow_guard_strict);
 }
 
 // Kimi CLI delivers the tool vocabulary the matcher was registered with —
@@ -251,7 +269,27 @@ process.stdin.on('end', () => {
     }
 
     // If we get here: GSD project, guard enabled, file edit outside .planning/,
-    // not in a subagent context. Inject advisory warning.
+    // not in a subagent context.
+    if (workflowGuardStrictEnabled(cwd)) {
+      // Strict mode: block outright instead of advising. Matches the
+      // decision:'block' + exit(2) shape used above for worktree-agent
+      // force-add — the deterministic pattern, not the advisory one.
+      const blockOutput = {
+        decision: 'block',
+        code: 'GSD_WORKFLOW_GUARD_STRICT',
+        reason: `Direct edit to ${path.basename(filePath)} outside a GSD workflow context, with ` +
+          'hooks.workflow_guard_strict enabled. Use /gsd:fast for trivial fixes or /gsd:quick for ' +
+          'larger changes so the edit is tracked in STATE.md and produces a SUMMARY.md. ' +
+          'If a direct edit is genuinely intended, ask the user to disable hooks.workflow_guard_strict ' +
+          'in .planning/config.json for this session rather than working around this block.',
+      };
+      process.stdout.write(JSON.stringify(blockOutput));
+      // Kimi CLI's exit-2 protocol feeds stderr back to the model (#2304)
+      process.stderr.write(blockOutput.reason);
+      process.exit(2);
+    }
+
+    // Default (soft) mode: inject advisory warning, edit still proceeds.
     const output = {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",

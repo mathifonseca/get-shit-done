@@ -184,3 +184,123 @@ describe('#2304: Kimi tool vocabulary engages the workflow guard', () => {
     });
   });
 });
+
+// workflow_guard_strict — the hard-block upgrade of the soft advisory (FORK.md
+// pattern row, zarar.dev agent-hooks source). CONTROL + TREATMENT pair: the
+// treatment alone proves nothing — exit 2 could come from anywhere — so the
+// control runs the IDENTICAL payload with only the strict flag flipped off and
+// must get the pre-existing advisory (exit 0, edit proceeds). Only the config
+// bit may separate the two outcomes.
+describe('workflow_guard_strict: hard-block upgrade (control/treatment)', () => {
+  let repoDir;
+  let editPayload;
+
+  function writeHooksConfig(hooks) {
+    fs.writeFileSync(
+      path.join(repoDir, '.planning', 'config.json'),
+      JSON.stringify({ hooks })
+    );
+  }
+
+  before(() => {
+    // No git init: the Write/Edit path never shells out to git, and keeping
+    // the fixture git-free pins that strict mode doesn't grow a git
+    // dependency the soft path never had.
+    repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-workflow-guard-strict-'));
+    fs.mkdirSync(path.join(repoDir, '.planning'));
+    editPayload = {
+      tool_name: 'Write',
+      tool_input: { file_path: path.join(repoDir, 'src', 'app.js'), content: 'x' },
+      cwd: repoDir,
+    };
+  });
+
+  after(() => {
+    cleanup(repoDir);
+  });
+
+  test('TREATMENT: guard + strict on -> decision:block, exit 2, reason on stderr', () => {
+    writeHooksConfig({ workflow_guard: true, workflow_guard_strict: true });
+    const r = runHook(editPayload);
+    assert.equal(r.exitCode, 2, `strict mode must hard-block. stderr: ${r.stderr}`);
+    const output = JSON.parse(r.stdout);
+    assert.equal(output.decision, 'block');
+    assert.equal(output.code, 'GSD_WORKFLOW_GUARD_STRICT');
+    assert.ok(
+      output.reason.includes('/gsd:fast') && output.reason.includes('workflow_guard_strict'),
+      'reason must name the escape hatches (/gsd:fast, the config flag), not just refuse'
+    );
+    assert.ok(
+      r.stderr.includes('workflow_guard_strict'),
+      'reason must reach stderr — that is what Kimi feeds back to the model on exit 2'
+    );
+  });
+
+  for (const [label, hooks] of [
+    ['strict absent', { workflow_guard: true }],
+    ['strict explicitly false', { workflow_guard: true, workflow_guard_strict: false }],
+  ]) {
+    test(`CONTROL: identical payload, ${label} -> soft advisory unchanged (exit 0)`, () => {
+      writeHooksConfig(hooks);
+      const r = runHook(editPayload);
+      assert.equal(r.exitCode, 0, `soft mode must not block. stderr: ${r.stderr}`);
+      const output = JSON.parse(r.stdout);
+      assert.equal(output.decision, undefined, 'soft mode must not carry a decision field');
+      assert.ok(
+        output.hookSpecificOutput?.additionalContext?.includes('WORKFLOW ADVISORY'),
+        'soft mode must keep emitting the advisory'
+      );
+    });
+  }
+
+  test('strict without the base guard is a no-op (strict upgrades, never stands alone)', () => {
+    writeHooksConfig({ workflow_guard: false, workflow_guard_strict: true });
+    const r = runHook(editPayload);
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.stdout, '', 'guard disabled means silence, not a block and not an advisory');
+  });
+
+  test('strict on: .planning/ edits stay exempt (strict must not widen the guarded surface)', () => {
+    writeHooksConfig({ workflow_guard: true, workflow_guard_strict: true });
+    const r = runHook({
+      tool_name: 'Write',
+      tool_input: { file_path: path.join(repoDir, '.planning', 'notes.md'), content: 'x' },
+      cwd: repoDir,
+    });
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.stdout, '');
+  });
+
+  test('strict on: allowlisted files (CLAUDE.md) stay exempt', () => {
+    writeHooksConfig({ workflow_guard: true, workflow_guard_strict: true });
+    const r = runHook({
+      tool_name: 'Write',
+      tool_input: { file_path: path.join(repoDir, 'CLAUDE.md'), content: 'x' },
+      cwd: repoDir,
+    });
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.stdout, '');
+  });
+
+  test('strict on: subagent context stays exempt (a hard block must not fire inside GSD executors)', () => {
+    writeHooksConfig({ workflow_guard: true, workflow_guard_strict: true });
+    const r = runHook({
+      tool_name: 'Write',
+      tool_input: { file_path: path.join(repoDir, 'src', 'app.js'), content: 'x', is_subagent: true },
+      cwd: repoDir,
+    });
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.stdout, '');
+  });
+
+  test('strict blocks through Kimi vocabulary too (WriteFile + path)', () => {
+    writeHooksConfig({ workflow_guard: true, workflow_guard_strict: true });
+    const r = runHook({
+      tool_name: 'WriteFile',
+      tool_input: { path: path.join(repoDir, 'src', 'app.js'), content: 'x' },
+      cwd: repoDir,
+    });
+    assert.equal(r.exitCode, 2, `Kimi WriteFile must hit the same strict block. stderr: ${r.stderr}`);
+    assert.equal(JSON.parse(r.stdout).code, 'GSD_WORKFLOW_GUARD_STRICT');
+  });
+});
