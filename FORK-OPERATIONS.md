@@ -81,7 +81,7 @@ PR, red on every contributor machine.
   `tests/plugin-manifest.test.cjs`, so the diff will not line up automatically.
   Adopting removes one modified-upstream-test entry (§3, 23 → 22).
 
-### `open-gsd/gsd-core#3660` — confirmed-bug 2026-08-19; our PR [#3681](https://github.com/open-gsd/gsd-core/pull/3681) is open. Watch review feedback.
+### `open-gsd/gsd-core#3660` — confirmed-bug 2026-08-19; our PR [#3681](https://github.com/open-gsd/gsd-core/pull/3681) is open, review answered 2026-08-23. Waiting on a run release.
 
 Every bounded prohibition check that hangs orphans a busy-spinning process. `node --test`
 defaults to `--test-isolation=process`, so the child we spawn is a *runner* that re-execs a
@@ -95,7 +95,12 @@ closed, so the suite stays green and the leak is invisible. Found from the outsi
   `execFileSync` sites). Their file is byte-identical to our pre-fix copy, and building
   `next` @ `1adf6d224` in place reproduces the orphan.
 - Fix is on `fix/prohibition-enforcement-subprocess-reap` (pushed): all four sites routed
-  through one `runBoundedCapture` that spawns `detached` and SIGKILLs the process group.
+  through one `runBoundedCapture` whose subtree is reaped by `reapDescendants()` in a
+  `finally` — `process.kill(-pid, 'SIGKILL')` on POSIX (`detached` makes the child a group
+  leader), `taskkill /PID <pid> /T /F` on win32. As of 2026-08-23 that branch carries the
+  POST-REVIEW version (`4721e31e6` + `a3eaac659`, cherry-picked back from the PR branch), so
+  fork and upstream no longer disagree. The `.changeset/` fragment is deliberately NOT on
+  this branch — it is upstream release bookkeeping keyed to PR #3681.
 - **Upstream PR #3681 opened 2026-08-19**, base `next` @ `4e60dba71` (v1.11.0), head
   `mathifonseca/gsd-core:fix/3660-bounded-check-orphans-worker` — a clean cherry-pick of
   `09d4d83a9` plus the `.changeset/tidy-jays-wander.md` fragment (fragment committed
@@ -112,14 +117,55 @@ closed, so the suite stays green and the leak is invisible. Found from the outsi
   its verify worktrees were removed after push — recreate one from the branch (NOT from
   a path under `/tmp`: `tests/helpers-cleanup.test.cjs`'s out-of-tmpdir refusal test
   trips its own safety precondition in any tmp-rooted checkout) for review-feedback work.
+- **Review round 1 (trek-e, 2026-08-20): CHANGES_REQUESTED — 2 blockers, 3 majors, 3 minors.**
+  Answered 2026-08-23 in `4721e31e6` (all eight) and `a3eaac659` (a bug CI then found in the
+  answer). Verdict on the mechanism was favourable throughout: *"genuine root-cause fix,
+  verified rather than taken on trust."* What changed: `pgrep` replaced by a pidfile the
+  subject writes (`procps` is absent from `node:*-slim`, and its ENOENT read as "the leak is
+  no longer reproducible"); Windows given a real reap instead of a carve-out comment; a
+  SIGINT handler added because `detached` had RELOCATED the defect to the interrupt path; the
+  treatment arm taught to observe its own worker before asserting it is gone; the spinner
+  replaced by `Atomics.wait` (same event-loop wedge, 0% CPU); the cast removed so the eslint
+  guard works again.
+- **Lesson, and it cost a red CI round: `process.kill(pid, 0)` CANNOT SEE ZOMBIES.** A
+  killed-but-unwaited child keeps its PID-table entry and answers signal 0 with success, so
+  the pidfile probe reported a correctly-reaped worker as still alive. Measured on
+  linux/amd64 and linux/arm64 (Node 24, container): after the reap the worker sits in
+  `/proc/<pid>/stat` state `Z` while `kill(pid, 0)` succeeds. **It passed on this Mac only
+  because launchd reaps orphans promptly enough that the limbo is never sampled** — the same
+  shape as the original bug, where a green local suite hid a real leak. Use `isRunning()`
+  (reads `/proc` state where it exists, falls back to signal 0). Generalise: when a probe
+  passes here and fails on Linux, suspect the probe before the code, and reproduce in
+  `docker run --platform linux/amd64 node:24` — it caught this in one round.
+- **Open, awaiting the next run release:** (a) `test (windows-latest)` failed on the CONTROL,
+  not the treatment — if that holds, Windows has NO leak to reap, because libuv assigns every
+  non-detached child to a job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so killing the
+  runner takes the worker with it. If confirmed, REMOVE the `taskkill` arm rather than keep
+  it: dead code carrying a real PID-reuse hazard (Windows has no process-group-lifetime rule).
+  (b) `emitted-attribution` fails on both Linux lanes — **verified pre-existing**: it fails on
+  the untouched PR base `4e60dba71` too (9 stale acks there, 1 on our branch). Not ours;
+  flagged upstream, not fixed, since #3681 is one concern.
+- **Fork PR runs need a maintainer release each push** (`action_required`). Expect a stall
+  after every push, not a CI failure. trek-e released round 1 on request.
 - The daily cloud routine that watched the #3613/#3660 labels should now watch two
   things instead: #3627 merging (triggers the §3613 sync adoption above) and #3681
   review feedback / CI.
-- **Load-bearing check** (§3) — revert the `src/` half, then
-  `node --test --test-name-pattern="leaves NO orphaned descendant" tests/prohibition-enforcement.test.cjs`
-  must go **red** with the orphan diagnostic. Verified in both directions 2026-08-19. If it
-  stays green after the revert, the guard is dead — and this leak is silent by nature, so
-  nothing else will tell you.
+- **Load-bearing checks** (§3) — FOUR now, not one, and each fails with its own diagnostic.
+  All verified in both directions 2026-08-23. This leak is silent by nature, so if a revert
+  leaves the suite green, nothing else will tell you the guard is dead.
+
+  | revert | must go red with |
+  | --- | --- |
+  | the whole `src/` half | *a descendant of the bounded check … OUTLIVED it* |
+  | `installInterruptReap()` only | *the interrupted check stranded its worker* |
+  | the `setImmediate` turn in the `finally` only | *the verifier must still DIE from the interrupt* |
+  | the `timeout:` key in the spawn options | `npx eslint src/prohibition-enforcement.cts` reports `local/require-subprocess-timeout` |
+
+  The last one is not a test — it is the machine guard itself. It went **inert** for four
+  days because an `as unknown as` cast turned the options argument into an Identifier, which
+  `require-subprocess-timeout` declines to trace by design. Caught in upstream review, not by
+  us. Keep the options an inline object literal; get `detached` in through a SPREAD, never a
+  cast.
 - **Do not "simplify" this to `--test-isolation=none`.** It looks like the smaller fix and
   was measured to be strictly worse: with no worker the subject runs inside the runner,
   whose SIGTERM queues behind the blocked event loop, so the bound stops firing entirely
