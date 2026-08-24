@@ -137,11 +137,38 @@ closed, so the suite stays green and the leak is invisible. Found from the outsi
   (reads `/proc` state where it exists, falls back to signal 0). Generalise: when a probe
   passes here and fails on Linux, suspect the probe before the code, and reproduce in
   `docker run --platform linux/amd64 node:24` — it caught this in one round.
-- **Open, awaiting the next run release:** (a) `test (windows-latest)` failed on the CONTROL,
-  not the treatment — if that holds, Windows has NO leak to reap, because libuv assigns every
-  non-detached child to a job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so killing the
-  runner takes the worker with it. If confirmed, REMOVE the `taskkill` arm rather than keep
-  it: dead code carrying a real PID-reuse hazard (Windows has no process-group-lifetime rule).
+- **Review round 2 (2026-08-23/24): a maintainer RULING, and two corrections we owed.** trek-e
+  withdrew their own round-1 `taskkill` prescription — `/T` resolves the specified process first,
+  and a synchronous spawn guarantees that process is already dead by the time control returns, so
+  the snippet they handed us could never have worked. Ruling sequences the remaining work:
+  (1) take the wall-clock out of the control, (2) confirm it strands a worker on both platforms,
+  (3) THEN the Windows reap. Step 1 shipped 2026-08-24 (`4721e31e6`..`ff525cbe1` here,
+  `11b0a0e9b` upstream). Steps 2-3 are blocked on a CI release and a re-ruling respectively.
+- **Lesson — a readiness signal must mark the state you actually depend on.** The control's premise
+  is "a worker exists AND IS BLOCKED when the runner dies", but the subject recorded its PID at
+  MODULE LOAD, which only proves a worker started. A started-but-not-yet-blocked worker still has a
+  live event loop and dies with its runner instead of being stranded. Record readiness from the
+  statement before the block, never at load.
+- **Lesson — `node --test` REAPS ITS OWN WORKERS on the way out, so how the runner dies decides
+  whether anything leaks.** Measured one variable at a time, killing at the handshake:
+  SIGTERM with the pipes still read -> NOT stranded (the runner cleaned up); SIGTERM with the pipes
+  torn down -> stranded; SIGKILL -> stranded. The real pre-fix path is the middle row (`spawnSync`
+  tears the pipes down as it returns). A control that kills with plain SIGTERM measures `node
+  --test`'s teardown, not ours, and passes for the wrong reason. Use SIGKILL: uncatchable, so it
+  reaches the no-cleanup state every time, and it is the stricter premise.
+- **Before spending a big refactor on a review instruction, TRACE IT.** The ruling priced the async
+  conversion at "three callers inside one module family". Measured, it reaches `routeCheckCommand`
+  (shared by 13 check subcommands) and `routeCheck` in `gsd-tools.cjs` (1 of 56 leaf routers on one
+  sync `({ args, cwd, raw, error }) => void` shape, ADR-2346 Layer-2), plus 52 call sites across 5
+  test files. Reported the measurement and asked for a re-ruling instead of spending it — the same
+  move that got the `taskkill` prescription withdrawn. Measurements move this reviewer; argument does
+  not.
+- **Open, awaiting the next run release:** (a) the Windows control failure was the
+  SAME clock race as the Linux one, not a Windows finding — step 1 should retire both. Our
+  "libuv job object means Windows has no leak" theory is UNCONFIRMED and should not be repeated as
+  fact: the control failed before the treatment arm ran, so that CI round settled nothing either way.
+  The `taskkill` branch is still in the tree and still cannot work (see round 2); it goes when step 3
+  does.
   (b) `emitted-attribution` fails on both Linux lanes — **verified pre-existing**: it fails on
   the untouched PR base `4e60dba71` too (9 stale acks there, 1 on our branch). Not ours;
   flagged upstream, not fixed, since #3681 is one concern.
