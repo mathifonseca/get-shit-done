@@ -379,6 +379,35 @@ function scalarNeedsDoubleQuoting(s: string): boolean {
 }
 
 /**
+ * Can `sv` be emitted as a literal (`|`) block scalar and survive a round-trip
+ * through BOTH `parseYamlRegion` and a conforming YAML parser? Anything that
+ * cannot falls back to the escaped double-quoted form, which round-trips every
+ * string by construction (see `escapeDoubleQuoted`).
+ *
+ * Not block-safe:
+ * - `\r` or any C0 control other than `\n`/`\t` (and DEL): a block scalar
+ *   carries bytes verbatim, so a NUL/ESC is invalid YAML input and CRLF is
+ *   normalised to LF by every parser.
+ * - a first content line that starts with whitespace: YAML derives the block's
+ *   indentation from that line, so the rest of the block is "less indented"
+ *   and the document fails to parse (an explicit indentation indicator would
+ *   be needed).
+ * - a whitespace-only content line: indistinguishable from a blank line once
+ *   the content indent is stripped.
+ * - nothing but newlines: chomping leaves an empty scalar.
+ */
+function isBlockScalarSafe(sv: string): boolean {
+  if (!sv.includes('\n')) return false;
+  if (/[\u0000-\u0008\u000b-\u001f\u007f]/.test(sv)) return false; // \n (0a) and \t (09) allowed
+  const body = sv.replace(/\n+$/, '');
+  if (body === '') return false;
+  const lines = body.split('\n');
+  if (/^[ \t]/.test(lines[0])) return false;
+  if (lines.some((l) => l.length > 0 && l.trim() === '')) return false;
+  return true;
+}
+
+/**
  * Render a multi-line string value as a YAML literal (`|`) block scalar, never as an
  * escaped single-line quoted string (#XXXX — the STATE.md-readability half of the
  * `parseYamlRegion` block-scalar fix). `|` is used unconditionally on the write side
@@ -476,7 +505,7 @@ function reconstructFrontmatter(obj: Frontmatter): string {
         } else {
           // eslint-disable-next-line @typescript-eslint/no-base-to-string
           const sv = String(subval);
-          if (sv.includes('\n')) {
+          if (isBlockScalarSafe(sv)) {
             lines.push(...renderBlockScalarLines(subkey, sv, '  '));
           } else if (sv.includes(':') || sv.includes('#') || scalarNeedsDoubleQuoting(sv)) {
             lines.push(`  ${subkey}: "${escapeDoubleQuoted(sv)}"`);
@@ -487,7 +516,7 @@ function reconstructFrontmatter(obj: Frontmatter): string {
       }
     } else {
       const sv = String(value);
-      if (sv.includes('\n')) {
+      if (isBlockScalarSafe(sv)) {
         lines.push(...renderBlockScalarLines(key, sv, ''));
       } else if (sv.includes(':') || sv.includes('#') || sv.startsWith('[') || sv.startsWith('{') || scalarNeedsDoubleQuoting(sv)) {
         lines.push(`${key}: "${escapeDoubleQuoted(sv)}"`);

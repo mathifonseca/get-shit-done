@@ -1226,6 +1226,30 @@ describe('reconstructFrontmatter: strict-YAML round-trip (#1779)', () => {
     assert.deepEqual(strictRoundTrip(obj), obj);
   });
 
+  test('multi-line values a `|` block scalar cannot carry fall back to the quoted form', () => {
+    // Each of these is unrepresentable as a literal block scalar (see
+    // isBlockScalarSafe): the emitter must take the escaped-quoted path so the
+    // value still round-trips exactly through a conforming parser.
+    const cases = {
+      first_line_leading_ws: '  first has leading spaces\nsecond',
+      whitespace_only_line: 'first\n   \nsecond',
+      only_newlines: '\n',
+      esc_control: 'first\n\x1b[0m second',
+    };
+    for (const [name, note] of Object.entries(cases)) {
+      const text = reconstructFrontmatter({ note });
+      assert.ok(!/^note: \|/.test(text), `${name}: expected quoted form, got block scalar:\n${text}`);
+      assert.deepEqual(strictRoundTrip({ note }), { note }, name);
+    }
+  });
+
+  test('clean multi-line prose still emits as a `|` block scalar (the readability half)', () => {
+    const note = 'Phase 3 stopped: waiting on review\n  - later lines may be indented\n# even comment-like\n';
+    const text = reconstructFrontmatter({ note });
+    assert.ok(/^note: \|/.test(text), `expected block scalar, got:\n${text}`);
+    assert.deepEqual(strictRoundTrip({ note }), { note });
+  });
+
   test('empty string round-trips as "" (bare `k:` would reload as null)', () => {
     assert.deepEqual(strictRoundTrip({ k: '' }), { k: '' });
   });
