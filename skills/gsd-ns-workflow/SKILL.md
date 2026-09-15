@@ -29,6 +29,7 @@ workflow-advance command.
 | Generate tests for a completed phase | gsd-add-tests |
 | Design an AI-integration phase | gsd-ai-integration-phase |
 | Run all remaining phases autonomously | gsd-autonomous |
+| Run independent phases in parallel in isolated worktrees | gsd-parallel-phases |
 | Execute a trivial task inline | gsd-fast |
 | Plan a phase as a vertical MVP slice | gsd-mvp-phase |
 | Execute a quick task with GSD guarantees | gsd-quick |

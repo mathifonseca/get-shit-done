@@ -1,6 +1,6 @@
 ---
-name: gsd-parallel-phases
-description: "Run independent phases in parallel — one worktree each, ledgers merged back via structured commands"
+name: gsd:parallel-phases
+description: Run independent phases in parallel — one worktree each, ledgers merged back via structured commands
 argument-hint: "[--phases N,M,...] [--from N] [--to N]"
 effort: high
 allowed-tools:
@@ -12,8 +12,8 @@ allowed-tools:
   - Bash
   - Agent
   - AskUserQuestion
+requires: [autonomous, phase]
 ---
-
 <objective>
 Identify phases in the current milestone that are dependency-satisfied and mutually independent of one another, run each to completion (discuss→plan→execute→code-review→verify:post hooks→teach) in its own isolated git worktree in parallel, then merge each back into the current branch one at a time — replaying the shared planning ledgers (ROADMAP.md, STATE.md, REQUIREMENTS.md, WINDOWS.md) via structured `gsd-tools` commands rather than a raw text merge, so two phases' independent completions can never collide on a row id or a YAML key.
 

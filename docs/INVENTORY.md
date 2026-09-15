@@ -120,6 +120,7 @@ These six routers are descriptor-only entries that the model picks first; the bo
 | `/gsd-manager` | Interactive command center for managing multiple phases from one terminal. | [commands/gsd/manager.md](../commands/gsd/manager.md) |
 | `/gsd-workstreams` | Manage parallel workstreams — list, create, switch, status, progress, complete, resume. | [commands/gsd/workstreams.md](../commands/gsd/workstreams.md) |
 | `/gsd-autonomous` | Run all remaining phases autonomously — discuss → plan → execute per phase. | [commands/gsd/autonomous.md](../commands/gsd/autonomous.md) |
+| `/gsd-parallel-phases` | Run mutually-independent phases in parallel, each in an isolated worktree, then merge back via structured ledger commands. | [commands/gsd/parallel-phases.md](../commands/gsd/parallel-phases.md) |
 | `/gsd-undo` | Safe git revert — roll back phase or plan commits using the phase manifest. | [commands/gsd/undo.md](../commands/gsd/undo.md) |
 
 ### Session & Navigation
@@ -233,6 +234,7 @@ Full roster at `gsd-core/workflows/*.md`. Workflows are thin orchestrators that 
 | `next.md` | Detect current project state and automatically advance to the next logical step. | `/gsd-progress --next` |
 | `node-repair.md` | Autonomous repair operator for failed task verification; invoked by `execute-plan`. | `execute-plan.md` (recovery) |
 | `note.md` | Zero-friction idea capture — one Write call, one confirmation line. | `/gsd-capture --note` |
+| `parallel-phases.md` | Cross-phase worktree parallelism — eligibility/independence check, per-phase worktree fan-out through `autonomous --only N`, then ff-first merge-back with the shared ledgers (ROADMAP/STATE/REQUIREMENTS/WINDOWS) replayed via structured commands. | `/gsd-parallel-phases` |
 | `pause-work.md` | Create structured `.planning/HANDOFF.json` and `.continue-here.md` handoff files. | `/gsd-pause-work` |
 | `plan-devils-advocate.md` | Devil's Advocate Review — challenges execution plans to surface BLOCKERs, RISKs, and SUGGESTIONs before execution begins. | `plan-phase.md` §12.6 (when `workflow.adversarial_validation` is true) |
 | `plan-lens-review.md` | Advisory negotiated plan-quality review — Round 1 position staking + Round 2 rebuttal via isolated gsd-lens agents, producing NN-PLAN-RATIONALE.md + NN-KILL-CRITERIA.md. | `plan-phase.md` §13c.5 (when `workflow.plan_lens_review` is true) |

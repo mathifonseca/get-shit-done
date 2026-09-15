@@ -486,6 +486,7 @@ const KNOWN_SKILLS = new Set([
   // command stays absorbed into `progress.md --next`, while the current
   // `/gsd:next` is a different state-aware smart-entry launcher.
   'next.md',
+  'parallel-phases.md', // fork addition — cross-phase worktree parallelism (nested under ns-workflow)
   'pause-work.md',
   'phase.md',
   'plan-phase.md',

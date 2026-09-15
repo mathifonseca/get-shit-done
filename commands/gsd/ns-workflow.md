@@ -5,7 +5,7 @@ argument-hint: ""
 allowed-tools:
   - Read
   - Skill
-requires: [discuss-phase, spec-phase, plan-phase, execute-phase, verify-work, phase, progress, next, ultraplan-phase, plan-review-convergence, add-tests, ai-integration-phase, autonomous, fast, mvp-phase, quick]
+requires: [discuss-phase, spec-phase, plan-phase, execute-phase, verify-work, phase, progress, next, ultraplan-phase, plan-review-convergence, add-tests, ai-integration-phase, autonomous, parallel-phases, fast, mvp-phase, quick]
 ---
 
 Route to the appropriate phase-pipeline skill based on the user's intent.
@@ -30,6 +30,7 @@ workflow-advance command.
 | Generate tests for a completed phase | gsd-add-tests |
 | Design an AI-integration phase | gsd-ai-integration-phase |
 | Run all remaining phases autonomously | gsd-autonomous |
+| Run independent phases in parallel in isolated worktrees | gsd-parallel-phases |
 | Execute a trivial task inline | gsd-fast |
 | Plan a phase as a vertical MVP slice | gsd-mvp-phase |
 | Execute a quick task with GSD guarantees | gsd-quick |
