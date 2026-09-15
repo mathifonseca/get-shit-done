@@ -254,6 +254,43 @@ ledger over our per-phase report. **The fork's ideas keep getting independently
 validated; upstream increasingly has better machinery to express them.** Default to
 adopting their mechanism and keeping only the opinion.
 
+### Adopt: a patch that adds a command ships `commands/gsd/<stem>.md`, never the skill
+
+Learned 2026-09-15 applying the three `gsd-fork-parallel-phases-patches` from
+another machine. `skills/gsd-*/SKILL.md` is **build output** — `gen-plugin-skills`
+derives it from `commands/gsd/*.md`, and every command-surface contract reads the
+source, not the output. A hand-written skill with no source is invisible to all of
+them, so the targeted tests in the patch's own commit message were green while the
+full suite had eight reds: `lint:generated-sync` ("stale (no source)"), the 100-char
+description budget, `KNOWN_SKILLS`, the `ns-*` router nesting rule (#69 — the same
+one that bit `sdlc-audit`/`teach-phase` in the v1.10.0 sync), `docs/INVENTORY.md` +
+manifest, `help/modes/full.md` (command **and** each `--flag`), the surface cluster
+union, the `/gsd:` colon rule in prose (#3443), the `AskUserQuestion` TEXT_MODE
+fallback (#2012), the `gsd-${ref.skill}` template form for hook dispatch, and the
+golden install-tree fixtures. Write the command source first and let the generator
+emit the skill; then run `npm test`, not the files you think you touched.
+
+Corollary for the emitter half of the same batch: a "make it readable" output change
+(`|` block scalars for multi-line STATE.md fields) needs a *can this form carry every
+value* gate. Probing the emitter against js-yaml with NUL, `\r`, a leading-whitespace
+first line, whitespace-only lines and an all-newline value found five cases the two
+existing round-trip tests only half covered. Unsafe values fall back to the quoted
+path, which round-trips by construction.
+
+### Gotcha: `fix-slash-commands.cjs` + incremental `tsc` poison the compiled lib
+
+`scripts/fix-slash-commands.cjs` rewrites `/gsd-<cmd>` → `/gsd:<cmd>` across
+`SEARCH_DIRS`, which **includes the gitignored `gsd-core/bin/lib/*.cjs`** — files that
+must keep the hyphen form under bug-3584's runtime-emitter contract (the namespace
+test excludes that directory on purpose). `npm run build:lib` does not undo it:
+`tsconfig.build.json` is `incremental`, so unchanged sources are not re-emitted and
+the rewritten outputs survive. Symptom: nine reds of the shape
+`'/gsd:new-project' !== '/gsd-new-project'` in `runtime-label-policy`, `install`,
+`copilot-install`, `gemini-runtime-removed`, `broken-windows-description` — none of
+them near anything you edited. Fix: `rm -f tsconfig.build.tsbuildinfo && npm run
+build:lib`. After running the transformer, always `git checkout -- gsd-core/bin/lib/`
+for the tracked generated files there and force a clean rebuild for the rest.
+
 ### Standing conflict surface (structural, will not go away)
 
 Four host-loop touchpoints cannot become capabilities — documented so nobody
