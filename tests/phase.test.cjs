@@ -6066,7 +6066,7 @@ describe('bug-3287 — init plan-phase exposes expected_phase_dir with project_c
       // preserve-when-unchanged guard requires a non-empty existing value to
       // restore, so with none present, derivation must still work.
       const seeded = fs.readFileSync(statePath, 'utf8');
-      const stripped = seeded.replace(/^stopped_at:.*\n/m, '');
+      const stripped = seeded.replace(/^stopped_at:.*\r?\n/m, '');
       fs.writeFileSync(statePath, stripped);
 
       const r = runSdkQuery(['phase.complete', '5'], tmpDir);

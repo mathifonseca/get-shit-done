@@ -2674,12 +2674,7 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
         // YAML keys cannot shadow the body fields being tracked (mirrors #1255).
         const preFmSnapshot = extractFrontmatter(originalStateContent, statePath) as Record<string, unknown>;
         const preBody = stripFrontmatter(originalStateContent);
-        const preSnapshot = extractStatePreservationBodySnapshot(preBody) as {
-          status: string | null;
-          stoppedAt: string | null;
-          phaseSource: string | null;
-          lastActivityDesc: string | null;
-        };
+        const preSnapshot = extractStatePreservationBodySnapshot(preBody);
 
         // ADR-1769 Phase 3: the STATE.md field-update policy (Current Phase
         // shape/name, Status, Current Plan, Last Activity + Description, and
@@ -2736,12 +2731,7 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
         // frontmatter block, so the body is identical either way, and this is
         // the body the transition's OWN edits actually produced.
         const postBody = stripFrontmatter(stateContent);
-        const postSnapshot = extractStatePreservationBodySnapshot(postBody) as {
-          status: string | null;
-          stoppedAt: string | null;
-          phaseSource: string | null;
-          lastActivityDesc: string | null;
-        };
+        const postSnapshot = extractStatePreservationBodySnapshot(postBody);
 
         // ADR-1769 #1796 (Path A): table-driven post-sync preservation, the
         // same call `readModifyWriteStateMd` makes — this is the fix. progress
