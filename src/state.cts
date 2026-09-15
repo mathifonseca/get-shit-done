@@ -1610,6 +1610,54 @@ function extractRetiredPhaseNumbers(scope: string): Set<string> {
 }
 
 /**
+ * Extract the STATE.md body fields that `applyStatePreservation`'s #1230
+ * delta heuristic compares before/after a transition, to decide whether a
+ * body-derived value is "unchanged" (and therefore the existing curated
+ * frontmatter value should win over a stale/wrong re-derivation).
+ *
+ * Shared by `buildStateFrontmatter` (the derive path, below) and by any
+ * adapter that writes STATE.md OUTSIDE `readModifyWriteStateMd` and must
+ * therefore compute its own #1230 snapshot pair — currently `cmdPhaseComplete`
+ * in phase.cts, whose STATE-half calls `completePhaseCore` + `syncStateFrontmatter`
+ * directly (never through the RMW seam) and had no #1230 protection at all: a
+ * `stopped_at`/`last_activity_desc` that had gone stale in `## Session
+ * Continuity` (this repo's own hand-edit conventions never touch that section)
+ * silently clobbered a correct, richer curated frontmatter value on every
+ * `phase.complete` run. Extracting this into one function guarantees the
+ * adapter's snapshot can never drift from the derive path's own extraction.
+ *
+ * `last_activity_desc` is included even though `buildStateFrontmatter` did
+ * not previously expose a `#1230`-shaped pre/post pair for it — its
+ * FIELD_CLASSIFICATION row already declares `preserve-when-unchanged`, but
+ * `applyStatePreservation` never consulted it. Both gaps are one bug: an
+ * unenforced policy row plus a caller that bypassed enforcement entirely.
+ */
+function extractStatePreservationBodySnapshot(bodyContent: string): {
+  status: string | null;
+  stoppedAt: string | null;
+  phaseSource: string | null;
+  lastActivityDesc: string | null;
+} {
+  const status = stateExtractField(bodyContent, 'Status');
+  // Bug #2444 / #2567: scope Stopped At extraction to the ## Session section
+  // so historical prose elsewhere in the body (e.g. a Session Continuity
+  // Archive section) never overwrites the current value. Fall back to
+  // full-body search only when no ## Session section exists. #1101: prefer
+  // the canonical `## Session` block, falling back to the bootstrap
+  // `## Session Continuity` heading. See matchSessionSection for the anchoring.
+  const sessionSectionMatch = matchSessionSection(bodyContent);
+  const sessionBodyScope = sessionSectionMatch ?? bodyContent;
+  const stoppedAt = stateExtractField(sessionBodyScope, 'Stopped At') || stateExtractField(sessionBodyScope, 'Stopped at');
+  // Matches readModifyWriteStateMd's own preBodyPhaseSource/postBodyPhaseSource
+  // snapshot (unscoped `Phase` extraction) so the two #1230 comparisons agree.
+  const phaseSource = stateExtractField(bodyContent, 'Phase');
+  const rawLastActivity = stateExtractField(bodyContent, 'Last Activity') ?? stateExtractField(bodyContent, 'Last activity');
+  const proseLastActivity = parseProseLastActivityField(rawLastActivity);
+  const lastActivityDesc = stateExtractField(bodyContent, 'Last Activity Description') ?? proseLastActivity.description;
+  return { status, stoppedAt, phaseSource, lastActivityDesc };
+}
+
+/**
  * Extract machine-readable fields from STATE.md markdown body and build
  * a YAML frontmatter object. Allows hooks and scripts to read state
  * reliably via `state json` instead of fragile regex parsing.
@@ -1628,12 +1676,13 @@ function buildStateFrontmatter(bodyContent: string, cwd: string | undefined, sto
   const currentPlan = stateExtractField(bodyContent, 'Current Plan');
   const totalPhasesRaw = stateExtractField(bodyContent, 'Total Phases');
   const totalPlansRaw = stateExtractField(bodyContent, 'Total Plans in Phase');
-  const status = stateExtractField(bodyContent, 'Status');
+  const preservationSnapshot = extractStatePreservationBodySnapshot(bodyContent);
+  const status = preservationSnapshot.status;
   const progressRaw = stateExtractField(bodyContent, 'Progress');
   const rawLastActivity = stateExtractField(bodyContent, 'Last Activity') ?? stateExtractField(bodyContent, 'Last activity');
   const proseLastActivity = parseProseLastActivityField(rawLastActivity);
   const lastActivity = proseLastActivity.date ?? rawLastActivity;
-  const lastActivityDesc = stateExtractField(bodyContent, 'Last Activity Description') ?? proseLastActivity.description;
+  const lastActivityDesc = preservationSnapshot.lastActivityDesc;
   // Bug #2444 / #2567: scope Stopped At AND Paused At extraction to the
   // ## Session section so historical prose elsewhere in the body (e.g. in a
   // Session Continuity Archive section) never overwrites the current value.
@@ -1642,7 +1691,7 @@ function buildStateFrontmatter(bodyContent: string, cwd: string | undefined, sto
   // `## Session Continuity` heading. See matchSessionSection for the anchoring.
   const sessionSectionMatch = matchSessionSection(bodyContent);
   const sessionBodyScope = sessionSectionMatch ?? bodyContent;
-  const stoppedAt = stateExtractField(sessionBodyScope, 'Stopped At') || stateExtractField(sessionBodyScope, 'Stopped at');
+  const stoppedAt = preservationSnapshot.stoppedAt;
   // #2567: Paused At is a session field — scope it to ## Session too so a
   // stale "Paused At:" line in an archive section cannot overwrite the value.
   const pausedAt = stateExtractField(sessionBodyScope, 'Paused At');
@@ -3431,6 +3480,7 @@ export = {
   stateExtractField,
   stateReplaceField,
   stateReplaceFieldWithFallback,
+  extractStatePreservationBodySnapshot,
   acquireStateLock,
   releaseStateLock,
   writeStateMd,

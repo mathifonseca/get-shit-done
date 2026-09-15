@@ -55,7 +55,7 @@ import stateMod = require('./state.cjs');
 import { platformWriteSync, platformReadSync, platformEnsureDir, retryRenameSync } from './shell-command-projection.cjs';
 import { formatGsdSlash, resolveRuntime } from './runtime-slash.cjs';
 import { realClock } from './clock.cjs';
-import { transitionCore } from './state-transition.cjs';
+import { transitionCore, applyStatePreservation } from './state-transition.cjs';
 import { updateTableCell, deleteTableRow, escapeCell } from './markdown-table.cjs';
 import { deleteSection, updateBullet } from './markdown-sectionizer.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- uat-predicate.cjs is an export= CommonJS module
@@ -75,7 +75,7 @@ const { computeHaltPropagation, buildSummaryFileIndex, isSummaryFileHalted } = p
 
 const { planningDir, withPlanningLock, listAvailableWorkstreams, getActiveWorkstream } =
   planningWorkspace;
-const { extractFrontmatter } = frontmatterMod;
+const { extractFrontmatter, reconstructFrontmatter, stripFrontmatter } = frontmatterMod;
 const {
   readModifyWriteStateMd,
   stateExtractField,
@@ -83,6 +83,7 @@ const {
   syncStateFrontmatter,
   withStateLock,
   updatePerformanceMetricsSection,
+  extractStatePreservationBodySnapshot,
 } = stateMod;
 
 // #2893 — strict canonical filter: `{padded_phase}-{NN}-PLAN.md` or `PLAN.md`.
@@ -2659,6 +2660,27 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
         const originalStateContent = platformReadSync(statePath) || '';
         let stateContent = originalStateContent;
 
+        // #1230/#1796 delta-heuristic snapshot, taken BEFORE completePhaseCore
+        // touches the body — mirrors readModifyWriteStateMd's own pre-transform
+        // snapshot exactly, because this transaction does NOT go through the RMW
+        // seam (see the comment below) and therefore had NO #1230 protection of
+        // its own: a stopped_at/last_activity_desc gone stale in ## Session
+        // Continuity (this repo's hand-edit conventions may never touch that
+        // section once curated frontmatter values take over) would silently
+        // clobber a correct, richer curated frontmatter value on every
+        // `phase.complete` run, because syncStateFrontmatter's own ad hoc
+        // preserve guard only fires when derivation is EMPTY, never when it
+        // found something stale-but-present. Strip frontmatter first so the
+        // YAML keys cannot shadow the body fields being tracked (mirrors #1255).
+        const preFmSnapshot = extractFrontmatter(originalStateContent, statePath) as Record<string, unknown>;
+        const preBody = stripFrontmatter(originalStateContent);
+        const preSnapshot = extractStatePreservationBodySnapshot(preBody) as {
+          status: string | null;
+          stoppedAt: string | null;
+          phaseSource: string | null;
+          lastActivityDesc: string | null;
+        };
+
         // ADR-1769 Phase 3: the STATE.md field-update policy (Current Phase
         // shape/name, Status, Current Plan, Last Activity + Description, and
         // the Completed/Total Phases + Progress percent block) now dispatches
@@ -2669,7 +2691,9 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
         // this adapter: they are section-table / disk-scan concerns, not
         // classified fields, and `syncStateFrontmatter` is the post-sync this
         // transaction needs (it does NOT go through readModifyWriteStateMd
-        // because STATE.md is committed atomically with ROADMAP/REQUIREMENTS).
+        // because STATE.md is committed atomically with ROADMAP/REQUIREMENTS —
+        // which is exactly why the #1230 snapshot above/below has to be taken
+        // by hand instead of coming for free from the RMW seam).
         const nextPhaseDisplayName =
           phaseDisplayNameFromRoadmap(roadmapContent, nextPhaseNum) ??
           phaseDisplayNameFromSlug(nextPhaseName);
@@ -2699,15 +2723,111 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
           planCount,
           summaryCount,
         );
+        const authoritativeFm = nextPhaseDisplayName ? { current_phase_name: nextPhaseDisplayName } : undefined;
         // #2736: the transition holds the next phase's exact display name in
         // the intent; pass it as authoritative so the sync's prose
         // re-derivation cannot rewrite current_phase_name to the name's own
         // parenthetical (`Closer-ruling measurement (D1a)` → `D1a`).
-        stateContent = syncStateFrontmatter(
-          stateContent,
-          cwd,
-          nextPhaseDisplayName ? { current_phase_name: nextPhaseDisplayName } : undefined,
-        );
+        let syncedStateContent = syncStateFrontmatter(stateContent, cwd, authoritativeFm);
+
+        // Post-transform #1230 snapshot: use `stateContent` (the pre-sync
+        // body completePhaseCore + updatePerformanceMetricsSection produced),
+        // not `syncedStateContent` — syncStateFrontmatter only rewrites the
+        // frontmatter block, so the body is identical either way, and this is
+        // the body the transition's OWN edits actually produced.
+        const postBody = stripFrontmatter(stateContent);
+        const postSnapshot = extractStatePreservationBodySnapshot(postBody) as {
+          status: string | null;
+          stoppedAt: string | null;
+          phaseSource: string | null;
+          lastActivityDesc: string | null;
+        };
+
+        // ADR-1769 #1796 (Path A): table-driven post-sync preservation, the
+        // same call `readModifyWriteStateMd` makes — this is the fix. progress
+        // is intentionally NOT reconciled here: it is `preserve-always` under
+        // `resync=false` only, and this transition always resyncs (recomputes
+        // progress from the roadmap, which is the correct behavior for
+        // completePhase — passing `resync: true` here, matching that intent).
+        // Bug (money-eng-health, found verifying the combined fix): do NOT
+        // build `postFm` by re-parsing `syncedStateContent`'s already-
+        // serialized text wholesale. `extractFrontmatter`'s quoted-scalar
+        // parsing does not decode escape sequences (`\n` stays the literal
+        // 2-char sequence, not a real newline) — round-tripping ANY
+        // multi-line value through a second extract+reconstruct cycle here
+        // doubles its escaping, because `syncStateFrontmatter` already ran
+        // one extract+reconstruct cycle of its own. `stopped_at` itself is
+        // safe (this transition restores it from `preFmSnapshot`, a single
+        // clean parse of the ORIGINAL on-disk text) — but every OTHER
+        // untouched key (e.g. the large `previous_stopped_at_*`/
+        // `previous_status_*` narrative keys this repo's own hand-edit
+        // convention accumulates) passes through unchanged and picks up a
+        // spurious second escaping pass for no reason: nothing about THIS
+        // transition should touch them at all.
+        //
+        // Fix: `postFm` starts from `preFmSnapshot` (the single clean parse)
+        // so untouched keys never re-enter the lossy round-trip. Only the
+        // fields this transition can legitimately change — exactly
+        // FIELD_CLASSIFICATION's declared set (state-transition.cts §4) —
+        // are overlaid from the freshly-derived `syncedStateContent`. Those
+        // fields are short (a phase number, a status phrase, a date, a
+        // small progress object) and never carry the kind of multi-line
+        // content this bug actually corrupts.
+        const postFmDerived = extractFrontmatter(syncedStateContent, statePath) as Record<string, unknown>;
+        const postFm: Record<string, unknown> = { ...preFmSnapshot };
+        for (const managedKey of [
+          'gsd_state_version', 'milestone', 'milestone_name',
+          'current_phase', 'current_phase_name', 'current_plan',
+          'status', 'stopped_at', 'paused_at',
+          'last_updated', 'last_activity', 'last_activity_desc',
+          'progress',
+        ]) {
+          if (Object.prototype.hasOwnProperty.call(postFmDerived, managedKey)) {
+            postFm[managedKey] = postFmDerived[managedKey];
+          } else {
+            delete postFm[managedKey];
+          }
+        }
+        const preservation = applyStatePreservation({
+          preFm: null,
+          postFm,
+          preFmSnapshot,
+          resync: true,
+          preBodyStatus: preSnapshot.status,
+          postBodyStatus: postSnapshot.status,
+          preBodyStoppedAt: preSnapshot.stoppedAt,
+          postBodyStoppedAt: postSnapshot.stoppedAt,
+          preBodyPhaseSource: preSnapshot.phaseSource,
+          postBodyPhaseSource: postSnapshot.phaseSource,
+          preBodyLastActivityDesc: preSnapshot.lastActivityDesc,
+          postBodyLastActivityDesc: postSnapshot.lastActivityDesc,
+        });
+
+        // #2736: re-assert the intent-first current_phase_name AFTER
+        // preservation, mirroring readModifyWriteStateMd's own reassertion —
+        // on a STATE.md layout with no body `Phase:` line, both phase-source
+        // snapshots are null (equal), so the preserve-always restore above
+        // would put the stale pre-transition name back over the authoritative
+        // one the transition just resolved.
+        let authoritativeReasserted = false;
+        if (authoritativeFm) {
+          for (const [key, value] of Object.entries(authoritativeFm)) {
+            if (typeof value === 'string' && value.trim().length > 0 && preservation.postFm[key] !== value) {
+              preservation.postFm[key] = value;
+              authoritativeReasserted = true;
+            }
+          }
+        }
+
+        if (preservation.mutated || authoritativeReasserted) {
+          const yamlStr = reconstructFrontmatter(
+            preservation.postFm as unknown as Record<string, string | string[] | Record<string, unknown>>,
+          );
+          const body = stripFrontmatter(syncedStateContent);
+          syncedStateContent = `---\n${yamlStr}\n---\n\n${body}`;
+        }
+
+        stateContent = syncedStateContent;
 
         writes.push({ filePath: statePath, before: originalStateContent, after: stateContent });
       }

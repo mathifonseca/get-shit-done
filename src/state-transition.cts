@@ -148,6 +148,15 @@ export type StatePreservationInput = {
   preBodyPhaseSource: string | null;
   postBodyPhaseSource: string | null;
   /**
+   * #1230 delta pair for `last_activity_desc` (preserve-when-unchanged per its
+   * FIELD_CLASSIFICATION row). Optional because not every caller of
+   * `applyStatePreservation` has computed this snapshot yet; omitting it simply
+   * skips the last_activity_desc preservation check below, matching the
+   * pre-existing behavior for callers that don't pass it.
+   */
+  preBodyLastActivityDesc?: string | null;
+  postBodyLastActivityDesc?: string | null;
+  /**
    * #2440: when true, total_plans and total_phases take the derived (post-sync)
    * value even under !resync, instead of the wholesale curated restore. Used
    * by callers (e.g. cmdStatePlannedPhase) where total_plans must correct to
@@ -251,6 +260,29 @@ export function applyStatePreservation(input: StatePreservationInput): StatePres
     postFm['stopped_at'] !== preFmSnapshot['stopped_at']
   ) {
     postFm['stopped_at'] = preFmSnapshot['stopped_at'];
+    mutated = true;
+  }
+
+  // last_activity_desc — same #1230 body-delta heuristic. Table:
+  // preserve-when-unchanged. FIELD_CLASSIFICATION already declared this
+  // policy; this block is what actually enforces it (previously unenforced —
+  // the row existed but nothing consulted it, so a stale body-derived
+  // description always won regardless of whether this transition's own edits
+  // changed it). Guarded by `!== undefined` so callers that don't pass the
+  // #1230 pair (not yet computing it) get identical behavior to before this
+  // block was added.
+  const lastActivityDescCls = getFieldClassification('last_activity_desc');
+  if (
+    lastActivityDescCls !== null &&
+    lastActivityDescCls.preservation === 'preserve-when-unchanged' &&
+    input.preBodyLastActivityDesc !== undefined &&
+    input.postBodyLastActivityDesc !== undefined &&
+    input.postBodyLastActivityDesc === input.preBodyLastActivityDesc &&
+    typeof preFmSnapshot['last_activity_desc'] === 'string' &&
+    preFmSnapshot['last_activity_desc'].length > 0 &&
+    postFm['last_activity_desc'] !== preFmSnapshot['last_activity_desc']
+  ) {
+    postFm['last_activity_desc'] = preFmSnapshot['last_activity_desc'];
     mutated = true;
   }
 

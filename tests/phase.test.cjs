@@ -5763,7 +5763,7 @@ describe('bug-3287 — init plan-phase exposes expected_phase_dir with project_c
   // Typed STATE.md surfaces (#3090) — replaces raw regex/substring matching
   // on STATE.md content written by phase.complete in this bug-#3517 block.
   const { stateExtractField } = require('../gsd-core/bin/lib/state-document.cjs');
-  const { extractFrontmatter } = require('../gsd-core/bin/lib/frontmatter.cjs');
+  const { extractFrontmatter, reconstructFrontmatter } = require('../gsd-core/bin/lib/frontmatter.cjs');
   const { parseMarkdownTable } = require('../gsd-core/bin/lib/markdown-table.cjs');
   const { parsePhaseFromProse } = require('../gsd-core/bin/lib/phase-id.cjs');
 
@@ -6017,9 +6017,30 @@ describe('bug-3287 — init plan-phase exposes expected_phase_dir with project_c
       );
     });
 
-    test('frontmatter stopped_at is updated after phase.complete', () => {
+    // AMENDED (money-eng-health phase.complete STATE.md-destruction fix):
+    // this test originally asserted that `phase.complete` always overwrites
+    // a stale frontmatter `stopped_at` with whatever the body's `## Session
+    // Continuity` "Stopped at:" line says. That assumption predates #1230/
+    // #1796's field-classification table actually being ENFORCED on this
+    // call path — `cmdPhaseComplete`'s STATE-half called `completePhaseCore`
+    // + `syncStateFrontmatter` directly, bypassing `readModifyWriteStateMd`
+    // entirely, so it never got the #1230 delta-heuristic protection every
+    // OTHER STATE.md writer already has. `stopped_at`'s own FIELD_CLASSIFICATION
+    // row already declared `preserve-when-unchanged`; it was simply never
+    // consulted on this path. `completePhaseCore` never writes a "Stopped
+    // At"/"Stopped at" body field itself (it owns Current Phase/Status/
+    // Current Plan/Last Activity, not Session Continuity), so under the
+    // now-enforced policy, an existing curated `stopped_at` correctly wins
+    // over a body value this transition's own edits did not touch — exactly
+    // the shape of a real production incident (a `## Session Continuity`
+    // "Stopped at:" line frozen since an old, unrelated phase silently
+    // clobbering a rich, current, hand-curated frontmatter narrative with a
+    // stale and sometimes actively FALSE sentence about a different phase
+    // entirely). See the new test immediately below for that exact scenario.
+    test('frontmatter stopped_at is PRESERVED when the body Session Continuity field is unchanged by this transition', () => {
       setupPhase3517Project(tmpDir);
       const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+      const before = extractFrontmatter(fs.readFileSync(statePath, 'utf8')).stopped_at;
 
       const r = runSdkQuery(['phase.complete', '5'], tmpDir);
       assert.ok(r.success, `call failed: ${r.error}`);
@@ -6027,14 +6048,129 @@ describe('bug-3287 — init plan-phase exposes expected_phase_dir with project_c
       const state = fs.readFileSync(statePath, 'utf8');
       const stoppedAt = extractFrontmatter(state).stopped_at;
       assert.ok(stoppedAt, 'stopped_at not found in frontmatter');
-      assert.ok(
-        !stoppedAt.includes('05-03-PLAN.md'),
-        `stopped_at should not still say "Completed 05-03-PLAN.md" — got: ${stoppedAt}`,
+      assert.equal(
+        stoppedAt,
+        before,
+        `stopped_at should be preserved — completePhaseCore never writes the ## Session ` +
+        `Continuity "Stopped at:" body field, so this transition's own edits did not change ` +
+        `it, and the pre-existing curated value must win over a stale, unrelated body ` +
+        `re-derivation. Expected unchanged ${JSON.stringify(before)}, got ${JSON.stringify(stoppedAt)}`,
       );
+    });
+
+    test('frontmatter stopped_at is DERIVED from the body when no prior curated value exists (first-ever completion)', () => {
+      setupPhase3517Project(tmpDir);
+      const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+      // Remove the seeded frontmatter stopped_at entirely so the only
+      // available signal is the body's ## Session Continuity field — the
+      // preserve-when-unchanged guard requires a non-empty existing value to
+      // restore, so with none present, derivation must still work.
+      const seeded = fs.readFileSync(statePath, 'utf8');
+      const stripped = seeded.replace(/^stopped_at:.*\n/m, '');
+      fs.writeFileSync(statePath, stripped);
+
+      const r = runSdkQuery(['phase.complete', '5'], tmpDir);
+      assert.ok(r.success, `call failed: ${r.error}`);
+
+      const state = fs.readFileSync(statePath, 'utf8');
+      const stoppedAt = extractFrontmatter(state).stopped_at;
+      assert.ok(stoppedAt, 'stopped_at should be derived from the body Session Continuity field when no curated value existed to preserve');
       assert.ok(
-        stoppedAt.toLowerCase().includes('phase 5') ||
-        stoppedAt.toLowerCase().includes('complete'),
-        `stopped_at should reference phase 5 completion, got: ${stoppedAt}`,
+        stoppedAt.includes('05-07-PLAN.md'),
+        `stopped_at should derive the body's "Completed 05-07-PLAN.md" value, got: ${stoppedAt}`,
+      );
+    });
+
+    // Reproduces the actual production incident this fix closes: a rich,
+    // multi-line curated frontmatter `stopped_at` narrative (the shape a
+    // real project accumulates over months) must survive `phase.complete`
+    // when the body's Session Continuity section holds stale, UNRELATED
+    // prose describing a different, long-past phase — the exact "Phase 6
+    // PLANNED ... Neither long gate has been run" shape observed for real.
+    test('a rich curated stopped_at narrative survives phase.complete even when ## Session Continuity holds stale, unrelated prose', () => {
+      setupPhase3517Project(tmpDir);
+      const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+      const richNarrative =
+        'PHASE 4 EXECUTED, REVIEWED, VERIFIED end-to-end via a full plan -> execute -> ' +
+        'code-review -> verify pipeline, with every named gate independently re-run rather ' +
+        'than trusted from a SUMMARY.md narration alone.';
+      const seeded = fs.readFileSync(statePath, 'utf8');
+      const withRichNarrative = seeded.replace(
+        /^stopped_at: .*$/m,
+        `stopped_at: "${richNarrative}"`,
+      );
+      fs.writeFileSync(statePath, withRichNarrative);
+
+      const r = runSdkQuery(['phase.complete', '5'], tmpDir);
+      assert.ok(r.success, `call failed: ${r.error}`);
+
+      const state = fs.readFileSync(statePath, 'utf8');
+      const stoppedAt = extractFrontmatter(state).stopped_at;
+      assert.equal(
+        stoppedAt,
+        richNarrative,
+        `the rich curated narrative must survive unchanged — got: ${JSON.stringify(stoppedAt)}`,
+      );
+    });
+
+    // Characterizes the double-escaping bug found verifying the combined
+    // fix against money-eng-health's real STATE.md. `completePhaseCore`'s
+    // own `reassemble()` step and `syncStateFrontmatter`'s own derive step
+    // EACH independently call `reconstructFrontmatter` once — two
+    // unavoidable round-trips already baked into `phase.complete`, present
+    // for every frontmatter key regardless of this fix. `extractFrontmatter`
+    // never DECODES an escape sequence on read (`\n` stays the literal
+    // 2-char text, not a real newline), so each round-trip through
+    // reconstructFrontmatter WORSENS any value that already needed escaping
+    // by one more level. This code used to add an AVOIDABLE THIRD round-trip
+    // on top of those two — re-parsing `syncStateFrontmatter`'s
+    // already-serialized output (`extractFrontmatter(syncedStateContent)`)
+    // to build `postFm` wholesale, rather than starting `postFm` from
+    // `preFmSnapshot` (a single clean parse of the ORIGINAL file) and only
+    // overlaying the specific FIELD_CLASSIFICATION-managed keys. An untouched
+    // custom key with a real embedded newline — exactly the shape of this
+    // repo's own large `previous_stopped_at_*` narrative keys — is the
+    // sharpest witness: it must come out with EXACTLY the two-round baseline
+    // level of escaping, never three.
+    test('an untouched custom multi-line key gets exactly the two-round baseline escaping, never a third round', () => {
+      setupPhase3517Project(tmpDir);
+      const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+      const customValue = 'PHASE 4 EXECUTED end-to-end.\nEvery named gate independently re-run.';
+      const seeded = fs.readFileSync(statePath, 'utf8');
+      const withCustomKey = seeded.replace(
+        /^gsd_state_version: 1\.0$/m,
+        ['gsd_state_version: 1.0', 'previous_note: >', ...customValue.split('\n').map((l) => `  ${l}`)].join('\n'),
+      );
+      fs.writeFileSync(statePath, withCustomKey);
+
+      // Compute the reference from the ACTUAL on-disk (folded) value — never
+      // a hand-typed string — then apply exactly ONE more reconstruct+
+      // extract round trip. When this transition restores/rebuilds the
+      // frontmatter block at all (as it does here, via the stopped_at
+      // preservation restore), `postFm` for an untouched key is sourced
+      // straight from `preFmSnapshot` — a single clean parse of the
+      // ORIGINAL file — and reconstructed exactly once, discarding
+      // whatever intermediate escaping `completePhaseCore`'s reassemble()
+      // and `syncStateFrontmatter`'s own derive step produced along the
+      // way. One round, not two, and never three. Independent of
+      // phase.complete's own code, so it can't be wrong for the same reason
+      // a bug in phase.cts would be wrong.
+      const foldedOriginalValue = extractFrontmatter(withCustomKey).previous_note;
+      assert.ok(foldedOriginalValue, 'fixture previous_note should parse from the seeded block scalar');
+      const round1 = reconstructFrontmatter({ previous_note: foldedOriginalValue });
+      const expectedOneRoundValue = extractFrontmatter(`---\n${round1}\n---\n`).previous_note;
+
+      const r = runSdkQuery(['phase.complete', '5'], tmpDir);
+      assert.ok(r.success, `call failed: ${r.error}`);
+
+      const state = fs.readFileSync(statePath, 'utf8');
+      const actual = extractFrontmatter(state).previous_note;
+      assert.equal(
+        actual,
+        expectedOneRoundValue,
+        `previous_note should carry exactly the single-round baseline escaping — ` +
+        `expected ${JSON.stringify(expectedOneRoundValue)}, got ${JSON.stringify(actual)} ` +
+        `(a mismatch here, with MORE escaping than expected, means an avoidable extra round-trip regressed)`,
       );
     });
 
