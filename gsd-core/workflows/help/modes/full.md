@@ -631,6 +631,7 @@ The commands above cover the most common day-to-day flows. Every command listed 
 - **`/gsd:ultraplan-phase [phase]`** — [BETA] Offload plan phase to Claude Code's ultraplan cloud; review in browser and import back.
 - **`/gsd:plan-review-convergence <phase> [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy/--antigravity] [--ollama] [--lm-studio] [--llama-cpp] [--kimi-code] [--all] [--text] [--ws <name>] [--max-cycles N]`** — Cross-AI plan convergence loop — replan with review feedback until no HIGH concerns remain. Supports both cloud reviewers (Gemini/Claude/Codex/CodeRabbit/OpenCode/Qwen/Cursor/Antigravity/Kimi Code) and local model runtimes (Ollama, LM Studio, llama.cpp).
 - **`/gsd:autonomous [--from N] [--to N] [--only N] [--interactive] [--converge]`** — Run all remaining phases autonomously: discuss → plan → execute per phase. `--converge` routes planning through plan-review convergence; `--cross-ai` is an alias.
+- **`/gsd:parallel-phases [--phases N,M,...] [--from N] [--to N]`** — Run mutually-independent phases in parallel, each in its own isolated worktree via `autonomous --only N`, then merge back one at a time with the shared ledgers (ROADMAP/STATE/REQUIREMENTS/WINDOWS) replayed as structured commands. `--phases` names an explicit batch; phases with an intra-batch or unmet dependency are excluded and reported.
 
 ### Quality, Review & Verification
 

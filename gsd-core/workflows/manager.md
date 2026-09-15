@@ -163,7 +163,7 @@ Handle responses:
 1. Collect all background actions (execute and plan recommendations) — there can be multiple of each.
 2. Collect verification actions (`verify`) for implementation-complete phases whose canonical verification has not passed.
 3. Collect the inline action (discuss recommendation, if any — there will be at most one since discuss is sequential).
-3.5. **Collect a parallel-batch candidate.** Count how many phases show `disk_status` of `empty`/`no_directory`/`discussed`/`researched`/`planned` (i.e. genuinely idle — not already `is_active`, not `partial`/`executed` mid-flight) AND are not blocked by an incomplete dependency (`deps_satisfied` true, per `init.manager`'s own field — this is only a cheap pre-filter for whether to SHOW the option; `/gsd-parallel-phases` re-derives independence properly from the raw ROADMAP.md text before actually dispatching anything, since `deps_satisfied` shares the same negation-blind substring-scan limitation `dep_phases` has). If 2 or more such phases exist, this is a parallel-batch candidate — do not attempt to verify mutual independence here in the dashboard; that is `/gsd-parallel-phases`'s own job.
+3.5. **Collect a parallel-batch candidate.** Count how many phases show `disk_status` of `empty`/`no_directory`/`discussed`/`researched`/`planned` (i.e. genuinely idle — not already `is_active`, not `partial`/`executed` mid-flight) AND are not blocked by an incomplete dependency (`deps_satisfied` true, per `init.manager`'s own field — this is only a cheap pre-filter for whether to SHOW the option; `/gsd:parallel-phases` re-derives independence properly from the raw ROADMAP.md text before actually dispatching anything, since `deps_satisfied` shares the same negation-blind substring-scan limitation `dep_phases` has). If 2 or more such phases exist, this is a parallel-batch candidate — do not attempt to verify mutual independence here in the dashboard; that is `/gsd:parallel-phases`'s own job.
 4. Build compound options:
 
    **If there are ANY recommended actions (background, inline, or both):**
@@ -460,7 +460,7 @@ Display final status with progress bar:
 - [ ] All-complete state offers verify-work and complete-milestone
 - [ ] Exit shows final status with resume instructions
 - [ ] "Other" free-text input parsed for phase number and action
-- [ ] When 2+ idle, dependency-satisfied phases exist, a "Run N phases in parallel" option is offered alongside "Continue", delegating the actual independence check and merge-back to `/gsd-parallel-phases` rather than duplicating that logic here
+- [ ] When 2+ idle, dependency-satisfied phases exist, a "Run N phases in parallel" option is offered alongside "Continue", delegating the actual independence check and merge-back to `/gsd:parallel-phases` rather than duplicating that logic here
 - [ ] Manager loop continues until user exits or milestone completes
 - [ ] Queued section renders when `queued_phases` is non-empty; skipped when absent or empty
 </success_criteria>
