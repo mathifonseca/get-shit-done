@@ -94,6 +94,54 @@ function isFrontmatterShaped(region: string): boolean {
 }
 
 /**
+ * Matches a block-scalar indicator (`>` folded, `|` literal) as the ENTIRE remaining
+ * value on a `key:` line, optionally followed by a chomping indicator (`+`/`-`), an
+ * explicit indentation digit, or a trailing comment — in either indicator order (`>-`,
+ * `>2`, `|+3`, `|2-` are all legal YAML). A value that merely starts with `>`/`|` but
+ * has other content after it (`range: >= 5`) must NOT match; the whole value has to
+ * be consumed by this pattern.
+ */
+const BLOCK_SCALAR_HEADER = /^([|>])([+-]?\d*|\d*[+-]?)\s*(#.*)?$/;
+
+/**
+ * Fold a block scalar's content lines per YAML's `>` (folded) semantics (spec §8.1.3,
+ * simplified for this parser's real usage — GSD narrative fields, never exotic tag/anchor
+ * combinations): adjacent "normal" lines join with a single space; a blank line becomes a
+ * literal newline (paragraph break); a line carrying LEADING whitespace relative to the
+ * block's own base indentation (already stripped by the caller) is "more indented" and is
+ * never folded into its neighbours — it and the lines immediately touching it keep literal
+ * newlines. This is what lets a folded `stopped_at: >` narrative carry a nested markdown
+ * bullet list or code block without every line collapsing onto one line.
+ */
+function foldBlockScalarLines(lines: string[]): string {
+  const parts: string[] = [];
+  let prevWasMoreIndented = false;
+  let prevWasBlank = true; // no separator needed before the very first line
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx];
+    if (line === '') {
+      parts.push('\n');
+      prevWasBlank = true;
+      prevWasMoreIndented = false;
+      continue;
+    }
+    const isMoreIndented = /^\s/.test(line);
+    if (idx === 0) {
+      parts.push(line);
+    } else if (isMoreIndented || prevWasMoreIndented) {
+      parts.push('\n' + line);
+    } else if (prevWasBlank) {
+      parts.push(line);
+    } else {
+      parts.push(' ' + line);
+    }
+    prevWasMoreIndented = isMoreIndented;
+    prevWasBlank = false;
+  }
+  return parts.join('');
+}
+
+/**
  * Parse one already-delimited YAML region into a Frontmatter object.
  *
  * Extracted from `extractFrontmatter` (#1882) so the truncation probe below and the real
@@ -108,7 +156,8 @@ function parseYamlRegion(yaml: string): Frontmatter {
   type StackEntry = { obj: Record<string, unknown> | unknown[]; key: string | null; indent: number };
   const stack: StackEntry[] = [{ obj: frontmatter, key: null, indent: -1 }];
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     // Skip empty lines
     if (line.trim() === '') continue;
 
@@ -128,6 +177,55 @@ function parseYamlRegion(yaml: string): Frontmatter {
     if (keyMatch) {
       const key = keyMatch[2];
       const value = keyMatch[3].trim();
+      const blockHeader = value === '' ? null : value.match(BLOCK_SCALAR_HEADER);
+
+      if (blockHeader) {
+        // Block scalar (`>`/`|`): every subsequent line indented MORE than this key's
+        // own indent is DATA belonging to this scalar, never a new key — a `Word:`-shaped
+        // line inside the narrative (e.g. "Status: done" in prose) must not be scavenged
+        // as a spurious top-level key. Consume ahead to the first line at or below this
+        // key's own indent (or EOF); blank lines are always part of the block regardless
+        // of indentation.
+        const style = blockHeader[1] as '|' | '>';
+        const indicators = blockHeader[2] || '';
+        const chomp: 'clip' | 'strip' | 'keep' = indicators.includes('+') ? 'keep' : indicators.includes('-') ? 'strip' : 'clip';
+        const explicitIndentDigits = indicators.replace(/[+-]/g, '');
+        let blockIndent: number | null = explicitIndentDigits ? indent + parseInt(explicitIndentDigits, 10) : null;
+
+        const blockLines: string[] = [];
+        let j = i + 1;
+        for (; j < lines.length; j++) {
+          const raw = lines[j];
+          if (raw.trim() === '') { blockLines.push(''); continue; }
+          const rawIndentMatch = raw.match(/^(\s*)/);
+          const rawIndent = rawIndentMatch ? rawIndentMatch[1].length : 0;
+          if (rawIndent <= indent) break; // back to this key's level or above — block is over
+          if (blockIndent === null) blockIndent = rawIndent; // implicit indent from the first content line
+          blockLines.push(raw.slice(Math.min(rawIndent, blockIndent)));
+        }
+
+        // Chomping (YAML §8.1.1.2): count and drop trailing blank lines before folding,
+        // then re-apply exactly what the header's +/- indicator asked for.
+        let trailingBlanks = 0;
+        while (blockLines.length > 0 && blockLines[blockLines.length - 1] === '') {
+          blockLines.pop();
+          trailingBlanks++;
+        }
+        const folded = style === '|' ? blockLines.join('\n') : foldBlockScalarLines(blockLines);
+        let result: string;
+        if (chomp === 'strip') {
+          result = folded;
+        } else if (chomp === 'keep') {
+          result = blockLines.length > 0 ? folded + '\n'.repeat(trailingBlanks + 1) : '\n'.repeat(trailingBlanks);
+        } else {
+          result = blockLines.length > 0 ? folded + '\n' : '';
+        }
+
+        (current.obj as Record<string, unknown>)[key] = result;
+        current.key = null;
+        i = j - 1; // resume the outer loop at the first line NOT consumed by this block
+        continue;
+      }
 
       if (value === '' || value === '[') {
         // Key with no value or opening bracket — could be nested object or array
@@ -280,6 +378,53 @@ function scalarNeedsDoubleQuoting(s: string): boolean {
   return false;
 }
 
+/**
+ * Render a multi-line string value as a YAML literal (`|`) block scalar, never as an
+ * escaped single-line quoted string (#XXXX — the STATE.md-readability half of the
+ * `parseYamlRegion` block-scalar fix). `|` is used unconditionally on the write side
+ * regardless of how the value was originally read (`>` or `|`): literal block scalars
+ * round-trip exactly with no folding ambiguity, so the writer never has to track or
+ * guess which style the source used.
+ *
+ * The chomping indicator (bare `|`, `|-`, `|+`) is derived from the value's OWN
+ * trailing-newline count so the exact byte sequence — including how many trailing
+ * newlines it carries — survives a parse -> reconstruct -> parse round-trip:
+ * `|-` (strip) for none, bare `|` (clip, the common case) for exactly one, `|+`
+ * (keep) for two or more, with the extra blanks emitted as explicit empty content
+ * lines so `parseYamlRegion`'s own chomping logic reconstructs them.
+ *
+ * `baseIndent` is the indentation of the `key:` line itself; content lines are
+ * indented two spaces deeper, matching this file's own existing convention (see any
+ * `stopped_at: >` field in a real GSD STATE.md).
+ */
+function renderBlockScalarLines(key: string, sv: string, baseIndent: string): string[] {
+  let trailingNewlines = 0;
+  let body = sv;
+  while (body.endsWith('\n')) {
+    body = body.slice(0, -1);
+    trailingNewlines++;
+  }
+  const contentLines = body.split('\n');
+  const contentIndent = `${baseIndent}  `;
+
+  let chompIndicator: string;
+  const extraBlankLines: string[] = [];
+  if (trailingNewlines === 0) {
+    chompIndicator = '-';
+  } else if (trailingNewlines === 1) {
+    chompIndicator = '';
+  } else {
+    chompIndicator = '+';
+    for (let n = 0; n < trailingNewlines - 1; n++) extraBlankLines.push('');
+  }
+
+  const lines = [`${baseIndent}${key}: |${chompIndicator}`];
+  for (const line of [...contentLines, ...extraBlankLines]) {
+    lines.push(line === '' ? '' : `${contentIndent}${line}`);
+  }
+  return lines;
+}
+
 function reconstructFrontmatter(obj: Frontmatter): string {
   const lines: string[] = [];
   for (const [key, value] of Object.entries(obj)) {
@@ -331,12 +476,20 @@ function reconstructFrontmatter(obj: Frontmatter): string {
         } else {
           // eslint-disable-next-line @typescript-eslint/no-base-to-string
           const sv = String(subval);
-          lines.push(`  ${subkey}: ${sv.includes(':') || sv.includes('#') || scalarNeedsDoubleQuoting(sv) ? `"${escapeDoubleQuoted(sv)}"` : sv}`);
+          if (sv.includes('\n')) {
+            lines.push(...renderBlockScalarLines(subkey, sv, '  '));
+          } else if (sv.includes(':') || sv.includes('#') || scalarNeedsDoubleQuoting(sv)) {
+            lines.push(`  ${subkey}: "${escapeDoubleQuoted(sv)}"`);
+          } else {
+            lines.push(`  ${subkey}: ${sv}`);
+          }
         }
       }
     } else {
       const sv = String(value);
-      if (sv.includes(':') || sv.includes('#') || sv.startsWith('[') || sv.startsWith('{') || scalarNeedsDoubleQuoting(sv)) {
+      if (sv.includes('\n')) {
+        lines.push(...renderBlockScalarLines(key, sv, ''));
+      } else if (sv.includes(':') || sv.includes('#') || sv.startsWith('[') || sv.startsWith('{') || scalarNeedsDoubleQuoting(sv)) {
         lines.push(`${key}: "${escapeDoubleQuoted(sv)}"`);
       } else {
         lines.push(`${key}: ${sv}`);

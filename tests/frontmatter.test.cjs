@@ -213,6 +213,125 @@ describe('extractFrontmatter', () => {
   });
 });
 
+// ─── Block scalars (`>` / `|`) — parseYamlRegion had ZERO block-scalar support: a
+// `key: >` header was read as the literal string ">" and every subsequent indented
+// line was then scanned by the ordinary key: value matcher, so a `Word:`-shaped line
+// inside the narrative (e.g. "Status: done" in prose) was scavenged as a spurious
+// top-level key. Measured on a real STATE.md: extractFrontmatter returned 210 "keys"
+// where PyYAML returns 184. These tests capture the bug's exact shape, not a minimal
+// synthetic case.
+describe('extractFrontmatter — block scalars', () => {
+  test('folded (`>`) block scalar does not leak a "Word:"-shaped line as a spurious key', () => {
+    const content = [
+      '---',
+      'stopped_at: >',
+      '  Summary text here.',
+      '  Status: this looks like a key but is not.',
+      '  More text.',
+      'next_key: done',
+      '---',
+      '',
+    ].join('\n');
+    const result = extractFrontmatter(content);
+    assert.deepStrictEqual(Object.keys(result), ['stopped_at', 'next_key'], 'no spurious key from inside the block');
+    assert.strictEqual(result.next_key, 'done');
+    assert.ok(result.stopped_at.includes('Status: this looks like a key but is not.'));
+  });
+
+  test('folded (`>`) block scalar joins adjacent lines with a single space', () => {
+    const content = [
+      '---',
+      'stopped_at: >',
+      '  Hello world.',
+      '  This continues.',
+      'next_key: done',
+      '---',
+      '',
+    ].join('\n');
+    const result = extractFrontmatter(content);
+    assert.strictEqual(result.stopped_at, 'Hello world. This continues.\n');
+    assert.strictEqual(result.next_key, 'done');
+  });
+
+  test('folded (`>`) block scalar treats a blank line as a paragraph break', () => {
+    const content = [
+      '---',
+      'notes: >',
+      '  Paragraph one continues',
+      '  across two lines.',
+      '',
+      '  Paragraph two.',
+      'done: yes',
+      '---',
+      '',
+    ].join('\n');
+    const result = extractFrontmatter(content);
+    assert.strictEqual(result.notes, 'Paragraph one continues across two lines.\nParagraph two.\n');
+    assert.strictEqual(result.done, 'yes');
+  });
+
+  test('literal (`|`) block scalar preserves newlines verbatim', () => {
+    const content = [
+      '---',
+      'body: |',
+      '  line one',
+      '  line two',
+      'next: x',
+      '---',
+      '',
+    ].join('\n');
+    const result = extractFrontmatter(content);
+    assert.strictEqual(result.body, 'line one\nline two\n');
+    assert.strictEqual(result.next, 'x');
+  });
+
+  test('a more-indented line inside a folded block stays on its own line (YAML "more indented lines" rule)', () => {
+    const content = [
+      '---',
+      'stopped_at: >',
+      '  Intro line.',
+      '    - nested bullet one',
+      '    - nested bullet two',
+      '  Outro line.',
+      'next: x',
+      '---',
+      '',
+    ].join('\n');
+    const result = extractFrontmatter(content);
+    assert.strictEqual(
+      result.stopped_at,
+      'Intro line.\n  - nested bullet one\n  - nested bullet two\nOutro line.\n',
+    );
+    assert.strictEqual(result.next, 'x');
+  });
+
+  test('block scalar at the end of the document with no trailing key still terminates correctly', () => {
+    const content = ['---', 'name: foo', 'stopped_at: >', '  Final narrative.', '---', ''].join('\n');
+    const result = extractFrontmatter(content);
+    assert.deepStrictEqual(Object.keys(result), ['name', 'stopped_at']);
+    assert.strictEqual(result.stopped_at, 'Final narrative.\n');
+  });
+
+  test('chomping indicators (`>-` strip, `>+` keep) are recognized as block-scalar headers, not plain values', () => {
+    const stripContent = ['---', 'a: >-', '  stripped', 'b: y', '---', ''].join('\n');
+    const stripResult = extractFrontmatter(stripContent);
+    assert.strictEqual(stripResult.a, 'stripped');
+    assert.strictEqual(stripResult.b, 'y');
+
+    const keepContent = ['---', 'a: >+', '  kept', '', '', 'b: y', '---', ''].join('\n');
+    const keepResult = extractFrontmatter(keepContent);
+    assert.strictEqual(keepResult.a, 'kept\n\n\n');
+    assert.strictEqual(keepResult.b, 'y');
+  });
+
+  test('a value that merely starts with ">" but is not a bare block-scalar header is left as a plain scalar', () => {
+    const content = ['---', 'range: >= 5', 'next: x', '---', ''].join('\n');
+    const result = extractFrontmatter(content);
+    assert.strictEqual(result.range, '>= 5');
+    assert.strictEqual(result.next, 'x');
+  });
+});
+
 // ─── reconstructFrontmatter ─────────────────────────────────────────────────
 
 describe('reconstructFrontmatter', () => {
@@ -294,6 +413,95 @@ describe('reconstructFrontmatter', () => {
     const roundTrip = `---\n${reconstructed}\n---\n`;
     const extracted2 = extractFrontmatter(roundTrip);
     assert.deepStrictEqual(extracted2, extracted1, 'round-trip should preserve multiple data types');
+  });
+
+  // ─── Multi-line values emit as a literal (`|`) block scalar, never an escaped
+  // single-line quoted string. Before this fix, a value read from a real `stopped_at: >`
+  // block scalar was re-serialized as `stopped_at: "line one\nline two"` (escaped `\n`
+  // text, not a real newline written to disk) — content survived byte-for-byte through
+  // parse/reconstruct in memory, but every real completePhase-style write flattened a
+  // readable multi-paragraph narrative into unreadable single-line escaped text on disk.
+
+  test('serializes a multi-line value as a literal (|) block scalar, not an escaped quoted string', () => {
+    const result = reconstructFrontmatter({ stopped_at: 'Hello world.\nSecond line.\n' });
+    assert.ok(!result.includes('\\n'), `must not contain an escaped-newline text sequence: ${result}`);
+    assert.ok(result.includes('stopped_at: |'), `must open a literal block scalar: ${result}`);
+    assert.strictEqual(result, 'stopped_at: |\n  Hello world.\n  Second line.');
+  });
+
+  test('a single-line value (no embedded newline) still uses the plain/quoted scalar form, unchanged', () => {
+    const result = reconstructFrontmatter({ name: 'no newlines here' });
+    assert.strictEqual(result, 'name: no newlines here');
+  });
+
+  test('round-trip: a multi-line value with a default (clip) trailing newline is byte-identical after parse -> reconstruct -> parse', () => {
+    const value = 'Hello world. This continues.\n';
+    const reconstructed = reconstructFrontmatter({ stopped_at: value });
+    const roundTrip = `---\n${reconstructed}\n---\n`;
+    const extracted = extractFrontmatter(roundTrip);
+    assert.strictEqual(extracted.stopped_at, value);
+  });
+
+  test('round-trip: a multi-line value with NO trailing newline (strip) is byte-identical', () => {
+    const value = 'first line\nsecond line';
+    const reconstructed = reconstructFrontmatter({ k: value });
+    assert.ok(reconstructed.includes('k: |-'), `must use the strip chomping indicator: ${reconstructed}`);
+    const roundTrip = `---\n${reconstructed}\n---\n`;
+    const extracted = extractFrontmatter(roundTrip);
+    assert.strictEqual(extracted.k, value);
+  });
+
+  test('round-trip: a multi-line value with MULTIPLE trailing newlines (keep) is byte-identical', () => {
+    const value = 'kept\n\n\n';
+    const reconstructed = reconstructFrontmatter({ k: value });
+    assert.ok(reconstructed.includes('k: |+'), `must use the keep chomping indicator: ${reconstructed}`);
+    const roundTrip = `---\n${reconstructed}\n---\n`;
+    const extracted = extractFrontmatter(roundTrip);
+    assert.strictEqual(extracted.k, value);
+  });
+
+  test('round-trip: an embedded blank line (paragraph break) inside a multi-line value is byte-identical', () => {
+    const value = 'Paragraph one.\n\nParagraph two.\n';
+    const reconstructed = reconstructFrontmatter({ notes: value });
+    const roundTrip = `---\n${reconstructed}\n---\n`;
+    const extracted = extractFrontmatter(roundTrip);
+    assert.strictEqual(extracted.notes, value);
+  });
+
+  test('round-trip: a nested markdown bullet list inside a multi-line value is byte-identical (a real GSD STATE.md shape)', () => {
+    const value = 'Intro line.\n  - nested bullet one\n  - nested bullet two\nOutro line.\n';
+    const reconstructed = reconstructFrontmatter({ stopped_at: value });
+    const roundTrip = `---\n${reconstructed}\n---\n`;
+    const extracted = extractFrontmatter(roundTrip);
+    assert.strictEqual(extracted.stopped_at, value);
+  });
+
+  test('round-trip: a full multi-key document with several multi-line and single-line fields survives byte-for-byte', () => {
+    const original = [
+      '---',
+      'name: foo',
+      'stopped_at: >',
+      '  A real narrative sentence.',
+      '  It continues on a second source line.',
+      'status: done',
+      '---',
+      '',
+    ].join('\n');
+    const extracted1 = extractFrontmatter(original);
+    const reconstructed = reconstructFrontmatter(extracted1);
+    const roundTrip = `---\n${reconstructed}\n---\n`;
+    const extracted2 = extractFrontmatter(roundTrip);
+    assert.deepStrictEqual(extracted2, extracted1);
+    assert.ok(!reconstructed.includes('\\n'), `no field should be escaped-single-line: ${reconstructed}`);
+  });
+
+  test('a multi-line value nested one level under an object key also emits as a block scalar', () => {
+    const result = reconstructFrontmatter({ progress: { note: 'line one\nline two\n' } });
+    assert.ok(!result.includes('\\n'), `must not contain an escaped-newline text sequence: ${result}`);
+    assert.ok(result.includes('note: |'), `must open a literal block scalar: ${result}`);
+    const roundTrip = `---\n${result}\n---\n`;
+    const extracted = extractFrontmatter(roundTrip);
+    assert.strictEqual(extracted.progress.note, 'line one\nline two\n');
   });
 });
 
