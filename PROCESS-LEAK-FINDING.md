@@ -24,7 +24,7 @@ PID    PPID  STARTED                  %CPU
 
 All `PPID 1` (orphaned — the parent died and they were reparented to init). Their working
 directory is a **deleted** temp dir (`prohib-hang-*`), so `t.after(() => cleanup(dir))`
-ran fine; only the processes outlived it. `INIT_CWD=/Users/mathifonseca/code/get-shit-done`.
+ran fine; only the processes outlived it. `INIT_CWD=/Users/mathifonseca/code/get-shit-done`. <!-- gsd-allow-legacy-name -->
 
 Roughly one per affected run, accumulating across days. They were noticed only because
 they slowed an unrelated Python test suite in another repo from ~110 s to several minutes.

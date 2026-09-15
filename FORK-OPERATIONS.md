@@ -21,7 +21,7 @@ The fork had drifted **1,628 commits** behind (v1.4.3 → v1.10.0, ten releases,
 ### 1a. The merge itself
 
 - Re-pointed the `upstream` remote — it was still aimed at the retired
-  `gsd-build/get-shit-done` despite FORK.md claiming otherwise. **That is why
+  `gsd-build/get-shit-done` despite FORK.md claiming otherwise. **That is why <!-- gsd-allow-legacy-name -->
   nothing looked new.** Check the remote first when a sync looks suspiciously quiet.
 - 21 conflicts + 2 modify/delete, resolved keeping fork behaviour.
 - Upstream became a multi-runtime framework: `capabilities/` system (43 packages),
@@ -109,8 +109,8 @@ closed, so the suite stays green and the leak is invisible. Found from the outsi
   target file, negative control red/green in both directions, full suite 30,594/30,611
   pass with the single failure being #3613's `C2` (pre-existing, disclosed in the PR
   body). Survived `auto-close-unsolicited-prs.yml`; early gates green at open.
-- **PR-network gotcha (bit us 2026-08-19):** `mathifonseca/get-shit-done` sits in the
-  archived `gsd-build/get-shit-done` fork network and CANNOT open PRs against
+- **PR-network gotcha (bit us 2026-08-19):** `mathifonseca/get-shit-done` sits in the <!-- gsd-allow-legacy-name -->
+  archived `gsd-build/get-shit-done` fork network and CANNOT open PRs against <!-- gsd-allow-legacy-name -->
   `open-gsd/gsd-core` — the 2026-06 migration was a fresh repo, not a transfer. Upstream
   PRs go through the fresh fork `mathifonseca/gsd-core` (remote `gsdfork` in this
   checkout). The PR branch also lives locally as `fix/3660-bounded-check-orphans-worker`;
@@ -309,7 +309,7 @@ brought both workflow tier caps back to upstream parity: move blocks into
 ## 5. Standard sync loop
 
 ```bash
-cd ~/code/get-shit-done
+cd ~/code/get-shit-done   # gsd-allow-legacy-name: local checkout dir
 git fetch upstream --tags --force --prune   # --force: old-repo tags v1.6.0–v1.10.0 collide
 git log upstream/main --oneline -20
 git merge upstream/main                     # resolve keeping BOTH sides
