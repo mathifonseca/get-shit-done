@@ -122,7 +122,9 @@ function countPhasePlansAndSummaries(phaseDir: string): PhasePlansAndSummaries {
 /**
  * Search for a phase header (and its section) within the given content string.
  * Returns a result object if found (either a full match or a malformed_roadmap
- * checklist-only match), or null if the phase is not present at all.
+ * checklist-only match), or null if the phase is not present at all. A
+ * checklist-only match may still be a complete bullet-style phase; callers
+ * decide that with searchBulletPhaseInContent once every heading lookup fails.
  */
 function searchPhaseInContent(content: string, escapedPhase: string, phaseNum: string): PhaseSearchResult | null {
   // #1729: OPTIONAL_PHASE_TAG_SOURCE after the number tolerates a pre-colon ( ) tag.
@@ -166,6 +168,23 @@ function searchPhaseInContent(content: string, escapedPhase: string, phaseNum: s
 
   const section = content.slice(headerIndex, sectionEnd).trim();
 
+  return {
+    found: true,
+    phase_number: phaseNum,
+    phase_name: phaseName,
+    ...extractPhaseSectionFields(section),
+    section,
+  };
+}
+
+// ─── extractPhaseSectionFields ────────────────────────────────────────────────
+
+/**
+ * Pull goal / mode / success_criteria out of an already-sliced phase section.
+ * Shared by the heading path (searchPhaseInContent) and the bullet path
+ * (searchBulletPhaseInContent) so the two shapes never drift apart.
+ */
+function extractPhaseSectionFields(section: string): { goal: string | null; mode: string | null; success_criteria: string[] } {
   // Extract goal if present (supports both **Goal:** and **Goal**: formats)
   const goalMatch = section.match(/\*\*Goal(?::\*\*|\*\*:)\s*([^\n]+)/i);
   const goal = goalMatch ? goalMatch[1].trim() : null;
@@ -175,28 +194,113 @@ function searchPhaseInContent(content: string, escapedPhase: string, phaseNum: s
   const modeMatch = section.match(/\*\*Mode(?::\*\*|\*\*:)\s*([^\n]+)/i);
   const mode = modeMatch ? modeMatch[1].trim().toLowerCase() : null;
 
-  // Extract success criteria as structured array. A criterion may wrap onto extra
-  // indented lines (no `N.` prefix); those continuations must fold INTO their
-  // criterion, not end the run (#2522 — the old `(?:\s*\d+\.\s*[^\n]+)+` broke on a
-  // wrapped line, truncating it and silently dropping every criterion below it).
-  // `\n*` before each numbered line keeps blank-line-separated criteria working.
-  const criteriaMatch = section.match(
-    /\*\*Success Criteria\*\*[^\n]*:\s*\n((?:\n*[ \t]*\d+\.[^\n]*\n?(?:[ \t]+(?!\d+\.)[^\n]*\n?)*)+)/i);
-  const success_criteria = criteriaMatch
-    ? criteriaMatch[1].trim().split(/\n+(?=[ \t]*\d+\.)/)
-        .map(entry => entry.replace(/^\s*\d+\.\s*/, '').replace(/\s*\n\s*/g, ' ').trim())
-        .filter(Boolean)
-    : [];
+  return { goal, mode, success_criteria: extractSuccessCriteria(section) };
+}
+
+/**
+ * Extract the numbered success criteria as a structured array.
+ *
+ * The label is accepted in both bold placements, like Goal/Mode above:
+ * `**Success Criteria** (what must be TRUE):` (the template) and
+ * `**Success criteria:**` (colon inside the bold). The old regex required the
+ * colon OUTSIDE the bold, so the second form always parsed as empty.
+ *
+ * A criterion may wrap onto extra lines; a wrapped line folds INTO its criterion
+ * only when it is indented deeper than that criterion's number (#2522). Anything
+ * at or left of the number's column (a `**Depends on:**` field, a sibling bullet)
+ * ends the list: bullet-style phases indent their fields to the same column as
+ * the criteria, so "any indentation" would swallow the next field. Blank lines
+ * are allowed between criteria, not inside one.
+ */
+function extractSuccessCriteria(section: string): string[] {
+  const lines = section.split('\n');
+  const labelPattern = /\*\*Success Criteria(?:\*\*[^\n]*:|:\*\*)/i;
+  const labelIndex = lines.findIndex((line) => labelPattern.test(line));
+  if (labelIndex === -1) return [];
+
+  const criteria: string[] = [];
+  let itemIndent = -1;
+  let sawBlank = false;
+  for (const line of lines.slice(labelIndex + 1)) {
+    if (!line.trim()) {
+      sawBlank = true;
+      continue;
+    }
+    const indent = line.length - line.trimStart().length;
+    const item = line.match(/^\s*\d+\.\s*(.*)$/);
+    if (item && (itemIndent === -1 || indent <= itemIndent)) {
+      criteria.push(item[1].trim());
+      itemIndent = indent;
+    } else if (itemIndent !== -1 && !sawBlank && indent > itemIndent) {
+      criteria[criteria.length - 1] = `${criteria[criteria.length - 1]} ${line.trim()}`;
+    } else {
+      break;
+    }
+    sawBlank = false;
+  }
+  return criteria.filter(Boolean);
+}
+
+// ─── searchBulletPhaseInContent ───────────────────────────────────────────────
+
+/**
+ * Bullet-style phase: the checklist entry carries its own detail block, indented
+ * under it, and there is no `### Phase N:` heading anywhere —
+ *
+ *   - [ ] **Phase 34: The Public Inbox** (0/? plans)
+ *         **Goal:** ...
+ *         **Success criteria:**
+ *         1. ...
+ *
+ * The section is the bullet line plus every following line indented deeper than
+ * the bullet (blank lines included), ending at the first non-blank line at or
+ * left of the bullet's column (the next phase bullet, a heading, prose).
+ *
+ * Returns null for a bare summary bullet (no Goal and no success criteria in its
+ * block): that is the #2114/#2139 "detail section missing" shape, and callers
+ * keep reporting it as malformed_roadmap. Callers try this only AFTER the heading
+ * lookup has failed on every source and on both milestone and full content, so a
+ * real heading always wins over a bullet (mirrors #2199 in roadmap-parser).
+ */
+function searchBulletPhaseInContent(content: string, escapedPhase: string, phaseNum: string): PhaseSearchResult | null {
+  const bulletPattern = new RegExp(
+    `^([ \\t]*)-\\s*\\[[ xX]\\]\\s*\\*\\*Phase\\s+${escapedPhase}${OPTIONAL_PHASE_TAG_SOURCE}:\\s*([^*]+)\\*\\*[^\\n]*$`,
+    'im'
+  );
+  const bulletMatch = content.match(bulletPattern);
+  if (!bulletMatch || bulletMatch.index === undefined) return null;
+
+  const bulletIndent = bulletMatch[1].length;
+  const bodyLines: string[] = [];
+  for (const line of content.slice(bulletMatch.index + bulletMatch[0].length).split('\n').slice(1)) {
+    if (line.trim() && line.length - line.trimStart().length <= bulletIndent) break;
+    bodyLines.push(line);
+  }
+  const section = [bulletMatch[0], ...bodyLines].join('\n').trim();
+
+  const fields = extractPhaseSectionFields(section);
+  if (fields.goal === null && fields.success_criteria.length === 0) return null;
 
   return {
     found: true,
     phase_number: phaseNum,
-    phase_name: phaseName,
-    goal,
-    mode,
-    success_criteria,
+    phase_name: bulletMatch[2].trim(),
+    ...fields,
     section,
   };
+}
+
+/**
+ * Last-resort bullet-style lookup across every lookup source, milestone slice
+ * first, then the full roadmap.
+ */
+function findBulletPhase(milestoneContent: string, fullContent: string, phaseNum: string): PhaseSearchResult | null {
+  for (const source of roadmapPhaseLookupSources(phaseNum)) {
+    const result = searchBulletPhaseInContent(milestoneContent, source, phaseNum)
+      ?? searchBulletPhaseInContent(fullContent, source, phaseNum);
+    if (result) return result;
+  }
+  return null;
 }
 
 // ─── getRoadmapPhaseWithFallback ──────────────────────────────────────────────
@@ -241,7 +345,9 @@ function getRoadmapPhaseWithFallback(cwd: string, phaseNum: string): string | nu
     if (fullResult && !fullResult.error) return fullResult.section ?? null;
   }
 
-  return null;
+  // No heading anywhere: a bullet-style phase still has a section, and the UI
+  // gate must see it rather than treat the phase as absent.
+  return findBulletPhase(milestoneContent, fullContent, phaseNum)?.section ?? null;
 }
 
 // ─── cmdRoadmapGetPhase ───────────────────────────────────────────────────────
@@ -285,6 +391,14 @@ function cmdRoadmapGetPhase(cwd: string, phaseNum: string, raw: boolean): void {
         return;
       }
       if (!malformed) malformed = (milestoneResult?.error ? milestoneResult : (fullResult?.error ? fullResult : null));
+    }
+
+    // No heading for any source: a bullet that carries its own Goal/criteria block
+    // is a complete bullet-style phase, not a malformed one.
+    const bulletResult = findBulletPhase(milestoneContent, fullContent, phaseNum);
+    if (bulletResult) {
+      output(bulletResult, raw, bulletResult.section);
+      return;
     }
 
     if (malformed) {
