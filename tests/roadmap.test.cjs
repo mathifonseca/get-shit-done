@@ -706,6 +706,174 @@ describe('roadmap get-phase success criteria', () => {
     assert.ok(Array.isArray(output.success_criteria), 'success_criteria should be an array');
     assert.strictEqual(output.success_criteria.length, 0, 'should have empty criteria');
   });
+
+  test('colon-inside-bold **Success criteria:** label parses (was always empty)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '### Phase 1: T',
+        '**Goal:** g',
+        '**Success criteria:**',
+        '1. alpha',
+        '2. beta',
+        '**Plans:** TBD',
+        '',
+      ].join('\n')
+    );
+
+    const output = JSON.parse(runGsdTools('roadmap get-phase 1', tmpDir).output);
+    assert.deepStrictEqual(output.success_criteria, ['alpha', 'beta']);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bullet-style phases: the checklist entry carries its own indented detail block
+// and there is no `### Phase N:` heading. Fixture is the shape of a real
+// production ROADMAP.md (v2.4 of the Pulse project), trimmed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BULLET_STYLE_ROADMAP = [
+  '# Roadmap: Pulse',
+  '',
+  '## Milestones',
+  '',
+  '### 🚧 v2.4 The Site Seam (Phases 32–37) — opened 2026-08-29',
+  '',
+  '- [x] **Phase 33: What "Published" Means** (14/14 plans) (completed 2026-09-16)',
+  '      **Goal:** one store-level flag that means "ready for the public site".',
+  '      **Requirements:** VIS-01…04',
+  '      **Success criteria:**',
+  '',
+  '      1. The site reads one flag.',
+  '      2. The flag is set by one writer.',
+  '      **Depends on:** Phase 32',
+  '',
+  '- [x] **Phase 33.1: Trust List & Approve Lane** (12/12 plans) (INSERTED 2026-09-17) — completed 2026-09-23',
+  '      **Goal:** the nightly promoter publishes ONLY from trusted sources.',
+  '      **Success criteria:**',
+  '',
+  '      1. Only trusted sources auto-publish.',
+  '',
+  '- [ ] **Phase 34: The Public Inbox** (3/8 plans)',
+  '      **Goal:** what the public site collects reaches a human, and accepting a submission grows',
+  '      coverage instead of forging an event.',
+  '      **Requirements:** INBOX-01…04',
+  '      **Success criteria:**',
+  '',
+  '      1. Martina sees the pending submissions and messages in Pulse, including the ones already',
+  '         sitting unread.',
+  '',
+  '      2. Setting a submission\'s status writes an audit row like every other write in the system.',
+  '      3. Accepting a submission produces a scope target and **no `events` row** — proven by the',
+  '         absence, not by inspection of the happy path.',
+  '',
+  '      4. A new submission notifies the team without anyone remembering to look.',
+  '      **Depends on:** Phase 32. **Owner-pushed migration:** one (`set_submission_status` vocabulary',
+  '      fill + `mark_message_seen`, one file, two `CREATE OR REPLACE FUNCTION`).',
+  '      **Plans:** 8 plans (3 waves)',
+  '',
+  '      - [x] 34-01-PLAN.md — W1 · TRACER: submissions read end-to-end',
+  '      - [ ] 34-05-PLAN.md — W2 · the two-tab `/inbox` shell (D-12)',
+  '',
+  '- [ ] **Phase 35: One Taxonomy, Two Languages** (0/? plans)',
+  '      **Goal:** the hand-copied map becomes one table.',
+  '      **Success criteria:**',
+  '',
+  '      1. One table holds every value.',
+  '',
+  '## Backlog',
+  '',
+  '### Phase 39: Contributor article editor',
+  '',
+  '**Goal:** Contributors write articles in Pulse.',
+  '',
+  '**Success Criteria** (what must be TRUE):',
+  '1. A contributor can draft an article.',
+  '2. An admin can publish it.',
+  '',
+  '**Depends on:** Phase 38',
+  '',
+].join('\n');
+
+describe('roadmap get-phase — bullet-style phases (no ### Phase N heading)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), BULLET_STYLE_ROADMAP);
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  function getPhase(phase) {
+    const result = runGsdTools(`roadmap get-phase ${phase}`, tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    return JSON.parse(result.output);
+  }
+
+  test('a bullet with its own Goal/criteria block is found, not malformed_roadmap', () => {
+    const output = getPhase('34');
+    assert.strictEqual(output.error, undefined, 'must not report malformed_roadmap');
+    assert.strictEqual(output.found, true);
+    assert.strictEqual(output.phase_name, 'The Public Inbox');
+    assert.ok(output.goal.startsWith('what the public site collects reaches a human'));
+    assert.ok(output.section.includes('34-05-PLAN.md'), 'section includes the whole indented block');
+    assert.ok(!output.section.includes('Phase 35'), 'section stops at the next phase bullet');
+  });
+
+  test('bullet-style success criteria are parsed, wrapped lines folded, and the list ends at the next field', () => {
+    const { success_criteria } = getPhase('34');
+    assert.strictEqual(success_criteria.length, 4);
+    assert.strictEqual(
+      success_criteria[0],
+      'Martina sees the pending submissions and messages in Pulse, including the ones already sitting unread.'
+    );
+    assert.ok(success_criteria[2].endsWith('not by inspection of the happy path.'));
+    assert.strictEqual(
+      success_criteria[3],
+      'A new submission notifies the team without anyone remembering to look.',
+      'a **Depends on:** line at the criteria column must not fold into the last criterion'
+    );
+  });
+
+  test('decimal and completed bullet phases resolve to their own block', () => {
+    const p33 = getPhase('33');
+    assert.strictEqual(p33.found, true);
+    assert.deepStrictEqual(p33.success_criteria, ['The site reads one flag.', 'The flag is set by one writer.']);
+    assert.ok(!p33.section.includes('Trust List'), 'Phase 33 must not bleed into 33.1');
+
+    const p331 = getPhase('33.1');
+    assert.strictEqual(p331.found, true);
+    assert.strictEqual(p331.phase_name, 'Trust List & Approve Lane');
+    assert.deepStrictEqual(p331.success_criteria, ['Only trusted sources auto-publish.']);
+  });
+
+  test('a heading-style phase in the same roadmap still parses with non-empty criteria', () => {
+    const output = getPhase('39');
+    assert.strictEqual(output.found, true);
+    assert.strictEqual(output.goal, 'Contributors write articles in Pulse.');
+    assert.deepStrictEqual(output.success_criteria, ['A contributor can draft an article.', 'An admin can publish it.']);
+  });
+
+  test('the UI gate resolver (getRoadmapPhaseWithFallback) sees the bullet section', () => {
+    const { getRoadmapPhaseWithFallback } = require('../gsd-core/bin/lib/roadmap.cjs');
+    const section = getRoadmapPhaseWithFallback(tmpDir, '34');
+    assert.ok(section, 'a bullet-style phase must not resolve to null (null silently disables the UI-SPEC gate)');
+    assert.ok(section.startsWith('- [ ] **Phase 34: The Public Inbox**'));
+    assert.ok(section.includes('**Success criteria:**'));
+  });
+
+  test('a heading elsewhere still wins over a bullet with a body', () => {
+    fs.appendFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '\n### Phase 35: One Taxonomy, Two Languages\n\n**Goal:** from the heading\n'
+    );
+    assert.strictEqual(getPhase('35').goal, 'from the heading');
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
