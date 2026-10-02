@@ -10,12 +10,17 @@
 
 process.env.GSD_TEST_MODE = '1';
 
-const { test } = require('node:test');
+const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const fc = require('fast-check');
 
 const SPEC_PHASE_PATH = path.join(__dirname, '..', 'gsd-core', 'workflows', 'spec-phase.md');
+const EDGE_PROBE_REF_PATH = path.join(__dirname, '..', 'gsd-core', 'references', 'edge-probe.md');
+const { classifyShape, applicableCategories } = require(
+  path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'edge-probe.cjs'),
+);
 
 function readSpecPhase() {
   return fs.readFileSync(SPEC_PHASE_PATH, 'utf8');
@@ -193,6 +198,56 @@ test('adversarial review: Step 5.5 guards a zero-applicable coverage report', ()
   );
 });
 
+// #3102 (data-flow reachability): the validated $COVERAGE report must be RENDERED into the
+// model's visible context, not merely captured and reduced to `coverage.applicable`. Before
+// #3102, every emission of $COVERAGE on the success path piped it into a `node -e` consumer
+// (the shape guard, the count extract) whose output the model never sees — so the engine's
+// items[] were computed, validated, then discarded, and the resolution loop re-derived edge
+// categories from requirement prose (the sibling of #2733's control-flow discard, one layer
+// down). This asserts a BARE render: $COVERAGE emitted to stdout as the leading command, not
+// captured into a variable (`=$(`) and not piped into a consumer (`| node`).
+test('#3102: Step 5.5 renders the $COVERAGE report to stdout (not only the applicable count)', () => {
+  const content = readSpecPhase();
+  const block = extractStep55Block(content);
+  assert.ok(block.length > 0, 'Step 5.5 block must be extractable from spec-phase.md');
+
+  const rendersReport = block.split('\n').some((raw) => {
+    const line = raw.trim();
+    if (!/\$COVERAGE\b/.test(line)) return false; // must reference the captured report
+    if (line.startsWith('#')) return false; // not a comment mention
+    if (!/^(printf|echo|cat)\b/.test(line)) return false; // emitted as the leading command
+    if (/=\s*\$\(/.test(line)) return false; // a capture reaches a variable, not the model
+    if (/\|\s*node\b/.test(line)) return false; // piped into a consumer (shape guard / count extract)
+    return true;
+  });
+
+  assert.ok(
+    rendersReport,
+    'Step 5.5 must RENDER $COVERAGE to the model context — a bare `printf`/`echo`/`cat` of $COVERAGE that is not captured (`=$(`) and not piped into `node` — so the engine items[] reach the resolution loop (#3102 data-flow discard)'
+  );
+});
+
+// #3102: rendering without binding leaves the rows decorative. The resolution loop must
+// consume the rendered engine rows as a deterministic FLOOR — every proposed (requirement_id,
+// category) is resolved, and the model ADDS any category the classifier missed (floor, never
+// ceiling — the classifier has a measured recall gap: ADR-857 §98 / ADR-550 D7b). This guards
+// a future edit that renders the report but leaves the loop re-deriving categories from prose.
+test('#3102: Step 5.5 resolution loop binds the engine rows as a floor, not a ceiling', () => {
+  const content = readSpecPhase();
+  const block = extractStep55Block(content);
+  assert.ok(block.length > 0, 'Step 5.5 block must be extractable from spec-phase.md');
+  assert.match(
+    block,
+    /floor/i,
+    'Step 5.5 resolution loop must describe the rendered engine rows as a FLOOR the model unions with its own classification (ADR-550 D7b) — surfacing the report without binding it leaves it decorative'
+  );
+  assert.match(
+    block,
+    /recall gap|never a ceiling|not a ceiling|add(?:ing)? (?:any|the missed|categor)/i,
+    'the floor must NOT be a ceiling — the loop must instruct the model to add categories the classifier missed (ADR-857 §98 recall gap), not narrow to the engine rows'
+  );
+});
+
 // #3132: the retired covered/backstop-as-status vocabulary must not appear in
 // the workflow prose. probe-core.cts locks Status to resolved|dismissed|unresolved;
 // backstop survives only as a verification tier on a resolved item.
@@ -248,4 +303,294 @@ test('#3132: specless-probe-fallback.md uses resolved+verification — not cover
     'specless-probe-fallback.md must use auto-"resolved" (not auto-"covered"/"backstop")');
   assert.match(content, /verification: explicit/,
     'specless-probe-fallback.md must reference "verification: explicit"');
+});
+
+// ─── #2773: non-English requirements and the English-only shape cues ──────────
+//
+// `SHAPE_CUES` (src/edge-probe.cts) are English word-boundary regexes. A project that sets
+// `response_language` writes its SPEC Requirements in that language, so transcribing them
+// verbatim into the Step 5.5 `$REQS_JSON` heredoc classifies every requirement to zero shapes
+// -> every row becomes the `unclassified` sentinel (#1110) and the 8-category taxonomy
+// contributes nothing. Approved scope for #2773 is doc-only: Step 5.5 must instruct that the
+// probe's `text` field carries a faithful English translation (engine input, never
+// user-facing), while the SPEC itself stays in the original language.
+
+test('#2773: Step 5.5 documents the English-translation step for response_language projects', () => {
+  const block = extractStep55Block(readSpecPhase());
+  assert.ok(block.length > 0, 'Step 5.5 block must be extractable from spec-phase.md');
+
+  assert.match(
+    block,
+    /response_language/,
+    'Step 5.5 must name `response_language` — it is the setting that makes the requirement prose non-English',
+  );
+  assert.match(
+    block,
+    /translat/i,
+    'Step 5.5 must instruct that the probe input carries a translation, not the original-language prose',
+  );
+  assert.match(
+    block,
+    /English/,
+    'Step 5.5 must say the translation target is English (the cue set the classifier actually speaks)',
+  );
+  // The SPEC must NOT be anglicized — only the transient probe payload is translated.
+  assert.match(
+    block,
+    /SPEC[^\n]*(original language|stays in|keeps)|(original language)[^\n]*SPEC/i,
+    'Step 5.5 must state the SPEC keeps the original language — only the probe input is translated',
+  );
+  // Requirement ids are the join key for coverage rows; translating them breaks the mapping.
+  assert.match(
+    block,
+    /`?id`?s?[^\n]*(unchanged|not translated|never translated|stable)/i,
+    'Step 5.5 must state requirement ids are NOT translated or renumbered (coverage rows join on id)',
+  );
+});
+
+test('#2773: Step 5.5 names the authored shapes override as the zero-cue fallback', () => {
+  const block = extractStep55Block(readSpecPhase());
+  assert.ok(block.length > 0, 'Step 5.5 block must be extractable from spec-phase.md');
+
+  // Translation is necessary but NOT sufficient: prose carrying no cue in ANY language still
+  // classifies to []. The engine already accepts an authored `shapes` override for exactly
+  // that case, so the instruction must point at it rather than over-promise.
+  assert.match(
+    block,
+    /`shapes`/,
+    'Step 5.5 must name the authored `shapes` override as the fallback for prose that still classifies to zero',
+  );
+});
+
+test('#2773: the translation instruction precedes the $REQS_JSON write', () => {
+  const block = extractStep55Block(readSpecPhase());
+  assert.ok(block.length > 0, 'Step 5.5 block must be extractable from spec-phase.md');
+
+  const langIdx = block.search(/response_language/);
+  const writeIdx = block.search(/>\s*"\$REQS_JSON"/);
+  assert.ok(langIdx !== -1, 'Step 5.5 must mention response_language');
+  assert.ok(writeIdx !== -1, 'Step 5.5 must write $REQS_JSON');
+  assert.ok(
+    langIdx < writeIdx,
+    'the translation instruction must come BEFORE the $REQS_JSON write — the downstream `$APPLICABLE = 0` warning only fires when EVERY requirement is unclassified, so a partially-classified non-English spec would slip through silently',
+  );
+});
+
+test('#2773: translating a non-English requirement is what makes the cue matcher apply', () => {
+  // Same requirement, two languages. This is the premise the Step 5.5 instruction rests on;
+  // if a future SHAPE_CUES edit breaks it, the documented advice becomes false and this fails.
+  const pt = 'O sistema mescla intervalos sobrepostos em uma lista ordenada';
+  const en = 'The system merges overlapping intervals in a sorted list';
+
+  assert.deepEqual(classifyShape(pt), [], 'non-English prose matches no English cue — the silent no-op #2773 reports');
+  assert.deepEqual(applicableCategories(classifyShape(pt)), [], 'zero shapes raise zero categories');
+
+  const enShapes = classifyShape(en);
+  assert.ok(enShapes.includes('collection'), 'the English rendering must classify as a collection');
+  const enCategories = applicableCategories(enShapes);
+  for (const expected of ['adjacency', 'empty', 'ordering']) {
+    assert.ok(enCategories.includes(expected), `translated requirement must raise \`${expected}\``);
+  }
+
+  // A second shape, so the row is not a single-cue coincidence.
+  const ptText = 'O nome do usuario e truncado em 50 caracteres';
+  const enText = 'The user name is truncated at 50 characters';
+  assert.deepEqual(classifyShape(ptText), [], 'non-English text-shape prose also matches nothing');
+  assert.ok(classifyShape(enText).includes('text'), 'the English rendering must classify as text');
+
+  // Multi-cue: a sentence carrying cues for two shapes yields the UNION, not one of them.
+  const multi = 'The API request uploads a sorted list of items';
+  const multiShapes = classifyShape(multi);
+  assert.ok(multiShapes.includes('io'), 'multi-cue prose must include io');
+  assert.ok(multiShapes.includes('collection'), 'multi-cue prose must include collection');
+});
+
+test('#2773: translation alone does not rescue genuinely zero-cue prose', () => {
+  // The issue's own repro sentence classifies to [] in ENGLISH too — it carries no shape cue
+  // in any language. That is the recorded recall gap (ADR-857 §98 / ADR-550 D7b), not a
+  // language failure, which is why Step 5.5 must point at the `shapes` override rather than
+  // promise that translation restores classification.
+  const enZeroCue = 'The command exits with code 1 and prints to stderr on invalid input';
+  assert.deepEqual(
+    classifyShape(enZeroCue),
+    [],
+    'a genuinely zero-cue requirement stays unclassified even in English — the doc must not over-promise',
+  );
+
+  // The authored `shapes` override is the deterministic escape hatch for exactly this case.
+  assert.deepEqual(
+    applicableCategories(['stateful']),
+    ['idempotency', 'concurrency'],
+    'an authored `shapes` override raises categories with no dependence on prose cues',
+  );
+});
+
+test('#2773 property: a cue word classifies regardless of surrounding text', () => {
+  // A translated sentence carries its cue word amid arbitrary other words. The Step 5.5
+  // advice is only sound if classification is robust to that surrounding context rather than
+  // anchored to a fixed sentence shape.
+  const cueForShape = {
+    'numeric-range': 'threshold',
+    collection: 'items',
+    text: 'unicode',
+    stateful: 'persist',
+    io: 'endpoints',
+  };
+  const filler = fc.string({ minLength: 0, maxLength: 24 }).filter((s) => !/[A-Za-z]/.test(s));
+
+  fc.assert(
+    fc.property(
+      fc.constantFrom(...Object.keys(cueForShape)),
+      filler,
+      filler,
+      (shape, before, after) => {
+        const sentence = `${before} ${cueForShape[shape]} ${after}`;
+        assert.ok(
+          classifyShape(sentence).includes(shape),
+          `cue "${cueForShape[shape]}" must classify as ${shape} inside ${JSON.stringify(sentence)}`,
+        );
+      },
+    ),
+    { numRuns: 100, seed: 2773 },
+  );
+});
+
+test('#2773: the edge-probe reference documents the English-cue assumption', () => {
+  const ref = fs.readFileSync(EDGE_PROBE_REF_PATH, 'utf8');
+  assert.match(
+    ref,
+    /English/,
+    'the edge-probe reference `## Inputs` contract must state that the heuristic classifier is English-cue based',
+  );
+  assert.match(
+    ref,
+    /response_language/,
+    'the edge-probe reference must point non-English projects at the translated-input requirement',
+  );
+});
+
+test('#2773: no Step 5.5 exit path leaks the $REQS_JSON temp file', () => {
+  // The temp file holds the SPEC's requirement text. Every guard between its creation and
+  // the unconditional cleanup must `rm -f` it before `exit 1`, or a failed spec run strands
+  // requirement content in TMPDIR. The engine-failure guard always did; the empty/placeholder
+  // guard directly above it did not, so the two siblings disagreed about their own invariant.
+  const block = extractStep55Block(readSpecPhase());
+  assert.ok(block.length > 0, 'Step 5.5 block must be extractable from spec-phase.md');
+
+  const lines = block.split('\n');
+  const createIdx = lines.findIndex((l) => /REQS_JSON=\$\(mktemp/.test(l));
+  assert.ok(createIdx !== -1, 'Step 5.5 must create $REQS_JSON via mktemp');
+
+  // The region ends at the first UNCONDITIONAL cleanup (a bare `rm -f "$REQS_JSON"` at column
+  // zero); past that the file is already gone and later exits cannot leak it.
+  const afterCreate = lines.slice(createIdx + 1);
+  const endOffset = afterCreate.findIndex((l) => /^rm -f "\$REQS_JSON"/.test(l));
+  assert.ok(endOffset !== -1, 'Step 5.5 must unconditionally rm -f "$REQS_JSON" after the engine run');
+  const region = afterCreate.slice(0, endOffset);
+
+  // Walk the region tracking whether the current guard branch has cleaned up. `then`/`else`
+  // opens a fresh branch; a cleanup inside it arms the branch; an `exit` must find it armed.
+  let cleanedInBranch = false;
+  const leaks = [];
+  for (const line of region) {
+    if (/\bthen\b|^\s*else\b|^\s*elif\b/.test(line)) cleanedInBranch = false;
+    if (/rm -f "\$REQS_JSON"/.test(line)) cleanedInBranch = true;
+    if (/^\s*exit\s+\d+/.test(line) && !cleanedInBranch) leaks.push(line.trim());
+  }
+
+  assert.deepEqual(
+    leaks,
+    [],
+    `every exit between the mktemp and the unconditional cleanup must rm -f "$REQS_JSON" first; leaking exits: ${JSON.stringify(leaks)}`,
+  );
+});
+
+// ─── #3717: durable text_en field (follow-up to the #2773 doc-only stopgap) ───
+//
+// #2773 shipped a documented convention: for a response_language project, Step 5.5's `text`
+// field silently carried the English TRANSLATION rather than the SPEC's own requirement
+// prose. #3717 (approved scope: Form 1 only, `text_en` field) makes this an explicit,
+// validatable field: `text` goes back to meaning "the requirement's own text" (in
+// response_language, when set), and `text_en` carries the translation the classifier reads.
+//
+// These three tests only check the WORKFLOW PROSE instructs populating text_en correctly —
+// the same prose-assertion pattern the #2773 tests above already use for Step 5.5, not a new
+// testing technique. The actual machine check the #2773 doc-only stopgap lacked is
+// ENGINE-level, not workflow-level: text_en is now a real, validated Requirement field —
+// validateRequirement fail-closes on an empty value, and classifyShape/proposeEdges
+// demonstrably prefer it over text — a property the #2773 prose-only convention had no way
+// to enforce. See tests/edge-probe.test.cjs for that engine-level coverage.
+
+test('#3717: Step 5.5 documents populating text_en for response_language projects', () => {
+  const block = extractStep55Block(readSpecPhase());
+  assert.ok(block.length > 0, 'Step 5.5 block must be extractable from spec-phase.md');
+
+  assert.match(
+    block,
+    /text_en/,
+    'Step 5.5 must name the text_en field — the durable #3717 fix for non-English requirement classification',
+  );
+  assert.match(
+    block,
+    /response_language/,
+    'Step 5.5 must still name response_language as the setting that triggers populating text_en',
+  );
+});
+
+test('#3717: Step 5.5 documents that text stays the original SPEC-language requirement text', () => {
+  const block = extractStep55Block(readSpecPhase());
+  assert.ok(block.length > 0, 'Step 5.5 block must be extractable from spec-phase.md');
+
+  // The #2773-era stopgap had `text` secretly carry the English translation. The #3717
+  // durable fix keeps `text` meaning the requirement's own text (original language) and
+  // moves the translation into the new text_en field — this must be documented, not just
+  // implemented, or the next reader re-introduces the #2773 overload by habit.
+  assert.match(
+    block,
+    /`?text`?[^\n]*(original language|SPEC's own|requirement's own|unchanged)|(original language)[^\n]*`?text`?/i,
+    'Step 5.5 must state that text carries the SPEC requirement in its own (original) language — not the translation',
+  );
+});
+
+test('#3717: the edge-probe reference documents the text_en field', () => {
+  const ref = fs.readFileSync(EDGE_PROBE_REF_PATH, 'utf8');
+  assert.match(
+    ref,
+    /text_en/,
+    'the edge-probe reference `## Inputs` contract must document the optional text_en field and its text_en ?? text fallback',
+  );
+});
+
+describe('#4656: the zero-applicable guard is widened to the all-unclassified case', () => {
+  // allow-test-rule: source-text-is-the-product (#4656) — spec-phase.md/ui-phase.md
+  // guard text is the shipped workflow contract.
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'gsd-core', 'workflows', f), 'utf-8');
+
+  test('spec-phase extracts coverage.unclassified and the guard fires on either condition', () => {
+    const content = read('spec-phase.md');
+    assert.ok(
+      content.includes('coverage.unclassified'),
+      'step 5.5 must extract the unclassified sibling count the #4656 rollup exposes',
+    );
+    assert.ok(
+      content.includes('[ "$UNCLASSIFIED" = "$APPLICABLE" ]'),
+      'the guard must fire when every requirement is unclassified (#4656), not only at applicable:0',
+    );
+    assert.ok(
+      content.includes('If the guard above fired'),
+      'the mandatory AskUserQuestion confirmation must key on the widened guard, not only on applicable:0 (#4656)',
+    );
+  });
+
+  test('ui-phase carries the same widened guard', () => {
+    const content = read('ui-phase.md');
+    assert.ok(
+      content.includes('coverage.unclassified') && content.includes('[ "$UNCLASSIFIED" = "$APPLICABLE" ]'),
+      'ui-phase.md:385 guard must be widened identically (#4656)',
+    );
+    assert.ok(
+      content.includes('If the guard above fired'),
+      'ui-phase confirmation prose must key on the widened guard too (#4656)',
+    );
+  });
 });

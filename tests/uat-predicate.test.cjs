@@ -21,6 +21,7 @@ const {
   analyzeMarkdown,
   evaluateUatPassed,
 } = require('../gsd-core/bin/lib/uat-predicate.cjs');
+const { parseUatItemsWithStats } = require('../gsd-core/bin/lib/uat.cjs');
 const { cleanup } = require('./helpers.cjs');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -598,6 +599,62 @@ describe('evaluateUatPassed — policy.requireVerification', () => {
   });
 });
 
+// ─── evaluateUatPassed — policy.uatOnly (#4663) ───────────────────────────────
+//
+// The verify-work canonicalize pre-check runs WHILE the report still reads
+// `human_needed` — and `human_needed` is itself a blocking verification
+// status, so the full predicate can never pass at pre-check time and the
+// flip would deadlock. uatOnly evaluates the UAT rows ONLY: verification-file
+// blockers (and only those) are skipped, while every UAT-row blocker
+// (pending/blocked/failed/skip-without-reason) and the vacuous-pass guard
+// still apply.
+
+describe('evaluateUatPassed — policy.uatOnly (#4663)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+  });
+
+  afterEach(() => {
+    rmDir(tmpDir);
+  });
+
+  test('uatOnly ignores the human_needed verification blocker the flip is about to remove', () => {
+    writeFile(tmpDir, 'phase-UAT.md', makePassingUat(1));
+    writeFile(tmpDir, 'phase-VERIFICATION.md', '---\nstatus: human_needed\n---\n\nWaiting on hardware.');
+    const full = evaluateUatPassed(tmpDir, {});
+    assert.strictEqual(full.passed, false,
+      'the full predicate must refuse while verification is human_needed (the blocker the flip removes)');
+    assert.ok(full.blockers.some(b => /human_needed/.test(b)),
+      `expected a human_needed blocker, got: ${JSON.stringify(full.blockers)}`);
+    const report = evaluateUatPassed(tmpDir, { policy: { uatOnly: true } });
+    assert.strictEqual(report.passed, true, 'uat-only: all UAT rows pass → the pre-check may flip');
+    assert.strictEqual(report.blockers.length, 0);
+    assert.strictEqual(report.policy.uat_only, true);
+    assert.strictEqual(report.policy.require_verification, false);
+  });
+
+  test('uatOnly still refuses blocked UAT rows — the vacuous pass stays impossible', () => {
+    writeFile(tmpDir, 'phase-UAT.md', [
+      '---', 'status: human_needed', '---', '', '# UAT', '',
+      '### 1. Test 1', 'expected: It works', 'result: blocked', '',
+    ].join('\n'));
+    writeFile(tmpDir, 'phase-VERIFICATION.md', '---\nstatus: human_needed\n---\n\nWaiting on hardware.');
+    const report = evaluateUatPassed(tmpDir, { policy: { uatOnly: true } });
+    assert.strictEqual(report.passed, false, 'a blocked row is a non-pass result even in uat-only mode');
+    assert.ok(report.blockers.length > 0);
+  });
+
+  test('uatOnly and requireVerification are mutually exclusive — uatOnly wins', () => {
+    writeFile(tmpDir, 'phase-UAT.md', makePassingUat(1));
+    const report = evaluateUatPassed(tmpDir, { policy: { uatOnly: true, requireVerification: true } });
+    assert.strictEqual(report.passed, true, 'uatOnly takes precedence; the verification policy is not evaluated');
+    assert.strictEqual(report.policy.require_verification, false);
+    assert.strictEqual(report.policy.uat_only, true);
+  });
+});
+
 // ─── evaluateUatPassed — #3057 B3: staleness-check indeterminate is surfaced ──
 //
 // readVerificationStatus's internal staleness check can fail (fs /
@@ -1011,6 +1068,83 @@ describe('evaluateUatPassed — output shape (Hyrum\'s Law contract)', () => {
   });
 });
 
+// ─── #3511: phase-scoped UAT/VERIFICATION scanning — the transition gate ─────
+//
+// evaluateUatPassed is the CRITICAL anchor for #3511: its `passed`/`blockers`
+// fields directly gate a phase transition. A cross-phase stray file sitting
+// in a phase directory must never contribute a blocker to a phase it does not
+// belong to, and the phase's own artifacts must keep behaving exactly as
+// before.
+
+describe('#3511: evaluateUatPassed — cross-phase stray files do not contribute blockers', () => {
+  let baseDir;
+  let phaseDir;
+
+  beforeEach(() => {
+    baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3511-uat-pred-'));
+    // Phase-shaped basename ("03-…") so isPhaseArtifact actually scopes —
+    // extractPhaseToken('03-uat-predicate') derives token "03".
+    phaseDir = path.join(baseDir, '03-uat-predicate');
+    fs.mkdirSync(phaseDir);
+  });
+
+  afterEach(() => {
+    rmDir(baseDir);
+  });
+
+  test('passed:true with a passing own UAT + own VERIFICATION, despite a blocking cross-phase stray VERIFICATION', () => {
+    writeFile(phaseDir, '03-UAT.md', makePassingUat(1));
+    writeFile(phaseDir, '03-VERIFICATION.md', '---\nstatus: passed\n---\n\nOK.');
+    // Cross-phase stray: a "04" VERIFICATION file sitting in phase 03's
+    // directory, with a BLOCKING status. Pre-#3511, this unscoped scan would
+    // have picked it up and blocked phase 03's transition.
+    writeFile(phaseDir, '04-VERIFICATION.md', '---\nstatus: human_needed\n---\n\nNeeds human check.');
+
+    const report = evaluateUatPassed(phaseDir);
+    assert.strictEqual(report.passed, true,
+      'a cross-phase stray VERIFICATION file must not block this phase\'s transition');
+    assert.ok(
+      !report.blockers.some(b => /04-VERIFICATION\.md/.test(b) || /human_needed/i.test(b)),
+      `blockers must not name the stray file; got: ${JSON.stringify(report.blockers)}`,
+    );
+    assert.strictEqual(report.verification_files.includes('04-VERIFICATION.md'), false,
+      'the stray must not even be counted as a verification_files entry for this phase');
+  });
+
+  test('passed:false with own report still failing, unaffected by an unrelated passing cross-phase stray (non-stray case unchanged)', () => {
+    writeFile(phaseDir, '03-UAT.md', makePassingUat(1));
+    // This phase's own VERIFICATION is blocking.
+    writeFile(phaseDir, '03-VERIFICATION.md', '---\nstatus: gaps_found\n---\n\nHas gaps.');
+    // A cross-phase stray that is itself passing must not paper over the
+    // phase's own real failure either — over-exclusion is as dangerous as
+    // under-exclusion here.
+    writeFile(phaseDir, '99-VERIFICATION.md', '---\nstatus: passed\n---\n\nOK.');
+
+    const report = evaluateUatPassed(phaseDir);
+    assert.strictEqual(report.passed, false,
+      'the phase\'s own gaps_found VERIFICATION must still block, exactly as before #3511');
+    assert.ok(report.blockers.some(b => /gaps_found/i.test(b)),
+      `blockers must still name this phase's own gaps_found status; got: ${JSON.stringify(report.blockers)}`);
+  });
+
+  test('#3511 follow-up: passed:true from a NON-canonical dir shape "1-unpadded" (over-exclusion / no_uat_artifacts check)', () => {
+    // "1-unpadded" tokenizes to literal "1"; scaffold writes the PADDED
+    // "01-…" form (normalizePhaseName). A literal token compare excluded the
+    // phase's own artifacts here, flipping `no_uat_artifacts: true` and
+    // false-blocking the transition gate this predicate feeds.
+    const unpaddedDir = path.join(baseDir, '1-unpadded');
+    fs.mkdirSync(unpaddedDir);
+    writeFile(unpaddedDir, '01-UAT.md', makePassingUat(1));
+    writeFile(unpaddedDir, '01-VERIFICATION.md', '---\nstatus: passed\n---\n\nOK.');
+
+    const report = evaluateUatPassed(unpaddedDir);
+    assert.strictEqual(report.no_uat_artifacts, false,
+      `own UAT/VERIFICATION files in an unpadded-dir phase must be found; got: ${JSON.stringify(report)}`);
+    assert.strictEqual(report.passed, true,
+      `the phase's own passing files in a non-canonical dir must pass the gate; got: ${JSON.stringify(report)}`);
+  });
+});
+
 // ─── FIX A regression: nested-fence (~~~ inside ```) ─────────────────────────
 
 describe('FIX A — nested fence: ~~~ inside ``` does not prematurely close outer fence', () => {
@@ -1115,6 +1249,32 @@ describe('FIX B — cross-line result: value must be on the same line', () => {
       'result value on a subsequent line must not be captured as passed');
     assert.strictEqual(items[0].result, 'missing',
       'cross-line result must yield missing (blocker)');
+  });
+
+  test('result: whose value sits on a following INDENTED line → missing (pinned #3078-CR divergence)', () => {
+    // #3078-CR (security review follow-up): on origin/next, the old
+    // `/^result:\s*\[?(\w+)\]?.*$/im` regex's `\s*` is greedy and matches
+    // ACROSS a newline, so `result:\n  blocked` parsed as `blocked` — a real
+    // row this shape reported 1/blocked. The split-then-match rewrite tests
+    // `result:` against a SINGLE already-split line, per the documented
+    // "value must sit on the SAME line as result:" contract (see the comment
+    // above RESULT_LINE_RE), so this now yields 'missing' (a parse gap, with
+    // the percentage withheld) instead of silently crossing the newline.
+    // This is a DELIBERATE, FAIL-SAFE divergence from the old cross-newline
+    // `\s*` behavior — pinned here so it is never "fixed" back by accident.
+    const content = [
+      '### 1. Indented-continuation Test',
+      'expected: Y',
+      'result:',
+      '  blocked',
+      '',
+    ].join('\n');
+    const items = parseUatResultItems(content);
+    assert.strictEqual(items.length, 1);
+    assert.notStrictEqual(items[0].result, 'blocked',
+      'a value on a following indented line must not be captured across the newline');
+    assert.strictEqual(items[0].result, 'missing',
+      'result: with its value on the next (even indented) line must yield missing, not the old cross-newline capture');
   });
 
   test('evaluateUatPassed → passed:false for cross-line result:passed', () => {
@@ -1377,6 +1537,320 @@ describe('evaluateUatPassed — property: wrapping in false-positive context nev
         }
       }),
       { numRuns: 50 }
+    );
+  });
+});
+
+// ─── #3078-CR MEDIUM: acceptance gate (uat-predicate.cjs) must AGREE with the ──
+// ─── audit surface (uat.cjs's parseUatItemsWithStats) on the same bytes ───────
+
+describe('#3078-CR: evaluateUatPassed agrees with the audit surface (parseUatItemsWithStats)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+  });
+
+  afterEach(() => {
+    rmDir(tmpDir);
+  });
+
+  test('U+2028 scalar-injection: gate blocks, audit surface reports the outstanding row — they AGREE', () => {
+    // A `result:` line reachable only via a U+2028 LINE SEPARATOR sitting inside
+    // an `expected: |` block-scalar body must not be read as a genuine
+    // column-0 match by EITHER surface. The real, later `result: blocked` line
+    // is the one that must win.
+    const LS = String.fromCharCode(0x2028);  // never a raw separator in source: a formatter that normalizes line separators would silently turn this fixture into an ordinary-character control that still passes
+    const body = [
+      '---',
+      'status: passed',
+      '---',
+      '',
+      '# UAT',
+      '',
+      '### 1. Alpha',
+      'expected: |',
+      '  x' + LS + 'result: pass',
+      'result: blocked',
+      '',
+    ].join('\n');
+    writeFile(tmpDir, '01-alpha-UAT.md', body);
+
+    const gateReport = evaluateUatPassed(tmpDir);
+    const auditReport = parseUatItemsWithStats(body);
+
+    // AGREEMENT, asserted explicitly (not each surface independently): both
+    // surfaces must consider this phase NOT clean, on the same test row.
+    assert.equal(gateReport.passed, false, 'gate: must not accept a blocked test as passed');
+    assert.equal(auditReport.items.length, 1, 'audit: the blocked row must surface as outstanding');
+    assert.equal(auditReport.items[0].result, 'blocked', 'audit: must read the real result, not the injected one');
+    const gateCheck = gateReport.checks.find((c) => c.test === 1);
+    assert.ok(gateCheck, 'gate: must record the test-1 check');
+    assert.equal(gateCheck.result, 'blocked', 'gate: must read the real result, not the injected one');
+    assert.equal(gateCheck.passing, false);
+    // Cross-surface identity: same test number, same result token.
+    assert.equal(gateCheck.result, auditReport.items[0].result, 'gate and audit surface must agree on the result token');
+  });
+
+  test('H-U28 restored: a heading delimited by U+2028 (not \n) is still found and blocks', () => {
+    // #3078-CR MEDIUM 1 (security review follow-up): origin/next found this
+    // heading via an /m-anchored scan whose LineTerminator set includes
+    // U+2028/U+2029; a naive split('\n')-only port of that scan silently
+    // stopped finding it, making the gate MORE PERMISSIVE than origin/next
+    // (measured: HEAD passed:true/0 blockers, origin/next passed:false/1
+    // blocker, for this exact shape). The heading scan now splits on
+    // \n/U+2028/U+2029 (a STRUCTURE frame) while the result: scan below it
+    // stays \n-only (an ATTRIBUTION frame, unchanged) -- so the heading is
+    // found, but its result: line -- separated from the heading by the same
+    // exotic separator -- is correctly NOT read across that boundary (that is
+    // the attribution guard I-U28 below exists to prove), yielding
+    // 'missing' rather than 'blocked'. Either token is a non-passing,
+    // blocking state, so the gate still BLOCKS -- the outcome origin/next
+    // produced, restored.
+    const LS = String.fromCharCode(0x2028);  // never a raw separator in source: a formatter that normalizes line separators would silently turn this fixture into an ordinary-character control that still passes
+    const content = 'Notes.' + LS + '### 2. B' + LS + 'result: blocked';
+    const items = parseUatResultItems(content);
+    assert.strictEqual(items.length, 1, 'a U+2028-delimited heading must still be found');
+    assert.strictEqual(items[0].test, 2);
+    assert.strictEqual(items[0].name, 'B');
+    // IDENTITY, not a proxy: the exact token. `notStrictEqual(..., 'passed')` also passes on
+    // 'pass', which IS in UAT_PASS_RESULTS -- so it could not catch a regression that
+    // attributed a PASSING result to the recovered heading, which is the whole risk here.
+    assert.strictEqual(items[0].result, 'missing',
+      'the result: line sits across the same exotic separator, so it is correctly NOT attributed -- '
+      + 'missing is a non-passing, blocking state');
+  });
+
+  test('H-U28 restored: evaluateUatPassed BLOCKS on the U+2028-delimited heading shape', () => {
+    const tmpDir = makeTmpDir();
+    try {
+      const LS = String.fromCharCode(0x2028);  // never a raw separator in source: a formatter that normalizes line separators would silently turn this fixture into an ordinary-character control that still passes
+      const content = 'Notes.' + LS + '### 2. B' + LS + 'result: blocked';
+      const body = ['---', 'status: passed', '---', '', '# UAT', '', content, ''].join('\n');
+      writeFile(tmpDir, '01-h28-UAT.md', body);
+      const report = evaluateUatPassed(tmpDir);
+      assert.strictEqual(report.passed, false, 'gate must block on the U+2028-delimited heading -- origin/next parity');
+      assert.ok(report.blockers.length > 0, 'a blocker must be recorded');
+    } finally {
+      rmDir(tmpDir);
+    }
+  });
+
+  test('CR-fenced case: gate and audit surface (parseUatItemsWithStats) agree -- neither silently clean', () => {
+    // #3078-CR MEDIUM 1 follow-up evidence: a lone-CR document
+    // (see:CRfenceCR### 2. BCRresult: blockedCRfence) has its CRs normalized
+    // to \n before parsing, which turns a literal fence-marker sequence into
+    // a REAL fence delimiter it was not before normalization -- the row ends
+    // up fenced and stripped on the gate side. Both surfaces must agree this
+    // phase is NOT clean (the gate must not pass while the audit surface
+    // reports a shortfall/gap for the same document).
+    const crBody = ['see:', '```', '### 2. B', 'result: blocked', '```'].join('\r');
+    const tmpDir = makeTmpDir();
+    try {
+      writeFile(tmpDir, '01-crfence-UAT.md', crBody);
+      const gateReport = evaluateUatPassed(tmpDir);
+      const auditReport = parseUatItemsWithStats(crBody);
+      assert.strictEqual(gateReport.passed, false, 'gate must not report a clean pass for this document');
+      assert.ok(auditReport.headingsSeen > 0, 'audit surface must see the heading exists');
+      assert.ok(auditReport.items.length === 0 && auditReport.shortfallBlocks > 0,
+        'audit surface must record the fenced row as an unresolved shortfall, not silently drop it');
+    } finally {
+      rmDir(tmpDir);
+    }
+  });
+
+  test('lone-CR frontmatter: gate no longer silently drops a blocking status hidden by an unnormalized read', () => {
+    // A lone-CR-terminated frontmatter fence (`---\rstatus: partial\r---`) must
+    // still be recognised as frontmatter — the raw, unnormalized read this
+    // fix replaces treated the whole fence as one unbroken line, so
+    // `extractFrontmatter` never matched it and the blocking `status: partial`
+    // was silently dropped (fail-OPEN, the false-clean this fix closes).
+    const body = [
+      '---\rstatus: partial\r---',
+      '',
+      '# UAT',
+      '',
+      '### 1. Alpha\rresult: passed',
+      '### 2. Beta\rresult: pass',
+      '',
+    ].join('\r');
+    writeFile(tmpDir, '01-beta-UAT.md', body);
+
+    const gateReport = evaluateUatPassed(tmpDir);
+    assert.equal(gateReport.passed, false, 'gate: the hidden status: partial must now block');
+    assert.ok(
+      gateReport.blockers.some((b) => b.includes('status=partial')),
+      'gate: the frontmatter status blocker must be surfaced, not silently dropped',
+    );
+  });
+
+  test('clean control: a normally-passing file agrees as passed on both surfaces', () => {
+    const body = [
+      '---',
+      'status: passed',
+      '---',
+      '',
+      '# UAT',
+      '',
+      '### 1. Alpha',
+      'result: passed',
+      '',
+      '### 2. Beta',
+      'result: pass',
+      '',
+    ].join('\n');
+    writeFile(tmpDir, '01-gamma-UAT.md', body);
+
+    const gateReport = evaluateUatPassed(tmpDir);
+    const auditReport = parseUatItemsWithStats(body);
+
+    // AGREEMENT: the gate accepts, and the audit surface reports NO outstanding
+    // (non-passing) rows for the same bytes.
+    assert.equal(gateReport.passed, true, 'gate: a clean file must still pass');
+    assert.equal(auditReport.items.length, 0, 'audit: a clean file must have no outstanding rows');
+  });
+});
+
+
+// ─── #4546 — deferred follow-up skips are non-blocking ────────────────────────
+
+describe('#4546 — deferred follow-up skips', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+  });
+
+  afterEach(() => {
+    rmDir(tmpDir);
+  });
+
+  function makeDeferredUatItem(n, name, reason) {
+    const lines = [`### ${n}. ${name}`, `expected: ${name} works`];
+    if (reason === null) {
+      lines.push('result: skipped');
+    } else {
+      lines.push('result: skipped', `reason: ${reason}`);
+    }
+    return lines;
+  }
+
+  test('deferred follow-up skip is non-blocking (#4546)', () => {
+    const content = [
+      '---', 'status: complete', '---', '',
+      '### 1. Test A', 'expected: A', 'result: passed', '',
+      ...makeDeferredUatItem(2, 'Test B', '"Deferred follow-up: nice to have, next version"'), '',
+    ].join('\n');
+    writeFile(tmpDir, 'phase-UAT.md', content);
+    const report = evaluateUatPassed(tmpDir);
+    assert.strictEqual(report.passed, true,
+      `a deliberately deferred follow-up must not block: ${JSON.stringify(report.blockers)}`);
+    assert.strictEqual(report.blockers.length, 0);
+    const deferred = report.checks.find(c => c.test === 2);
+    assert.ok(deferred, 'deferred check present');
+    assert.strictEqual(deferred.passing, true, 'deferred skip counts as passing');
+    assert.strictEqual(deferred.deferred, true, 'deferred skip is flagged deferred in the report');
+    const passing = report.checks.find(c => c.test === 1);
+    assert.strictEqual(passing.deferred, false, 'a real pass is not flagged deferred');
+  });
+
+  test('plain skipped without a reason still blocks (#4546 negative space)', () => {
+    const content = [
+      '---', 'status: complete', '---', '',
+      '### 1. Test A', 'expected: A', 'result: passed', '',
+      ...makeDeferredUatItem(2, 'Test B', null), '',
+    ].join('\n');
+    writeFile(tmpDir, 'phase-UAT.md', content);
+    const report = evaluateUatPassed(tmpDir);
+    assert.strictEqual(report.passed, false,
+      'a skipped test with no reason is unresolved and must block');
+    assert.ok(report.blockers.some(b => /test 2/.test(b)),
+      `expected a blocker for test 2, got: ${JSON.stringify(report.blockers)}`);
+  });
+
+  test('skipped with a non-deferral reason still blocks (#4546 negative space)', () => {
+    const content = [
+      '---', 'status: complete', '---', '',
+      '### 1. Test A', 'expected: A', 'result: passed', '',
+      ...makeDeferredUatItem(2, 'Test B', '"waiting on credentials"'), '',
+    ].join('\n');
+    writeFile(tmpDir, 'phase-UAT.md', content);
+    const report = evaluateUatPassed(tmpDir);
+    assert.strictEqual(report.passed, false,
+      'a skipped test whose reason is not a deferral must block');
+  });
+
+  test('deferred reason match is case-insensitive (#4546 boundary)', () => {
+    const content = [
+      '---', 'status: complete', '---', '',
+      ...makeDeferredUatItem(1, 'Test A', '"deferred follow-up: later"'), '',
+    ].join('\n');
+    writeFile(tmpDir, 'phase-UAT.md', content);
+    const report = evaluateUatPassed(tmpDir);
+    assert.strictEqual(report.passed, true,
+      'the matcher anchors on the shipped template text case-insensitively');
+  });
+
+  test('a deferred skip does not mask other blockers (#4546 independence)', () => {
+    const content = [
+      '---', 'status: complete', '---', '',
+      ...makeDeferredUatItem(1, 'Test A', '"Deferred follow-up: later"'), '',
+      '### 2. Test B', 'expected: B', 'result: pending', '',
+      '### 3. Test C', 'expected: C', 'result: blocked', 'blocked_by: server', '',
+      '### 4. Test D', 'expected: D', 'result: issue', 'reported: "crashes"', '',
+    ].join('\n');
+    writeFile(tmpDir, 'phase-UAT.md', content);
+    const report = evaluateUatPassed(tmpDir);
+    assert.strictEqual(report.passed, false,
+      'deferred skip must not mask pending/blocked/issue blockers');
+    assert.ok(report.blockers.some(b => /test 2/.test(b)), 'pending still blocks');
+    assert.ok(report.blockers.some(b => /test 3/.test(b)), 'blocked still blocks');
+    assert.ok(report.blockers.some(b => /test 4/.test(b)), 'issue still blocks');
+    assert.ok(!report.blockers.some(b => /test 1/.test(b)),
+      `the deferred item must not appear among blockers: ${JSON.stringify(report.blockers)}`);
+  });
+
+  test('property: deferred-skip acceptance drives the real gate over arbitrary result/reason pairs (#4546)', () => {
+    // Gate-driven: expectations are derived from the INPUT (the spec sentence
+    // in #4546), then asserted against evaluateUatPassed's report — the
+    // property never restates the implementation's regex. The generated
+    // classes include the no-result-line shape (the parser's 'missing'
+    // branch) and reasonless skips.
+    const deferredRe = /^["']?deferred follow-up\b/i;
+    fc.assert(
+      fc.property(
+        fc.constantFrom('passed', 'pass', 'skipped', 'pending', 'blocked', 'issue', 'missing'),
+        fc.option(fc.stringMatching(/^["']?[a-z ]{0,30}$/), { nil: undefined }),
+        (result, reason) => {
+          const itemLines = [`### 1. Test X`, 'expected: X works'];
+          if (result !== 'missing') {
+            itemLines.push(`result: ${result}`);
+            if (reason !== undefined) itemLines.push(`reason: ${reason}`);
+          }
+          const content = [
+            '---', 'status: complete', '---', '',
+            ...itemLines, '',
+          ].join('\n');
+          fs.writeFileSync(path.join(tmpDir, 'phase-UAT.md'), content, 'utf-8');
+          const report = evaluateUatPassed(tmpDir);
+          assert.strictEqual(report.checks.length, 1);
+          const check = report.checks[0];
+
+          const isDeferral = result === 'skipped' &&
+            typeof reason === 'string' && deferredRe.test(reason);
+          const specPassing = result === 'passed' || result === 'pass' || isDeferral;
+
+          assert.strictEqual(check.result, result === 'missing' ? 'missing' : result);
+          assert.strictEqual(check.passing, specPassing,
+            `result=${result} reason=${JSON.stringify(reason)}: gate must ${specPassing ? 'pass' : 'block'}`);
+          assert.strictEqual(check.deferred, isDeferral,
+            `result=${result} reason=${JSON.stringify(reason)}: deferred flag`);
+          assert.strictEqual(report.passed, specPassing,
+            'a single-item file passes exactly when the item passes');
+          assert.deepStrictEqual(report.blockers, specPassing ? [] : [report.blockers[0]]);
+        }
+      ),
+      { numRuns: 120, seed: 4546 }
     );
   });
 });

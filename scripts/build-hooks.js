@@ -11,16 +11,25 @@ const path = require('path');
 const vm = require('vm');
 
 const HOOKS_DIR = path.join(__dirname, '..', 'hooks');
+const REPO_ROOT = path.join(HOOKS_DIR, '..');
 const DIST_DIR = path.join(HOOKS_DIR, 'dist');
 // Per-process staging directory for atomic writes. Using process.pid in the
 // name eliminates all contention between concurrent builders: each process
 // owns its own staging dir and never races with another builder's cleanup.
-// Lives under hooks/ so it shares a filesystem with DIST_DIR (POSIX
-// rename(2) is only atomic within the same filesystem) but is NOT inside
-// DIST_DIR — so readers that readdirSync(DIST_DIR) (e.g. bin/install.js,
-// install-hooks-copy tests) never observe a transient ".tmp" sibling.
-// The parent pattern hooks/.dist-staging-*/ is gitignored.
-const STAGE_DIR = path.join(HOOKS_DIR, `.dist-staging-${process.pid}`);
+// A SIBLING of hooks/ (not inside it) — still on the same filesystem as
+// DIST_DIR (both live under the repo checkout), so rename(2) stays atomic —
+// but this way nothing that walks or copies hooks/ as a whole can ever
+// observe this directory being created/populated/deleted concurrently.
+// tests/gsd-validate-commit-sigpipe.test.cjs's fixture setup does exactly
+// that (fs.cpSync(HOOKS_DIR, ..., {recursive: true})), and when its walk
+// entered a staging dir that a concurrent build-hooks.js run deleted
+// mid-iteration, Node's native recursive-copy (std::filesystem under the
+// hood) threw an uncaught C++ exception and aborted the whole process with
+// SIGABRT — not a catchable JS error. Moving the staging dir out of hooks/
+// closes that race for every current and future hooks/-tree walker, not
+// just that one call site (which also gained its own defensive filter).
+// The parent pattern .dist-staging-*/ (repo root) is gitignored.
+const STAGE_DIR = path.join(REPO_ROOT, `.dist-staging-${process.pid}`);
 
 // Hooks to copy (pure Node.js, no bundling needed)
 const HOOKS_TO_COPY = [
@@ -61,6 +70,8 @@ const HOOKS_TO_COPY = [
   'gsd-prompt-guard.js',
   'gsd-read-guard.js',
   'gsd-read-injection-scanner.js',
+  // Secret-file read guard (#4221) — replaces the installer's Read(.env*) deny rules
+  'gsd-secret-read-guard.js',
   'gsd-statusline.js',
   'gsd-update-banner.js',
   'gsd-workflow-guard.js',
@@ -71,6 +82,16 @@ const HOOKS_TO_COPY = [
   'gsd-session-state.sh',
   'gsd-validate-commit.sh',
   'gsd-phase-boundary.sh',
+  // Portable node resolver (#3662). Managed JS hook commands under
+  // --portable-hooks route through it (bash <resolver> <baked-node>
+  // <script>) so node resolves at hook-fire time in every environment
+  // sharing the config root. It IS registered in MANAGED_HOOKS
+  // (managed-hooks-registry.cjs) for staleness tracking like every other
+  // shipped .sh hook, and install.js stamps its {{GSD_VERSION}} header the
+  // same way (#4076 — the prior comment here claimed the opposite on both
+  // counts, which is why the header was missing and staleness detection was
+  // permanently broken for this file).
+  'gsd-node-runner.sh',
   // Graphify auto-update hook (#3347 / PR #3557 / #3579). Opt-in via
   // .planning/config.json graphify.auto_update; off by default.
   'gsd-graphify-update.sh'

@@ -44,7 +44,7 @@ Core package and are stamped with the package version at release (per
 ADR-1244 D6). They are not subject to the consent or integrity-pin flow applied
 to third-party capabilities.
 
-### Feature capabilities (role: feature) — 25
+### Feature capabilities (role: feature) — 27
 
 Feature capabilities extend what the loop does — contributing research,
 planning, execution, verification, or ship artefacts at the loop extension
@@ -57,8 +57,8 @@ points.
 | `assumption-delta` | feature | full | `>=1.6.0` | `plan:pre` | contribution | first-party |
 | `audit` | feature | full | `>=1.6.0` | — | — | first-party |
 | `broken-windows` | feature | full | `>=1.7.0` | `ship:pre` | gate | first-party |
-| `claude-orchestration` | feature | full | `>=1.7.0` | `plan:post`, `execute:wave:pre` | contribution | first-party |
-| `code-review` | feature | full | `>=1.6.0` | `execute:post` | step | first-party |
+| `claude-orchestration` | feature | full | `>=1.7.0` | `plan:post` | contribution | first-party |
+| `code-review` | feature | full | `>=1.6.0` | `execute:wave:post`, `execute:post` | step | first-party |
 | `definition-of-done` | feature | full | `>=1.6.0` | `execute:wave:post` | contribution | first-party |
 | `design-spec` | feature | full | `>=1.6.0` | `discuss:post` | contribution | first-party |
 | `drift` | feature | full | `>=1.6.0` | `plan:pre`, `execute:wave:post` | gate | first-party |
@@ -66,11 +66,13 @@ points.
 | `gap-analysis` | feature | standard | `>=1.6.0` | `plan:post` | gate | first-party |
 | `graphify` | feature | full | `>=1.6.0` | — | — | first-party |
 | `intel` | feature | full | `>=1.6.0` | `plan:pre` | step | first-party |
+| `live-dom-uat` | feature | full | `>=1.11.0` | `execute:wave:post` | step | first-party |
 | `mempalace` | feature | full | `>=1.6.0` | `discuss:pre`, `discuss:post`, `plan:pre`, `plan:post`, `execute:wave:post`, `verify:post`, `ship:post` | step, contribution | first-party |
 | `nyquist` | feature | full | `>=1.6.0` | `verify:post` | step | first-party |
 | `pattern-mapper` | feature | full | `>=1.6.0` | `plan:pre` | step | first-party |
 | `playwright` | feature | full | `>=1.6.0` | `execute:wave:post` | contribution | first-party |
 | `profile-pipeline` | feature | full | `>=1.6.0` | — | — | first-party |
+| `refactor-trigger` | feature | full | `>=1.10.0` | `execute:post` | step | first-party |
 | `research` | feature | standard | `>=1.6.0` | `plan:pre` | step | first-party |
 | `schema-gate` | feature | full | `>=1.6.0` | `plan:pre` | contribution | first-party |
 | `security` | feature | full | `>=1.6.0` | `plan:pre`, `verify:post`, `ship:pre` | step, contribution, gate | first-party |
@@ -107,7 +109,7 @@ emission), so their extension-point and hook-kind cells are `—`.
 | `windsurf` | runtime | core | `>=1.6.0` | — | — | first-party |
 | `zcode` | runtime | core | `>=1.6.0` | — | — | first-party |
 
-### Reviewer capabilities (role: reviewer) — 5
+### Reviewer capabilities (role: reviewer) — 4
 
 Reviewer capabilities declare a cross-AI **reviewer lane** — one external CLI or
 model endpoint `/gsd-review` hands a plan to (ADR-2782 D3). They are not install
@@ -125,7 +127,6 @@ at install like any other — see
 | id | role | tier | engines.gsd | extension points | hook kinds | source |
 |---|---|---|---|---|---|---|
 | `coderabbit` | reviewer | full | `>=1.8.0` | — | — | first-party |
-| `gemini` | reviewer | full | `>=1.8.0` | — | — | first-party |
 | `llama-cpp` | reviewer | full | `>=1.8.0` | — | — | first-party |
 | `lm-studio` | reviewer | full | `>=1.8.0` | — | — | first-party |
 | `ollama` | reviewer | full | `>=1.8.0` | — | — | first-party |

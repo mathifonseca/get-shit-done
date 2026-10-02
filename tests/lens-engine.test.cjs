@@ -34,6 +34,7 @@ const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'lens-engine');
 const WORKFLOWS_DIR = path.join(REPO_ROOT, 'gsd-core', 'workflows');
 
 const { execSync } = require('node:child_process');
+const { REAL_REPO_GIT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const { VALID_CONFIG_KEYS } = require('../gsd-core/bin/lib/config-schema.cjs');
 
@@ -742,7 +743,7 @@ describe('CON-LENS-GENERIC: frozen agents unchanged vs HEAD (PLANLENS-01/CON-len
       // Static string — no user input interpolated. Safe from command injection.
       const diffOutput = execSync(
         'git diff --stat HEAD -- agents/gsd-lens.md agents/gsd-lens-synthesizer.md',
-        { cwd: REPO_ROOT, timeout: 15000 }
+        { cwd: REPO_ROOT, timeout: REAL_REPO_GIT_TIMEOUT_MS }
       ).toString().trim();
       assert.strictEqual(
         diffOutput,

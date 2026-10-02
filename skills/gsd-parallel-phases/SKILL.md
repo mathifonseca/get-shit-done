@@ -2,7 +2,6 @@
 name: gsd-parallel-phases
 description: "Run independent phases in parallel — one worktree each, ledgers merged back via structured commands"
 argument-hint: "[--phases N,M,...] [--from N] [--to N]"
-effort: high
 allowed-tools:
   - Read
   - Write

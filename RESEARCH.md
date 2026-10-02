@@ -20,7 +20,7 @@ Research conducted 2026-04-03 to understand alternative approaches to AI-assiste
 5. `/speckit.tasks` — break the plan into actionable tasks
 6. `/speckit.implement` — execute all tasks according to the plan
 
-**Key features:** Extensible via community extensions (Jira/Azure DevOps sync, checkpointing, cleanup, multi-agent orchestration), presets, rich community ecosystem. Works with Claude Code, Cursor, Gemini CLI, Codex, GitHub Copilot.
+**Key features:** Extensible via community extensions (Jira/Azure DevOps sync, checkpointing, cleanup, multi-agent orchestration), presets, rich community ecosystem. Works with Claude Code, Cursor, Gemini CLI, Codex, GitHub Copilot. <!-- gsd-allow-retired-runtime-name: third-party product list, see #1928 -->
 
 **Comparison to GSD:** Spec Kit is spec-first — specifications are the source of truth and implementation flows from them in a linear pipeline (specify → plan → tasks → implement). It is agent-agnostic and GitHub-backed. GSD is a meta-prompting/orchestration system focused on milestones, phases, and parallel sub-agent execution. GSD emphasizes iterative planning, verification loops (UAT), and stateful context persistence across sessions — more of a project management layer than a spec authoring layer.
 

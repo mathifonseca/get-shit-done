@@ -16,7 +16,8 @@ const { writeSurface, readSurface, resolveSurface, listSurface, applySurface } =
 const { loadSkillsManifest, writeActiveProfile, resolveProfile } = require('../gsd-core/bin/lib/install-profiles.cjs');
 const { resolveRuntimeArtifactLayout } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 const { CLUSTERS, allClusteredSkills } = require('../gsd-core/bin/lib/clusters.cjs');
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, sandboxHome, writePackageSourceMarkerFixture } = require('./helpers.cjs');
+const { runMinimalInstall } = require('./helpers/install-shared.cjs');
 
 const REAL_COMMANDS_DIR = path.join(__dirname, '..', 'commands', 'gsd');
 
@@ -34,6 +35,7 @@ function createFixtureRuntime() {
   const agentsDir = path.join(runtimeConfigDir, 'agents');
   fs.mkdirSync(commandsDir, { recursive: true });
   fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(path.join(runtimeConfigDir, '.gsd-source'), REAL_COMMANDS_DIR + '\n');
   return { base, runtimeConfigDir, commandsDir, agentsDir };
 }
 
@@ -56,9 +58,68 @@ function readFrontmatterDescription(markdown) {
   return '';
 }
 
+function surfaceBytesForTest(state) {
+  return JSON.stringify(state, null, 2) + '\n';
+}
+
 // ─── applySurface ────────────────────────────────────────────────────────────
 
 describe('applySurface', () => {
+  test('#4132: an unmanifested installed command cannot become a live instruction', (t) => {
+    const installed = runMinimalInstall({ runtime: 'claude', scope: 'global' });
+    const configDir = installed.configDir;
+    t.after(() => cleanup(installed.root));
+    const rogueSource = path.join(configDir, 'gsd-core', 'commands', 'gsd', 'rogue.md');
+    const rogueSkill = path.join(configDir, 'skills', 'gsd-rogue', 'SKILL.md');
+    fs.writeFileSync(rogueSource, '<instructions>ROGUE</instructions>\n');
+
+    const layout = resolveRuntimeArtifactLayout('claude', configDir, 'global');
+    assert.throws(
+      () => applySurface(configDir, layout, realManifest(), CLUSTERS, undefined, {
+        surfaceState: { baseProfile: 'full', disabledClusters: [], explicitAdds: [], explicitRemoves: [] },
+      }),
+      /install or upgrade gsd-core/,
+    );
+    assert.equal(fs.existsSync(rogueSkill), false, 'unmanifested Markdown must not reach the live skill surface');
+  });
+
+  test('#4132: a marker below rejected installed commands cannot promote instructions', (t) => {
+    const installed = runMinimalInstall({ runtime: 'claude', scope: 'global' });
+    const configDir = installed.configDir;
+    t.after(() => cleanup(installed.root));
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(configDir, 'gsd-file-manifest.json'), 'utf8'));
+    const commandKey = Object.keys(manifest.files).find((key) => key.startsWith('gsd-core/commands/gsd/'));
+    assert.ok(commandKey, 'precondition: install manifest must own a command corpus file');
+    fs.appendFileSync(path.join(configDir, ...commandKey.split('/')), '\n# corrupted after install\n');
+
+    const installedCommands = path.join(configDir, 'gsd-core', 'commands', 'gsd');
+    const nestedMarkerCommands = path.join(installedCommands, 'nested');
+    const markerAgents = path.resolve(path.dirname(nestedMarkerCommands), '..', 'agents');
+    fs.mkdirSync(nestedMarkerCommands, { recursive: true });
+    fs.mkdirSync(markerAgents, { recursive: true });
+    fs.writeFileSync(path.join(nestedMarkerCommands, 'rogue.md'), '<instructions>ROGUE</instructions>\n');
+    fs.copyFileSync(path.join(__dirname, '..', 'agents', 'gsd-planner.md'), path.join(markerAgents, 'gsd-planner.md'));
+    fs.appendFileSync(path.join(markerAgents, 'gsd-planner.md'), '\nMARKER_AGENT_USED\n');
+    fs.writeFileSync(path.join(configDir, '.gsd-source'), nestedMarkerCommands + '\n');
+
+    const rogueSkill = path.join(configDir, 'skills', 'gsd-rogue', 'SKILL.md');
+    const liveAgent = path.join(configDir, 'agents', 'gsd-planner.md');
+    const oldAgent = fs.readFileSync(liveAgent);
+    const oldState = { baseProfile: 'full', disabledClusters: [], explicitAdds: [], explicitRemoves: [] };
+    writeSurface(configDir, oldState);
+    const oldSurface = fs.readFileSync(path.join(configDir, '.gsd-surface.json'));
+
+    const layout = resolveRuntimeArtifactLayout('claude', configDir, 'global');
+    assert.throws(
+      () => applySurface(configDir, layout, realManifest(), CLUSTERS, undefined, { surfaceState: oldState }),
+      /install or upgrade gsd-core/,
+    );
+    assert.equal(fs.existsSync(rogueSkill), false, 'nested marker Markdown must not reach the live skill surface');
+    assert.deepEqual(fs.readFileSync(liveAgent), oldAgent, 'marker agents must not replace live agents');
+    assert.deepEqual(fs.readFileSync(path.join(configDir, '.gsd-surface.json')), oldSurface);
+  });
+
   test('core profile: only core skills appear in commandsDir', (t) => {
     // #1367: claude local uses flat gsd-<stem>.md files at commands/ (not commands/gsd/<stem>.md).
     const { base, runtimeConfigDir, commandsDir } = createFixtureRuntime();
@@ -324,6 +385,7 @@ describe('applySurface', () => {
   test('applySurface writes gsd-prefixed command files matching install and preserves user commands (#816)', (t) => {
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-surface-816-'));
     t.after(() => cleanup(configDir));
+    writePackageSourceMarkerFixture(configDir);
 
     writeActiveProfile(configDir, 'standard');
     writeSurface(configDir, {
@@ -392,7 +454,7 @@ describe('applySurface', () => {
   // both paths must produce identical sets.
   test('applySurface command-dir filenames match a fresh install for every command runtime (#816 parity)', async (t) => {
     process.env.GSD_TEST_MODE = '1';
-    const { installRuntimeArtifacts } = require('../bin/install.js');
+    const { installRuntimeArtifacts } = require('../gsd-core/bin/lib/install-engine.cjs');
 
     const manifest = loadSkillsManifest(REAL_COMMANDS_DIR);
     // Build the resolved profile once. Both install and surface sides must use
@@ -406,6 +468,7 @@ describe('applySurface', () => {
       const installDir = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-816-install-${runtime}-`));
       const surfaceDir = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-816-surface-${runtime}-`));
       t.after(() => { cleanup(installDir); cleanup(surfaceDir); });
+      writePackageSourceMarkerFixture(surfaceDir);
 
       // --- Install path ---
       installRuntimeArtifacts(runtime, installDir, 'global', resolvedProfile);
@@ -531,6 +594,118 @@ describe('applySurface', () => {
       );
     });
   }
+
+  test('#4132: a later kind staging failure leaves exact all-old state and artifacts', (t) => {
+    const root = createTempDir('gsd-surface-stage-failure-');
+    t.after(() => cleanup(root));
+    const firstDest = path.join(root, 'first');
+    const secondDest = path.join(root, 'second');
+    fs.mkdirSync(firstDest, { recursive: true });
+    fs.mkdirSync(secondDest, { recursive: true });
+    fs.writeFileSync(path.join(firstDest, 'gsd-alpha.md'), 'old alpha\n');
+    fs.writeFileSync(path.join(secondDest, 'gsd-beta.md'), 'old beta\n');
+    const stagedFirst = path.join(root, 'staged-first');
+    fs.mkdirSync(stagedFirst);
+    fs.writeFileSync(path.join(stagedFirst, 'alpha.md'), 'new alpha\n');
+    const oldSurface = surfaceBytesForTest({ baseProfile: 'full', disabledClusters: [], explicitAdds: [], explicitRemoves: [] });
+    fs.writeFileSync(path.join(root, '.gsd-surface.json'), oldSurface);
+    const layout = {
+      runtime: 'claude', configDir: root, scope: 'local', kinds: [
+        { kind: 'commands', destSubpath: 'first', prefix: 'gsd-', stage: () => stagedFirst },
+        { kind: 'commands', destSubpath: 'second', prefix: 'gsd-', stage: () => { throw new Error('later stage failed'); } },
+      ],
+    };
+
+    assert.throws(() => applySurface(root, layout, new Map([['alpha', []], ['beta', []]])), /later stage failed/);
+    assert.equal(fs.readFileSync(path.join(firstDest, 'gsd-alpha.md'), 'utf8'), 'old alpha\n');
+    assert.equal(fs.readFileSync(path.join(secondDest, 'gsd-beta.md'), 'utf8'), 'old beta\n');
+    assert.equal(fs.readFileSync(path.join(root, '.gsd-surface.json'), 'utf8'), oldSurface);
+  });
+
+  test('#4132: a hash-mismatched installed corpus leaves exact all-old state and artifacts', (t) => {
+    const root = createTempDir('gsd-surface-corrupt-corpus-');
+    t.after(() => cleanup(root));
+    const installedCommands = path.join(root, 'gsd-core', 'commands', 'gsd');
+    const installedAgents = path.join(root, 'gsd-core', 'agents');
+    fs.mkdirSync(installedCommands, { recursive: true });
+    fs.mkdirSync(installedAgents, { recursive: true });
+    fs.writeFileSync(path.join(installedCommands, 'help.md'), '# corrupted command\n');
+    fs.writeFileSync(path.join(installedAgents, 'gsd-planner.md'), '# corrupted agent\n');
+    fs.writeFileSync(path.join(root, 'gsd-file-manifest.json'), JSON.stringify({ files: {
+      'gsd-core/commands/gsd/help.md': '0'.repeat(64),
+      'gsd-core/agents/gsd-planner.md': '0'.repeat(64),
+    } }));
+
+    const skillPath = path.join(root, 'skills', 'gsd-help', 'SKILL.md');
+    const agentPath = path.join(root, 'agents', 'gsd-planner.md');
+    fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+    fs.mkdirSync(path.dirname(agentPath), { recursive: true });
+    fs.writeFileSync(skillPath, 'old skill\n');
+    fs.writeFileSync(agentPath, 'old agent\n');
+    const oldState = { baseProfile: 'full', disabledClusters: [], explicitAdds: [], explicitRemoves: [] };
+    const candidate = { ...oldState, explicitRemoves: ['help'] };
+    const oldSurface = surfaceBytesForTest(oldState);
+    fs.writeFileSync(path.join(root, '.gsd-surface.json'), oldSurface);
+
+    const layout = resolveRuntimeArtifactLayout('claude', root, 'global');
+    assert.throws(
+      () => applySurface(root, layout, realManifest(), CLUSTERS, undefined, { surfaceState: candidate }),
+      /install or upgrade gsd-core/,
+    );
+    assert.equal(fs.readFileSync(skillPath, 'utf8'), 'old skill\n');
+    assert.equal(fs.readFileSync(agentPath, 'utf8'), 'old agent\n');
+    assert.equal(fs.readFileSync(path.join(root, '.gsd-surface.json'), 'utf8'), oldSurface);
+  });
+
+  test('#4132: candidate surface state is published after materialization', (t) => {
+    const root = createTempDir('gsd-surface-state-last-');
+    t.after(() => cleanup(root));
+    const dest = path.join(root, 'commands');
+    const staged = path.join(root, 'staged');
+    fs.mkdirSync(dest, { recursive: true });
+    fs.mkdirSync(staged);
+    fs.writeFileSync(path.join(dest, 'gsd-alpha.md'), 'old alpha\n');
+    fs.writeFileSync(path.join(staged, 'alpha.md'), 'new alpha\n');
+    const oldState = { baseProfile: 'full', disabledClusters: [], explicitAdds: [], explicitRemoves: [] };
+    const newState = { ...oldState, disabledClusters: ['ui'] };
+    writeSurface(root, oldState);
+    const layout = {
+      runtime: 'claude', configDir: root, scope: 'local', kinds: [
+        { kind: 'commands', destSubpath: 'commands', prefix: 'gsd-', stage: () => {
+          assert.deepEqual(readSurface(root), oldState, 'candidate must not be visible while staging');
+          return staged;
+        } },
+      ],
+    };
+
+    applySurface(root, layout, new Map([['alpha', []]]), undefined, undefined, { surfaceState: newState });
+
+    assert.equal(fs.readFileSync(path.join(dest, 'gsd-alpha.md'), 'utf8'), 'new alpha\n');
+    assert.deepEqual(readSurface(root), newState);
+  });
+
+  test('#4132: reset removes surface state after materialization', (t) => {
+    const root = createTempDir('gsd-surface-reset-state-last-');
+    t.after(() => cleanup(root));
+    const dest = path.join(root, 'commands');
+    const staged = path.join(root, 'staged');
+    fs.mkdirSync(dest, { recursive: true });
+    fs.mkdirSync(staged);
+    fs.writeFileSync(path.join(staged, 'alpha.md'), 'reset alpha\n');
+    writeActiveProfile(root, 'full');
+    writeSurface(root, { baseProfile: 'core', disabledClusters: ['ui'], explicitAdds: [], explicitRemoves: [] });
+    const layout = {
+      runtime: 'claude', configDir: root, scope: 'local', kinds: [
+        { kind: 'commands', destSubpath: 'commands', prefix: 'gsd-', stage: () => staged },
+      ],
+    };
+
+    applySurface(root, layout, new Map([['alpha', []]]), undefined, undefined, { surfaceState: null });
+
+    assert.equal(fs.existsSync(path.join(root, '.gsd-surface.json')), false);
+    assert.equal(fs.readFileSync(path.join(dest, 'gsd-alpha.md'), 'utf8'), 'reset alpha\n');
+  });
+
 });
 
 // ─── resolveSurface ──────────────────────────────────────────────────────────
@@ -1140,13 +1315,20 @@ describe('skills-kind destination parity: installer vs surface-apply (#2911)', (
   function withFakeHome(fakeHome, fn) {
     const savedHome = process.env.HOME;
     const savedUserProfile = process.env.USERPROFILE;
+    // #3712: record WHICH home this sandboxed to. src/real-home-guard.cts fails
+    // closed on hosts with no readable passwd entry, and this is what proves a
+    // genuinely-sandboxed caller there. Without it these calls would be refused.
+    const savedMarker = process.env.GSD_TEST_HOME_SANDBOX;
     process.env.HOME = fakeHome;
     process.env.USERPROFILE = fakeHome;
+    process.env.GSD_TEST_HOME_SANDBOX = fakeHome;
     try {
       return fn();
     } finally {
       if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
       if (savedUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedUserProfile;
+      if (savedMarker === undefined) delete process.env.GSD_TEST_HOME_SANDBOX;
+      else process.env.GSD_TEST_HOME_SANDBOX = savedMarker;
     }
   }
 
@@ -1173,13 +1355,14 @@ describe('skills-kind destination parity: installer vs surface-apply (#2911)', (
 
   test('registry home-override discrimination report (#2911)', () => {
     const overrides = runtimesWithHomeOverride();
-    // Stated per the brief: at time of writing only codex/global has a `home`
-    // override, so this parity test discriminates on exactly one runtime/scope
-    // pair. This assertion documents that fact and fails loudly if the set
-    // ever changes shape unexpectedly empty (a discrimination-less parity
-    // test would be silently vacuous).
+    // Stated per the brief: at time of writing only codex/global had a `home`
+    // override; #3738 added antigravity/global (skills AND agents →
+    // ~/.gemini/config, the dir AGY scans). This parity test discriminates on
+    // exactly these runtime/scope pairs. This assertion documents that fact and
+    // fails loudly if the set ever changes shape unexpectedly empty (a
+    // discrimination-less parity test would be silently vacuous).
     assert.ok(overrides.length > 0, 'expected at least one runtime/scope with a home override (codex/global)');
-    assert.deepStrictEqual(overrides, ['codex/global'], `home-override set changed — update this test's documentation. Found: ${overrides.join(', ')}`);
+    assert.deepStrictEqual(overrides, ['antigravity/global', 'codex/global'], `home-override set changed — update this test's documentation. Found: ${overrides.join(', ')}`);
   });
 
   for (const scope of ['global', 'local']) {
@@ -1193,6 +1376,7 @@ describe('skills-kind destination parity: installer vs surface-apply (#2911)', (
       for (const runtime of RUNTIME_IDS) {
         const configDir = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2911-parity-${runtime}-${scope}-`));
         t.after(() => cleanup(configDir));
+        writePackageSourceMarkerFixture(configDir);
 
         withFakeHome(fakeHome, () => {
           let layout;
@@ -1265,13 +1449,20 @@ describe('codex skills-kind destination: home override (#2911)', () => {
   function withFakeHome(fakeHome, fn) {
     const savedHome = process.env.HOME;
     const savedUserProfile = process.env.USERPROFILE;
+    // #3712: record WHICH home this sandboxed to. src/real-home-guard.cts fails
+    // closed on hosts with no readable passwd entry, and this is what proves a
+    // genuinely-sandboxed caller there. Without it these calls would be refused.
+    const savedMarker = process.env.GSD_TEST_HOME_SANDBOX;
     process.env.HOME = fakeHome;
     process.env.USERPROFILE = fakeHome;
+    process.env.GSD_TEST_HOME_SANDBOX = fakeHome;
     try {
       return fn();
     } finally {
       if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
       if (savedUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedUserProfile;
+      if (savedMarker === undefined) delete process.env.GSD_TEST_HOME_SANDBOX;
+      else process.env.GSD_TEST_HOME_SANDBOX = savedMarker;
     }
   }
 
@@ -1280,6 +1471,7 @@ describe('codex skills-kind destination: home override (#2911)', () => {
     t.after(() => cleanup(fakeHome));
     const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2911-codex-home-dir-'));
     t.after(() => cleanup(codexHome));
+    writePackageSourceMarkerFixture(codexHome);
 
     withFakeHome(fakeHome, () => {
       const manifest = loadSkillsManifest(REAL_COMMANDS_DIR);
@@ -1372,6 +1564,15 @@ describe('installOpencodeFamilySkills destination parity (#2911 sibling coverage
       const configDir = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2911-ocfs-${runtime}-`));
       const fakeHomeOverride = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2911-ocfs-home-${runtime}-`));
       t.after(() => { cleanup(configDir); cleanup(fakeHomeOverride); });
+      writePackageSourceMarkerFixture(configDir);
+      // #3712 — this row drives a skills-kind `home` override on purpose, which is
+      // exactly what the test-home guard exists to police, so it has to declare the
+      // sandbox rather than rely on the destination happening to sit outside the
+      // real home. On POSIX it does (os.tmpdir() is /tmp or /var/folders); on
+      // Windows os.tmpdir() is under %USERPROFILE%, so without this the guard
+      // correctly refuses and the row fails on Windows only. HOME is the override
+      // itself, which is the home this call actually writes under.
+      sandboxHome(t, fakeHomeOverride);
 
       const originalResolve = runtimeArtifactLayoutModule.resolveRuntimeArtifactLayout;
       // Capture the real destSubpath before patching so the assertion below
@@ -1414,4 +1615,205 @@ describe('installOpencodeFamilySkills destination parity (#2911 sibling coverage
       }
     });
   }
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/issue-69-surface-keeps-nested.test.cjs — consolidation epic #1969 (H3 #3336)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe('folded:issue-69-surface-keeps-nested', () => {
+
+// #69 regression, folded from issue-69-surface-keeps-nested.test.cjs:
+// stageSkillsForRuntimeAsSkills gated nesting on `resolvedProfile.skills === '*'`
+// (the sentinel). applySurface → resolveSurface materializes the full profile
+// into a concrete Set<string>, so the sentinel check was never true on the
+// surface path, causing applySurface to re-flatten a nested install. Fix
+// (install-profiles.cts): gate nesting on full OR full-equivalent (all
+// routerStems present in the concrete Set).
+//
+// #924: Claude was reverted to FLAT, so the claude case below asserts the
+// flat layout is preserved (not re-nested) rather than a nested one.
+describe('issue-69: applySurface preserves nested skill layout (no re-flatten)', () => {
+  test('cline global full: applySurface keeps 6 router dirs and nested gsd-ns-manage/skills/help/SKILL.md', (t) => {
+    const installed = runMinimalInstall({ runtime: 'cline', scope: 'global' });
+    const dir = installed.configDir;
+    t.after(() => { try { cleanup(installed.root); } catch { /* best-effort */ } });
+
+    // Step 1: full install
+    const manifest = loadSkillsManifest(REAL_COMMANDS_DIR);
+
+    const skillsDir = path.join(dir, 'skills');
+
+    // Sanity: install must produce nested layout (6 top-level router dirs)
+    const topLevelAfterInstall = fs.readdirSync(skillsDir).filter((n) => n.startsWith('gsd-'));
+    assert.strictEqual(
+      topLevelAfterInstall.length,
+      6,
+      `Install must produce exactly 6 gsd-* top-level dirs (routers). Got ${topLevelAfterInstall.length}: [${topLevelAfterInstall.join(', ')}]`,
+    );
+    assert.ok(
+      fs.existsSync(path.join(skillsDir, 'gsd-ns-workflow', 'skills', 'plan-phase', 'SKILL.md')),
+      'After install: gsd-ns-workflow/skills/plan-phase/SKILL.md must exist',
+    );
+
+    // Step 2: applySurface (full surface, no surface state file → resolves to full)
+    const layout = resolveRuntimeArtifactLayout('cline', dir, 'global');
+    applySurface(dir, layout, manifest);
+
+    // Step 3: assert nested layout is preserved after applySurface
+    const topLevelAfterSurface = fs.readdirSync(skillsDir).filter((n) => n.startsWith('gsd-'));
+    assert.strictEqual(
+      topLevelAfterSurface.length,
+      6,
+      `After applySurface: expected exactly 6 gsd-* top-level dirs (routers only). Got ${topLevelAfterSurface.length}: [${topLevelAfterSurface.join(', ')}]. ` +
+      'Re-flattening detected: applySurface must preserve nested layout (#69 regression).',
+    );
+
+    // The nested SKILL.md must still exist (not re-flattened to top-level concrete dir)
+    assert.ok(
+      fs.existsSync(path.join(skillsDir, 'gsd-ns-workflow', 'skills', 'plan-phase', 'SKILL.md')),
+      'After applySurface: gsd-ns-workflow/skills/plan-phase/SKILL.md must still exist (nested layout preserved)',
+    );
+
+    // The concrete skill must NOT have been promoted to a top-level flat dir
+    assert.ok(
+      !fs.existsSync(path.join(skillsDir, 'gsd-plan-phase', 'SKILL.md')),
+      'After applySurface: gsd-plan-phase/ must NOT exist at top level (#69 re-flatten regression guard)',
+    );
+  });
+
+  // #924 companion: Claude must use FLAT layout and applySurface must NOT re-nest it.
+  test('claude global full: install produces flat layout and applySurface preserves it (#924)', (t) => {
+    const installed = runMinimalInstall({ runtime: 'claude', scope: 'global' });
+    const dir = installed.configDir;
+    t.after(() => { try { cleanup(installed.root); } catch { /* best-effort */ } });
+
+    const manifest = loadSkillsManifest(REAL_COMMANDS_DIR);
+
+    const skillsDir = path.join(dir, 'skills');
+
+    // Install must produce FLAT layout (>= 60 gsd-* dirs)
+    const topLevelAfterInstall = fs.readdirSync(skillsDir).filter((n) => n.startsWith('gsd-'));
+    assert.ok(
+      topLevelAfterInstall.length >= 60,
+      `Claude install must produce >= 60 gsd-* top-level dirs (flat, #924). Got ${topLevelAfterInstall.length}.`,
+    );
+
+    // gsd-plan-phase must be directly at top level
+    assert.ok(
+      fs.existsSync(path.join(skillsDir, 'gsd-plan-phase', 'SKILL.md')),
+      'After claude install: gsd-plan-phase/SKILL.md must be at top level (flat layout, #924)',
+    );
+
+    // No nested skills/ subdirs under gsd-ns-* in Claude
+    assert.ok(
+      !fs.existsSync(path.join(skillsDir, 'gsd-ns-workflow', 'skills')),
+      'After claude install: gsd-ns-workflow/skills/ must NOT exist (flat layout, no nesting, #924)',
+    );
+
+    // applySurface must preserve flat layout
+    const layout = resolveRuntimeArtifactLayout('claude', dir, 'global');
+    applySurface(dir, layout, manifest);
+
+    const topLevelAfterSurface = fs.readdirSync(skillsDir).filter((n) => n.startsWith('gsd-'));
+    assert.ok(
+      topLevelAfterSurface.length >= 60,
+      `After applySurface: claude must still have >= 60 gsd-* dirs (flat preserved). Got ${topLevelAfterSurface.length}.`,
+    );
+
+    assert.ok(
+      fs.existsSync(path.join(skillsDir, 'gsd-plan-phase', 'SKILL.md')),
+      'After applySurface: gsd-plan-phase/SKILL.md must remain at top level (#924)',
+    );
+  });
+});
+  });
+}
+
+// ─── #4211: kimi-agents materialization ─────────────────────────────────────
+//
+// Kimi's managed tree is `agents/gsd.yaml` + `agents/gsd.md` +
+// `agents/subagents/gsd-*.{yaml,md}` (runtime-artifact-layout.cts
+// kimiAgentsKind), and install copies it recursively (_copyStaged in
+// src/install-engine.cts). Surface apply fell through to the flat
+// command/agent branch of _syncGsdDir, which reads only top-level `*.md`: it
+// ignored the YAML half and the subagents/ subtree, and rewrote `gsd.md` as
+// `gsdgsd.md` (the flat branch re-applies kind.prefix to a name that already
+// carries it) — corrupting Kimi's installed artifacts while still exiting 0.
+
+describe('#4211: applySurface materializes the kimi-agents kind like a fresh install', () => {
+  function kimiTree(dir, base = dir) {
+    if (!fs.existsSync(dir)) return [];
+    let out = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) out = out.concat(kimiTree(full, base));
+      else out.push(path.relative(base, full).split(path.sep).join('/'));
+    }
+    return out.sort();
+  }
+
+  function installKimi(t) {
+    const installed = runMinimalInstall({ runtime: 'kimi', scope: 'global' });
+    t.after(() => { try { cleanup(installed.root); } catch { /* best-effort */ } });
+    return { configDir: installed.configDir, agentsDir: path.join(installed.configDir, 'agents') };
+  }
+
+  test('the materialized tree is identical to the installed one — no gsdgsd.md, no dropped YAML', (t) => {
+    const { configDir, agentsDir } = installKimi(t);
+
+    const before = kimiTree(agentsDir);
+    assert.ok(before.includes('gsd.yaml'), 'precondition: install writes agents/gsd.yaml');
+    assert.ok(before.includes('gsd.md'), 'precondition: install writes agents/gsd.md');
+    assert.ok(before.some((f) => f.startsWith('subagents/gsd-') && f.endsWith('.yaml')),
+      'precondition: install writes agents/subagents/gsd-*.yaml');
+    const rootPromptBefore = fs.readFileSync(path.join(agentsDir, 'gsd.md'), 'utf8');
+
+    const layout = resolveRuntimeArtifactLayout('kimi', configDir, 'global');
+    applySurface(configDir, layout, realManifest(), CLUSTERS);
+
+    const after = kimiTree(agentsDir);
+    assert.deepEqual(after, before,
+      'surface apply must produce the same managed artifact tree as the install it re-stages');
+    assert.ok(!after.includes('gsdgsd.md'), 'the root prompt must not be re-prefixed into gsdgsd.md');
+    assert.equal(fs.readFileSync(path.join(agentsDir, 'gsd.md'), 'utf8'), rootPromptBefore,
+      'the root prompt content must survive re-materialization');
+  });
+
+  test('user-owned files under agents/ are preserved', (t) => {
+    const { configDir, agentsDir } = installKimi(t);
+
+    const userRoot = path.join(agentsDir, 'my-own-agent.yaml');
+    const userSub = path.join(agentsDir, 'subagents', 'my-own-subagent.yaml');
+    const userNote = path.join(agentsDir, 'subagents', 'notes.txt');
+    fs.writeFileSync(userRoot, 'name: mine\n');
+    fs.writeFileSync(userSub, 'name: mine-sub\n');
+    fs.writeFileSync(userNote, 'scratch\n');
+
+    const layout = resolveRuntimeArtifactLayout('kimi', configDir, 'global');
+    applySurface(configDir, layout, realManifest(), CLUSTERS);
+
+    for (const file of [userRoot, userSub, userNote]) {
+      assert.ok(fs.existsSync(file), `${path.basename(file)} is user-owned and must survive surface apply`);
+    }
+  });
+
+  test('a GSD subagent the surface no longer stages is pruned', (t) => {
+    const { configDir, agentsDir } = installKimi(t);
+
+    // Shaped exactly like a subagent an earlier version staged and this one
+    // does not — the case install's _removeGsdEntries prunes for this kind.
+    const retiredYaml = path.join(agentsDir, 'subagents', 'gsd-retired-agent.yaml');
+    const retiredPrompt = path.join(agentsDir, 'subagents', 'gsd-retired-agent.md');
+    fs.writeFileSync(retiredYaml, 'name: gsd-retired-agent\n');
+    fs.writeFileSync(retiredPrompt, '# retired\n');
+
+    const layout = resolveRuntimeArtifactLayout('kimi', configDir, 'global');
+    applySurface(configDir, layout, realManifest(), CLUSTERS);
+
+    assert.equal(fs.existsSync(retiredYaml), false, 'a stale GSD subagent must be pruned');
+    assert.equal(fs.existsSync(retiredPrompt), false, 'a stale GSD subagent prompt must be pruned');
+    assert.ok(fs.existsSync(path.join(agentsDir, 'gsd.yaml')), 'the live root agent must remain');
+  });
 });

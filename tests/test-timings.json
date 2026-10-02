@@ -4,9 +4,10 @@
   "unit": "ms",
   "sources": [
     "test-events-linux-node22.jsonl",
-    "test-events-linux-node24.jsonl"
+    "test-events-linux-node24.jsonl",
+    "manual: codex-config.test.cjs/codex-config-hooks.test.cjs re-measured locally (node --test --test-reporter=tap, max of 3 runs) after next split codex-config.test.cjs (#4139/#4540) — the old 127783ms entry predated the split and codex-config-hooks.test.cjs, which now holds the #3245/#4249 install()-pipeline blocks, had no entry at all (PR #4249)."
   ],
-  "file_count": 770,
+  "file_count": 771,
   "timings": {
     "active-workstream-store.test.cjs": 81,
     "active-workstream-store.unit.test.cjs": 364,
@@ -27,7 +28,7 @@
     "adr857-predicate-boundary.test.cjs": 113,
     "affected-tests-lib.test.cjs": 240,
     "agent-classification-parity.test.cjs": 49,
-    "agent-fragments-emission.install.test.cjs": 79456,
+    "agent-fragments-emission.install.test.cjs": 228000,
     "agent-frontmatter.test.cjs": 1076,
     "agent-install-check.test.cjs": 274,
     "agent-install-validation.test.cjs": 12405,
@@ -129,7 +130,8 @@
     "codebase-mapper-date-restamp.test.cjs": 138,
     "codebuddy-install.test.cjs": 3763,
     "codebuddy-upgrades.test.cjs": 2932,
-    "codex-config.test.cjs": 127783,
+    "codex-config-hooks.test.cjs": 3454,
+    "codex-config.test.cjs": 189,
     "codex-declarative-reference.test.cjs": 205,
     "command-arg-projection.test.cjs": 113,
     "command-contract.test.cjs": 1105,
@@ -282,7 +284,7 @@
     "fixture-builder.test.cjs": 324,
     "forensics.test.cjs": 164,
     "format-github-release-notes.test.cjs": 69,
-    "fragment-single-edit-propagation.install.test.cjs": 229914,
+    "fragment-single-edit-propagation.install.test.cjs": 575000,
     "frontmatter-cli.test.cjs": 25728,
     "frontmatter.property.test.cjs": 2551,
     "frontmatter.test.cjs": 10565,

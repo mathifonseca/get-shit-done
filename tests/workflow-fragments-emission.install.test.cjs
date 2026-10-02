@@ -62,6 +62,9 @@ const REPO_ROOT = path.join(__dirname, '..');
 const { INSTALL_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const PILOT_REL = path.join('gsd-core', 'workflows', 'execute-phase.md');
 const PILOT_PATH = path.join(REPO_ROOT, PILOT_REL);
+const PLAN_PHASE_REL = path.join('gsd-core', 'workflows', 'plan-phase.md');
+const CHUNKED_PLAN_REL = path.join('gsd-core', 'workflows', 'plan-phase', 'steps', 'chunked-planning-mode.md');
+const STALL_HELPERS_REL = path.join('gsd-core', 'workflows', 'plan-phase', 'steps', 'stall-detection-helpers.md');
 // plan-phase.md was the original #2930 pilot but was reverted to unmarked
 // (chore/2930 retarget: it sits 36 B under the ADR-857 Phase-6 PRE_PHASE6
 // gate and cannot absorb marker overhead) — it was a genuinely unmarked
@@ -80,6 +83,12 @@ const RUNTIMES = Object.keys(RUNTIME_META);
  *  assert success — callers decide (row 36 expects failure). */
 function spawnGlobalInstall(installScript, runtime, extraArgs = []) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2930-dest-${runtime}-`));
+  // #3547 — same real config-home shape as runMinimalInstall: the strict
+  // <root>/<globalSuffix> subdirectory, not the collapsed <root>. The size
+  // comparisons below normalize each side's own root out of the text; a
+  // collapsed stub against a real-shape install bakes in a `.claude`-style
+  // suffix delta that has nothing to do with the compose wiring under test.
+  const configDir = path.join(root, RUNTIME_META[runtime].globalSuffix);
   const args = [
     '--preserve-symlinks',
     '--preserve-symlinks-main',
@@ -87,7 +96,7 @@ function spawnGlobalInstall(installScript, runtime, extraArgs = []) {
     `--${runtime}`,
     '--global',
     '--config-dir',
-    root,
+    configDir,
     ...extraArgs,
   ];
   const seamResult = runNode(args, {
@@ -96,7 +105,7 @@ function spawnGlobalInstall(installScript, runtime, extraArgs = []) {
     timeoutMs: INSTALL_TIMEOUT_MS,
   });
   const result = { status: seamResult.exitCode, stdout: seamResult.stdout, stderr: seamResult.stderr };
-  return { result, configDir: root, root };
+  return { result, configDir, root };
 }
 
 /** Convert native path separators to POSIX forward slashes, unconditionally
@@ -278,6 +287,22 @@ test('noSectionMarkerLeaksIntoEmittedArtifacts', (t) => {
       false,
       `${runtime}: emitted execute-phase.md still contains a gsd:section marker token`,
     );
+
+    // #4570: assert against the real installed workflow bytes for every runtime,
+    // after composition and runtime conversion. The background parameter itself
+    // is runtime vocabulary (`run_in_background` becomes `background` on Hermes),
+    // so parity is pinned on the shared gate and its two semantic branches.
+    for (const relativePath of [PLAN_PHASE_REL, CHUNKED_PLAN_REL, STALL_HELPERS_REL]) {
+      const installedPath = path.join(configDir, relativePath);
+      assert.ok(fs.existsSync(installedPath), `${runtime}: emitted ${relativePath} is missing`);
+      const installed = fs.readFileSync(installedPath, 'utf8');
+      assert.match(installed, /PLANNER_STALL_DETECTION_ENABLED/,
+        `${runtime}: ${relativePath} lost the planner stall-detection gate during conversion`);
+      assert.match(installed, /gsd_stall_watch/,
+        `${runtime}: ${relativePath} lost the default-on watcher branch during conversion`);
+      assert.match(installed, /runtime-native/,
+        `${runtime}: ${relativePath} lost the explicit-off ordinary completion branch during conversion`);
+    }
     cleanup(root);
   }
 });
@@ -414,6 +439,9 @@ test('leavesUnmarkedWorkflowEmissionByteIdentical', () => {
     'new-project.md',
     'plan-phase.md',
     'progress.md',
+    // #3676 (epic #3344, ADR-1239 "Quick-batch binding"): research-phase and
+    // verification-wave sections are gated on flag:--research/flag:--validate.
+    'quick-batch.md',
     'quick.md',
     'review.md',
     'transition.md',

@@ -79,7 +79,17 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('node:os');
 const path = require('path');
-const { lfByteCount: byteCount, listWorkflowStems, measureWorkflows } = require('../scripts/workflow-size.cjs');
+const fc = require('fast-check');
+const {
+  lfByteCount: byteCount,
+  listWorkflowStems,
+  measureWorkflows,
+  MARGIN_RATIO,
+  marginFor,
+  buildHeadroomRows,
+  formatHeadroomTable,
+  appendHeadroomStepSummary,
+} = require('../scripts/workflow-size.cjs');
 const { cleanup } = require('./helpers.cjs');
 
 const WORKFLOWS_DIR = path.join(__dirname, '..', 'gsd-core', 'workflows');
@@ -89,11 +99,24 @@ const WORKFLOWS_DIR = path.join(__dirname, '..', 'gsd-core', 'workflows');
 // only as the outer bound where the correct response is lazy extraction, never
 // a raise. Each sits above its tier's current high-water mark with real
 // headroom (vs the old GRACE=3000 hug):
-//   XL      96 KiB — high-water execute-phase.md 94,250 → ~4.0 KB headroom
-//   LARGE   60 KiB — high-water discuss-phase.md 60,024 → ~1.4 KB headroom
-//   DEFAULT 40 KiB — high-water verify-phase.md 40,931 → ~0 KB headroom
+//   XL      96 KiB
+//   LARGE   60 KiB
+//   DEFAULT 40 KiB
+//
+// #4261: the per-tier high-water marks that used to be written out here are
+// gone rather than refreshed. They were measured once and then quietly
+// diverged from the tree — the XL line named execute-phase.md as the
+// high-water when plan-phase.md had passed it — so the comment meant to
+// document the remaining headroom became a reason to believe there was more
+// of it than there was. The headroom census below emits the live numbers on
+// every run instead of asking a comment to stay true.
 // (DEFAULT is deliberately the tightest: a single-purpose workflow approaching
-// 40 KiB is the strongest extraction signal of the three.)
+// 40 KiB is the strongest extraction signal of the three. The previous DEFAULT
+// high-water, verify-phase.md at 40,931 (29 bytes of headroom), was deleted as
+// an orphan in #1892 — 0 loaders, with its still-live gates migrated to
+// gsd-core/references/verifier-phase-gates.md behind the gsd-verifier agent.
+// Measured 2026-08-13 via measureWorkflows() after that deletion; the note
+// before that named settings-advanced.md at 39,160, stale on both counts.)
 //
 // **Fork note.** These were briefly raised (XL 108 KiB / LARGE 64 KiB) at the
 // v1.10.0 sync to bound fork blocks that were still inlined in the host loops.
@@ -155,6 +178,87 @@ function capFor(workflow) {
 // baseline generator so the guard and the snapshot can never measure
 // differently. See the #683 regression test at the bottom of this file.
 
+// ─── #4261: headroom visibility + reserved margin ──────────────────────────
+//
+// See the twin block in tests/agent-size-budget.test.cjs for the rationale.
+// The short version: a green run used to say nothing, so the difference
+// between a file at 60% of its cap and one at 99.9% was invisible until the
+// day someone crossed the line — and because each PR's CI measures only its
+// own base plus its own diff, two individually-green PRs can be jointly over
+// with no run either of them produces able to show it.
+const WORKFLOW_HEADROOM_ROWS = buildHeadroomRows(SIZES, capFor);
+
+describe('SIZE: workflow headroom census (issue #4261)', () => {
+  test('reports every workflow\'s remaining bytes, and never fails for it', (t) => {
+    for (const line of formatHeadroomTable(WORKFLOW_HEADROOM_ROWS)) t.diagnostic(line);
+    const pressured = WORKFLOW_HEADROOM_ROWS.filter((r) => r.overMargin);
+    t.diagnostic(
+      `workflows: ${WORKFLOW_HEADROOM_ROWS.length} | over the ${Math.round(MARGIN_RATIO * 100)}% margin: ${pressured.length}`,
+    );
+    appendHeadroomStepSummary('Workflow size headroom', WORKFLOW_HEADROOM_ROWS);
+
+    // Reporting, not a gate — assert only that the corpus was measured, so an
+    // empty census cannot read as good news.
+    assert.equal(WORKFLOW_HEADROOM_ROWS.length, ALL_WORKFLOWS.length);
+  });
+
+  test('names the workflows inside the reserved margin', (t) => {
+    for (const r of WORKFLOW_HEADROOM_ROWS.filter((row) => row.overMargin)) {
+      t.diagnostic(
+        `RESERVED MARGIN: ${r.name}.md is ${r.bytes} bytes — ${r.headroom} under the ${r.tier} cap ` +
+        `(${r.usedPct.toFixed(1)}%), past the ${r.margin}-byte margin. The cap is not moving: ` +
+        `extract per-mode bodies to workflows/${r.name}/modes/, templates to ` +
+        `workflows/${r.name}/templates/, or shared references to gsd-core/references/ — lazily.`,
+      );
+    }
+    // No assertion on the count, deliberately: pinning it would recreate the
+    // per-file size baseline #2724 deleted for conflicting on 7 of 7 PRs.
+  });
+
+  test('the reserved margin sits strictly below every tier cap', () => {
+    // Negative proof for the margin arithmetic, mirroring the hard-cap
+    // boundary fixtures: a ratio or operator edit that widened the margin to
+    // the cap would silently disable the warning, and no real-corpus test
+    // would notice.
+    for (const cap of [DEFAULT_CAP, LARGE_CAP, XL_CAP]) {
+      const margin = marginFor(cap);
+      assert.ok(margin < cap, `margin ${margin} must sit below cap ${cap}`);
+      const rows = buildHeadroomRows({
+        'below.md': margin - 1,
+        'exact.md': margin,
+        'above.md': margin + 1,
+      }, () => ({ tier: 'FIXTURE', cap }));
+      const byName = new Map(rows.map((row) => [row.name, row]));
+      assert.equal(byName.get('below').overMargin, false, 'margin - 1 is NOT over it');
+      assert.equal(byName.get('exact').overMargin, false, 'exactly at the margin is NOT over it');
+      assert.equal(byName.get('above').overMargin, true, 'margin + 1 IS over it');
+    }
+  });
+
+  test('reserved-margin classification holds for every positive cap', () => {
+    fc.assert(fc.property(
+      fc.integer({ min: 2, max: 10_000_000 }),
+      (cap) => {
+        const margin = marginFor(cap);
+        const rows = buildHeadroomRows({
+          'below.md': margin - 1,
+          'exact.md': margin,
+          'above.md': margin + 1,
+        }, () => ({ tier: 'FIXTURE', cap }));
+        const byName = new Map(rows.map((row) => [row.name, row]));
+
+        assert.ok(margin >= 0 && margin < cap);
+        assert.equal(byName.get('below').overMargin, false);
+        assert.equal(byName.get('exact').overMargin, false);
+        assert.equal(byName.get('above').overMargin, true);
+        assert.equal(byName.get('below').headroom, cap - (margin - 1));
+        assert.equal(byName.get('exact').headroom, cap - margin);
+        assert.equal(byName.get('above').headroom, cap - (margin + 1));
+      },
+    ));
+  });
+});
+
 describe('SIZE: workflow tier hard caps (issue #1074)', () => {
   // Absolute outer bound per tier. Unlike the old tighten-only ceiling, a cap
   // is NOT raised when a file approaches it — crossing it means extract, not
@@ -190,6 +294,71 @@ describe('SIZE: workflow tier hard caps (issue #1074)', () => {
   // already exists. Narrower than the original — the pure differential module cannot
   // see XL_WORKFLOWS/LARGE_WORKFLOWS tiering, so a legitimately large new file must
   // extract rather than tier in — a disclosed, deliberate simplification.
+});
+
+describe('SIZE: detail/ subtree is excluded from tier classification (#4403, ADR-4139 §6)', () => {
+  // ADR-4139 §6 (the `NEW_FILE_CAP` row): a spine's `<workflow>/detail/<part>.md`
+  // files are governed SOLELY by the hard, non-waivable NEW_FILE_CAP (32768 bytes,
+  // exported from tests/helpers/emitted-diff.cjs) -- NEVER by the XL/LARGE/DEFAULT
+  // tier caps above, because NEW_FILE_CAP carries no per-tier escape hatch the way
+  // the old pre-#2724 per-file baseline did.
+  //
+  // This already holds TRUE BY CONSTRUCTION: measureWorkflows() / listWorkflowStems()
+  // (scripts/workflow-size.cjs) do a plain, non-recursive fs.readdirSync() over the
+  // top-level workflows directory, so a `detail/` subdirectory (like the
+  // modes/steps/templates subdirectories before it) is never walked and never
+  // contributes a key to SIZES or a stem to ALL_WORKFLOWS -- it is never a candidate
+  // for capFor()/XL_CAP/LARGE_CAP/DEFAULT_CAP at all. These tests make that explicit
+  // rather than true-by-omission, and lock it as a regression guard: a future switch
+  // to a recursive scan must not start tier-classifying detail files.
+  test('measureWorkflows()/listWorkflowStems() do not recurse into any <workflow>/detail/ subdirectory', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-size-detail-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'sample.md'), 'top-level spine\n');
+      const detailDir = path.join(dir, 'sample', 'detail');
+      fs.mkdirSync(detailDir, { recursive: true });
+      fs.writeFileSync(path.join(detailDir, 'part.md'), 'detail part\n');
+
+      const sizes = measureWorkflows(dir);
+      assert.deepEqual(
+        Object.keys(sizes), ['sample.md'],
+        'measureWorkflows() must only key the top-level spine, never a nested detail/ file'
+      );
+
+      const stems = listWorkflowStems(dir);
+      assert.deepEqual(
+        stems, ['sample'],
+        'listWorkflowStems() must not surface a stem for anything under detail/'
+      );
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('a near-NEW_FILE_CAP-sized detail/ file is excluded from SIZES and never tier-classified', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-size-detail-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'sample.md'), 'top-level spine\n');
+      const detailDir = path.join(dir, 'sample', 'detail');
+      fs.mkdirSync(detailDir, { recursive: true });
+      // Sized just under the NEW_FILE_CAP anchor (32768 bytes,
+      // tests/helpers/emitted-diff.cjs) -- the cap this file is ACTUALLY governed
+      // by -- and comfortably below every tier cap in this file (DEFAULT_CAP alone
+      // is 40960), so a regression that started tier-classifying it would still
+      // pass on size and only be caught by the key-shape assertion below.
+      const largeBody = 'x'.repeat(32760);
+      fs.writeFileSync(path.join(detailDir, 'large-part.md'), largeBody);
+
+      const sizes = measureWorkflows(dir);
+      assert.deepEqual(
+        Object.keys(sizes), ['sample.md'],
+        'a large detail/ file must not appear in SIZES -- it is governed solely by ' +
+        'NEW_FILE_CAP (tests/helpers/emitted-diff.cjs), never by XL/LARGE/DEFAULT tiering'
+      );
+    } finally {
+      cleanup(dir);
+    }
+  });
 });
 
 // A prior "SIZE: per-file workflow baseline (issue #1074)" describe block lived here,
@@ -291,6 +460,7 @@ describe('SIZE: discuss-phase progressive disclosure (#717 byte budget)', () => 
     const parent = fs.readFileSync(path.join(WORKFLOWS_DIR, 'discuss-phase.md'), 'utf-8');
     // The template reference must appear inside or near the write_context step,
     // not in the top-level <required_reading> block (which would defeat lazy load).
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own workflow .md content, fixed-size author-controlled content
     const requiredReadingMatch = parent.match(/<required_reading>([\s\S]*?)<\/required_reading>/);
     if (requiredReadingMatch) {
       assert.ok(
@@ -480,6 +650,7 @@ describe('workflow progressive disclosure — MVP bodies lazy-loaded (#720)', ()
 
   test('plan-phase.md does not list MVP bodies in <required_reading>', () => {
     const planPhaseContent = fs.readFileSync(path.join(WORKFLOWS_DIR, 'plan-phase.md'), 'utf-8');
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own workflow .md content, fixed-size author-controlled content
     const requiredReadingMatch = planPhaseContent.match(/<required_reading>([\s\S]*?)<\/required_reading>/);
     if (requiredReadingMatch) {
       const block = requiredReadingMatch[1];
@@ -606,6 +777,193 @@ describe('SIZE: byteCount is line-ending independent (#683 regression)', () => {
       assert.strictEqual(byteCount(lfPath), Buffer.byteLength(body, 'utf-8'));
     } finally {
       cleanup(dir);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3324 — @-include lines inside Agent() prompt strings never expand
+// ---------------------------------------------------------------------------
+// Claude Code expands @path only in natively-loaded markdown bodies (CLAUDE.md,
+// slash-command/skill bodies, agent definitions) — never inside the prompt
+// parameter of a dynamically constructed Agent() call, which is delivered as
+// literal turn text. A bare @-include line in a prompt string means the
+// subagent never sees the referenced file (#3324).
+describe('#3324: no @-include lines inside Agent() prompt strings', () => {
+  const BARE_INCLUDE_LINE = /^\s*@(\$HOME|~)\//;
+
+  function listWorkflowFilesRecursive(dir, out = []) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) listWorkflowFilesRecursive(p, out);
+      else if (entry.name.endsWith('.md')) out.push(p);
+    }
+    return out;
+  }
+
+  // A prompt region opens at a line ending in `prompt="` and closes at the
+  // first subsequent line that is only whitespace + a double quote.
+  function bareIncludeLinesInPromptRegions(content) {
+    const hits = [];
+    let inPrompt = false;
+    content.split('\n').forEach((line, i) => {
+      if (!inPrompt && /prompt="\s*$/.test(line)) { inPrompt = true; return; }
+      if (inPrompt && /^\s*"\s*$/.test(line)) { inPrompt = false; return; }
+      if (inPrompt && BARE_INCLUDE_LINE.test(line)) {
+        hits.push({ line: i + 1, text: line.trim() });
+      }
+    });
+    return hits;
+  }
+
+  test('no workflow prompt string contains a bare @-include line (repo-wide guard)', () => {
+    const offenders = [];
+    for (const file of listWorkflowFilesRecursive(WORKFLOWS_DIR)) {
+      const rel = path.relative(path.join(__dirname, '..'), file);
+      for (const hit of bareIncludeLinesInPromptRegions(fs.readFileSync(file, 'utf-8'))) {
+        offenders.push(`${rel}:${hit.line} ${hit.text}`);
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'Claude Code never expands @path inside a dynamically built Agent() ' +
+      'prompt="..." string — the include arrives as literal text and the ' +
+      'subagent never sees the referenced file. Use the ORCHESTRATOR ' +
+      'build-time embed pattern (see execute-phase.md <worktree_branch_check> ' +
+      'and <execution_context>) or inline the content. See #3324.'
+    );
+  });
+
+  test('execute-phase.md <execution_context> build-time embeds execute-plan.md instead of @-including it', () => {
+    const content = fs.readFileSync(path.join(WORKFLOWS_DIR, 'execute-phase.md'), 'utf-8');
+    const block = content.match(/<execution_context>([\s\S]{0,4000}?)<\/execution_context>/);
+    assert.ok(
+      block,
+      'execute-phase.md must keep an <execution_context> block in the executor dispatch prompt'
+    );
+    assert.ok(
+      /ORCHESTRATOR build-time embed/.test(block[1]),
+      '<execution_context> must carry the ORCHESTRATOR build-time embed instruction (#3324)'
+    );
+    assert.ok(
+      /`~\/\.claude\/gsd-core\/workflows\/execute-plan\.md`/.test(block[1]),
+      '<execution_context> must list execute-plan.md (backticked, no @ sigil) for build-time embed (#3324)'
+    );
+  });
+
+  // #3370 — the executor dispatch prompts must carry checkpoint gate semantics so the
+  // orchestrator cannot compose anti-auto-approval prompt text that conflates
+  // gate="blocking" (the default, auto-approvable) with gate="blocking-human"
+  // (always surfaces). The dispatch prompt text IS the product here — the templates
+  // below are what gets composed into the Agent() call — so region asserts on the
+  // template text are the behavioral seam, same precedent as the #3324 guards above.
+  const ANTI_AUTO_APPROVAL = /never auto-approve|do not auto-approve|must not auto-approve|under any circumstance, including/;
+
+  function dispatchRegion(file, fromAnchor, toAnchor) {
+    const content = fs.readFileSync(path.join(WORKFLOWS_DIR, file), 'utf-8');
+    const from = content.indexOf(fromAnchor);
+    assert.ok(from !== -1, `${file}: anchor "${fromAnchor}" not found`);
+    const to = content.indexOf(toAnchor, from);
+    assert.ok(to !== -1, `${file}: anchor "${toAnchor}" not found after "${fromAnchor}"`);
+    return content.slice(from, to);
+  }
+
+  test('execute-phase step-3 routes checkpoint gate semantics through the per-plan routing fragment (#3370)', () => {
+    // The host file sits under the frozen ADR-857 Phase 6 ceiling (≤93400 bytes), so the
+    // gate rule lives in the per-plan-executor-routing fragment — the same
+    // keep-the-host-lean pattern #1689/#3417 used — which step 3 loads for EVERY plan
+    // in every isolation mode (harness-worktree, orchestrator-worktree, sequential)
+    // immediately before the dispatch prompt is composed.
+    const step = dispatchRegion(
+      'execute-phase.md',
+      '**Spawn executor agents:**',
+      '**Wait for all agents in wave to complete.**',
+    );
+    assert.match(
+      step,
+      /Executor routing \([^)]*#3370/,
+      'step 3\'s executor-routing line must cite #3370 so the gate rule is loaded with it',
+    );
+
+    const fragment = fs.readFileSync(
+      path.join(WORKFLOWS_DIR, 'execute-phase', 'steps', 'per-plan-executor-routing.md'),
+      'utf-8',
+    );
+    // AC 1 + AC 3, phase-level: blocking is the auto-approvable default, blocking-human
+    // is the only always-surface gate, and the orchestrator is forbidden from injecting
+    // dispatch text that refuses auto-approval.
+    assert.match(fragment, /#3370/, 'the routing fragment must carry the gate rule');
+    assert.match(fragment, /gate="blocking"/, 'the gate rule must name gate="blocking"');
+    assert.match(fragment, /auto-approv/i, 'the gate rule must state blocking is auto-approvable in auto-mode');
+    assert.match(fragment, /blocking-human/, 'the gate rule must name gate="blocking-human" as the always-surface carve-out');
+    assert.match(
+      fragment,
+      /do NOT add text refusing or overriding\s+auto-approval/,
+      'the gate rule must forbid composing dispatch text that refuses or overrides auto-approval',
+    );
+    // Negative guard: the fix must not itself introduce the anti-auto-approval phrasing.
+    assert.doesNotMatch(
+      fragment,
+      ANTI_AUTO_APPROVAL,
+      'the gate rule must not contain anti-auto-approval instructions (#3370)',
+    );
+  });
+
+  test('execute-phase.md executor Agent() prompt contains no anti-auto-approval instruction in any block (#3370)', () => {
+    const step = dispatchRegion(
+      'execute-phase.md',
+      '**Spawn executor agents:**',
+      '**Wait for all agents in wave to complete.**',
+    );
+    // The gate rule lives in the step-3 instructions (previous test), which every
+    // isolation mode executes; the prompt template itself never carried gate text and
+    // must stay free of anti-auto-approval phrasing — the executor's semantics come
+    // from its own <checkpoint_protocol> plus the build-time-embedded checkpoints.md
+    // (#3324), which this guards against the template contradicting.
+    assert.doesNotMatch(
+      step,
+      ANTI_AUTO_APPROVAL,
+      'the step-3 dispatch region (instructions + Agent() prompt template) must not '
+      + 'contain anti-auto-approval instructions (#3370)',
+    );
+  });
+
+  test('execute-plan.md Pattern A dispatch carries the same gate semantics (#3370)', () => {
+    const patternA = dispatchRegion(
+      'execute-plan.md',
+      '**Pattern A:** init_agent_tracking',
+      '**Pattern B:** Execute segment-by-segment',
+    );
+    // AC 4: the single-plan-level dispatch path is covered, not just execute-phase.
+    assert.match(patternA, /#3370/, 'Pattern A must cite the gate-semantics rule');
+    assert.match(patternA, /gate="blocking"/, 'Pattern A must name gate="blocking"');
+    assert.match(patternA, /blocking-human/, 'Pattern A must name gate="blocking-human"');
+    assert.match(patternA, /auto-approv/i, 'Pattern A must state blocking is auto-approvable in auto-mode');
+    assert.match(
+      patternA,
+      /no instruction (?:that )?overrid/i,
+      'Pattern A must forbid adding instructions that override the executor checkpoint protocol',
+    );
+    assert.doesNotMatch(
+      patternA,
+      ANTI_AUTO_APPROVAL,
+      'Pattern A must not contain anti-auto-approval instructions (#3370)',
+    );
+  });
+
+  test('execute-plan.md still defines the steps only it carries into the dispatch', () => {
+    const content = fs.readFileSync(path.join(WORKFLOWS_DIR, 'execute-plan.md'), 'utf-8');
+    for (const marker of [
+      'segment_execution',
+      'previous_phase_check',
+      'verification_failure_gate',
+      'update_codebase_map',
+    ]) {
+      assert.ok(
+        content.includes(marker),
+        `execute-plan.md must still define ${marker} — it reaches executors only via the build-time embed (#3324)`
+      );
     }
   });
 });

@@ -8,31 +8,191 @@ const os = require('os');
 const path = require('path');
 const { createFixture } = require('./fixtures/index.cjs');
 const processSeam = require('./helpers/process-seam.cjs');
+const { SEAM_DEFAULT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const TOOLS_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
-const TEST_ENV_BASE = {
-  GSD_SESSION_KEY: '',
-  CODEX_THREAD_ID: '',
-  CLAUDE_SESSION_ID: '',
-  CLAUDE_CODE_SSE_PORT: '',
-  OPENCODE_SESSION_ID: '',
-  GEMINI_SESSION_ID: '',
-  CURSOR_SESSION_ID: '',
-  WINDSURF_SESSION_ID: '',
-  TERM_SESSION_ID: '',
-  WT_SESSION: '',
-  TMUX_PANE: '',
-  ZELLIJ_SESSION_NAME: '',
-  TTY: '',
-  SSH_TTY: '',
-  // #2665: blank config-LOCATION vars so npm test never writes into the developer's
-  // live config directory. The resolver consults these before HOME, so an ambient
-  // value wins unconditionally over a sandboxed HOME. Per-site overrides still win
-  // because env is spread last in the child-env merge.
-  CLAUDE_CONFIG_DIR: '',
-  GSD_RUNTIME: '',
-  CODEX_HOME: '',
-};
+
+// Session-IDENTITY vars. Blanked so a child cannot inherit the developer's
+// terminal/agent session and key shared state off it.
+const SESSION_IDENTITY_ENV_KEYS = [
+  'GSD_SESSION_KEY',
+  'CODEX_THREAD_ID',
+  'CLAUDE_SESSION_ID',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_SSE_PORT',
+  'OPENCODE_SESSION_ID',
+  'GEMINI_SESSION_ID',
+  'CURSOR_SESSION_ID',
+  'WINDSURF_SESSION_ID',
+  'TERM_SESSION_ID',
+  'WT_SESSION',
+  'TMUX_PANE',
+  'ZELLIJ_SESSION_NAME',
+  'TTY',
+  'SSH_TTY',
+];
+
+// LAZY, and memoized. These live in the BUILT runtime lib, so requiring them at
+// module scope made an unbuilt tree throw during `require('./helpers.cjs')` —
+// before a single test() had registered — which turns one missing
+// `npm run build:lib` into a whole-suite crash with no actionable message, in the
+// file ~370 test files import. `npm test` builds via its pretest hook, so the
+// shape that hits this is a direct `node --test` invocation.
+//
+// Deferring the require means only the tests that actually need the derived scrub
+// set pay for the build, and they fail with a message that names the remedy.
+let _builtLib = null;
+function builtLib() {
+  if (_builtLib) return _builtLib;
+  try {
+    const { runtimes } = require('../gsd-core/bin/lib/capability-registry.cjs');
+    const {
+      NON_REGISTRY_CONFIG_HOME_DESCRIPTORS,
+      GSD_LOCATION_ENV_KEYS,
+    } = require('../gsd-core/bin/lib/runtime-homes.cjs');
+    _builtLib = { runtimes, NON_REGISTRY_CONFIG_HOME_DESCRIPTORS, GSD_LOCATION_ENV_KEYS };
+  } catch (cause) {
+    throw new Error(
+      'tests/helpers.cjs derives the config-location scrub set from the built runtime '
+        + 'lib (gsd-core/bin/lib), which is not present. Run `npm run build:lib` first — '
+        + '`npm test` does this for you via its pretest script.',
+      { cause },
+    );
+  }
+  return _builtLib;
+}
+
+// Config-location vars that are neither in the registry nor descriptor-shaped,
+// each with its reader:
+//   GROK_AGENTS_HOME — hardcoded `grok` branch in getGlobalConfigDir (src/runtime-homes.cts)
+//   GSD_RUNTIME      — selects WHICH runtime home resolves (src/model-resolver.cts)
+//   GSD_PROJECT      — planningDir() project segment (src/planning-workspace.cts)
+//   GSD_WORKSTREAM   — planningDir() workstream segment (src/planning-workspace.cts)
+//
+// #2665 round 3: this list shrinks as sources become enumerable, and that direction
+// is the point. KIMI_SHARE_DIR was NOT added here — it now derives from
+// NON_REGISTRY_CONFIG_HOME_DESCRIPTORS, because hand-adding each var a reviewer
+// names is precisely what reopened this bug three times.
+const NON_REGISTRY_CONFIG_LOCATION_ENV_KEYS = [
+  'GROK_AGENTS_HOME',
+  'GSD_RUNTIME',
+  'GSD_PROJECT',
+  'GSD_WORKSTREAM',
+  // #3245: host-session signals GSD now reads (host-runtime-detection.cts's
+  // detectHostRuntime / resolveReportedRuntime). Scrubbed for the same reason
+  // GSD_RUNTIME is — an ambiently-set CODEX_SANDBOX / (this repo's test suite
+  // running from inside a Codex session, or any host that happens to export
+  // these) would non-deterministically flip the detected runtime for every
+  // test that does not explicitly pass them. Tests that WANT them set still
+  // can, via the per-call env override, which is applied after this base and
+  // so continues to win.
+  'CODEX_SANDBOX',
+  'CODEX_SANDBOX_NETWORK_DISABLED',
+];
+
+// Write-escape PERMISSIONS — deliberately its own family, and deliberately NOT
+// folded into any of the four rungs below.
+//
+// #2665 round 5: GSD_ALLOW_SYMLINKED_DEST is boolean and names no path, so it is
+// not a config-location var by any honest reading. But install-engine.cts reads it
+// env-first (`:214`) and threads it as `allowOptInFollow` into the symlink-escape
+// guard at four call sites, each gating a write (`:361/:367`, `:416/:424`,
+// `:785/:790`, `:927/:932`). That guard is what stops a write leaving the install
+// root, so an ambient `=1` disarms it for the whole suite — the #2665 hazard
+// exactly, arriving through a permission rather than a path.
+//
+// Blanking is fail-safe in the only direction that matters: '' is neither '1' nor
+// 'true', so a blanked value makes the guard STRICTER, never looser. That asymmetry
+// is why this can be scrubbed wholesale without reasoning about each call site.
+const WRITE_ESCAPE_PERMISSION_ENV_KEYS = ['GSD_ALLOW_SYMLINKED_DEST'];
+
+// Config-LOCATION vars — distinct in kind from the session-identity vars above:
+// these decide WHERE a child writes, so leaving one ambient lets a test that
+// sandboxes HOME still escape into the developer's real config dir.
+//
+// #2665: this list is DERIVED, not hand-maintained. A hand-written list is
+// exactly what reopened this bug twice — it can only ever be as complete as the
+// author's recall, and every resolver in `runtime-homes.cts` is env-FIRST, so a
+// key missing here is a live escape hatch rather than a cosmetic gap. Sourcing
+// it from the same registry the resolver reads makes the scrub list structurally
+// incapable of being narrower than the surface it guards: adding a capability
+// that declares a new configHome env var extends this set in the same commit.
+let _configLocationEnvKeys = null;
+function configLocationEnvKeys() {
+  if (_configLocationEnvKeys) return _configLocationEnvKeys;
+  const { runtimes, NON_REGISTRY_CONFIG_HOME_DESCRIPTORS, GSD_LOCATION_ENV_KEYS } = builtLib();
+  _configLocationEnvKeys = [
+  ...new Set([
+    // 1. Every runtime descriptor the capability registry carries — including
+    //    the nested skillsHome descriptor, which resolves independently of
+    //    configHome (resolveSkillsBaseFromDescriptor) and can carry its own
+    //    env array. Inert today (only kilo declares skillsHome, with env: []),
+    //    but walking configHome.env alone is the identical gap-shape this PR
+    //    closed twice already, one field over. (#2665 round 4)
+    ...Object.values(runtimes).flatMap((r) => r?.runtime?.configHome?.env ?? []),
+    ...Object.values(runtimes).flatMap(
+      (r) => r?.runtime?.configHome?.skillsHome?.env ?? [],
+    ),
+    // 2. Descriptor-shaped config homes resolved OUTSIDE the registry (kimi's
+    //    native config.toml home via KIMI_SHARE_DIR). Derived, not hand-listed.
+    //    Same skillsHome walk as rung 1 — a descriptor is a descriptor.
+    ...NON_REGISTRY_CONFIG_HOME_DESCRIPTORS.flatMap((d) => [
+      ...(d?.env ?? []),
+      ...(d?.skillsHome?.env ?? []),
+    ]),
+    // 3. GSD's OWN location vars — a different family: they decide where GSD keeps
+    //    user-owned state ($GSD_HOME/.gsd/), not where a runtime keeps its config.
+    ...GSD_LOCATION_ENV_KEYS,
+    // 4. The residue that is neither registry-carried nor descriptor-shaped.
+    ...NON_REGISTRY_CONFIG_LOCATION_ENV_KEYS,
+    // 5. Write-escape permissions — NOT locations. Same mechanism because the
+    //    hazard is identical (ambient env lets a suite write outside the sandbox);
+    //    named separately above so the list does not misdescribe what they are.
+    ...WRITE_ESCAPE_PERMISSION_ENV_KEYS,
+  ]),
+  ].sort();
+  return _configLocationEnvKeys;
+}
+
+let _testEnvBase = null;
+function testEnvBase() {
+  if (_testEnvBase) return _testEnvBase;
+  _testEnvBase = Object.fromEntries(
+    [...SESSION_IDENTITY_ENV_KEYS, ...configLocationEnvKeys()].map((k) => [k, '']),
+  );
+  return _testEnvBase;
+}
+
+/**
+ * Save + clear every config-LOCATION env var on THIS process; returns a restorer.
+ *
+ * #2665: TEST_ENV_BASE only reaches CHILD processes. A test that calls the real
+ * installer IN-PROCESS — `install(true, 'claude')` — resolves through the same
+ * env-first `getGlobalConfigDir`, so an ambient CLAUDE_CONFIG_DIR beats a
+ * sandboxed `process.env.HOME` and a complete global install (agents/, commands/,
+ * skills/, gsd-core/, manifest, settings) lands in the developer's live config
+ * dir. No child-env scrub can reach that call; only clearing the parent's env can.
+ *
+ * Pair with a HOME sandbox, not instead of one: HOME covers the home-derived
+ * fallback, this covers the env-first branch that overrides it.
+ *
+ * @returns {() => void} restorer — call in afterEach to put the env back exactly
+ *   as it was (deleting keys that were previously unset, rather than setting '').
+ */
+function scrubConfigLocationEnv() {
+  const saved = {};
+  const keys = configLocationEnvKeys();
+  for (const key of keys) {
+    saved[key] = process.env[key];
+    delete process.env[key];
+  }
+  return function restoreConfigLocationEnv() {
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  };
+}
 
 /**
  * Run gsd-tools command.
@@ -46,7 +206,7 @@ const TEST_ENV_BASE = {
  */
 function runGsdTools(args, cwd = process.cwd(), env = {}) {
   // Resolve argv once so both the first attempt and the retry use the same vector.
-  const childEnv = { ...process.env, ...TEST_ENV_BASE, ...env };
+  const childEnv = { ...process.env, ...testEnvBase(), ...env };
   const argv = Array.isArray(args)
     ? args
     : (args.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [])
@@ -67,7 +227,7 @@ function runGsdTools(args, cwd = process.cwd(), env = {}) {
     return processSeam.runNode([TOOLS_PATH, ...argv], {
       cwd,
       env: childEnv,
-      timeoutMs: 60000,
+      timeoutMs: SEAM_DEFAULT_TIMEOUT_MS,
     });
   }
 
@@ -382,6 +542,171 @@ function cleanup(tmpDir) {
  */
 function readFileNormalized(filePath) {
   return fs.readFileSync(filePath, 'utf-8').replace(/\r\n/g, '\n');
+}
+
+/**
+ * Fault-injection helper for durable-write tests (#1874): monkeypatches
+ * `fsModule.writeFileSync` so any call matching `matches(target)` writes
+ * only the first `bytesBeforeThrow` bytes of `data` (a faithful crash
+ * window — the partial bytes DO land on disk, mirroring a real ENOSPC/EIO
+ * mid-write) and then throws. Calls not matching `matches` pass through to
+ * the real implementation unchanged.
+ *
+ * fs-method override rather than chmod: root bypasses mode bits, so a
+ * permission-based fault injection silently passes with zero coverage in
+ * root CI (CLAUDE.md §4 / CONTRIBUTING.md).
+ *
+ * Returns a restore function — call it via `t.after(...)`, never a manual
+ * try/finally in the test body.
+ *
+ * @param {typeof import('fs')} fsModule
+ * @param {(target: unknown) => boolean} matches - defaults to matching every write
+ * @param {number} bytesBeforeThrow - byte count of `data` that lands before the throw
+ * @param {{code?: string, message?: string}} [options]
+ * @returns {() => void} restore function
+ */
+function mockPartialWriteThenThrow(fsModule, matches, bytesBeforeThrow, options = {}) {
+  const { code = 'ENOSPC', message = `${code}: simulated partial write failure` } = options;
+  const shouldMatch = typeof matches === 'function' ? matches : () => true;
+  const origWriteFileSync = fsModule.writeFileSync;
+  fsModule.writeFileSync = (target, data, writeOptions) => {
+    if (!shouldMatch(target)) {
+      return origWriteFileSync.call(fsModule, target, data, writeOptions);
+    }
+    origWriteFileSync.call(fsModule, target, String(data).slice(0, bytesBeforeThrow), writeOptions);
+    throw Object.assign(new Error(message), { code });
+  };
+  return () => { fsModule.writeFileSync = origWriteFileSync; };
+}
+
+/**
+ * Capture the bytes written to `captureFd` while `fn()` runs, WITHOUT ever
+ * fabricating a byte count for any fd (#4306).
+ *
+ * Every previous hand-rolled version of this idiom across the test suite
+ * mocked `fs.writeSync`, and on its "success" arm returned a fabricated byte
+ * count while pushing the bytes into a local array instead of ever calling
+ * the real `fs.writeSync` — the data reached nowhere but that array. That is
+ * unsafe: Node's `node:test` runner defaults to `--test-isolation=process`
+ * (Node >= 22), so each test file's own real stdout is what the PARENT
+ * runner reads to parse its child-to-parent result/TAP protocol. If the
+ * runner's own reporter write for an adjacent test lands on the mocked fd
+ * during this window, a mock that fabricates success without delivering the
+ * bytes silently swallows that write instead of letting it reach the real
+ * pipe — the parent then tries to parse a truncated stream, observed in CI
+ * as "Unable to deserialize cloned data" (Node's generic corrupted/truncated
+ * v8.deserialize error), not as a thrown exception.
+ *
+ * This helper always forwards every write, on every fd, to the real
+ * `fs.writeSync` first — so nothing is ever swallowed, regardless of what
+ * else shares the fd during the mocked window — and returns the REAL
+ * result. Only `captureFd`'s traffic is additionally recorded and returned
+ * to the caller as a joined UTF-8 string; every other fd's bytes still
+ * reach their real destination (e.g. a test's own stderr diagnostics still
+ * physically write to stderr, just outside the returned capture), they are
+ * simply not included in the returned string.
+ *
+ * Standalone — no node:test context required; save/restore in a `finally`
+ * so a thrown assertion still restores the real `fs.writeSync`.
+ *
+ * @param {number} captureFd - the fd to capture and return (1 for stdout, 2 for stderr).
+ * @param {() => void} fn - synchronous function to run while capturing.
+ * @returns {string} every byte actually written to `captureFd` during `fn()`.
+ */
+function captureFdSync(captureFd, fn) {
+  const chunks = [];
+  const orig = fs.writeSync;
+  fs.writeSync = (fd, data, ...rest) => {
+    const n = orig.call(fs, fd, data, ...rest);
+    if (fd === captureFd) {
+      // rest[0] is `offset` only for the buffer-form overload; the
+      // string-form overload's 2nd arg is `position`, which is irrelevant
+      // here since a string write has no byte offset into `data` itself.
+      const offset = Buffer.isBuffer(data) && typeof rest[0] === 'number' ? rest[0] : 0;
+      const buf = Buffer.isBuffer(data)
+        ? data.subarray(offset, offset + n)
+        : Buffer.from(String(data), 'utf8').subarray(0, n);
+      // Buffered, not decoded per-call: a real short write can split a
+      // multi-byte UTF-8 codepoint across two writeSync calls, and decoding
+      // each half separately would corrupt it. Decode once, after joining.
+      chunks.push(buf);
+}
+    return n;
+};
+  try {
+    fn();
+  } finally {
+    fs.writeSync = orig;
+}
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * NARROW, deliberate exception to `captureFdSync`'s
+ * "never swallow" philosophy (#4306) — do NOT reach for this casually.
+ *
+ * Async twin of `captureFdSync` that awaits `fn()` before restoring the
+ * patch, so a deferred write that happens after a microtask/macrotask
+ * boundary is still safely observed. Its patched `fs.writeSync`
+ * does NOT forward `captureFd`'s writes to the real `fs.writeSync` at all.
+ * It only records the bytes into `chunks` and returns the byte length of
+ * `data` as if the real syscall had succeeded, so a caller that inspects the
+ * return value sees a normal success and not an error. Every OTHER fd's
+ * writes still forward to the real `fs.writeSync` exactly as
+ * `captureFdSync` does — only the `captureFd`-matching branch
+ * differs.
+ *
+ * This exists for #4448: `runMain()`/`io.output()`'s deferred `fs.writeSync(1,
+ * ...)` races Node's own `node:test` child-to-parent IPC, which also uses fd
+ * 1 under the default `--test-isolation=process` — corrupting the parent's
+ * message parsing ("Unable to deserialize cloned data"). An always-forward
+ * capture (the first fix attempted for this issue) does not
+ * fix that: the corrupting write still physically reaches fd 1. Use this
+ * ONLY for a window the caller has verified is narrow and fully controlled —
+ * i.e. nothing else legitimately needs to write to `captureFd` during `fn()`
+ * — such as a single `runMain(...)` call plus its promise-chain settling.
+ * Reaching for this in a window where something else might legitimately
+ * write to `captureFd` will silently swallow that other write.
+ *
+ * @param {number} captureFd - the fd whose writes are suppressed and recorded
+ *   (never delivered to the real fd) while `fn()` runs.
+ * @param {() => (Promise<void> | void)} fn - function to run (and await) while suppressing.
+ * @returns {Promise<string>} every byte that WOULD have been written to
+ *   `captureFd` during `fn()`, joined as UTF-8 — none of it actually reached
+ *   the real fd.
+ */
+async function suppressFdAsync(captureFd, fn) {
+  const chunks = [];
+  const orig = fs.writeSync;
+  fs.writeSync = (fd, data, ...rest) => {
+    if (fd === captureFd) {
+      const offset = Buffer.isBuffer(data) && typeof rest[0] === 'number' ? rest[0] : 0;
+      // No real syscall happens here (unlike captureFdSync, which slices to
+      // the real return value `n`), so the caller-requested `length` IS the
+      // count that must be recorded and returned — suppression always
+      // "succeeds" in full, so anything else silently drops or over-reports
+      // bytes.
+      const length = Buffer.isBuffer(data) && typeof rest[1] === 'number' ? rest[1] : undefined;
+      const buf = Buffer.isBuffer(data)
+        ? data.subarray(offset, length === undefined ? undefined : offset + length)
+        : Buffer.from(String(data), 'utf8');
+      // Buffered, not decoded per-call: see captureFdSync's identical note on
+      // why joined-then-decoded avoids splitting a multi-byte UTF-8 codepoint.
+      chunks.push(buf);
+      // No real fs.writeSync call for this fd — that is the entire point of
+      // this helper. Return the byte length as if the write succeeded, so a
+      // caller inspecting the return value (Node's own writeSync contract)
+      // sees ordinary success rather than an error.
+      return buf.length;
+}
+    return orig.call(fs, fd, data, ...rest);
+};
+  try {
+    await fn();
+  } finally {
+    fs.writeSync = orig;
+}
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 /**
@@ -739,7 +1064,8 @@ function resetRuntimeWarningCaches() {
  * (#2850 code review finding: the two copies had already silently diverged).
  */
 const SESSION_ENV_KEYS = [
-  'GSD_SESSION_KEY', 'CODEX_THREAD_ID', 'CLAUDE_SESSION_ID', 'CLAUDE_CODE_SSE_PORT',
+  'GSD_SESSION_KEY', 'CODEX_THREAD_ID', 'CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_SSE_PORT',
   'OPENCODE_SESSION_ID', 'GEMINI_SESSION_ID', 'CURSOR_SESSION_ID', 'WINDSURF_SESSION_ID',
   'TERM_SESSION_ID', 'WT_SESSION', 'TMUX_PANE', 'ZELLIJ_SESSION_NAME',
   'TTY', 'SSH_TTY', 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
@@ -763,4 +1089,218 @@ function clearSessionEnv() {
   for (const k of SESSION_ENV_KEYS) delete process.env[k];
 }
 
-module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, TOOLS_PATH };
+/**
+ * Save + clear GSD_WORKSTREAM and GSD_PROJECT on process.env, paired with
+ * restoreWorkstreamEnv(). planningDir() reads both directly from
+ * process.env when its params are omitted, so a test asserting
+ * workstream/project-scoped behavior must isolate them from ambient shell
+ * state (and from whatever an earlier test in the same process left behind).
+ *
+ * Previously duplicated as a local isolateWorkstreamEnv()/restoreWorkstreamEnv()
+ * pair in tests/phase-locator.test.cjs, and as the GSD_WORKSTREAM/GSD_PROJECT
+ * slice of tests/model-resolver.test.cjs's broader isolateHome()/restoreHome()
+ * (which still isolates HOME/USERPROFILE/GSD_HOME/GSD_RUNTIME locally — that
+ * part is genuinely specific to model-resolver's tests and stays there).
+ *
+ * Module-level save slot (not a returned snapshot) to match the exact
+ * no-arg isolate()/restore() call shape both prior local copies used.
+ */
+let _origGsdWorkstream;
+let _origGsdProject;
+
+function isolateWorkstreamEnv() {
+  _origGsdWorkstream = process.env.GSD_WORKSTREAM;
+  _origGsdProject = process.env.GSD_PROJECT;
+  delete process.env.GSD_WORKSTREAM;
+  delete process.env.GSD_PROJECT;
+}
+
+function restoreWorkstreamEnv() {
+  if (_origGsdWorkstream === undefined) delete process.env.GSD_WORKSTREAM;
+  else process.env.GSD_WORKSTREAM = _origGsdWorkstream;
+  if (_origGsdProject === undefined) delete process.env.GSD_PROJECT;
+  else process.env.GSD_PROJECT = _origGsdProject;
+}
+
+/**
+ * #3156: env for a RAW installer spawn — one that bypasses runGsdTools and so
+ * never receives TEST_ENV_BASE on its own.
+ *
+ * Blanking config-LOCATION vars is necessary but NOT sufficient here.
+ * bin/install.js writes GSD's own user-owned store through os.homedir()
+ * DIRECTLY (writeNonClaudeDefaults -> <home>/.gsd/defaults.json, #2834), and
+ * os.homedir() consults no GSD variable at all — so nothing in
+ * CONFIG_LOCATION_ENV_KEYS can reach it, and blanking GSD_HOME does not reach
+ * it either, because a blank GSD_HOME falls back to exactly that homedir().
+ * Only a sandboxed HOME/USERPROFILE contains it.
+ *
+ * HOME stays deliberately OUT of TEST_ENV_BASE — blanking it would break far
+ * more than it fixed — so it is sandboxed per spawn instead, which is the
+ * discipline the suite already applies by hand elsewhere. USERPROFILE is set
+ * with it because os.homedir() reads that one on Windows.
+ *
+ * The sandbox home is per-process and removed on exit, so a caller gets
+ * containment without having to own a lifecycle.
+ *
+ * SCOPE, stated because it is a real residual rather than an oversight: this is
+ * one home per test-FILE process, not one per spawn. Two installer spawns in the
+ * same file therefore share `.gsd` state, so a prior non-Claude install can be
+ * observed by a later spawn. That is strictly better than the status quo it
+ * replaces -- which shared the developer's REAL home, and all of its state --
+ * and it closes the leak this helper exists for; it does not claim isolation
+ * BETWEEN spawns. A test needing that passes its own { HOME, USERPROFILE }.
+ */
+let installSpawnHomeDir = null;
+function installSpawnHome() {
+  if (installSpawnHomeDir === null) {
+    installSpawnHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-install-home-'));
+    process.on('exit', () => {
+      try { fs.rmSync(installSpawnHomeDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    });
+  }
+  return installSpawnHomeDir;
+}
+
+function installSpawnEnv(overrides = {}) {
+  const home = installSpawnHome();
+  // #3712 — carry the sandbox marker too, not just HOME. The guard falls back to
+  // the marker on hosts with no readable passwd entry (some CI images) and
+  // otherwise REFUSES. A spawned installer inherits NODE_TEST_CONTEXT and has a
+  // legitimately redirected HOME, so without this it is refused on exactly the
+  // environment the fallback exists to serve. The name is the same constant
+  // sandboxHome() writes; see the note there on why it is a bare string.
+  const env = {
+    ...process.env,
+    ...testEnvBase(),
+    HOME: home,
+    USERPROFILE: home,
+    [TEST_HOME_SANDBOX_MARKER]: home,
+    ...overrides,
+  };
+  // The marker attests to the home ACTUALLY in effect, so it has to follow an
+  // overridden HOME rather than keep naming this helper's default one. Spreading
+  // `overrides` last is deliberate (an explicit HOME must win — see the docblock's
+  // "A test needing that passes its own { HOME, USERPROFILE }"), but it left the
+  // marker stale: a caller supplying its own HOME got HOME=<theirs> and
+  // marker=<helper default>. On a passwd-less host the guard compares the two and
+  // REFUSES a legitimately sandboxed spawn — tests/install.test.cjs:7143 and
+  // install-shared.cjs's own runInstaller both take that path. An explicitly
+  // supplied marker still wins over both. Reported in Codex review of #3725.
+  if (!(TEST_HOME_SANDBOX_MARKER in overrides)) env[TEST_HOME_SANDBOX_MARKER] = env.HOME;
+  return env;
+}
+
+/**
+ * #3712 — sandbox HOME/USERPROFILE for the duration of ONE test.
+ *
+ * The spawn-side helpers above (#3156) cover CHILD processes only. A test that
+ * calls the installer IN-PROCESS gets no protection from them, and a runtime kind
+ * may declare a global `home` override that resolves from `os.homedir()` rather
+ * than from the sandboxed configDir — codex's skills kind (`.agents`, ADR-1239 /
+ * #2088) is the live case. Without this, such a call writes to, and prunes
+ * `gsd-*` entries from, the developer's REAL ~/.agents/skills.
+ *
+ * Promoted here from the identical private copies in executed-plan.test.cjs and
+ * install-runtime-artifacts.test.cjs so new in-process callers have one obvious
+ * helper to reach for instead of re-deriving it (or forgetting it).
+ *
+ * Pass the test's own temp configDir as `dir` where possible: codex's skills dir
+ * then resolves to `<configDir>/.agents/skills`, keeping every artifact the call
+ * writes inside the directory the test already cleans up.
+ *
+ * @param {{ after: (fn: () => void) => void }} t - node:test context.
+ * @param {string} dir - directory to use as HOME for the duration of the test.
+ */
+// #3712: the marker NAME is a constant, duplicated here deliberately rather than
+// required from the compiled guard. helpers.cjs is imported by ~370 test files and
+// documents (see builtLib above) that it must NOT load gsd-core/bin/lib at module
+// scope — an unbuilt tree would then fail on import alone, turning a missing
+// `npm run build:lib` into a whole-suite crash. A lazy require inside sandboxHome
+// would satisfy that too, but a bare string needs no build at all. The pairing is
+// pinned by a test so the two cannot drift.
+const TEST_HOME_SANDBOX_MARKER = 'GSD_TEST_HOME_SANDBOX';
+
+function sandboxHome(t, dir) {
+  const savedHome = process.env.HOME;
+  const savedUserProfile = process.env.USERPROFILE;
+  const savedMarker = process.env[TEST_HOME_SANDBOX_MARKER];
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+  // Records WHICH directory this call sandboxed to. src/real-home-guard.cts fails
+  // CLOSED when it cannot read a passwd entry to compare HOME against (some CI
+  // images), and consults this only in that branch, accepting it only when it
+  // names the home actually in effect — so a stale marker cannot vouch for a
+  // later, un-sandboxed call.
+  process.env[TEST_HOME_SANDBOX_MARKER] = dir;
+  t.after(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = savedUserProfile;
+    if (savedMarker === undefined) delete process.env[TEST_HOME_SANDBOX_MARKER];
+    else process.env[TEST_HOME_SANDBOX_MARKER] = savedMarker;
+  });
+}
+
+function writePackageSourceMarkerFixture(configDir) {
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, '.gsd-source'),
+    path.join(__dirname, '..', 'commands', 'gsd') + '\n',
+  );
+  return configDir;
+}
+
+/** Write one valid third-party gate into a synthetic user capability home. */
+function writeAmbientCapabilityGate(home, id, point) {
+  const capDir = path.join(home, '.gsd', 'capabilities', id);
+  fs.mkdirSync(capDir, { recursive: true });
+  fs.writeFileSync(path.join(capDir, 'capability.json'), JSON.stringify({
+    id,
+    title: 'Ambient test capability',
+    version: '1.0.0',
+    role: 'feature',
+    tier: 'full',
+    description: 'Capability outside the test fixture that must remain invisible.',
+    engines: { gsd: '>=1.7.0' },
+    requires: [],
+    runtimeCompat: { supported: ['claude'], unsupported: [] },
+    skills: [],
+    agents: [],
+    config: {},
+    steps: [],
+    contributions: [],
+    gates: [{ point, check: { query: 'ambient.check' }, blocking: false, onError: 'skip' }],
+  }), 'utf8');
+}
+
+/**
+ * Put a capability in the parent process's ambient home for one serial test.
+ * The child must still receive installSpawnEnv()'s different sandbox home.
+ */
+function withAmbientCapabilityHome(t, prefix, id, point) {
+  const home = createTempDir(prefix);
+  writeAmbientCapabilityGate(home, id, point);
+  const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    cleanup(home);
+  });
+  return home;
+}
+
+module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, isolateWorkstreamEnv, restoreWorkstreamEnv, TOOLS_PATH, SESSION_IDENTITY_ENV_KEYS, scrubConfigLocationEnv, installSpawnEnv, installSpawnHome, sandboxHome, writePackageSourceMarkerFixture, writeAmbientCapabilityGate, withAmbientCapabilityHome, TEST_HOME_SANDBOX_MARKER, mockPartialWriteThenThrow, captureFdSync, suppressFdAsync };
+
+// Lazy, for the reason builtLib() is lazy: reading either of these is what
+// forces the built-lib require, so a test file that needs neither can still
+// import this helper on an unbuilt tree. Enumerable, so destructuring and
+// Object.keys() behave exactly as they did when these were plain properties.
+Object.defineProperties(module.exports, {
+  TEST_ENV_BASE: { enumerable: true, get: testEnvBase },
+  CONFIG_LOCATION_ENV_KEYS: { enumerable: true, get: configLocationEnvKeys },
+});

@@ -22,6 +22,12 @@ const { stripFencedCode } = markdownSectionizer;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import verification = require('./verification.cjs');
 const { readVerificationStatus } = verification;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseIdMod = require('./phase-id.cjs');
+const { scopeToPhase } = phaseIdMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import coreUtils = require('./core-utils.cjs');
+const { normalizeLineEndings } = coreUtils;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,6 +37,13 @@ interface UatCheckItem {
   name: string;
   result: string;
   passing: boolean;
+  /**
+   * #4546: true when this item is a `skipped` whose reason matches the
+   * verify-work writer's "Deferred follow-up:" template — a deliberately
+   * deferred follow-up (#1921) counts as passing and never blocks. Additive
+   * report field: consumers read `passed`/`blockers`.
+   */
+  deferred: boolean;
 }
 
 interface UatPassedReport {
@@ -42,6 +55,14 @@ interface UatPassedReport {
   no_uat_artifacts: boolean;
   policy: {
     require_verification: boolean;
+    /**
+     * #4663: true when the report was produced in uat-only mode — UAT rows
+     * evaluated, VERIFICATION-file blockers (and only those) skipped. The
+     * verify-work canonicalize pre-check uses this form; the flip it gates is
+     * what removes the human_needed verification status, so the full
+     * predicate could never pass at pre-check time.
+     */
+    uat_only: boolean;
   };
   /**
    * #3057 B3: true when the `requireVerification` policy check's own
@@ -77,6 +98,22 @@ const BLOCKING_VERIFICATION_FM_STATUSES = new Set([
 
 // UAT test-item `result` values that count as passing
 const PASSING_RESULTS = new Set(['passed', 'pass']);
+// #4546 — a `skipped` test-item whose reason carries the verify-work writer's
+// deferral template prefix ("Deferred follow-up: …", #1921) is a deliberately
+// deferred follow-up: non-blocking. Quote-tolerant (the writer wraps the value
+// in double quotes) and case-insensitive (human-edited files vary). Anything
+// else — a reasonless skip, a non-deferral reason — still blocks. PARITY: this
+// matcher and the writer template in gsd-core/workflows/verify-work.md
+// (process_response) are two halves of one contract, pinned together by
+// tests/verify-work-deferred-promotion.test.cjs.
+const DEFERRED_REASON_RE = /^["']?deferred follow-up\b/i;
+// Trust note (#4546 review): the reason line is user-authored state — an
+// author could equally write `result: passed` — so this prefix is an
+// AUTHORING contract with the verify-work writer, not a security boundary.
+// A hand-written deferral that skips the UAT file's ## Deferred Follow-Ups
+// section also bypasses the complete_session promotion offer; the section is
+// the durable project-level record. Variant spellings that do not match
+// ("Deferred follow-ups:", "followup") block — fail-closed by design.
 
 // ─── stripFalsePositiveContexts ───────────────────────────────────────────────
 
@@ -150,42 +187,84 @@ function analyzeMarkdown(raw: string): { unterminatedFence: boolean; unterminate
  * - Support bracketed [passed] and bare passed (#2273).
  * - Returns ALL items (both passing and non-passing).
  */
-function parseUatResultItems(cleanContent: string): Array<{ test: number; name: string; result: string }> {
-  const items: Array<{ test: number; name: string; result: string }> = [];
+function parseUatResultItems(cleanContent: string): Array<{ test: number; name: string; result: string; reason: string }> {
+  const items: Array<{ test: number; name: string; result: string; reason: string }> = [];
 
-  // Find all ### N. Name headings (line-anchored)
-  const headingPattern = /^###\s*(\d+)\.\s*(.+)$/gm;
-  const headings: Array<{ index: number; test: number; name: string }> = [];
-  let hMatch: RegExpExecArray | null;
-  while ((hMatch = headingPattern.exec(cleanContent)) !== null) {
-    headings.push({
-      index: hMatch.index + hMatch[0].length,
-      test: parseInt(hMatch[1], 10),
-      name: hMatch[2].trim(),
-    });
+  // Find all ### N. Name headings.
+  // #3078-CR MEDIUM (security review follow-up): STRUCTURE and ATTRIBUTION
+  // need different split frames. This is a STRUCTURE scan — finding where a
+  // heading block begins — and there is no attribution distinction to
+  // preserve, so split on any of `\n`, U+2028, U+2029: a heading delimited by
+  // an exotic line separator (origin/next's `/m`-anchored scan found these;
+  // a naive `split('\n')`-only port silently stopped finding them, making the
+  // gate MORE permissive than origin/next) is found exactly like a
+  // `\n`-delimited one. Contrast the `result:` scan below, which is an
+  // ATTRIBUTION scan and must NOT do this.
+  const HEADING_LINE_RE = /^###\s*(\d+)\.\s*(.+)$/;
+  const headings: Array<{ index: number; lineStart: number; test: number; name: string }> = [];
+  {
+    // All three separators are exactly one UTF-16 code unit, so the
+    // `line.length + 1` offset arithmetic below stays valid regardless of
+    // which separator terminated a given line.
+    const lines = cleanContent.split(/[\n\u2028\u2029]/);
+    let offset = 0;
+    for (const line of lines) {
+      const hMatch = line.match(HEADING_LINE_RE);
+      if (hMatch) {
+        headings.push({
+          index: offset + hMatch[0].length,
+          lineStart: offset,
+          test: parseInt(hMatch[1], 10),
+          name: hMatch[2].trim(),
+        });
+      }
+      offset += line.length + 1; // +1 for the separator consumed by split
+    }
   }
 
   for (let i = 0; i < headings.length; i++) {
     const h = headings[i];
     const blockStart = h.index;
-    // More precise: find next heading's position in the original string
-    // We'll slice from current heading end to the position just before next heading's "###"
-    const nextHeadingMatch = i + 1 < headings.length
-      ? cleanContent.lastIndexOf('\n###', headings[i + 1].index)
-      : -1;
-    const blockContent = nextHeadingMatch >= blockStart
-      ? cleanContent.slice(blockStart, nextHeadingMatch)
+    // A block spans until the START of the next heading's line (tracked
+    // directly from the same split-frame scan above), not a re-search for a
+    // literal '\n###' over unsplit text -- the latter would silently miss a
+    // next heading delimited by U+2028/U+2029 instead of '\n' and swallow
+    // every subsequent block into this one.
+    const blockContent = i + 1 < headings.length
+      ? cleanContent.slice(blockStart, headings[i + 1].lineStart)
       : cleanContent.slice(blockStart);
 
-    // Column-0 anchored result line: /^result:[ \t]*\[?([\w-]+)\]?/mi
+    // Column-0 result line, split-then-match (#3078-CR MEDIUM — same fix as
+    // the heading scan above): test each already-split line individually
+    // against a single-line (no `/m` anchor) pattern instead of anchoring
+    // over unsplit `blockContent`, so a `result:`-shaped line reachable only
+    // via a U+2028/U+2029 separator inside an `expected: |` scalar body can
+    // never register as a fake column-0 match. FIRST MATCH WINS — no
+    // ambiguity counting, matching src/uat.cts's contract.
     // Uses [ \t]* (not \s*) so the captured value must sit on the SAME line as result:.
     // A result: key with the value on a subsequent line yields no match → 'missing' (blocker).
-    const resultMatch = /^result:[ \t]*\[?([\w-]+)\]?/mi.exec(blockContent);
+    // #4546: the `reason:` line is captured with the same frame and FIRST-match
+    // rule — it is the deferral signal the evaluator needs (a `skipped` item
+    // whose reason is the verify-work writer's "Deferred follow-up:" template
+    // is non-blocking). Quoted values are captured with their quotes so the
+    // evaluator's matcher can tolerate them exactly as written.
+    const RESULT_LINE_RE = /^result:[ \t]*\[?([\w-]+)\]?/i;
+    const resultMatch = blockContent
+      .split('\n')
+      .map((line) => line.match(RESULT_LINE_RE))
+      .find((m): m is RegExpMatchArray => m !== null) ?? null;
+    const REASON_LINE_RE = /^reason:[ \t]*(.*)$/i;
+    const reasonMatch = blockContent
+      .split('\n')
+      .map((line) => line.match(REASON_LINE_RE))
+      .find((m): m is RegExpMatchArray => m !== null) ?? null;
+    const reason = reasonMatch ? reasonMatch[1].trim() : '';
     if (resultMatch) {
       items.push({
         test: h.test,
         name: h.name,
         result: resultMatch[1].toLowerCase(),
+        reason,
       });
     } else {
       // No column-0 result line → emit 'missing' (a non-passing state)
@@ -193,6 +272,7 @@ function parseUatResultItems(cleanContent: string): Array<{ test: number; name: 
         test: h.test,
         name: h.name,
         result: 'missing',
+        reason,
       });
     }
   }
@@ -211,9 +291,15 @@ function parseUatResultItems(cleanContent: string): Array<{ test: number; name: 
  */
 function evaluateUatPassed(
   phaseFullDir: string,
-  opts?: { policy?: { requireVerification?: boolean } },
+  opts?: { policy?: { requireVerification?: boolean; uatOnly?: boolean } },
 ): UatPassedReport {
-  const requireVerification = opts?.policy?.requireVerification === true;
+  // uatOnly (#4663) takes precedence: it evaluates the UAT rows ONLY, skipping
+  // the VERIFICATION-file blockers entirely. The verify-work canonicalize
+  // pre-check needs exactly that — it runs while the report still reads
+  // `human_needed`, which is itself a blocking verification status, so the
+  // full predicate could never pass there and the flip would deadlock.
+  const uatOnly = opts?.policy?.uatOnly === true;
+  const requireVerification = !uatOnly && opts?.policy?.requireVerification === true;
 
   const blockers: string[] = [];
   const checks: UatCheckItem[] = [];
@@ -237,15 +323,24 @@ function evaluateUatPassed(
       checks: [],
       blockers,
       no_uat_artifacts,
-      policy: { require_verification: requireVerification },
+      policy: { require_verification: requireVerification, uat_only: uatOnly },
       // readVerificationStatus was never reached on this early-return path.
       verification_stale_check_indeterminate: false,
     };
   }
 
-  // Filter UAT and VERIFICATION files using the same filter as cmdPhaseComplete
-  const uatFileNames = dirEntries.filter(f => f.includes('-UAT') && f.endsWith('.md'));
-  const verFileNames = dirEntries.filter(f => f.includes('-VERIFICATION') && f.endsWith('.md'));
+  // Filter UAT and VERIFICATION files using the same filter as cmdPhaseComplete,
+  // scoped to THIS phase's own token (#3511) — a stray, cross-phase, or ad-hoc
+  // file can no longer contribute a blocker to a phase it does not belong to.
+  const phaseDirBaseName = path.basename(phaseFullDir);
+  const uatFileNames = scopeToPhase(
+    dirEntries.filter(f => f.includes('-UAT') && f.endsWith('.md')),
+    phaseDirBaseName,
+  );
+  const verFileNames = scopeToPhase(
+    dirEntries.filter(f => f.includes('-VERIFICATION') && f.endsWith('.md')),
+    phaseDirBaseName,
+  );
 
   // ── Process UAT files ──────────────────────────────────────────────────────
   for (const file of uatFileNames) {
@@ -253,7 +348,11 @@ function evaluateUatPassed(
     const uatFilePath = path.join(phaseFullDir, file);
     let raw = '';
     try {
-      raw = fs.readFileSync(uatFilePath, 'utf-8');
+      // #3078-CR MEDIUM: normalize line endings at the read boundary — the
+      // same seam src/uat.cts and src/verification.cts route through — so a
+      // lone-CR *-UAT.md is not read as one unbroken line by the column-0
+      // scans below.
+      raw = normalizeLineEndings(fs.readFileSync(uatFilePath, 'utf-8'));
     } catch {
       blockers.push(`${file}: could not read file`);
       continue;
@@ -284,13 +383,20 @@ function evaluateUatPassed(
     const items = parseUatResultItems(cleanContent);
 
     for (const item of items) {
-      const passing = PASSING_RESULTS.has(item.result);
+      // #4546: a `skipped` item whose reason matches the verify-work writer's
+      // "Deferred follow-up:" template is a deliberately deferred follow-up
+      // (#1921) — non-blocking. Quote-tolerant because the writer emits the
+      // reason WITH its wrapping quotes. Everything else — pending, blocked,
+      // issue, missing, and a plain or non-deferral skipped — still blocks.
+      const deferred = item.result === 'skipped' && DEFERRED_REASON_RE.test(item.reason);
+      const passing = PASSING_RESULTS.has(item.result) || deferred;
       checks.push({
         file,
         test: item.test,
         name: item.name,
         result: item.result,
         passing,
+        deferred,
       });
       if (!passing) {
         blockers.push(`${file}: test ${item.test} (${item.result})`);
@@ -300,12 +406,13 @@ function evaluateUatPassed(
 
   // ── Process VERIFICATION files ─────────────────────────────────────────────
   let hasPassingVerification = false;
-  for (const file of verFileNames) {
+  for (const file of uatOnly ? [] : verFileNames) {
     verificationFiles.push(file);
     const verificationFilePath = path.join(phaseFullDir, file);
     let raw = '';
     try {
-      raw = fs.readFileSync(verificationFilePath, 'utf-8');
+      // #3078-CR MEDIUM: same read-boundary normalization as the UAT loop above.
+      raw = normalizeLineEndings(fs.readFileSync(verificationFilePath, 'utf-8'));
     } catch {
       blockers.push(`${file}: could not read verification file`);
       continue;
@@ -358,6 +465,7 @@ function evaluateUatPassed(
     no_uat_artifacts,
     policy: {
       require_verification: requireVerification,
+      uat_only: uatOnly,
     },
     verification_stale_check_indeterminate: verificationStaleCheckIndeterminate,
   };

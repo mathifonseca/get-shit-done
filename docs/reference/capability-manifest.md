@@ -45,6 +45,10 @@ Feature capabilities declare owned artefacts, lifecycle hooks, a federated confi
 | `skills` | string[] | Owned skill stems. Exactly one capability may own each stem across the entire merged registry (first-party ∪ overlay). |
 | `agents` | string[] | Owned agent stems. Same uniqueness constraint as skills. |
 
+The `skills` stems declared here are disclosed by name as **instruction surfaces** in the pre-install consent summary ([ADR-2363](../adr/2363-capability-instruction-surface-trust.md)). Bodies are installed verbatim and are not content-scanned — see [the capability trust model](../explanation/capability-trust-model.md).
+
+`agents` are classified as an instruction surface too (ADR-2363 D3), but the stems declared here are **not** disclosed at the prompt: a third-party capability's `agents[]` are never staged into the agent's instruction context — the staging path that unions third-party skills into a runtime's skills directory has no equivalent for agents — so naming them would claim a surface that does not exist. This does not make agents safe or inert; it means the mechanism does not yet reach them.
+
 ### `hooks`
 
 Non-loop lifecycle hooks.
@@ -78,6 +82,7 @@ Steps run at a loop extension point as independent units. Ordering within a poin
 | `onError` | `"skip"` \| `"halt"` | Yes | Behaviour on failure; must be present and one of `"skip"` or `"halt"` (an omitted `onError` fails validation). Steps are purely additive — they never halt or redirect the host workflow on their own; a blocking precondition is expressed as a `gate`. |
 | `when` | string | No | Dotted config key; the step is active only when the key is truthy. Evaluated deterministically at render time; phase-context applicability is the skill's own responsibility. |
 | `fragment` | object | No | Optional inline-or-file prompt fragment attached to the step, with the **same** `{ "path": "<relative path>" }` or `{ "inline": "<string>" }` semantics as a contribution's `fragment`. A `path` is materialised (read and inlined) at load time, resolved against the capability directory and confined to it (`..` traversal is rejected). |
+| `supportsReviewerLanes` | boolean | No | Strict opt-in trait (#4209): declares that this step's dispatch target accepts external reviewer-lane evidence. Only a literal `true` opts in — every other type fails validation, and `false`/omitted are inert (no reviewer-lane behaviour, no key on the projected active hook). Step-scoped, not capability-wide. |
 
 ### `contributions`
 
@@ -113,11 +118,37 @@ Gates check a condition at a loop extension point and optionally block progressi
 | Predicate | `{ "predicate": { "kind": "artifact-exists" \| "config-equals" \| …, … } }` | Yes | Declarative; no code path. |
 | Agent verdict | `{ "agentVerdict": { "ref": …, "prompt": … } }` | No (forced advisory) | LLM evaluation; non-deterministic checks may not halt the loop. |
 
+### `taskContentResolver`
+
+Declares that this capability resolves per-task content (`<action>`/`<verify>`/
+`<acceptance_criteria>`/`<read_first>`/`<done>`) from an external issue tracker instead of
+`execute-plan.md`'s per-task loop reading it inline from a task's `PLAN.md` body. This is **not**
+one of `steps` / `contributions` / `gates`, and it does not use a `point` value from the closed
+12-point vocabulary above — it is dispatched directly, once per task, by `execute-plan.md` before
+that task's `read_first` gate, documented separately in
+[`loop-hook-dispatch.md`](../../gsd-core/references/loop-hook-dispatch.md#the-executetask-point-a-different-shape).
+See [ADR-3646](../adr/3646-per-task-content-resolution-seam.md) for the full design and
+[Develop a task-content resolver capability](../how-to/develop-a-task-content-resolver-capability.md)
+for the authoring walkthrough.
+
+| Sub-field | Type | Required | Description |
+|---|---|---|---|
+| `trackerPrefix` | string (kebab-case) | Yes | Matches the prefix of a task's `<task tracker-id="beads:GSD-42">` attribute — everything before the **first** `:`. Text after the first colon, including further colons, is passed through verbatim as the id. Must be unique across the merged first-party ∪ overlay capability set. |
+| `invoke.binary` | string | Yes | Executable name or path for the resolver subprocess. |
+| `invoke.args` | string[] | Yes | Argv passed to `invoke.binary`. Must contain the `{{id}}` placeholder at least once — GSD substitutes it with the task's tracker id (everything after the first `:`); an `args` array that never carries the placeholder fails validation, since the id could never reach the resolver. |
+| `invoke.timeoutMs` | number | Yes | Bound on the subprocess invocation. Required — an unbounded resolver subprocess is this repo's named Unbounded Subprocesses defect class. A resolver exceeding this bound is killed and `task resolve-content` exits non-zero. |
+
+`taskContentResolver` is feature-role only (`role: "feature"`); it is not admissible on `role: "runtime"` or `role: "reviewer"` bodies.
+
 ---
 
 ## Valid `point` values
 
 The 12 loop extension points are a **closed, additive-only vocabulary**. Every `steps`, `contributions`, and `gates` entry must use one of these identifiers exactly.
+
+A valid point is necessary but not sufficient: each host workflow decides, per point, which hook **kinds** its dispatch text handles, and a point may dispatch a subset. The registry build derives the real answer from the host workflows (`getWiredKinds()` in `scripts/gen-loop-host-contract.cjs`) and rejects a manifest declaring a kind the point does not dispatch — so an unsupported combination is a build-time error naming the point, the kind, and the kinds that point does cover. It is never a hook that renders and is then silently dropped.
+
+`verify:pre` dispatches all three kinds. A step there is **advisory**: it runs before UAT begins and never blocks it — a precondition that must halt verification is a `gate`. Its `produces` artefact names are consumed **additively** by the verify workflow's `extract_tests` step, which can deepen what UAT covers but cannot suppress a checkpoint. See [Develop a capability](../how-to/develop-a-capability.md#check-the-point-dispatches-your-kind) for the authoring workflow.
 
 | Point | Phase | Position |
 |---|---|---|
@@ -157,24 +188,31 @@ Runtime capabilities describe how GSD projects its artefacts onto one host CLI. 
 
 ### `hostBehaviors`
 
-`runtime.hostBehaviors` is an **open, unvalidated bag** of per-host behavior switches consumed directly by installer and runtime-adaptation code. Unlike every axis in the table above, it is **not covered by any schema**: the key `hostBehaviors` appears zero times in `scripts/gen-capability-registry.cjs` and zero times in `scripts/registry-schema.cjs`. An unknown key inside `hostBehaviors` is neither rejected nor warned about — it is simply ignored by any code path that does not look for it by name.
+`runtime.hostBehaviors` is a **closed vocabulary** of per-host behavior switches consumed directly by installer and runtime-adaptation code. A key outside the vocabulary is **ignored, with a non-fatal warning** naming the capability and the key; it is never a validation error, so a manifest authored against a newer GSD degrades visibly instead of failing the build of a repo that merely reads it.
 
-58 distinct keys are declared across the shipped runtime manifests; most are set by exactly one capability. This table is not exhaustive — it lists the keys with the widest reuse so a reader can pattern-match new ones against the same shape:
+Adding a key is a reviewed first-party change, which is [ADR-1016](../adr/1016-runtime-capability-descriptor.md)'s intended friction rather than an obstacle: the runtime descriptor expresses every per-host difference as a value over a closed vocabulary, and a host needing a new shape gets a named primitive rather than an open escape hatch.
+
+> **History.** `hostBehaviors` went unvalidated until [#2801](https://github.com/open-gsd/gsd-core/issues/2801), and this page previously described it as a deliberate open seam sanctioned by ADR-1016. That attribution was wrong — ADR-1016 does not mention `hostBehaviors` at all. See the [ADR-1016 amendment](../adr/1016-runtime-capability-descriptor.md#amendment-2026-08-09-hostbehaviors-is-closed-2801).
+
+The vocabulary holds 59 keys; 39 of them are set by exactly one capability. This table is not exhaustive — it lists the keys with the widest reuse so a reader can pattern-match new ones against the same shape:
 
 | Key | Capabilities declaring it |
 |---|---|
 | `reapplyCommand` | 9 |
 | `skipSharedHooksInstall` | 8 |
-| `reviewerCli` | 6 |
 | `frontmatterDialect` | 5 |
 | `hyphenNameAgentBody` | 3 |
 | `legacyCommandsGsdInstallMigration` | 3 |
+| `legacyCommandsGsdUninstall` | 3 |
+| `nativePlugin` | 3 |
 | `skipUpdateBannerCommand` | 3 |
 | `verificationStyle` | 3 |
 
-**`reviewerCli` is deprecated.** It is a boolean that historically marked a runtime capability as also being a reviewer lane. It is now a **derived legacy alias**, retained for one release so an out-of-tree runtime descriptor that still sets it keeps working. A declared `reviewer` body (see below) takes precedence over the alias, and a capability declaring both contributes **one** slug, not two. `reviewerCli` is superseded by the `reviewer` body; its removal is tracked by issue #2801. It is currently set by 6 capabilities: `antigravity`, `claude`, `codex`, `cursor`, `opencode`, `qwen`.
+**`reviewerCli` has been removed.** It was a boolean that marked a runtime capability as also being a reviewer lane. [ADR-2782](../adr/2782-reviewer-lane-capability-surface.md) replaced it with the [`reviewer` body](#reviewer-body-role-reviewer-or-on-any-role); it survived one release (1.9.0 → 1.10.0) as a derived legacy alias and was deleted in Phase 7 ([#2801](https://github.com/open-gsd/gsd-core/issues/2801)). No shipped capability declares it.
 
-See [ADR-1016](../adr/1016-runtime-capability-descriptor.md) (the runtime body is a closed 8-axis plus 4 install-surface vocabulary; `hostBehaviors` is the deliberate open seam beside it) and [ADR-2782](../adr/2782-reviewer-lane-capability-surface.md) (introduces the `reviewer` body and the `reviewerCli` alias's deprecation).
+**If your out-of-tree manifest still sets it:** nothing crashes and nothing else about your capability changes — it simply contributes no reviewer lane, and the registry reports a non-fatal warning naming the capability. The warning reaches you at build time on stderr, and at install time through the overlay loader's diagnostics. To restore the lane, declare a `reviewer` body; [Ship a reviewer lane in your capability](../how-to/ship-a-reviewer-lane.md) is the migration path, and the field reference is below.
+
+See [ADR-1016](../adr/1016-runtime-capability-descriptor.md) (the runtime descriptor is a closed vocabulary; its 2026-08-09 amendment closes `hostBehaviors` too) and [ADR-2782](../adr/2782-reviewer-lane-capability-surface.md) (introduces the `reviewer` body, and D9 retires the `reviewerCli` alias).
 
 For a minimal `role: "runtime"` example, see [ADR-1016 §Decision 8](../adr/1016-runtime-capability-descriptor.md).
 
@@ -195,7 +233,7 @@ The shape is **hybrid**:
 
 Current role counts across `capabilities/`: `feature` 20, `runtime` 19, `reviewer` 5.
 
-All 12 shipped lane declarations carry all 13 fields below.
+All 12 shipped lane declarations carry all 14 fields below.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -203,8 +241,9 @@ All 12 shipped lane declarations carry all 13 fields below.
 | `flags` | string[] | User-facing CLI flags that select this lane. A lane may declare more than one — `antigravity` declares `--antigravity` and `--agy`. 12 lanes declare 13 flags in total. |
 | `transport` | closed enum | `spawn` \| `openai-http`. |
 | `probe` | object | Availability check. `probe.kind` is a closed enum: `command-exists` \| `command-capability` \| `http-reachable`. `command-capability` additionally takes `binary`, `needle`, and a **required** `timeoutMs` — it exists because a bare binary name can be ambiguous (`kimi` is claimed by both the Kimi Code CLI and the legacy Python `kimi-cli`), and the timeout bound is mandatory because an unbounded `--help \| grep` probe is this repo's named Unbounded Subprocesses defect. |
-| `invoke` | object | Shape is selected by `transport`. For `spawn`: `binary`, `args[]`, `promptChannel` (`stdin` \| `argv` \| `argv-file-ref` \| `none`), `outputChannel` (`stdout` \| `file-arg`), `outputArg` (required when `outputChannel` is `file-arg`), `modelArg` (string or `null`), `effortChannel` (`none` \| `argv` \| `env`). For `openai-http`: `hostConfigKey`, `defaultHost`, `path`, `modelDiscovery` (`none` \| `first-from-models-endpoint`), `fallbackModel`, `effortChannel`. `args` supports the `{{model}}`, `{{prompt}}`, `{{effort}}`, and `{{output}}` placeholders. |
+| `invoke` | object | Shape is selected by `transport`. For `spawn`: `binary`, `args[]`, `promptChannel` (`stdin` \| `argv` \| `argv-file-ref` \| `none`), `outputChannel` (`stdout` \| `file-arg`), `outputArg` (required when `outputChannel` is `file-arg`), `modelArg` (string or `null`), `effortChannel` (`none` \| `argv` \| `env`), `env` (optional; an object of environment name/value pairs, string values only, merged over the inherited environment for that one spawn — keys must match the portable environment-name grammar `[A-Za-z_][A-Za-z0-9_]*`, which is a portability policy rather than an OS limit, and `__proto__` is refused because it would be dropped before reaching the child). For `openai-http`: `hostConfigKey`, `defaultHost`, `path`, `modelDiscovery` (`none` \| `first-from-models-endpoint`), `fallbackModel`, `effortChannel`. `args` supports the `{{model}}`, `{{prompt}}`, `{{effort}}`, and `{{output}}` placeholders. **Every field in this object is disclosed at install and bound to the consent signature** — `env` and `defaultHost` by name in the consent prompt, the rest through a residual, so any change to a declared `invoke` field forces re-consent. `env` additionally **refuses execution-primitive names** — `PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `BASH_ENV`, `PYTHONPATH`, `PERL5OPT`, `RUBYOPT`, `GIT_SSH_COMMAND`, `JAVA_TOOL_OPTIONS` and siblings, matched case-insensitively (Windows environment lookup is). A lane needing a specific executable declares an absolute `binary` rather than reshaping the child's `PATH`. That denylist is defence in depth and not the boundary: it cannot be complete against an arbitrary child, and disclosure runs before validation, so install-time consent — which shows every declared pair and warns on execution-primitive names — is what actually gates them. |
 | `timeoutFloorMs` | number | Measured per-lane floor. Lane divergence here is real and correct — the descriptor's job is to declare divergence in one place, not to promise uniformity. |
+| `timeoutConfigKey` | string or `null` | Federated config key holding this lane's outer timeout override, in SECONDS, e.g. `review.timeouts.antigravity`. Falls back to `timeoutFloorMs` when unset or invalid (#3274). |
 | `emptyOutput` | closed enum | `stub-with-stderr` \| `handler-owned`. |
 | `reviewsSection` | string | The `REVIEWS.md` heading this lane renders under. Must be unique across the merged roster. |
 | `evidenceClass` | closed enum | `source-grounded` \| `diff-only` (diff-only findings are down-weighted in consensus). |
@@ -245,6 +284,7 @@ An unknown field inside a `reviewer` body is a **non-fatal warning on stderr, ne
       "effortChannel": "none"
     },
     "timeoutFloorMs": 360000,
+    "timeoutConfigKey": null,
     "emptyOutput": "stub-with-stderr",
     "reviewsSection": "CodeRabbit",
     "evidenceClass": "diff-only",
@@ -268,12 +308,13 @@ The following invariants are enforced at **build time** by `scripts/gen-capabili
 - **`requires` exist and are acyclic.** Every `id` listed in `requires` must exist in the registry; the dependency graph must be acyclic.
 - **`requires` is tier-monotone.** A `core` capability may not require a `standard` or `full` capability. A `standard` capability may not require a `full` capability.
 - **`point` values are from the closed set.** Every `point` in `steps`, `contributions`, and `gates` must be one of the 12 identifiers above.
-- **`contribution.into` is a published agent role.** The `into` value must be an agent role declared by the host contract for that loop extension point.
+- **`contribution.into` is a published agent role.** The `into` value must be an agent role declared by the host contract for that loop extension point. The published roles are **family-partitioned** (ADR-894 §3, Amendment 2026-09-14): every role belongs to exactly one of orchestration (`orchestrator`), planning (`researcher`, `planner`, `checker`) or execution (`executor`, `verifier`), and each loop step publishes exactly one family. So `execute:*` publishes `executor`/`verifier` and never `orchestrator`, and `discuss:*`/`verify:*`/`ship:*` publish `orchestrator` and never `executor`/`verifier`. The partition is enforced when the host contract is generated, so the role set a point publishes is stable rather than incidental.
 - **Config key exclusivity.** A federated config key must be owned by exactly one capability and absent from the central `config-schema`. Presence in both is a collision; a half-migrated key fails the build gate.
 - **Artefact production uniqueness per point.** No two capability steps may `produces` the same artefact name at the same loop extension point.
 - **`engines.gsd` is a hard gate.** A capability whose `engines.gsd` range does not satisfy the installed GSD version is blocked at install and skipped (with a warning) at load time.
 - **Path confinement.** Declared module paths may not use parent-directory traversal (`../`); modules are `require()`'d only from the capability's own install root.
 - **Reserved namespace.** Capability `id` values beginning with `gsd-`, `gsd-core-`, or `anthropic-` are reserved; third-party capabilities using these prefixes are rejected.
+- **`taskContentResolver.trackerPrefix` uniqueness, feature-only.** `trackerPrefix` must be unique across the merged first-party ∪ overlay capability set (mirrors `reviewsSection` uniqueness on the reviewer body above); a collision is a build-time violation. `taskContentResolver` is admissible only on `role: "feature"` bodies.
 
 ---
 

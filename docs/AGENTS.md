@@ -1,6 +1,6 @@
 # GSD Agent Reference
 
-> Full role cards for 21 primary agents plus concise stubs for 12 advanced/specialized agents (33 shipped agents total). The `agents/` directory and [`docs/INVENTORY.md`](INVENTORY.md) are the authoritative roster; see [Architecture](ARCHITECTURE.md) for context.
+> Full role cards for 22 primary agents plus concise stubs for 12 advanced/specialized agents (34 shipped agents total). The `agents/` directory and [`docs/INVENTORY.md`](INVENTORY.md) are the authoritative roster; see [Architecture](ARCHITECTURE.md) for context.
 
 ---
 
@@ -8,9 +8,11 @@
 
 GSD uses a multi-agent architecture where thin orchestrators (workflow files) spawn specialized agents with fresh context windows. Each agent has a focused role, limited tool access, and produces specific artifacts.
 
+**Required reading (#3423):** the canonical spawn-block tag is `<required_reading>` on BOTH sides — orchestrators emit it, and gating agents enforce it ("you MUST use the Read tool to load every file listed there before performing any other actions"). The legacy `<files_to_read>` emit-tag is retired and banned repo-wide by `tests/agent-required-reading-consistency.test.cjs`, because a mismatched pair silently disarms the enforcement clause.
+
 ### Agent Categories
 
-> The table below covers the **21 primary agents** detailed in this section. Thirteen additional shipped agents (pattern-mapper, debug-session-manager, code-reviewer, code-fixer, ai-researcher, domain-researcher, eval-planner, eval-auditor, framework-selector, intel-updater, doc-classifier, doc-synthesizer, mempalace-curator) have concise stubs in the [Advanced and Specialized Agents](#advanced-and-specialized-agents) section below. For the authoritative 34-agent roster, see [`docs/INVENTORY.md`](INVENTORY.md) and the `agents/` directory.
+> The table below covers the **22 primary agents** detailed in this section. Thirteen additional shipped agents (pattern-mapper, debug-session-manager, code-reviewer, code-fixer, ai-researcher, domain-researcher, eval-planner, eval-auditor, framework-selector, intel-updater, doc-classifier, doc-synthesizer, mempalace-curator) have concise stubs in the [Advanced and Specialized Agents](#advanced-and-specialized-agents) section below. For the authoritative 35-agent roster, see [`docs/INVENTORY.md`](INVENTORY.md) and the `agents/` directory.
 
 | Category | Count | Agents |
 |----------|-------|--------|
@@ -21,7 +23,7 @@ GSD uses a multi-agent architecture where thin orchestrators (workflow files) sp
 | Roadmappers | 1 | roadmapper |
 | Executors | 1 | executor |
 | Checkers | 3 | plan-checker, integration-checker, ui-checker |
-| Verifiers | 1 | verifier |
+| Verifiers | 2 | verifier, dom-verifier |
 | Auditors | 3 | nyquist-auditor, ui-auditor, security-auditor |
 | Mappers | 1 | codebase-mapper |
 | Debuggers | 1 | debugger |
@@ -67,9 +69,11 @@ GSD uses a multi-agent architecture where thin orchestrators (workflow files) sp
 
 **Capabilities:**
 - Reads CONTEXT.md to focus research on user's decisions
+- Queries the project knowledge graph through the `graphify` CLI when it is on `PATH` (IDF-ranked, fuzzy-matched, context-filtered seeding), falling back to the built-in substring-seeded reader otherwise (#4836)
 - Investigates implementation patterns for the specific phase domain
 - Detects test infrastructure for Nyquist validation mapping
 - Tags in-repo discrete values (enums, schema unions, error codes, status constants, paths) `[VERIFIED]` only after reading the source-of-truth file that run, citing path and line range, and quoting the values verbatim
+- Refuses `[VERIFIED]` for a compatibility claim resting on *missing* metadata (no `python_requires`, no `engines` field, no per-version classifier, no changelog entry, no matching support-matrix row) — an absence constrains no version, and an enumerated allow-list that stops short of the target is still an absence, so only a positive falsification attempt with its failing output pasted earns the tag; anything less stays `[ASSUMED]`
 
 ---
 
@@ -91,6 +95,7 @@ GSD uses a multi-agent architecture where thin orchestrators (workflow files) sp
 - Offers shadcn initialization for React/Next.js/Vite projects
 - Asks only unanswered design contract questions
 - Enforces registry safety gate for third-party components
+- **Enumerates the component inventory rather than recalling it (#2845):** the UI-SPEC's `## Component Inventory` carries a provenance line — the command that enumerated it, the count it returned, the resolved `<package>@<version>`, and the date — or, when nothing can enumerate it, a `Could not enumerate: <reason>` record in the same slot
 
 ---
 
@@ -169,10 +174,13 @@ GSD uses a multi-agent architecture where thin orchestrators (workflow files) sp
 
 **Key behaviors:**
 - Reads PROJECT.md, REQUIREMENTS.md, CONTEXT.md, RESEARCH.md
+- Queries the project knowledge graph through the `graphify` CLI when it is on `PATH`, adding `graphify affected` for reverse traversal, and falls back to the built-in substring-seeded reader otherwise (#4836)
 - Creates 2-3 atomic task plans sized for single context windows
 - Uses XML structure with `<task>` elements
+- Emits a `<fails_when>` sibling for every runnable `<automated>` verify command, naming what output constitutes failure (#3172)
 - Includes `read_first` and `acceptance_criteria` sections
 - Groups plans into dependency waves
+- Applies an ordered minimum-solution check after preserving locked decisions and requirement coverage, preferring existing project behavior, standard-library or native-platform capability, and already-installed dependencies before new implementation (#4089)
 - Performs reachability check to validate plan steps reference accessible files and APIs (v1.32)
 - Enforces a comment-text discipline HARD GATE at plan-write time (`verify.plan-structure`): a literal that an acceptance criterion negative-greps for (`grep -c 'LIT' file == 0`) must not appear verbatim in an `<action>` body; violations fail plan creation. Use `<!-- planner-discipline-allow: LIT -->` to allowlist a legitimate occurrence. (#429)
 
@@ -217,7 +225,7 @@ GSD uses a multi-agent architecture where thin orchestrators (workflow files) sp
 - Follows XML task instructions precisely
 - Atomic git commit per completed task
 - Handles task types: auto, tracer, checkpoint (human-verify, decision, human-action)
-- Tracer feedback gate: after a `tracer` slice, verifies it end-to-end before expansion tasks — autonomous runs halt on failure; interactive runs emit a human-verify checkpoint
+- Tracer feedback gate: after a `tracer` slice, verifies it end-to-end before expansion tasks — autonomous runs halt on failure; interactive runs honor `workflow.human_verify_mode` (under the `end-of-phase` default an automated-only `<verify>` continues with no checkpoint; otherwise a human-verify checkpoint is emitted, #3299)
 - Reports deviations from plan in SUMMARY.md
 - Invokes node repair on verification failure
 
@@ -237,15 +245,28 @@ GSD uses a multi-agent architecture where thin orchestrators (workflow files) sp
 | **Color** | Green |
 | **Produces** | PASS/FAIL verdict with specific feedback |
 
-**8 Verification Dimensions:**
-1. Requirement coverage
-2. Task atomicity
-3. Dependency ordering
-4. File scope
-5. Verification commands
-6. Context fit
-7. Gap detection
-8. Nyquist compliance (when enabled)
+**Verification Dimensions** — labels match the agent's own `## Dimension <N>` headings:
+
+| # | Dimension |
+|---|---|
+| 1 | Requirement coverage |
+| 2 | Task completeness |
+| 3 | Dependency correctness |
+| 3b | Undeclared / temporal coupling — advisory; flags same-wave plan pairs coupled through shared mutable state or execution order with no `depends_on` between them |
+| 4 | Key links planned |
+| 5 | Scope sanity |
+| 6 | Verification derivation |
+| 7 | Context compliance (when CONTEXT.md exists) |
+| 7b | Scope reduction detection |
+| 7c | Architectural tier compliance (when RESEARCH.md defines a responsibility map) |
+| 8 | Nyquist compliance (when enabled) — checks 8a-8e cover automated-verify presence, feedback latency, sampling continuity and Wave 0 completeness; check 8f blocks a runnable `<automated>` command with no stated `<fails_when>` failing direction (#3172) |
+| 9 | Cross-plan data contracts |
+| 10 | CLAUDE.md compliance |
+| 11 | Research resolution |
+| 12 | Pattern compliance |
+
+Three further dimensions carry no number: **Verify Command Format Sanity**,
+**Verify Command Path Resolvability**, and **Numeric/Factual Claim Authority**.
 
 ---
 
@@ -279,7 +300,20 @@ GSD uses a multi-agent architecture where thin orchestrators (workflow files) sp
 | **Color** | Cyan |
 | **Produces** | BLOCK/FLAG/PASS verdict |
 
+**Verification Dimensions** — labels match the agent's own `## Dimension <N>` headings:
+
+| # | Dimension |
+|---|---|
+| 1 | Copywriting |
+| 2 | Visuals |
+| 3 | Color |
+| 4 | Typography |
+| 5 | Spacing |
+| 6 | Registry Safety |
+| 7 | Inventory Provenance |
+
 **Key behaviors:**
+- **Inventory provenance (#2845):** a UI-SPEC whose component inventory carries no provenance line is reported as a defect, and the inventory is downgraded from a closed allowlist to a **non-exhaustive list of known-good components** — so an executor is never blocked from something the spec merely failed to mention. A spec with no inventory at all PASSes, which is what keeps every UI-SPEC written before the dimension existed validating unchanged. The checker never executes the recorded command; it reads the spec as a document. **Limits, because the dimension is narrower than it reads:** the line makes an inventory's origin falsifiable, not verified — nothing re-runs the command or compares the count, so a fabricated line passes; the rule is agent-applied like the other six, not a schema check; and "never executes the recorded command" is an instruction rather than a capability boundary, since the checker holds a `Bash` grant it needs for the agent-skills bootstrap. See [Security model → Trade-offs and limits](explanation/security-model.md#trade-offs-and-limits) and [How to design a UI phase](how-to/design-a-ui-phase.md#what-this-check-is-and-is-not).
 - **Adversarial stance / "The Auditor" (#1578):** applies explicit BLOCK/FLAG/PASS tiers and an anti-capitulation rule that resists author-framing pressure while still allowing self-correction when the prior dimension application was mistaken. Persona effects are strongest on Sonnet-class reasoning and unvalidated on budget/Haiku-class routing; the criteria and evidence remain authoritative.
 
 ---
@@ -306,6 +340,10 @@ GSD uses a multi-agent architecture where thin orchestrators (workflow files) sp
 - **Test quality audit** (v1.32): verifies that tests prove what they claim by checking for disabled/skipped tests on requirements, circular test patterns (system generating its own expected values), assertion strength (existence vs. value vs. behavioral), and expected value provenance. Blockers from test quality audit override an otherwise passing verification
 - Runs the full workspace test suite at most once per verification — proves a test *exists* by enumeration and that it *passes* via a single named test, never re-running the whole suite per must-have.
 - **Behavior-dependent calibration (#966):** a must-have that asserts a state transition or a cancellation/cleanup/ordering invariant is marked `⚠️ PRESENT_BEHAVIOR_UNVERIFIED` (not `VERIFIED`) when no test exercises it — excluded from the `verified_truths` score, counted in the `behavior_unverified` frontmatter field, and routed to human verification, so a clean `N/N` certifies behavioral evidence rather than mere symbol presence.
+- **Coincidental-reliance advisory (#1955):** a truth that reaches `✓ VERIFIED` is additionally asked *why* it holds. When the recorded evidence shows the truth holding for an incidental reason — `undeclared-precondition`, `incidental-ordering`, or `fixture-only` — the verdict is qualified as `✓ VERIFIED (coincidental-reliance)` and the truth is listed in the `coincidental_reliance_items` frontmatter field with what to harden. This is **advisory**: the base `✓ VERIFIED` token is unchanged, the truth still counts toward `verified_truths`, the overall `status` is unaffected, and no human-verification item is emitted — a passing phase still passes. It classifies evidence the verifier already gathered rather than asking it to rate its own confidence — but it is honestly an **endogenous** check, and `gsd-core/references/honest-verifier.md` records that endogenous gates are measurably weaker than the exogenous `backstop` tag it routes on. Advisory status is the consequence, not a coincidence: a miss costs exactly today's behaviour (a plain `✓ VERIFIED`) and a false positive costs one line of prose, never a failed phase, so a weaker mechanism is affordable here in a way it would not be on a pass/fail axis. Its precision is unmeasured. It complements the two existing axes: `PRESENT_BEHAVIOR_UNVERIFIED` is *no* behavioral evidence, `insufficient_spec` is an under-specified truth, and this is evidence that exists and passes for the wrong reason.
+
+  The advisory is carried by two surfaces. `agents/gsd-verifier.md` (Step 3, sub-step 5c) holds the detection rule, and the verifier's eagerly-imported `gsd-core/references/verifier-phase-gates.md` points at the canonical report template `@~/.claude/gsd-core/templates/verification-report.md`, whose `## Guidelines` carry the same instruction. (The former third surface, the retired `verify-phase` workflow, was deleted as an orphan in #1892 — every verification path is subagent-shaped today.)
+- **Convergence evidence gate (#3304):** during re-verification (after a `/gsd-plan-phase --gaps` cycle), Step 7's anti-pattern scan re-runs at full, unbounded scope — by design — but a 🛑 Blocker it finds no longer auto-reverts a completed gap-closure round on its own judgment alone. A blocker other than the self-evidencing debt-marker check (`TBD`/`FIXME`/`XXX`) blocks unconditionally only if it is a carried-forward gap from the prior `VERIFICATION.md` or its file was git-modified since the prior pass (a regression, fail-closed toward blocking when history is unresolvable); otherwise it predates the gap-closure round unflagged and needs deterministic evidence — a named test run red, or another concrete reproducible artifact — to stay blocking. Unevidenced, it downgrades to the `advisory:` frontmatter list and the report's "Advisory (New Scope, Unevidenced)" section instead of setting `status: gaps_found`. Full algorithm in `gsd-core/references/verifier-evidence-gate.md`.
 
 ---
 
@@ -342,6 +380,7 @@ GSD uses a multi-agent architecture where thin orchestrators (workflow files) sp
 | **Model (balanced)** | Sonnet |
 | **Color** | Pink |
 | **Produces** | `{phase}-UI-REVIEW.md` with scores |
+| **Interaction capture** | `workflow.ui_interaction_capture` (default `false`) |
 
 **6 Audit Pillars (scored 1-4):**
 1. Copywriting
@@ -350,6 +389,50 @@ GSD uses a multi-agent architecture where thin orchestrators (workflow files) sp
 4. Typography
 5. Spacing
 6. Experience Design
+
+**Interaction capture (default-off).** The static screenshots are three viewport captures of
+the first paint, taken with `npx playwright screenshot`, which has no interaction verb — so a
+hover state, an open menu, a focus ring or a form's validation state never appears in them.
+With `workflow.ui_interaction_capture` on, `/gsd-ui-review` passes `interaction_capture: true`
+in the auditor's `<config>` block and the auditor adds post-interaction captures through the
+`chrome-devtools` CLI (the second binary in the `chrome-devtools-mcp` package), driven from
+`Bash` against a throwaway `--isolated` profile: no MCP server, no `tools:` change. It needs an
+installed Chrome (`CHROME_BIN` overrides discovery). With the key off, or no Chrome resolved,
+the section prints one line and the Playwright-only path runs exactly as before. The report's
+`**Interaction captures:**` field carries the outcome — off, skipped with its reason, or the
+number of states captured — and an interaction state that was not captured is never reported as
+observed. See [Enable UI interaction capture](how-to/enable-ui-interaction-capture.md).
+
+---
+
+### gsd-dom-verifier
+
+**Role:** Observes a live DOM and reports which of a wave's stated UI acceptance criteria hold. Additive — never blocks.
+
+| Property | Value |
+|----------|-------|
+| **Spawned by** | `live-dom-uat` capability step at `execute:wave:post` |
+| **Parallelism** | One per wave |
+| **Tools** | Read, Write, Glob, Grep, mcp__chrome-devtools__*, mcp__claude-in-chrome__* |
+| **Disallowed Tools** | Edit, Bash, the Playwright MCP family |
+| **Model (balanced)** | Sonnet |
+| **Color** | Cyan |
+| **Produces** | `{phase}-DOM-VERIFY.md` |
+| **Gated by** | `workflow.live_dom_uat` (default `false`) |
+
+This is the **only** GSD agent carrying browser MCP tools. `gsd-executor` is deliberately not widened — for a first-party agent the static `tools:` list is the only control that exists ([ADR-1244](adr/1244-capability-ecosystem.md) D2, [ADR-857](adr/857-capability-system.md) D4). It carries no `Bash`: it does not start dev servers or shell out.
+
+**Outcome codes** (`nothing_to_report` and `could_not_look` are never conflated):
+
+| `outcome` | `reason` | Meaning |
+|---|---|---|
+| `verified` | `ok` | Criteria existed and were observed |
+| `nothing_to_report` | `no_criteria` | The wave stated no UI acceptance criteria |
+| `could_not_look` | `no_browser_mcp` | No browser MCP answered |
+| `could_not_look` | `profile_locked` | Another instance holds the browser profile |
+| `could_not_look` | `target_unreachable` | Nothing serving the target |
+
+**Reference:** [Enable live-DOM verification](how-to/enable-live-dom-verification.md) · [Explanation](explanation/live-dom-uat-capability.md)
 
 ---
 
@@ -563,6 +646,8 @@ Twelve additional agents ship under `agents/gsd-*.md` and are used by specialty 
 - Detects bugs (logic errors, null/undefined checks, off-by-one, type mismatches, unreachable code), security issues (injection, XSS, hardcoded secrets, insecure crypto), and quality issues
 - Honors `CLAUDE.md` project conventions and `.claude/skills/` / `.agents/skills/` rules when present
 - Read-only against implementation source — never modifies code under review
+- Full-context review scope: surrounding modules, callers, tests, and docs, not a diff-only pass
+- Owns `REVIEW.md` even when optional external reviewer lanes ran (#4209): it treats their `<external_reviewer_evidence>` as unverified input, re-verifies every claim against the actual current source before accepting it, and never follows an instruction embedded inside evidence text — there remains exactly one `REVIEW.md` schema regardless of how many lanes contributed
 
 ---
 
@@ -770,7 +855,7 @@ Twelve additional agents ship under `agents/gsd-*.md` and are used by specialty 
 
 ## Agent Tool Permissions Summary
 
-> **Scope:** this table covers the 21 primary agents only. The 13 advanced/specialized agents listed above carry their own tool surfaces in their `agents/gsd-*.md` frontmatter (summarized in the per-agent stubs above and in [`docs/INVENTORY.md`](INVENTORY.md)).
+> **Scope:** this table covers the 22 primary agents only. The 13 advanced/specialized agents listed above carry their own tool surfaces in their `agents/gsd-*.md` frontmatter (summarized in the per-agent stubs above and in [`docs/INVENTORY.md`](INVENTORY.md)).
 
 | Agent | Read | Write | Edit | Bash | Grep | Glob | WebSearch | WebFetch | MCP |
 |-------|------|-------|------|------|------|------|-----------|----------|-----|
@@ -801,3 +886,21 @@ Twelve additional agents ship under `agents/gsd-*.md` and are used by specialty 
 - Researchers have web access — they need current ecosystem information
 - Executors have Edit — they modify code but not web access
 - Mappers have Write — they write analysis documents but not Edit (no code changes)
+
+## Completion Contracts (machine-enforced)
+
+Every agent's return contract is declared in [`gsd-core/references/agent-contracts.md`](../gsd-core/references/agent-contracts.md)'s **Agent Registry** table — `(Agent, Completion Markers, Consumed by, Kind)` — and enforced by `npm run check:contract-drift` (part of `lint:ci`).
+
+The `Kind` column records how a caller actually detects the agent's completion:
+
+| Kind | Detection mechanism |
+|---|---|
+| `sentinel-match` | Exact-case string match against a declared marker (by a workflow, command, or another agent) |
+| `artifact+query` | The agent writes a file; the caller reads or queries that artifact |
+| `structured-return` | The agent returns parseable sections/JSON inline; the caller reads the return text |
+
+When you add an agent or change what it returns, update its registry row in the same change — a stale row is a build failure, not a documentation cleanup for later. Markers are extracted **fence-aware** (a heading inside a fenced block is the emitted template; the same words outside a fence are prose documentation), producer scope includes `@`-included `gsd-core/references/**` files, and consumers are matched **exact-case** (a case-insensitive hit is reported as a collision, never accepted). A marker that is deliberately emitted but matched by nothing carries an `(unconsumed: <reason>)` annotation — an auditable exemption that waives only the consumer requirement.
+
+The same check also enforces the read-tag pairing: whenever a declared consumer emits `<required_reading>`, the producing agent's instructions must reference the gate (directly or via an `@`-included reference) — and the retired `<files_to_read>` vocabulary may not reappear under `workflows/`, `commands/`, or `agents/`.
+
+For acting on a specific finding, see [How to resolve a contract-drift finding](how-to/resolve-contract-drift-findings.md).

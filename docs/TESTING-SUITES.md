@@ -33,7 +33,8 @@ The suite-suffix convention was chosen over a directory layout (`tests/security/
 
 ## Regression tests
 
-**Do not create new top-level `tests/bug-NNNN-*.test.cjs` files.** Add the
+**Do not create new top-level `tests/bug-NNNN-*.test.cjs`,
+`tests/fix-NNNN-*.test.cjs`, or `tests/issue-NNNN-*.test.cjs` files.** Add the
 regression case to the owning module's main test file instead (e.g. a
 `describe('regressions')` block in `tests/<module>.test.cjs`).
 
@@ -42,18 +43,59 @@ count — is the unit of CI overhead, and it is worst on Windows lanes where
 every spawn is Defender-scanned. The 2026-06 CI audit found 244 one-off
 `bug-*` files (~38% of the suite). That population is grandfathered in
 `scripts/lint-regression-test-names.allowlist.json` and enforced by an
-identity ratchet (`npm run lint:regression-names`, part of `npm run lint:ci`):
+identity ratchet (`npm run lint:regression-names`, part of `npm run lint:ci`),
+which also bans `fix-*` and `issue-*` NNNN-prefixed files the same way:
 
-- A **new** `bug-*` file fails CI — fold it into the owning module's file.
+- A **new** `bug-*`, `fix-*`, or `issue-*` NNNN-prefixed file fails CI — fold
+  it into the owning module's file.
 - **Deleting/consolidating** a grandfathered file requires pruning its
   allowlist entry, so the baseline only ever shrinks.
 - **Inherited drift** (the failure names files your PR didn't add — e.g. the
-  base branch merged `bug-*` files without feeding the allowlist, or you
-  rebased and carried a pre-rebase allowlist): run
+  base branch merged `bug-*`/`fix-*`/`issue-*` files without feeding the
+  allowlist, or you rebased and carried a pre-rebase allowlist): run
   `node scripts/lint-regression-test-names.cjs --update` and commit the
   regenerated allowlist. Snapshot artifacts like this allowlist (and
   `docs/INVENTORY.md`) must be regenerated **after** rebasing, never carried
   through a rebase.
+
+### A folded suite may appear only once per host
+
+When a standalone file is folded into its owning module's test file, the moved
+suite is wrapped in a self-contained block carrying a marker:
+
+```javascript
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/bug-376-claude-js-hook-gsd-rewriter.test.cjs — …
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:bug-376-claude-js-hook-gsd-rewriter (…)", () => { … });
+}
+```
+
+Because the block is self-contained, a **second verbatim copy in the same host
+parses, registers, and passes — twice.** Nothing in a green suite reports it.
+[#3271](https://github.com/open-gsd/gsd-core/issues/3271) found 25 such copies
+(~5,800 lines) across three install suites, all from a single stale-base
+re-application during the consolidation epic. The cost is not only wasted CI on
+every lane: it is a `DEFECT.GENERATIVE-FIX` trap, because a contributor fixing
+one of those regressions edits the copy they found and leaves the other
+asserting the old behavior, with the suite still green.
+
+`local/no-duplicate-fold-marker` (`eslint-rules/no-duplicate-fold-marker.cjs`,
+error under `tests/**/*.cjs`) reports the second and every later occurrence of a
+`folded:<marker>` title in one file, naming the line the first occurrence sits
+on. **When it fires, delete the copy it points at** — the two blocks are the
+same suite, so the fix is removal, never an `eslint-disable`.
+
+It keys on the whitespace-delimited token after `folded:`, which matters in both
+directions. A narrower key that stops at `.` would collide
+`feat-443-effort-fast-mode.integration` with `feat-443-effort-fast-mode` — two
+genuinely distinct suites that coexist in `tests/model-resolver.test.cjs`. Keying
+on the *whole* title instead would let a re-fold under a different batch label
+slip through, which is exactly the shape #3271 took. Titles without a `folded:`
+prefix, non-literal titles, and the same marker appearing in two *different* host
+files are all left alone.
 
 The ratchet deliberately covers only `bug-*`. Files named `feat-NNNN-*` /
 `enh-NNNN-*` are *feature* test files — one (or one per suite) per feature is
@@ -79,6 +121,17 @@ layers:
 |---|---|---|
 | **Differential attribution size ratchet** (primary, #2724 / ADR-2719 §4) | The same computed-attribution check that replaced the golden-install-parity fixtures also reports growth in any `gsd-core/workflows/*.md` or `agents/gsd-*.md` file, with the exact byte delta, comparing PR HEAD against `next`. Unacknowledged growth is a hard failure; shrinkage needs no acknowledgment. No committed snapshot — nothing to regenerate by hand. | `tests/emitted-attribution.test.cjs` (real-tree test) via `tests/helpers/emitted-diff.cjs` |
 | **Loose tier hard caps** (backstop) | Absolute outer red lines per tier — workflows: `XL ≤ 98304`, `LARGE ≤ 61440`, `DEFAULT ≤ 40960` bytes; agents: `XL ≤ 57344`, `LARGE ≤ 49152`, `DEFAULT ≤ 24576` bytes. A cap is **never raised** when a file approaches it: crossing it means *extract*, not bump. Independent of the ratchet above — unaffected by #2724. | `XL/LARGE/DEFAULT_CAP` in each guard file |
+| **Headroom census + reserved margin** (visibility, [#4261](https://github.com/open-gsd/gsd-core/issues/4261)) | Every run prints each capped file's remaining bytes and percentage used — green runs included — sorted least-headroom-first, and appends a table of the files past a **95% reserved margin** to the GitHub job summary. The margin **reports, it does not fail**: a file at 96% is not broken, it is a file whose next contributor should extract before adding. Nothing here raises or relaxes a cap. | `buildHeadroomRows` / `marginFor` in `scripts/workflow-size.cjs` |
+
+Why the census exists: each PR's CI measures only its own base plus its own
+diff, so two PRs that are individually under a cap can be jointly over it, and
+no run either of them produces can show that. The census does not solve that
+directly — measuring on the merge result would, and was deliberately left out
+of #4261's approved scope — but it makes the density that causes it legible
+before the collision, which a passing run previously did not. It also replaces
+the hand-written per-tier high-water comments in both guard files, which had
+gone stale by several kilobytes and were themselves the reason the shrinking
+margin went unnoticed.
 
 `discuss-phase.md` additionally has a thin-dispatcher target of `< 32000` bytes
 (the discuss-phase progressive-disclosure split, #717). A net-new agent is
@@ -95,11 +148,31 @@ The differential attribution check reports the file and the byte delta. To resol
 1. **Justify the growth in your PR** (a sentence in the description is enough) —
    the acknowledgment entry (below) is the review record that the larger size
    was a deliberate, seen decision, not silent drift.
-2. **Add an acknowledgment entry** in `tests/emitted-drift-ack.json` naming the
-   file and the reason, per `CONTEXT.md`'s `### Emitted Artifact Provenance`
-   entry. This is deliberately a committed file, not a flag — the entry appears
-   in your PR diff, so touching it *is* the visible signal.
-3. **Or shrink it instead of acknowledging.** Prefer extraction when the growth
+2. **Add an acknowledgment trailer** to one of your own commits (ADR-3942),
+   naming the file and the reason, per `CONTRIBUTING.md`'s "Editing shipped
+   content" section and `CONTEXT.md`'s `### Emitted Artifact Provenance` entry:
+
+   ```
+   Emitted-Drift-Ack-Growth: explore.md — new dispatch section, reasoning ships with the block
+   ```
+
+   Growth keys on the **bare filename** as it appears under `gsd-core/workflows/`
+   or `agents/`; an unattributable **hash** ripple uses
+   `Emitted-Drift-Ack-Hash:` and keys on the emitted path (which always contains
+   a `/`). The two are separate namespaces — a growth trailer will not excuse a
+   hash ripple, and the failure output says which one applies. The trailer is the
+   review record that the larger size was a deliberate, seen decision.
+
+   If you need to change an acknowledgment, amend the commit carrying it. That is
+   deliberate: the trailer cannot drift out of sync with the diff it explains,
+   because changing either changes the sha and re-runs the gate.
+3. **There is nothing to clean up afterwards.** The trailer is read from
+   `git log $(git merge-base <base> HEAD)..HEAD` — your commits and no others —
+   so once your PR merges it is out of range by construction. It never becomes
+   "spent", it owns no shared key space, it cannot conflict with anyone else's,
+   and no sweeper has to delete it. That is the whole reason ADR-3942 moved the
+   acknowledgment off the working tree.
+4. **Or shrink it instead of acknowledging.** Prefer extraction when the growth
    is incidental: for a workflow, move per-mode bodies to
    `workflows/<name>/modes/`, templates to `workflows/<name>/templates/`, and
    shared prose to `gsd-core/references/`; for an agent, lift shared boilerplate
@@ -118,7 +191,7 @@ help — that is the signal to extract, per step 3.
 |---|---|
 | `scripts/workflow-size.cjs` | Single source of truth — LF-normalized byte counter (`lfByteCount`) + generic `measureMdFiles(dir, predicate)` (backs both workflows and agents) + workflow enumeration (`listWorkflowStems`, `measureWorkflows`). Imported by both guards and by `tests/helpers/emitted-runtime.cjs`'s `currentSizes()` so they can never measure differently. |
 | `tests/emitted-attribution.test.cjs` + `tests/helpers/emitted-diff.cjs` | The differential attribution check and its size ratchet (ADR-2719). The sole mechanism for both emitted-content propagation AND per-file size growth as of #2724. |
-| `tests/emitted-drift-ack.json` | Committed acknowledgment file for unattributable emitted-content ripples and for size growth. Absent = no acks; its presence is the alarm. |
+| `Emitted-Drift-Ack-Hash:` / `Emitted-Drift-Ack-Growth:` commit trailers (ADR-3942) | The acknowledgment mechanism for unattributable emitted-content ripples and for size growth. Read from `git log $(git merge-base <base> HEAD)..HEAD` — no committed file, nothing to sweep; a merged trailer is out of range by construction. |
 | `npm run regen:derived` | Runs every remaining generator in dependency order (build → registry → ADR index → capability matrix → inventory manifest → manifest versions → `tests/fixtures/install-tree/*.json`). |
 | `tests/workflow-size-budget.test.cjs` | The workflow tier hard-cap guards, plus the `discuss-phase` progressive-disclosure checks. |
 | `tests/agent-size-budget.test.cjs` | The agent tier hard-cap guards (the agent analog). |
@@ -143,7 +216,8 @@ self-test. Separately, `scripts/qa-smell-ratchet.cjs` drives that same harness
 end to end against the real `gsd-tools` binary and turns its findings into a
 CI gate — run it with `npm run lint:qa-smells`.
 
-The harness's oracles (`tests/qa/oracles.cjs`) distinguish two severities:
+The gate has three independent inputs. The harness's oracles
+(`tests/qa/oracles.cjs`) supply the first two:
 
 - A **violation** is the engine breaking a documented contract. It always
   fails the build — baseline or no baseline, acknowledged or not.
@@ -153,6 +227,34 @@ The harness's oracles (`tests/qa/oracles.cjs`) distinguish two severities:
   `tests/qa/smell-baseline.json` (one that stopped firing — the baseline is
   shrink-only, so a fixed or changed scenario must be pruned, not left
   behind).
+
+The third comes from the scenarios themselves, not from an oracle:
+
+- A **scenario expectation failure** is a step's declared `expect` not
+  holding — the scenario asserted `percent: 100` and the engine returned
+  something else. Like a violation, it is **never acknowledgeable**: it
+  carries no fingerprint, so there is no `key` to put in a baseline entry or
+  an ack fragment. Fix the engine, or correct the expectation.
+
+Expectation failures were invisible to the gate until
+[#3597](https://github.com/open-gsd/gsd-core/issues/3597): `buildReport`
+counted them in `totals.violations` while `collectFindings` read only oracle
+violations, so a failing scenario printed `0 violations` and exited 0. The
+`multi-workstream` scenario failed on every CI run for three weeks without
+reddening a build. The invariant that keeps the two honest — asserted in
+`tests/loop-walk.qa.test.cjs` — is:
+
+```
+collectFindings().violations.length
+  + collectFindings().expectationFailures.length
+  === report.totals.violations
+```
+
+Note also that `scripts/qa-smell-ratchet.cjs` only invokes its own `main()`
+under `require.main === module`. That guard is what lets the QA suite
+`require()` the script to test `collectFindings` without kicking off a real
+20-scenario walk as an import side effect — the reason the gate's own logic
+had no test before #3597.
 
 Every smell must terminate in exactly one of TWO states — there is no third
 "accepted with a good explanation" state:
@@ -219,43 +321,169 @@ disagree, trust (and fix) the rule table.
 
 Unknown suites exit non-zero with the list of valid suites. Empty suites (e.g. `--suite security` before any security-tagged file exists) exit `0` with a `no tests in suite "..."` notice on stderr so CI lanes don't go red while a suite is being populated.
 
+## The live-config hermeticity guard
+
+Every `run-tests.cjs` invocation snapshots GSD's own install footprint in each
+live runtime config directory before the suite and re-checks it afterwards. It
+exists because the failure it catches is silent by construction: a test that
+resolves a config directory from the ambient environment instead of a sandbox
+writes into *your real* `~/.claude` (or `$GSD_HOME/.gsd`, or a Kimi
+`config.toml`), and nothing reports it. CI cannot catch this class at all —
+CI never has `CLAUDE_CONFIG_DIR` and friends set.
+
+The guard watches only what GSD unambiguously owns — its top-level install
+footprint plus `gsd-`-prefixed children of directories shared with the host
+agent — never whole config roots, because a host agent legitimately writing
+`history.jsonl` mid-run would make the guard cry wolf, and a guard that cries
+wolf gets switched off.
+
+Two environment variables control it:
+
+| Variable | Effect |
+|---|---|
+| `GSD_STRICT_LIVE_CONFIG_GUARD=1` | A detected write **fails the run**. Set on the Linux/macOS lanes of every CI job that runs the suite. |
+| `GSD_SKIP_LIVE_CONFIG_GUARD=1` | Skips the check entirely. |
+
+Unset, the guard **reports and does not fail** — deliberately, not timidly. On
+its first CI run it surfaced pre-existing leaks on the Windows lane, where
+`os.homedir()` reads `USERPROFILE` and ~190 test sites sandbox `HOME` alone.
+Those are real and worth fixing, but they are a different defect class, and a
+brand-new gate that instantly reds an unrelated lane gets reverted rather than
+obeyed. Windows lanes therefore stay report-only until that sweep lands; this
+repo has the pattern already, in the `local/no-source-grep` ESLint rule that
+shipped at `warn` and was promoted to `error` after its cleanup (ADR 452).
+
+`GSD_SKIP_LIVE_CONFIG_GUARD` is a bypass on a safety check, so it is documented
+here rather than left to be discovered in the source: an undocumented bypass is
+one people eventually set without knowing what they turned off. If you need it
+routinely, that is a bug report, not a workflow.
+
+Reported paths are labelled `CREATED`, `MODIFIED`, `DELETED`, or `UNVERIFIED`.
+`UNVERIFIED` means a scan bound was hit and the path could not be attested
+either way — it is never the same as clean.
+
+## The mergeability preflight
+
+Before any of the matrix below is provisioned, every `pull_request` compute lane
+waits on one shared gate: **`PR mergeability`**, the reusable workflow
+`.github/workflows/pr-mergeable-preflight.yml`. **A pull request with a merge
+conflict runs no CI at all until the conflict is resolved** (#3833).
+
+### Reference
+
+| Verdict | When | Job result | Effect on the pipeline |
+|---|---|---|---|
+| `MERGEABLE` | GitHub reported `mergeable: true` | success | everything runs as normal |
+| `CONFLICTED` | GitHub reported `mergeable: false` | **failure** | every gated job is skipped; `Required tests` and `Stryker mutation score` report **red** |
+| `INDETERMINATE` | mergeability still unknown after the retry budget, or the API read failed | success **(fails open)** | everything runs as normal; a `::warning::` is emitted |
+| `SKIPPED_NOT_A_PR` | the event is not `pull_request` (push, `workflow_dispatch`, a `release.yml` call into `install-smoke.yml`) | success | everything runs as normal; **zero** API calls |
+| `INDETERMINATE` (bootstrap) | `scripts/ci-pr-mergeability.cjs` is absent at the base sha | success **(fails open)** | everything runs as normal; a `::warning::` names the cause |
+
+The bootstrap row is a consequence of the checkout being pinned to the base sha:
+the preflight runs the script **as it exists on the base branch**, so the script
+is absent on the pull request that introduces it, and on any branch whose base
+predates it. Absent is not "conflicted" — it is one more thing the gate cannot
+determine, so it takes the same fail-open path. The arm is self-healing and
+never fires again once the script is on the base branch; a test pins it in place
+so a future reader does not mistake it for dead code.
+
+The verdict comes from `scripts/ci-pr-mergeability.cjs`, which polls
+`GET /repos/{owner}/{repo}/pulls/{number}` until `mergeable` is non-null.
+GitHub computes mergeability in an **asynchronous background job** and returns
+`null` while it is in progress, so a single cold read is never authoritative —
+the poll is required, not defensive.
+
+Two properties are load-bearing and easy to break:
+
+- **Only `mergeable === true` / `=== false` decides the verdict.** `null` is
+  falsy, so a truthiness test (`if (!mergeable)`) would classify every cold read
+  as a conflict and red every PR in the repo.
+- **`mergeable_state` never decides the verdict.** Its `blocked` value means
+  "required checks have not passed", which is true *while this very job is
+  running* — gating on it self-deadlocks the pipeline. It is read for the
+  failure message only.
+
+Gated: `test.yml` (`lint-tests`, `test`, `test-inert`,
+`test-conformance`, `coverage-gate`, `qa-loop-walk`, `required-tests`), `install-smoke.yml`,
+`mutation.yml`, `security-scan.yml`, `docs-required.yml`,
+`changeset-required.yml`, `default-flip-documentation.yml`, `branch-naming.yml`.
+
+**Deliberately not gated:** the `pull_request_target` policy and security lanes —
+auto-close-unsolicited-PRs, close-draft-PRs, the target/title/template
+validators, issue-link, and unauthorized-approval dismissal. Gating those would
+let a conflicted drive-by PR evade auto-close, so they keep running on a
+conflicted PR and a test asserts they are never wired to the preflight.
+
+### What it deliberately does not do
+
+**It applies no label.** The gate does not add or remove `needs-review: merge-conflict`.
+Eight caller workflows each invoke the preflight, so eight jobs would race to
+add-or-remove one label on every PR event, and it would force
+`pull-requests: write` into eight lanes that today hold `contents: read`.
+`needs-review: merge-conflict` stays a maintainer triage label applied during PR
+sweeps; the red check and its annotation are the machine signal.
+
+**It changes no branch protection.** `.github/rulesets/main-protection.json` is
+untouched and needs no new required context — GitHub natively refuses to merge a
+pull request with conflicts, so the ruleset already blocks it. (Adding the check
+as *required* before the workflow exists on the base branch would deadlock every
+open PR until it landed.)
+
+### What this does not replace
+
+`scripts/ci-rebase-check.cjs` is unchanged and still runs inside each matrix job,
+including its #2472 base-sha pin. The preflight is an early-exit optimization on
+GitHub's asynchronously-computed view; the in-job merge remains authoritative and
+covers the case where the base advances mid-run. **The gate is never a safety
+property** — every path except an explicit `mergeable: false` fails open, so an
+API outage simply restores the pre-#3833 behavior.
+
+### If your PR shows a red `PR mergeability` check
+
+The annotation names the base branch and the remedy. There is one step:
+
+```bash
+git fetch origin && git rebase origin/next && git push --force-with-lease
+```
+
+Resolve the conflicts the rebase reports, then push. The next `synchronize`
+event re-runs the preflight and the full pipeline comes back. (Because the
+sequence is a single command, this has no separate how-to page — see
+[CONTRIBUTING.md → Where Do I Open My PR?](../CONTRIBUTING.md#where-do-i-open-my-pr-branching-model)
+for the branching model that makes the rebase necessary in the first place.)
+
+Note the interaction with the sha-bound pass marker: a rebase changes your HEAD
+sha, which invalidates any prior remote-runner verification. Rebase *last*.
+
 ## CI matrix
 
-The `Tests` workflow runs every PR through a scoped gate generated by
-`scripts/ci-test-scope.cjs`.
+The `Tests` workflow (`.github/workflows/test.yml`) runs every PR through a scope
+computed by `scripts/ci-test-scope.cjs`'s `classify()`, which sets two flags —
+`product_changed` and `full_matrix` — from the changed-file list.
 
-| Lane | Node 22 | Node 24 |
-|---|---|---|
-| `ubuntu-latest` | scoped tests | unit + integration + security |
-| `windows-latest` | — | scoped Windows/path/shell tests |
-| `macos-latest` | full parity when required | full parity when required |
+All lanes run on **Node 24** — the `engines.node` floor (`>=24.0.0`) and the
+only supported runtime.
 
-- **Node 22** is the `engines.node` floor (`>=22.0.0`) — must stay green.
-- **Node 24** is the default development lane.
-- **Scoped tests** are selected from the changed paths, plus a small CLI/package
-  smoke set. They are for confidence on the affected surface, not for counting
-  tests.
+| Job | Lanes | Gated on | Purpose |
+|---|---|---|---|
+| `test` | `ubuntu-latest` (1 targeted + 3-shard full) | `product_changed == 'true'` | The default, always-scoped PR signal — the full `unit`/`integration`/`security` suites run once, sharded, on Linux. **Linux only**: its three `scope: windows` shards were deleted in #4641 (ADR-4641), which found them a second, redundant Windows selector alongside `test-conformance` |
+| `test-inert` | `ubuntu-latest` | `code_changed == 'true' && product_changed != 'true'` | A lightweight lane for PRs that touch only administrative/policy workflow files (code changed, but nothing that needs the real matrix) |
+| `test-conformance` | `windows-latest` (3-shard) + `macos-latest` (unsharded) | `code_changed == 'true' && full_matrix == 'true'` | Runs only the **platform-conformance-tier** file list (`scripts/lib/platform-conformance-tier.generated.cjs`, epic #4589 Phase 2/#4591) on real Windows/macOS — since #4641 the **sole** Windows and macOS selector in CI, not merely the sole gating one. Retired the parallel legacy full-suite matrix in #4603; #4641 removed the second Windows selector in `test` and narrowed the tier from 548 to 266 of 932 eligible unit-suite files (58.8% → 28.5%, measured 2026-09-11; the absolute counts track `next`'s test count, the percentages are what the ceiling test binds on). |
+| `coverage-gate` | `ubuntu-latest` | `product_changed == 'true' && test.result == 'success'` | Merges every `test` shard's coverage dumps and evaluates the threshold once (sharding moved this out of the `test` job itself — #2952) |
+| `qa-loop-walk` | `ubuntu-latest` | `product_changed == 'true'` | The QA smell-ratchet scenario walk (see "The QA smell ratchet" below) |
+| `required-tests` | `ubuntu-latest` | `always()` | Aggregates every job above into the one branch-protection-required check |
 
-The default PR gate runs the broad `unit` (under the c8 coverage gate),
-`integration`, and `security` suites once on Ubuntu / Node 24, scoped tests on
-Ubuntu / Node 22, and scoped tests on Windows / Node 24. "Scoped" means the
-diff-selected list from the rule table — not the full suite and not a fixed
-smoke set (the fixed smoke list is only the empty-selection fallback). The
-Windows lane's list is the Windows-sensitive subset of the selection, plus
-**every changed test file, unconditionally** (the #494 invariant, narrowed): a
-modified test is exercised on the divergent OS before merge at per-file cost,
-without paying for the three full parity lanes.
+`full_matrix` fires on any changed `tests/**/*.test.cjs` file unconditionally (restored
+by #4421 after #962's narrowing let a real regression through undetected), plus a
+handful of curated `RULES` (workflow/installer/hooks/env-gate changes) — see
+`scripts/ci-test-scope.cjs`'s own `classify()` for the exact, current rule set; this
+doc intentionally does not restate it in full, to avoid drifting out of sync with it.
 
-PRs touching workflow, package, test-runner, install, release, or
-Windows-sensitive surfaces also run the full parity matrix on macOS and the
-older Windows runtime, plus `install` and `slow` on the primary Ubuntu lane.
-Everything (including the full parity matrix) runs on every push to `next`,
-which covers the residual macOS / Windows-Node-22 cross-product for scoped PRs.
-
-Coverage runs inside the Ubuntu / Node 24 full lane (not a separate job — that
-duplicated the entire unit run) and stays single-lane because multiplying
-coverage across OS/runtime lanes adds cost without improving the threshold
-signal. Note the gate's deliberate blind spot: it measures
+Coverage is evaluated by the dedicated `coverage-gate` job (moved out of the `test`
+job by #2952, once sharding meant no single `test` runner saw the whole picture) and
+stays single-lane (Ubuntu / Node 24 only) because multiplying coverage across
+OS/runtime lanes adds cost without improving the threshold signal. Note the gate's
+deliberate blind spot: it measures
 `gsd-core/bin/lib/*.cjs` only — `scripts/`, `hooks/`, and `bin/` are
 unenforced, and `stryker.config.mjs` additionally excludes ~48% of lib lines
 from mutation testing (see the UNMUTATED list there). Widening either gate is
@@ -287,18 +515,67 @@ mis-ranked files badly enough that the slowest chunk ran ~3.9x the lightest.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `RUN_TESTS_MAX_FILES_PER_CHUNK` | `60` | Per-chunk weight budget. Weights are normalized so an **average-cost** file weighs 1, so this still reads as "about 60 average files". |
+| `RUN_TESTS_MAX_FILES_PER_CHUNK` | `60` (`22` on win32) | Per-chunk weight budget. Weights are normalized so an **average-cost** file weighs 1, so this still reads as "about 60 average files" (about 22 on win32). Windows gets a lower cap than Linux/macOS because the weight table's calibration does not transfer 1:1 to the Windows runner for install/subprocess-heavy work — see the derivation comment above `DEFAULT_MAX_FILES_PER_CHUNK` in `scripts/run-tests.cjs`. |
 | `RUN_TESTS_MAX_CMDLINE_CHARS` | `28000` | argv ceiling per chunk, with headroom under the Windows 32,767 limit. |
 | `RUN_TESTS_TIMINGS_FILE` | `tests/test-timings.json` | Path to the timing table. Tests override it to inject a synthetic cost profile. |
-| `RUN_TESTS_CHUNK_TIMEOUT_MS` | `600000` | Per-chunk timeout. |
+| `RUN_TESTS_CHUNK_TIMEOUT_MS` | `600000` | Per-chunk timeout. When it fires, the runner kills the chunk (on Windows it first attempts a whole-tree kill) and prints the in-flight-file diagnostic immediately, without waiting for the child's exit to be reported. |
+| `RUN_TESTS_CHUNK_KILL_GRACE_MS` | `30000` | Once a chunk times out, how long the runner waits for the child's exit to be observed before it stops waiting, reports that the exit was never confirmed, and aborts the remaining chunks. |
 
 The timing table is **advisory and deliberately un-gated**. There is no `--check`
 mode and no CI lint that fails on staleness, because timing data legitimately
-varies run to run. A file missing from the table falls back to the table's median
-weight, and a missing or unparseable table falls back to uniform weight — so
+varies run to run. A file missing from the table falls back to the table's mean
+weight (1), and a missing or unparseable table falls back to uniform weight — so
 drift costs chunk *balance*, never a red build. A count-based floor additionally
 guarantees the packer never produces fewer chunks than plain count-based packing
 would, so a badly stale table cannot collapse the suite into a few fat chunks.
+
+### CI job timeout budgets: report + near-cap warning (#4036)
+
+Every matrixed job — `test` in `test.yml`, `mutate` in
+`mutation.yml`, `smoke` in `install-smoke.yml` — declares a `timeout-minutes`
+cap. `tests/ci-test-job-timeout-budget.test.cjs` enforces that each checked-in
+cap stays at least the **headroom factor** (1.5x) above a documented,
+hand-measured cost for that job — now all three of the jobs above, not just
+`test`/`coverage-gate`/`test-inert` as before.
+
+`test-conformance` in `test.yml` (#4591, epic #4589 Phase 2) runs the
+`scripts/lib/platform-conformance-tier.generated.cjs` file list on
+`windows-latest` (sharded three ways) and `macos-latest` (unsharded) — the
+sole gating signal for real-OS coverage (#4603 retired the parallel
+legacy full-matrix safety-net job). It
+also declares a `timeout-minutes` cap and runs the same in-job near-cap check
+described below, but it has no `LANE_COSTS` entry in
+`tests/ci-test-job-timeout-budget.test.cjs` yet — no real, completed
+(non-cancelled) per-shard measurement exists — so the headroom-factor gate
+does not cover it until one lands.
+
+Two runtime mechanisms sit on top of that static gate, both new in #4036:
+
+- **In-job near-cap check** (`scripts/ci-check-job-near-cap.cjs`) — the last
+  step of each of the three jobs computes elapsed-vs-cap from a start-time
+  marker recorded as that job's first step. At >=90% of budget it emits a
+  `::warning::` annotation (visible in the PR Checks UI) and a
+  `$GITHUB_STEP_SUMMARY` block. Advisory only — it never fails the job. Known
+  limit: it cannot fire for a job actually killed by the timeout, since a
+  killed job never reaches its last step. That case is caught by the second
+  mechanism instead.
+- **Scheduled trending report** (`.github/workflows/ci-timeout-report.yml`,
+  `scripts/ci-timeout-report.cjs`) — runs daily and on `workflow_dispatch`. It
+  polls GitHub's Actions REST API for recently completed jobs across
+  `test.yml`, `mutation.yml`, and `install-smoke.yml`, resolves each job's
+  declared cap (a literal `timeout-minutes` for `test`/`test-conformance`/`smoke`, or
+  `scripts/mutation-matrix.cjs`'s `COVERED[<module>].timeoutMinutes` for
+  `mutate`'s per-module shards), and appends any new `(runId, jobName)`
+  records to `tests/ci-timeout-budget-history.jsonl`. Unlike the in-job check,
+  this also catches jobs killed by an actual timeout breach — GitHub's Jobs
+  API still reports `started_at`/`completed_at` for a cancelled job. Each run
+  opens a small, data-only PR carrying that run's new rows, since `next` is a
+  protected branch and nothing pushes to it directly — the same constraint
+  `auto-backmerge.yml` already works within.
+
+This does not retune any `timeout-minutes` value, rebalance shard composition,
+or trim what runs in shard 1 — those stay maintainer policy calls made from
+the accumulated history, not something either mechanism decides on its own.
 
 ### How-to: regenerate the timing table
 
@@ -308,8 +585,8 @@ event stream from a `gsd-test` run:
 
 ```bash
 node scripts/gen-test-timings.cjs \
-  ~/.local/state/gsd-test/runs/<run-id>/test-events-linux-node22.jsonl \
-  ~/.local/state/gsd-test/runs/<run-id>/test-events-linux-node24.jsonl
+  ~/.local/state/gsd-test/runs/<run-id>/test-events-linux-node24.jsonl \
+  ~/.local/state/gsd-test/runs/<run-id>/test-events-macos-node24.jsonl
 ```
 
 Pass every lane you have. A file's recorded time is the **max** across the

@@ -7,10 +7,9 @@
 ## Sintaxe de Comandos
 
 - **Claude Code / Copilot / OpenCode / Kilo:** `/gsd-command-name [args]` (forma com hífen)
-- **Gemini CLI:** `/gsd:command-name [args]` (forma com dois-pontos — o Gemini agrupa comandos sob `gsd:`)
 - **Codex:** `$gsd-command-name [args]`
 
-As formas com hífen e com dois-pontos são *variações específicas do runtime para o mesmo comando*. Independente do runtime utilizado, o instalador escreve a forma correta no diretório de comandos do seu runtime.
+Independente do runtime utilizado, o instalador escreve a forma correta no diretório de comandos do seu runtime.
 
 ---
 
@@ -218,8 +217,8 @@ Loop de convergência de planos cross-AI — replaneja com feedback de revisão 
 | Argumento / Flag | Obrigatório | Descrição |
 |------------------|-------------|-----------|
 | `N` | **Sim** | Número da fase a planejar e revisar |
-| Flags de revisor | Não | Repassa todas as flags de lane de revisor: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
-| `--all` | Não | Executa todos os revisores configurados em paralelo |
+| Flags de revisor | Não | Repassa todas as flags de lane de revisor: `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
+| `--all` | Não | Executa todos os revisores configurados. As lanes são despachadas **sequencialmente** por padrão; defina `review.parallel_lanes` como `true` para despachá-las simultaneamente em uma única passagem de revisão |
 | `--max-cycles N` | Não | Substitui o limite de ciclos (padrão 3) |
 
 **Comportamento de saída:** O loop termina quando a contagem HIGH chega a zero. A detecção de estagnação avisa quando a contagem HIGH não diminui entre ciclos. O portão de escalação solicita ao usuário que prossiga ou revise manualmente quando `--max-cycles` é atingido com preocupações HIGH ainda em aberto.
@@ -817,6 +816,8 @@ v1.40.0, [#2792](https://github.com/open-gsd/gsd-core/issues/2792)).
 /gsd-health --context               # Triagem de utilização de contexto
 ```
 
+**Sombreamento de instalação entre escopos (`W028`).** Quando um runtime é instalado em ambos os escopos `global` e `local` e as regras de resolução de gatilhos do host tornam a superfície `/gsd-*` de um dos escopos inalcançável — o caso do Claude Code: a skill pessoal sempre vence o comando de projeto — a checagem de integridade adiciona um aviso de severidade WARNING nomeando os gatilhos sombreados, o escopo vencedor e o escopo perdedor. Isso nunca altera o status de aprovação/reprovação e nunca é corrigido automaticamente (não existe um único escopo correto a remover), então `--repair` nunca o toca. É idêntico ao mesmo aviso que o GSD Core imprime no momento da instalação.
+
 ### `/gsd-cleanup`
 
 Arquiva diretórios de fases acumulados de milestones concluídos e poda branches locais cujo upstream foi excluído.
@@ -919,7 +920,7 @@ Extrai padrões reutilizáveis, antipadrões e decisões arquiteturais do trabal
 | `--format` | Formato de saída: `markdown` (padrão), `json` |
 
 **Pré-requisitos:** A fase foi executada (arquivos SUMMARY.md existem)
-**Produz:** `.planning/learnings/{phase}-LEARNINGS.md`
+**Produz:** `.planning/phases/{phase-dir}/{padded-phase}-LEARNINGS.md`
 
 **Extrai:**
 - Decisões arquiteturais e sua justificativa
@@ -1164,7 +1165,7 @@ Revisa arquivos de código-fonte alterados durante uma fase em busca de bugs, vu
 | Argumento | Obrigatório | Descrição |
 |-----------|-------------|-----------|
 | `N` | **Sim** | Número da fase cujas mudanças revisar (por exemplo, `2` ou `02`) |
-| `--depth=quick\|standard\|deep` | Não | Nível de profundidade da revisão (substitui a configuração `workflow.code_review_depth`). `quick`: somente correspondência de padrões (~2 min). `standard`: análise por arquivo com verificações específicas de linguagem (~5–15 min, padrão). `deep`: análise entre arquivos incluindo grafos de importação e cadeias de chamadas (~15–30 min) |
+| `--depth=quick\|standard\|deep` | Não | Nível de profundidade da revisão. Substitui tanto `workflow.code_review_depth` quanto qualquer regra de caminho correspondente em `workflow.code_review_depth_overrides` — a flag sempre prevalece. `quick`: somente correspondência de padrões (~2 min). `standard`: análise por arquivo com verificações específicas de linguagem (~5–15 min, padrão). `deep`: análise entre arquivos incluindo grafos de importação e cadeias de chamadas (~15–30 min) |
 | `--files file1,file2,...` | Não | Lista explícita de arquivos separados por vírgula; ignora completamente o escopo SUMMARY/git |
 | `--fix` | Não | Corrige automaticamente problemas após a revisão — lê REVIEW.md, cria agente corretor, faz commit de cada correção atomicamente |
 | `--fix --all` | Não | Inclui descobertas Info no escopo de correção (padrão: somente Critical + Warning) |
@@ -1239,7 +1240,6 @@ Revisão por pares cross-AI de planos de fase a partir de CLIs de IA externas.
 
 | Flag | Descrição |
 |------|-----------|
-| `--gemini` | Inclui revisão pelo Gemini CLI |
 | `--claude` | Inclui revisão pelo Claude CLI (sessão separada) |
 | `--codex` | Inclui revisão pelo Codex CLI |
 | `--coderabbit` | Inclui revisão pelo CodeRabbit |
@@ -1255,7 +1255,7 @@ Revisão por pares cross-AI de planos de fase a partir de CLIs de IA externas.
 
 **Comportamento do revisor padrão (sem flags):**
 - Se `review.default_reviewers` estiver **não definido**, `/gsd-review` executa todos os revisores detectados (comportamento padrão atual).
-- Se `review.default_reviewers` estiver **definido**, `/gsd-review` executa somente esse subconjunto (por exemplo `["gemini","codex"]`).
+- Se `review.default_reviewers` estiver **definido**, `/gsd-review` executa somente esse subconjunto (por exemplo `["codex","claude"]`).
 - `--all` sempre substitui a configuração e executa o conjunto detectado completo.
 - Flags explícitas (por exemplo `--cursor`) substituem tanto `--all` quanto os padrões de configuração para aquela execução.
 
@@ -1263,11 +1263,11 @@ Revisão por pares cross-AI de planos de fase a partir de CLIs de IA externas.
 
 ```bash
 # define revisores padrão do projeto para execuções de /gsd-review sem flag
-gsd config-set review.default_reviewers '["gemini","codex"]'
+gsd config-set review.default_reviewers '["codex","claude"]'
 
-/gsd-review --phase 2             # executa gemini+codex da configuração
+/gsd-review --phase 2             # executa codex+claude da configuração
 /gsd-review --phase 3 --all
-/gsd-review --phase 2 --gemini
+/gsd-review --phase 2 --codex
 /gsd-review --phase 2 --cursor    # substituição avulsa
 ```
 

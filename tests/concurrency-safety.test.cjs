@@ -1,6 +1,10 @@
-// allow-test-rule: source-text-is-the-product
 // Reads .md/.json/.yml product files whose deployed text IS what the
 // runtime loads — testing text content tests the deployed contract.
+//
+// docs-guard-exempt: #3884 — the docs/CLI-TOOLS.md:736 citation below is an
+// explanatory comment pointing at documented CLI shape, not a read target;
+// this file performs unrelated filesystem reads (STATE.md, phase/plan
+// fixtures under .planning/) and never reads any docs/ file.
 
 /**
  * GSD Tools Tests - Concurrency Safety
@@ -416,7 +420,9 @@ describe('normalizeMd behavioral equivalence', () => {
     assert.ok(result.includes('\n\n## Section One\n\n'), 'Section One heading needs blank lines');
     assert.ok(result.includes('\n\n## Section Two\n\n'), 'Section Two heading needs blank lines');
     assert.ok(result.includes('\n\n## Section Three\n\n'), 'Section Three heading needs blank lines');
-    assert.ok(result.includes('Paragraph text.\n\n- item 1'), 'list should have blank line before');
+    // #4725: paragraph→list is preserved byte-identical — the removed
+    // before-a-bullet rule used to inject a blank here (tight list turned loose).
+    assert.ok(result.includes('Paragraph text.\n- item 1'), 'tight paragraph→list stays byte-identical');
     assert.ok(result.includes('\n\n```bash'), 'code block should have blank line before');
     assert.ok(result.includes('```\n\nAfter code.'), 'code block should have blank line after');
     assert.ok(result.includes('echo hello'), 'code content should be preserved');
@@ -454,7 +460,10 @@ describe('normalizeMd snapshot tests', () => {
 
   test('snapshot - list spacing', () => {
     const input = 'Paragraph\n- item 1\n- item 2\nAnother paragraph';
-    const expected = 'Paragraph\n\n- item 1\n- item 2\n\nAnother paragraph\n';
+    // #4725: the paragraph→list transition is preserved byte-identical (the
+    // removed before-a-bullet rule used to inject a blank there); the
+    // list→prose separation below is the after-a-bullet rule and stays.
+    const expected = 'Paragraph\n- item 1\n- item 2\n\nAnother paragraph\n';
     const result = normalizeMd(input);
     assert.strictEqual(result, expected,
       `List spacing snapshot mismatch.\nGot:      ${JSON.stringify(result)}\nExpected: ${JSON.stringify(expected)}`
@@ -538,16 +547,38 @@ must_haves:
 `
     );
 
+    // #3884 (ADR-3473 §8.4): `frontmatter get <file> <field>` is not a real
+    // form — the documented shape is `frontmatter get <file> [--field key]`
+    // (docs/CLI-TOOLS.md:736). Under the pre-#3884 permissive parser the bare
+    // "must_haves" positional was silently dropped, `field` resolved to
+    // null, and cmdFrontmatterGet dumped the WHOLE frontmatter object — the
+    // test's original `result.output.includes('acceptance')` branch passed
+    // only because the full dump happens to contain that substring, not
+    // because field selection ever worked. `cmdFrontmatterGet` never calls
+    // `parseMustHavesBlock` (that WARNING is only emitted by other
+    // consumers), so the WARNING branch of the old assertion could never
+    // fire through this command either. Corrected to the real `--field`
+    // form and strengthened to assert on the actual, field-scoped payload.
     const result = runGsdTools(
-      ['frontmatter', 'get', path.join(planDir, '01-01-PLAN.md'), 'must_haves'],
+      ['frontmatter', 'get', path.join(planDir, '01-01-PLAN.md'), '--field', 'must_haves'],
       tmpDir
     );
 
-    const stderr = result.error || '';
-    assert.ok(
-      stderr.includes('WARNING') && stderr.includes('must_haves') ||
-      result.output.includes('acceptance'),
-      `Expected WARNING about must_haves parse or valid parse result. stderr: ${stderr}, stdout: ${result.output}`
+    assert.ok(result.success, `frontmatter get --field must_haves failed: ${result.error}`);
+    const parsed = JSON.parse(result.output);
+    assert.deepStrictEqual(
+      Object.keys(parsed),
+      ['must_haves'],
+      `--field must_haves must scope the output to only that field, got keys: ${Object.keys(parsed).join(', ')}`,
+    );
+    // Dash-less list items under a YAML mapping key fold into a single plain
+    // scalar string, not an array — this is the actual "0 items" parse
+    // hazard the test's title names, surfaced directly rather than via a
+    // WARNING this command path never emits.
+    assert.strictEqual(
+      typeof parsed.must_haves.acceptance,
+      'string',
+      `bare-content (no dash prefix) must_haves.acceptance must parse as a scalar string, not a list, got: ${JSON.stringify(parsed.must_haves.acceptance)}`,
     );
   });
 

@@ -117,15 +117,75 @@ describe('quick workflow: research step', () => {
     );
   });
 
-  test('research step spawns gsd-phase-researcher', () => {
+  test('research Agent uses researcher role bindings end to end', () => {
     content = expandWorkflowSections(workflowPath);
-    const researchSection = content.substring(
-      content.indexOf('Step 4.75'),
-      content.indexOf('Step 5:')
+    const researchStart = content.indexOf('Step 4.75');
+    const plannerStart = content.indexOf('Step 5:', researchStart);
+    assert.ok(researchStart !== -1, 'Step 4.75 anchor should exist');
+    assert.ok(plannerStart > researchStart, 'Step 5 should follow Step 4.75');
+
+    const researchSection = content.slice(researchStart, plannerStart);
+    const parseStart = content.indexOf('Parse JSON for:');
+    const parseEnd = content.indexOf('\n\n', parseStart);
+    assert.ok(parseStart !== -1, 'init parse-list anchor should exist');
+    assert.ok(parseEnd > parseStart, 'init parse list should be non-empty');
+    const parseList = content.slice(parseStart, parseEnd);
+
+    const agentStart = researchSection.indexOf('Agent(');
+    const agentEnd = researchSection.indexOf('\n)', agentStart);
+    assert.ok(agentStart !== -1, 'research Agent call should exist');
+    assert.ok(agentEnd > agentStart, 'research Agent payload should be non-empty');
+    const researchAgent = researchSection.slice(agentStart, agentEnd);
+
+    assert.deepStrictEqual(
+      {
+        hostSkillBinding: content.includes(
+          'AGENT_SKILLS_RESEARCHER=$(gsd_run query agent-skills gsd-phase-researcher)'
+        ),
+        modelParsed: parseList.includes('researcher_model'),
+        researcherPersona: researchAgent.includes('${AGENT_SKILLS_RESEARCHER}'),
+        researcherSubagent: researchAgent.includes('subagent_type="gsd-phase-researcher"'),
+        researcherModel: researchAgent.includes('model="{researcher_model}"'),
+        plannerPersona: researchAgent.includes('${AGENT_SKILLS_PLANNER}'),
+        plannerModel: researchAgent.includes('model="{planner_model}"'),
+      },
+      {
+        hostSkillBinding: true,
+        modelParsed: true,
+        researcherPersona: true,
+        researcherSubagent: true,
+        researcherModel: true,
+        plannerPersona: false,
+        plannerModel: false,
+      }
     );
-    assert.ok(
-      researchSection.includes('subagent_type="gsd-phase-researcher"'),
-      'research step should spawn gsd-phase-researcher agent'
+  });
+
+  test('executor dispatch keeps its own persona', () => {
+    content = expandWorkflowSections(workflowPath);
+    const executorStart = content.indexOf('Step 6: Spawn executor');
+    const reviewStart = content.indexOf('Step 6.25', executorStart);
+    assert.ok(executorStart !== -1, 'Step 6 executor anchor should exist');
+    assert.ok(reviewStart > executorStart, 'Step 6.25 should follow the executor');
+
+    const executorSection = content.slice(executorStart, reviewStart);
+    const agentStart = executorSection.indexOf('Agent(');
+    const agentEnd = executorSection.indexOf('\n)', agentStart);
+    assert.ok(agentStart !== -1, 'executor Agent call should exist');
+    assert.ok(agentEnd > agentStart, 'executor Agent payload should be non-empty');
+    const executorAgent = executorSection.slice(agentStart, agentEnd);
+
+    assert.deepStrictEqual(
+      {
+        executorPersona: executorAgent.includes('${AGENT_SKILLS_EXECUTOR}'),
+        plannerPersona: executorAgent.includes('${AGENT_SKILLS_PLANNER}'),
+        researcherPersona: executorAgent.includes('${AGENT_SKILLS_RESEARCHER}'),
+      },
+      {
+        executorPersona: true,
+        plannerPersona: false,
+        researcherPersona: false,
+      }
     );
   });
 
@@ -322,5 +382,38 @@ describe('quick workflow: banner variants for flag combinations', () => {
       content.includes('QUICK TASK (FULL)'),
       'should have banner for --full (all phases enabled)'
     );
+  });
+});
+
+// ─── #3894: quick.md honors workflow.research_before_questions ───────────────
+
+describe('#3894 quick.md research-before-questions ordering', () => {
+  const QUICK = fs.readFileSync(path.join(WORKFLOWS_DIR, 'quick.md'), 'utf-8');
+
+  test('quick.md reads workflow.research_before_questions', () => {
+    assert.ok(
+      QUICK.includes('research_before_questions'),
+      '#3894: the quick path must read the documented key — before this fix neither quick.md nor its steps referenced it'
+    );
+  });
+
+  test('when enabled, research-phase is ordered BEFORE discussion-phase', () => {
+    const orderingIdx = QUICK.indexOf('research_before_questions');
+    assert.ok(orderingIdx !== -1, 'key referenced');
+    const ruleWindow = QUICK.slice(orderingIdx, orderingIdx + 900);
+    assert.ok(
+      /research[- ]phase[^]{0,200}(before|prior to|first)[^]{0,120}discussion/i.test(ruleWindow)
+        || /when[^]{0,60}(true|enabled)[^]{0,300}research/i.test(ruleWindow),
+      'the ordering rule must state research runs before discussion when the key is true'
+    );
+    assert.ok(
+      ruleWindow.includes('false') || ruleWindow.includes('unset') || ruleWindow.toLowerCase().includes('unchanged'),
+      'and must keep the written order when false/unset'
+    );
+  });
+
+  test('both step sections remain section-manifest gated (no structural regression)', () => {
+    assert.ok(/gsd:section id="discussion-phase"/.test(QUICK), 'discussion-phase section marker intact');
+    assert.ok(/gsd:section id="research-phase"/.test(QUICK), 'research-phase section marker intact');
   });
 });

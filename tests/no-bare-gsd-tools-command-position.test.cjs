@@ -37,29 +37,50 @@ const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
 const ROUTER_PATH = path.join(ROOT, 'gsd-core', 'bin', 'gsd-tools.cjs');
-const SCAN_DIRS = ['agents', path.join('gsd-core', 'workflows')];
+// #3809 widened this from agents/ + workflows/ to include gsd-core/references/,
+// which was carrying 37 bare calls the guard simply never looked at.
+//
+// commands/ is deliberately NOT here, and that is a finding rather than an
+// oversight. Its files cannot use the shared launcher the way workflows and agents
+// do: tests/graphify-visualization.test.cjs extracts individual Step-3 shell chains
+// and runs them standalone, so each fenced block needs its OWN preamble —
+// graphify.md carries five on purpose, and collapsing them to one produces
+// `gsd_run: command not found` (exit 127). tests/gsd-tools-path-refs.test.cjs
+// (#1766) separately pins commands/gsd/workstreams.md to the literal string
+// `gsd-tools query workstream.list`. Bringing commands/ under this guard therefore
+// needs those two contracts reconciled first; it is not a scan-set widening.
+//
+// skills/ is absent for a different reason: it is generated from commands/ by
+// scripts/gen-plugin-skills.cjs and pinned by lint:generated-sync, so guarding the
+// source guards both, and scanning the generated mirror would double-report every
+// future offender.
+const SCAN_DIRS = [
+  'agents',
+  path.join('gsd-core', 'workflows'),
+  path.join('gsd-core', 'references'),
+];
 
 // Derive the verb set the bare-call guard matches against. Most top-level
-// verbs live in the host-command router table as `'verb': routeHandler` entries
-// (~70); this reads those dynamically so new router verbs are covered the moment
-// they land. A handful of verbs are dispatched as FAMILIES (their own
-// `command === 'verb'` arm, not a route-table entry): `query` (line ~2876),
-// `intel`, `verify`, and `graphify`. These are stable, documented families, so
-// they are supplemented explicitly here rather than parsed from the help string
-// (whose prose mixes real verbs with English words like "for"/"output"/"working",
-// producing noise). If a family verb is ever promoted into the route table the
-// union dedupes harmlessly; if a NEW family verb is added it must be added here.
+// verbs live in the host-command router table (`HOST_COMMAND_ROUTERS`, ~70
+// entries, exported by gsd-tools.cjs for exactly this kind of test); this
+// reads that real exported object directly so new router verbs are covered
+// the moment they land. A handful of verbs are dispatched as FAMILIES (their
+// own `command === 'verb'` arm, not a route-table entry): `query` (line
+// ~2876), `intel`, `verify`, and `graphify`. These are stable, documented
+// families, so they are supplemented explicitly here rather than parsed from
+// the help string (whose prose mixes real verbs with English words like
+// "for"/"output"/"working", producing noise). If a family verb is ever
+// promoted into the route table the union dedupes harmlessly; if a NEW
+// family verb is added it must be added here.
 //
 // Sorted longest-first so a hyphenated verb (`verify-summary`) is preferred over
 // its prefix (`verify`) — the exact ordering bug that let `verify-summary` slip
 // past a fixed 6-verb list during the first #2751 pass.
 const FAMILY_DISPATCHED_VERBS = ['query', 'intel', 'verify', 'graphify'];
 function readRouterVerbs() {
-  const src = fs.readFileSync(ROUTER_PATH, 'utf8');
-  const re = /(?:'([a-z][a-z-]*)'|([a-z][a-z-]*))\s*:\s*route[A-Z]\w*/g;
+  const { HOST_COMMAND_ROUTERS } = require(ROUTER_PATH);
   const verbs = new Set(FAMILY_DISPATCHED_VERBS);
-  let m;
-  while ((m = re.exec(src)) !== null) verbs.add(m[1] || m[2]);
+  for (const verb of Object.keys(HOST_COMMAND_ROUTERS)) verbs.add(verb);
   return [...verbs].sort((a, b) => b.length - a.length);
 }
 
@@ -82,14 +103,18 @@ const BARE_COMMAND_RE = new RegExp(
 // Each entry MUST carry a one-line reason; the test prints the allowlist on
 // failure so a reviewer can see exactly what is sanctioned.
 const PROSE_ALLOWLIST = [
-  // Fork: line shifted 793 -> 932 (the fork's executor carries the test-contract,
+  // Fork: line shifted 828 -> 851 (the fork's executor carries the
   // Makefile-preference and Edge Case Hunter blocks upstream does not ship).
-  { file: 'agents/gsd-executor.md', line: 932, reason: 'describes the SDK return envelope of `gsd-tools query commit`; not an instruction to run the bare word' },
+  { file: 'agents/gsd-executor.md', line: 851, reason: 'describes the SDK return envelope of `gsd-tools query commit`; not an instruction to run the bare word (#4670 shifted it from 823; #4834 shifted it from 825: the delegation @-include replaced the inline preamble above it; #4763 shifted it from 826: the decision loop gained its --phase line above, the mention is unchanged)' },
   { file: 'agents/gsd-phase-researcher.md', line: 33, reason: 'package-legitimacy provenance rule names the command as the source of an OK verdict; descriptive' },
-  { file: 'agents/gsd-roadmapper.md', line: 642, reason: 'parenthetical "e.g." naming SDK queries a user *could* run; not an agent instruction' },
+  { file: 'agents/gsd-roadmapper.md', line: 660, reason: 'parenthetical "e.g." naming SDK queries a user *could* run; not an agent instruction (#4134 shifted it from 647: the H1 template section added above moved the line, the mention is unchanged)' },
   { file: 'agents/gsd-intel-updater.md', line: 40, reason: 'cross-platform note names the `gsd-tools intel <subcommand>` CLI surface descriptively ("CLI invocations go through..."); not an agent instruction' },
-  { file: 'gsd-core/workflows/execute-plan.md', line: 387, reason: 'describes the downstream SDK validation step (`validated downstream by ...`); names the mechanism, does not instruct the agent to type it' },
-  { file: 'agents/gsd-research-synthesizer.md', line: 65, reason: 'a code comment inside a fenced block explaining what the commit step loads (`# Planning config loaded via gsd-tools query ...`); descriptive, not an invocation — and explicitly names gsd-tools.cjs as the alternative' },
+  { file: 'gsd-core/workflows/execute-plan.md', line: 420, reason: 'describes the downstream SDK validation step (`validated downstream by ...`); names the mechanism, does not instruct the agent to type it (#4834 shifted it from 419: the delegation @-include replaced the inline preamble above it, the mention is unchanged)' },
+  // #4407: .compact.md variant siblings carry the same descriptive prose as
+  // their already-allowlisted canonical line above, at a different line
+  // number in a different file.
+  { file: 'agents/gsd-intel-updater.compact.md', line: 32, reason: 'compact variant of the already-allowlisted gsd-intel-updater.md:40 cross-platform note; same descriptive mention' },
+  { file: 'agents/gsd-roadmapper.compact.md', line: 363, reason: 'compact variant of the already-allowlisted gsd-roadmapper.md:660 parenthetical; same descriptive mention' },
 ];
 
 // Resolver-snippet definition lines / probes that must never be flagged. A line

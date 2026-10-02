@@ -14,7 +14,15 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { cleanup } = require('./helpers.cjs');
+const { cleanup, captureFdSync } = require('./helpers.cjs');
+
+/**
+ * A `config-get` CLI call with a deliberately pathological 50KB key,
+ * proving the call fails safely without hanging -- distinct from
+ * PROBE_TIMEOUT_MS's plain-query class (15000ms) despite the shared file,
+ * since this site is specifically testing pathological-input tolerance.
+ */
+const LONG_KEY_CLI_TIMEOUT_MS = 8000;
 
 // In-process invocation, not execFileSync: cmdConfigGet is a pure CJS
 // function reachable without spawning `node` as a child. The prior
@@ -32,28 +40,28 @@ const config = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'con
 // is bound to io.error at load, so we drive io directly to (a) get structured stderr
 // we can assert a typed `reason` on, and (b) restore the mode after each error probe.
 const io = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'io.cjs'));
+// ADR-3889: error() throws ExitError instead of calling process.exit()
+// directly. The `runExpectError`/`runInProcessAt`/`runScopedExpectError`
+// harnesses below now catch ExitError directly rather than mocking
+// process.exit with a throwable sentinel — mocking process.exit no longer
+// observes anything, since error() never calls it.
+const { ExitError } = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'cli-exit.cjs'));
 
 /**
- * cmdConfigGet's error() path (gsd-core/bin/lib/io.cjs) calls process.exit(1)
- * directly (it predates the ExitError/runMain seam used by the CLI
- * entrypoint's non-error paths). Intercepting process.exit with a throwable
- * sentinel lets the error path be exercised in-process without killing the
- * test worker.
+ * cmdConfigGet's error() path (gsd-core/bin/lib/io.cjs) now throws ExitError
+ * directly (ADR-3889) instead of calling process.exit(1). The harnesses below
+ * catch that ExitError directly — no process.exit mock / throwable sentinel
+ * is needed anymore.
  *
- * The sentinel carries the ORIGINAL error message (not a generic "process.exit(1)").
- * That matters for cmdConfigGet's "no config.json" branch, whose `error()` sits inside
- * a try/catch that reclassifies any throw NOT starting with "No config.json" as a parse
- * failure (a guard that is dead in production, where process.exit terminates first, but
- * becomes live once process.exit is a throwing seam). Carrying the real message makes
- * that guard re-throw — modeling the single, faithful production termination instead of
- * a spurious second error() call with the wrong reason.
+ * cmdConfigGet's "no config.json" branch sits inside a try/catch that used to
+ * reclassify any throw NOT starting with "No config.json" as a parse failure.
+ * Because an ExitError carries no message (`.message` defaults to
+ * "process exit 1"), that message-sniffing check could never match it — a
+ * real production bug this PR also fixes at src/config.cts (an unconditional
+ * `instanceof ExitError` re-throw now guards it). The `writeCount === 1`
+ * assertion in these harnesses is what would have caught it: a
+ * fall-through-and-reclassify shows up as a second stderr write.
  */
-class _ExitSignal extends Error {
-  constructor(code, message) {
-    super(message ?? `process.exit(${code})`);
-    this.code = code;
-  }
-}
 
 /**
  * bin/lib/io.cjs's output()/error() write directly to the raw fd (1 or 2)
@@ -65,23 +73,7 @@ class _ExitSignal extends Error {
  * would have hit the fd.
  */
 function captureFdWrite(fd, fn) {
-  const orig = fs.writeSync;
-  let captured = Buffer.alloc(0);
-  fs.writeSync = (writeFd, ...rest) => {
-    if (writeFd !== fd) return orig.call(fs, writeFd, ...rest);
-    const [data, offset = 0, length] = rest;
-    const chunk = Buffer.isBuffer(data)
-      ? data.subarray(offset, offset + (length ?? data.length - offset))
-      : Buffer.from(String(data), 'utf8');
-    captured = Buffer.concat([captured, chunk]);
-    return chunk.length;
-  };
-  try {
-    fn();
-  } finally {
-    fs.writeSync = orig;
-  }
-  return captured.toString('utf-8');
+  return captureFdSync(fd, fn);
 }
 
 /**
@@ -131,14 +123,13 @@ describe('config-get --default flag (#1893)', () => {
 
   function runExpectError(...args) {
     const { keyPath, raw, defaultValue } = parseConfigGetArgs(args);
-    const origExit = process.exit;
     const origWriteSync = fs.writeSync;
-    io.setJsonErrorMode(true); // structured stderr line lets the sentinel carry the message + assert reason
-    let exitCount = 0;
-    let exitCode;
+    io.setJsonErrorMode(true); // structured stderr line lets the payload carry the reason
+    let writeCount = 0;
     let stderr = '';
     fs.writeSync = (fd, ...rest) => {
       if (fd !== 2) return origWriteSync.call(fs, fd, ...rest);
+      writeCount++;
       const [data, offset = 0, length] = rest;
       const chunk = Buffer.isBuffer(data)
         ? data.subarray(offset, offset + (length ?? data.length - offset)).toString('utf8')
@@ -150,27 +141,27 @@ describe('config-get --default flag (#1893)', () => {
       const parts = stderr.split('\n').filter(Boolean);
       try { return JSON.parse(parts[parts.length - 1]); } catch { return {}; }
     };
-    process.exit = (code) => {
-      exitCount++;
-      exitCode = code;
-      // Carry the just-emitted error message so cmdConfigGet's seam guard re-throws
-      // (single, faithful fire) instead of catching + reclassifying into a 2nd error().
-      throw new _ExitSignal(code, lastError().message);
-    };
+    // ADR-3889: error() now throws ExitError directly (rather than calling
+    // process.exit()), so the real termination contract is caught here
+    // instead of via a process.exit mock.
+    let exitCode;
     try {
       config.cmdConfigGet(tmpDir, keyPath, raw, defaultValue);
+      assert.fail('expected cmdConfigGet to throw ExitError');
     } catch (e) {
-      if (!(e instanceof _ExitSignal)) throw e;
+      if (!(e instanceof ExitError)) throw e;
+      exitCode = e.code;
     } finally {
-      process.exit = origExit;
       fs.writeSync = origWriteSync;
       io.setJsonErrorMode(false);
     }
     assert.ok(exitCode !== 0 && exitCode !== undefined, 'Expected non-zero exit code');
-    // Faithfulness guard: production process.exit terminates, so error() fires exactly
-    // once. A count of 2 means the throwing-exit seam was caught + reclassified (the bug
-    // this harness redesign fixes) — fail loudly rather than report a wrong reason.
-    assert.equal(exitCount, 1, 'error() must fire exactly once (production process.exit terminates)');
+    // Faithfulness guard: error() must fire exactly once. A count of 2 means
+    // the guard's ExitError was caught by a message-sniffing catch and
+    // reclassified into a 2nd error() call (the exact Part-2 defect class —
+    // an ExitError has no message, so `.message.startsWith(...)` conditions
+    // never match it and it falls through to a wrong, generic branch).
+    assert.equal(writeCount, 1, 'error() must fire exactly once');
     const payload = lastError();
     return { status: exitCode, reason: payload.reason, message: payload.message, stderr };
   }
@@ -277,41 +268,28 @@ describe('config-get --default flag (#1893)', () => {
 
     function runExpectError(...args) {
       const { keyPath, raw, defaultValue } = parseConfigGetArgs(args);
-      const origExit = process.exit;
-      const origWriteSync = fs.writeSync;
       io.setJsonErrorMode(true);
-      let exitCount = 0;
       let exitCode;
-      let stderr = '';
-      fs.writeSync = (fd, ...rest) => {
-        if (fd !== 2) return origWriteSync.call(fs, fd, ...rest);
-        const [data, offset = 0, length] = rest;
-        const chunk = Buffer.isBuffer(data)
-          ? data.subarray(offset, offset + (length ?? data.length - offset)).toString('utf8')
-          : String(data);
-        stderr += chunk;
-        return Buffer.byteLength(chunk);
-      };
-      const lastError = () => {
-        const parts = stderr.split('\n').filter(Boolean);
-        try { return JSON.parse(parts[parts.length - 1]); } catch { return {}; }
-      };
-      process.exit = (code) => {
-        exitCount++;
-        exitCode = code;
-        throw new _ExitSignal(code, lastError().message);
-      };
+      let stderr;
       try {
-        config.cmdConfigGet(tmpDir, keyPath, raw, defaultValue);
-      } catch (e) {
-        if (!(e instanceof _ExitSignal)) throw e;
+        stderr = captureFdSync(2, () => {
+          try {
+            config.cmdConfigGet(tmpDir, keyPath, raw, defaultValue);
+            assert.fail('expected cmdConfigGet to throw ExitError');
+          } catch (e) {
+            if (!(e instanceof ExitError)) throw e;
+            exitCode = e.code;
+          }
+        });
       } finally {
-        process.exit = origExit;
-        fs.writeSync = origWriteSync;
         io.setJsonErrorMode(false);
       }
+      const lines = stderr.split('\n').filter(Boolean);
+      const lastError = () => {
+        try { return JSON.parse(lines[lines.length - 1]); } catch { return {}; }
+      };
       assert.ok(exitCode !== 0 && exitCode !== undefined, 'Expected non-zero exit code');
-      assert.equal(exitCount, 1, 'error() must fire exactly once (production process.exit terminates)');
+      assert.equal(lines.length, 1, 'error() must emit exactly one stderr line');
       const payload = lastError();
       return { status: exitCode, reason: payload.reason, message: payload.message, stderr };
     }
@@ -491,7 +469,6 @@ describe('config-get --default flag (#1893)', () => {
     // fresh for every fc run (unique mkdtemp per run body, cleaned up in a
     // finally — no shared/leaked state across runs).
     function runInProcessAt(dir, keyPath) {
-      const origExit = process.exit;
       const origWriteSync = fs.writeSync;
       io.setJsonErrorMode(true);
       let stdout = '';
@@ -507,17 +484,15 @@ describe('config-get --default flag (#1893)', () => {
         else if (fd === 2) stderr += chunk;
         return Buffer.byteLength(chunk);
       };
-      process.exit = (code) => {
-        exited = true;
-        exitCode = code;
-        throw new _ExitSignal(code, '');
-      };
+      // ADR-3889: error() throws ExitError directly; catch it here rather
+      // than mocking process.exit.
       try {
         config.cmdConfigGet(dir, keyPath, true, undefined);
       } catch (e) {
-        if (!(e instanceof _ExitSignal)) throw e;
+        if (!(e instanceof ExitError)) throw e;
+        exited = true;
+        exitCode = e.code;
       } finally {
-        process.exit = origExit;
         fs.writeSync = origWriteSync;
         io.setJsonErrorMode(false);
       }
@@ -646,6 +621,15 @@ describe('config-get --default flag (#1893)', () => {
         // (mkdtemp + write + rm) rather than pure in-memory computation.
         { numRuns: 60 },
       );
+    });
+
+    test('absent git.protected_branches has no schema default ((none) per docs)', () => {
+      fs.mkdirSync(planningDir, { recursive: true });
+      fs.writeFileSync(path.join(planningDir, 'config.json'), '{}');
+      const { reason } = runExpectError('config-get', 'git.protected_branches');
+      assert.equal(reason, io.ERROR_REASON.CONFIG_KEY_NOT_FOUND);
+      const fallback = runRaw('config-get', 'git.protected_branches', '--default', '["main"]');
+      assert.equal(fallback, '["main"]');
     });
   });
 }
@@ -791,6 +775,7 @@ const { execFileSync } = require('node:child_process');
 const GSD_TOOLS = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 const { ERROR_REASON } = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'io.cjs'));
 const { cleanup } = require('./helpers.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 describe('bug-2943: config-get returns schema default for context_window', () => {
   let tmpDir;
@@ -822,7 +807,7 @@ describe('bug-2943: config-get returns schema default for context_window', () =>
       stdout = execFileSync(process.execPath, args, {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 15000,
+        timeout: PROBE_TIMEOUT_MS,
       });
     } catch (err) {
       exitCode = err.status ?? 1;
@@ -1132,7 +1117,7 @@ test('config-get with a very long key (50KB) fails safely without hanging', (t) 
   const projectDir = createTempProject('cli-neg-config-13-');
   t.after(() => cleanup(projectDir));
   const longKey = 'x'.repeat(50000);
-  const result = runCli(['config-get', longKey], { cwd: projectDir, timeoutMs: 8000 });
+  const result = runCli(['config-get', longKey], { cwd: projectDir, timeoutMs: LONG_KEY_CLI_TIMEOUT_MS });
   assert.equal(result.signal, null, 'long input must not trigger the harness timeout');
   assert.equal(result.hasStackTrace, false, 'long input must not crash');
   assert.notEqual(result.status, 0, 'unknown 50KB key must fail');
@@ -1415,23 +1400,24 @@ describe('#2702: workstream config-get inherits from root config', () => {
     const { keyPath, raw, defaultValue } = parseConfigGetArgs(args);
     const saved = process.env.GSD_WORKSTREAM;
     process.env.GSD_WORKSTREAM = 'alpha';
-    const origExit = process.exit;
     const origWriteSync = fs.writeSync;
     io.setJsonErrorMode(true);
-    let exitCode;
     let stderr = '';
     fs.writeSync = (fd, ...rest) => {
       if (fd !== 2) return origWriteSync.call(fs, fd, ...rest);
       stderr += String(rest[0]);
       return Buffer.byteLength(String(rest[0]));
     };
-    process.exit = (code) => { exitCode = code; throw new _ExitSignal(code); };
+    // ADR-3889: error() throws ExitError directly; catch it here rather
+    // than mocking process.exit.
+    let exitCode;
     try {
       config.cmdConfigGet(tmpDir, keyPath, raw, defaultValue);
+      assert.fail('expected cmdConfigGet to throw ExitError');
     } catch (e) {
-      if (!(e instanceof _ExitSignal)) throw e;
+      if (!(e instanceof ExitError)) throw e;
+      exitCode = e.code;
     } finally {
-      process.exit = origExit;
       fs.writeSync = origWriteSync;
       io.setJsonErrorMode(false);
       if (saved === undefined) delete process.env.GSD_WORKSTREAM;

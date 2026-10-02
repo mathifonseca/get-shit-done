@@ -7,10 +7,9 @@
 ## コマンド構文
 
 - **Claude Code / Copilot / OpenCode / Kilo:** `/gsd-command-name [args]`（ハイフン形式）
-- **Gemini CLI:** `/gsd:command-name [args]`（コロン形式 — Gemini は `gsd:` 配下にコマンドを名前空間化します）
 - **Codex:** `$gsd-command-name [args]`
 
-ハイフン形式とコロン形式は、*同じコマンドのランタイム固有の表記*です。どのランタイムを使用していても、インストーラーが正しい形式をランタイムのコマンドディレクトリに書き込みます。
+どのランタイムを使用していても、インストーラーが正しい形式をランタイムのコマンドディレクトリに書き込みます。
 
 ---
 
@@ -218,8 +217,8 @@ WebSearch から取得したパッケージは `[ASSUMED]`（`[VERIFIED]` では
 | 引数 / フラグ | 必須 | 説明 |
 |-----------------|----------|-------------|
 | `N` | **Yes** | 計画およびレビューするフェーズ番号 |
-| レビュアーフラグ | No | すべてのレビュアーレーンフラグをそのまま渡す: `--gemini`、`--claude`、`--codex`、`--coderabbit`、`--opencode`、`--qwen`、`--cursor`、`--agy` / `--antigravity`、`--ollama`、`--lm-studio`、`--llama-cpp`、`--kimi-code` |
-| `--all` | No | 設定済みのすべてのレビュアーを並列で実行 |
+| レビュアーフラグ | No | すべてのレビュアーレーンフラグをそのまま渡す: `--claude`、`--codex`、`--coderabbit`、`--opencode`、`--qwen`、`--cursor`、`--agy` / `--antigravity`、`--ollama`、`--lm-studio`、`--llama-cpp`、`--kimi-code` |
+| `--all` | No | 設定済みのすべてのレビュアーを実行。レーンはデフォルトでは**順次**ディスパッチされます。`review.parallel_lanes` を `true` にすると、1 回のレビューパス内で並行してディスパッチされます |
 | `--max-cycles N` | No | サイクル上限を上書き（デフォルト3） |
 
 **終了動作:** HIGH カウントがゼロになるとループが終了します。HIGH カウントがサイクル間で減少しない場合はストール検出が警告します。`--max-cycles` に達しても HIGH 懸念が残っている場合、エスカレーションゲートがユーザーに続行するか手動でレビューするかを確認します。
@@ -814,6 +813,8 @@ GSD の保証付きでアドホックタスクを実行します。
 /gsd-health --context               # コンテキスト使用率のトリアージ
 ```
 
+**スコープ間インストールのシャドーイング（`W028`）。** あるランタイムが `global` と `local` の両方のスコープにインストールされ、ホストのトリガー解決ルールによって一方のスコープの `/gsd-*` サーフェスが到達不能になっている場合——Claude Code のケース：個人スキルは常にプロジェクトコマンドより優先される——ヘルスチェックは、シャドーイングされたトリガー、勝者スコープ、敗者スコープを示す WARNING 重大度のアドバイザリを追加します。これはヘルスチェックの合否ステータスを変更することはなく、自動修正の対象にもなりません（削除すべき単一の正解スコープが存在しないため）。そのため `--repair` はこれに一切手を加えません。インストール時に GSD Core が表示するのと同一のアドバイザリです。
+
 ### `/gsd-cleanup`
 
 完了したマイルストーンからの累積フェーズディレクトリをアーカイブし、アップストリームが削除されたローカルブランチを削除します。
@@ -916,7 +917,7 @@ GSD の保証付きでアドホックタスクを実行します。
 | `--format` | 出力フォーマット: `markdown`（デフォルト）、`json` |
 
 **前提条件:** フェーズが実行済みであること（SUMMARY.md ファイルが存在すること）
-**生成物:** `.planning/learnings/{phase}-LEARNINGS.md`
+**生成物:** `.planning/phases/{phase-dir}/{padded-phase}-LEARNINGS.md`
 
 **抽出内容:**
 - アーキテクチャ上の決定とその根拠
@@ -1161,7 +1162,7 @@ AI システムの構築を含むフェーズの AI-SPEC.md デザインコン�
 | 引数 | 必須 | 説明 |
 |----------|----------|-------------|
 | `N` | **Yes** | レビューする変更のフェーズ番号（例: `2` または `02`） |
-| `--depth=quick\|standard\|deep` | No | レビューの深さレベル（`workflow.code_review_depth` 設定を上書き）。`quick`: パターンマッチングのみ（約2分）。`standard`: 言語固有のチェックを含むファイルごとの分析（約5〜15分、デフォルト）。`deep`: インポートグラフとコールチェーンを含むクロスファイル分析（約15〜30分） |
+| `--depth=quick\|standard\|deep` | No | レビューの深さレベル。`workflow.code_review_depth` と、一致する `workflow.code_review_depth_overrides` のパスルールの両方を上書きします — フラグが常に優先します。`quick`: パターンマッチングのみ（約2分）。`standard`: 言語固有のチェックを含むファイルごとの分析（約5〜15分、デフォルト）。`deep`: インポートグラフとコールチェーンを含むクロスファイル分析（約15〜30分） |
 | `--files file1,file2,...` | No | 明示的なカンマ区切りのファイルリスト; SUMMARY/git スコーピングを完全にスキップ |
 | `--fix` | No | レビュー後に問題を自動修正 — REVIEW.md を読み込み、修正エージェントを起動し、各修正をアトミックにコミット |
 | `--fix --all` | No | 修正スコープに Info の発見事項を含める（デフォルト: Critical + Warning のみ） |
@@ -1236,7 +1237,6 @@ AI システムの構築を含むフェーズの AI-SPEC.md デザインコン�
 
 | フラグ | 説明 |
 |------|-------------|
-| `--gemini` | Gemini CLI レビューを含める |
 | `--claude` | Claude CLI レビューを含める（別のセッション） |
 | `--codex` | Codex CLI レビューを含める |
 | `--coderabbit` | CodeRabbit レビューを含める |
@@ -1252,7 +1252,7 @@ AI システムの構築を含むフェーズの AI-SPEC.md デザインコン�
 
 **デフォルトレビュアーの動作（フラグなし）:**
 - `review.default_reviewers` が**未設定**の場合、`/gsd-review` は検出されたすべてのレビュアーを実行します（現在のデフォルト動作）。
-- `review.default_reviewers` が**設定済み**の場合、`/gsd-review` はそのサブセットのみを実行します（例: `["gemini","codex"]`）。
+- `review.default_reviewers` が**設定済み**の場合、`/gsd-review` はそのサブセットのみを実行します（例: `["codex","claude"]`）。
 - `--all` は常に設定を上書きし、完全な検出セットを実行します。
 - 明示的なフラグ（例: `--cursor`）は、そのランの `--all` と設定デフォルトの両方を上書きします。
 
@@ -1260,11 +1260,11 @@ AI システムの構築を含むフェーズの AI-SPEC.md デザインコン�
 
 ```bash
 # フラグなしの /gsd-review 実行用のプロジェクトデフォルトレビュアーを設定
-gsd config-set review.default_reviewers '["gemini","codex"]'
+gsd config-set review.default_reviewers '["codex","claude"]'
 
-/gsd-review --phase 2             # 設定から gemini+codex を実行
+/gsd-review --phase 2             # 設定から codex+claude を実行
 /gsd-review --phase 3 --all
-/gsd-review --phase 2 --gemini
+/gsd-review --phase 2 --codex
 /gsd-review --phase 2 --cursor    # ワンオフの上書き
 ```
 

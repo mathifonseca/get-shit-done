@@ -1,7 +1,7 @@
 {
   "id": "playwright",
   "role": "feature",
-  "version": "1.10.0",
+  "version": "1.15.0",
   "title": "Playwright verification",
   "description": "Runs the project's Playwright suite after each execution wave and folds screenshot/pass-fail evidence into verification, auto-verifying the UAT items Playwright already covered so manual UAT is the fallback rather than the default.",
   "tier": "full",

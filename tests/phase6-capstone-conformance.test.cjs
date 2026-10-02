@@ -1,4 +1,3 @@
-// allow-test-rule: source-text-is-the-product
 'use strict';
 
 const { describe, test } = require('node:test');
@@ -21,13 +20,26 @@ const CORE_SUBSTRATE_TERMS = [
 
 const registry = require('../gsd-core/bin/lib/capability-registry.cjs');
 const { isCentralConfigKey } = require('../gsd-core/bin/lib/config-schema.cjs');
+const { escapeRegex: escapeRegExp } = require('../gsd-core/bin/lib/pattern.cjs');
+
+/**
+ * A single gsd-tools.cjs `check <query> --raw` CLI subcommand spawn, no
+ * fan-out, doing real registry lookup and gate-predicate evaluation work
+ * through the full CLI dispatch path -- "the real dispatch form used by
+ * the host loop." Coincides numerically with tests/helpers/timeouts.cjs's
+ * QUICK_SPAWN_TIMEOUT_MS and epic #4445 batch 13's
+ * TASK_RESOLVER_INVOKE_TIMEOUT_MS, but describes neither of those
+ * operations -- kept local. Also distinct from
+ * LOOP_HOOK_POINT_CLI_TIMEOUT_MS (60000ms), whose own doc comment lists
+ * `check <check-id>` as one of its representative verbs at a heavier
+ * bound -- this site's pre-existing value (10000ms) was not bench-
+ * remeasured against that class norm and is preserved as-is, not
+ * reclassified.
+ */
+const GATE_CHECK_CLI_TIMEOUT_MS = 10000;
 
 function readRepoFile(relativePath) {
   return fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function activeWhenKeys() {
@@ -207,20 +219,24 @@ describe('ADR-857 Phase 6 capstone conformance (#1139)', () => {
     // Decision #1) — NOT the optional-feature inline logic this budget ratchets
     // toward capabilities — so its footprint legitimately raises the host-loop
     // ceiling rather than signalling an un-extracted optional feature.
+    //
+    // #3771: the plan-phase.md ceiling was raised from 94519 to accommodate the
+    // REVISION_CONFLICT persistence/routing gate (fail-closed conflict recording,
+    // the max-cycles escalation's OPEN_CONFLICTS branch). That protocol is core
+    // planner control flow, not an optional feature pending capability extraction
+    // — its footprint legitimately raises the host-loop ceiling, same rationale
+    // as #1298 above. Landed alongside an independent, unrelated same-file growth
+    // (the #4.6 context-drift pre-check) already on `next` when this PR rebased.
+    //
+    // #3916: raised again from 96700 to accommodate turning the REVISION_CONFLICT
+    // writer-side sanitize step from a prose instruction (an LLM applying it by hand,
+    // per a review finding across two rounds) into real, executed shell matching the
+    // reader gate's rigor, plus an adversarial-review fix (an `awk -v` escape-decoding forgery
+    // and a same-session conflict record never closed on resolution). Same rationale as #3771:
+    // conflict-record persistence is core planner control flow, not an un-extracted
+    // optional feature.
     const { lfByteCount } = require('../scripts/workflow-size.cjs');
-    // Fork ratchet (SDLC-aligned), same rationale as upstream's #1298 raise above.
-    // The fork's optional feature logic HAS been extracted: edge_case_hunter,
-    // definition_of_done, playwright_verification, pr_workflow and
-    // propagate_execution_decisions now live in execute-phase/steps/*.md
-    // fragments (~6.3 KB moved out of the host loop). What remains inline is
-    // host machinery, not un-extracted features: five one-line dispatch stubs
-    // (the hook declarations this gate wants) plus the `--text`/TEXT_MODE
-    // argument contract required by tests/ask-user-questions-fallback.test.cjs.
-    // Raised 93600 -> 95000 to cover that bounded residue. Tighten-only from
-    // here; the structural fix is migrating the fork steps to capability
-    // packages (capabilities/*/capability.json steps at execute:wave:post),
-    // after which this can return to upstream's number.
-    const PRE_PHASE6 = { 'plan-phase.md': 94519, 'execute-phase.md': 94600 };
+    const PRE_PHASE6 = { 'plan-phase.md': 98300, 'execute-phase.md': 93600 };
     const notShrunk = [];
     for (const [file, frozen] of Object.entries(PRE_PHASE6)) {
       const now = lfByteCount(path.join(ROOT, 'gsd-core', 'workflows', file));
@@ -263,6 +279,7 @@ describe('ADR-857 phase 6 — capabilities must not bake install paths into the 
 
   test('generated capability-registry.cjs contains no ~/.claude install path', () => {
     const reg = fs.readFileSync(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'capability-registry.cjs'), 'utf8');
+    // allow-test-rule: source-text-is-the-product (#3464)
     const leakLines = reg.split(/\r?\n/).map((l, i) => [i + 1, l]).filter(([, l]) => LEAK.test(l)).map(([n]) => n);
     assert.deepEqual(leakLines, [],
       `capability-registry.cjs leaks ~/.claude install paths at line(s) ${leakLines.join(', ')} — the registry is copied verbatim to non-Claude runtimes (only workflow .md files are path-converted at install). Make the source capability fragment path-free.`);
@@ -312,6 +329,81 @@ describe('ADR-857 phase 6 — capabilities must not bake install paths into the 
     }
   });
 
+  // ─── #3866: the verify:pre produced-artefact seam must be strictly additive ──
+  //
+  // The lane opened at verify:pre lets a capability step produce an artefact that
+  // extract_tests consumes. The contract that makes that safe is that the seam is
+  // INERT when nothing is produced: derivation must be unchanged for every project
+  // that has no such capability — which is every project on `next` today. These
+  // assert the workflow prose an executing agent actually reads (verify-work.md is
+  // Markdown, not a source path, so local/no-source-grep does not apply).
+
+  test('the verify:pre produced-artefact seam is conditional, and the pre-existing derivation paths are not nested inside it (#3866)', () => {
+    const wf = readRepoFile('gsd-core/workflows/verify-work.md');
+
+    const seamIdx = wf.indexOf('Verify:pre produced-artefact seam');
+    assert.ok(seamIdx > 0, 'verify-work.md must carry the verify:pre produced-artefact seam');
+
+    // The seam must open with its own skip-when-absent guard, so an agent reading
+    // it top-down never falls into the merge on a project with no producing step.
+    const seamHead = wf.slice(seamIdx, seamIdx + 400);
+    assert.match(
+      seamHead, /VERIFY_PRE_PRODUCED/,
+      'the seam must name the variable it is conditional on',
+    );
+    assert.match(
+      seamHead, /empty or absent/,
+      'the seam must state the empty/absent case before describing any merge',
+    );
+
+    // Both pre-existing derivation paths must still exist, and must sit OUTSIDE the
+    // seam: the coverage classifier before it, the legacy prose fallback after it.
+    // If either migrated inside the seam it would become conditional on a producing
+    // step existing — the exact regression "byte-identical when no artefact exists"
+    // rules out.
+    const coverageIdx = wf.indexOf('uat.classify-coverage');
+    const legacyIdx = wf.indexOf('Extract testable deliverables from SUMMARY.md');
+    assert.ok(coverageIdx > 0, 'the #1602 coverage classifier must still be invoked');
+    assert.ok(legacyIdx > 0, 'the legacy prose-extraction fallback must still exist');
+    assert.ok(
+      coverageIdx < seamIdx,
+      'coverage classification must run before the seam, not inside it',
+    );
+    assert.ok(
+      legacyIdx > seamIdx,
+      'the legacy fallback must follow the seam and stay unguarded by it',
+    );
+  });
+
+  test('the verify:pre produced-artefact seam validates manifest-supplied artefact names in-context (#3866)', () => {
+    const wf = readRepoFile('gsd-core/workflows/verify-work.md');
+    const seamIdx = wf.indexOf('Verify:pre produced-artefact seam');
+    assert.ok(seamIdx > 0, 'verify-work.md must carry the verify:pre produced-artefact seam');
+    const seam = wf.slice(seamIdx, legacyEnd(wf, seamIdx));
+
+    // `produces` names come from a third-party capability manifest. The seam must
+    // carry an explicit in-context allowlist, the same shape loop-hook-dispatch.md
+    // requires of `ref.command` — not a vague "it is a name, not a path".
+    assert.match(
+      seam, /\^\[A-Za-z0-9\]\[A-Za-z0-9\._-\]\*\$/,
+      'the seam must pin an explicit allowlist regex for artefact names',
+    );
+    assert.match(
+      seam, /never\*{0,2}\s*by pasting it into a\s*\n?\s*shell command|never\*{0,2} by pasting it into a shell/,
+      'the seam must forbid shell-side validation of the manifest value',
+    );
+    assert.match(
+      seam, /\$PHASE_DIR/,
+      'the seam must confine resolution to the phase directory',
+    );
+  });
+
+  /** End of the seam region: the next top-level bold heading after it. */
+  function legacyEnd(wf, seamIdx) {
+    const next = wf.indexOf('**Extract testable deliverables', seamIdx);
+    return next > seamIdx ? next : Math.min(wf.length, seamIdx + 3000);
+  }
+
   test('every declared gate check.query returns a uniform boolean `block` field', () => {
     // FIX A regression guard: every gate check command must return a top-level
     // boolean `block` field so the host-loop dispatch can read a single consistent
@@ -345,7 +437,7 @@ describe('ADR-857 phase 6 — capabilities must not bake install paths into the 
         rawOut = execFileSync(
           process.execPath,
           [gsdTools, 'check', query, '1', '--raw'],
-          { cwd: tmpDir, encoding: 'utf-8', timeout: 10000 },
+          { cwd: tmpDir, encoding: 'utf-8', timeout: GATE_CHECK_CLI_TIMEOUT_MS },
         );
         const parsed = JSON.parse(rawOut.trim());
         if (typeof parsed.block !== 'boolean') {
@@ -361,7 +453,7 @@ describe('ADR-857 phase 6 — capabilities must not bake install paths into the 
           rawOut = execFileSync(
             process.execPath,
             [gsdTools, 'check', query, tmpDir, '--raw'],
-            { cwd: tmpDir, encoding: 'utf-8', timeout: 10000 },
+            { cwd: tmpDir, encoding: 'utf-8', timeout: GATE_CHECK_CLI_TIMEOUT_MS },
           );
           const parsed = JSON.parse(rawOut.trim());
           if (typeof parsed.block !== 'boolean') {

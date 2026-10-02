@@ -6,11 +6,28 @@
 #   scripts/prompt-injection-scan.sh --file path/to/file   # Scan a single file
 #   scripts/prompt-injection-scan.sh --dir agents/          # Scan all files in a directory
 #
-# Exit codes:
-#   0 = clean
-#   1 = findings detected
-#   2 = usage error
+# Exit codes (ADR-3889, #3908 — registered in gsd-core/bin/shared/exit-codes.json):
+#   0                = clean
+#   1                = findings detected
+#   $EXIT_USAGE       (64) = usage error (bad argv, missing --file/--dir target)
+#   $EXIT_NO_INPUT    (66) = ran; scope established; zero files in scope (genuinely empty)
+#   $EXIT_UNAVAILABLE (69) = could not establish scope (bad ref, not a repo, unreadable dir)
 set -euo pipefail
+
+# ─── Exit-code registry (ADR-3889, #3908) ────────────────────────────────────
+# Resolved relative to THIS script's location, not the caller's cwd. Loud,
+# non-zero failure if the fragment is missing — never fall back to a guessed
+# literal integer, and never let a missing registry silently degrade to
+# exit 0.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXIT_CODES_SH="$SCRIPT_DIR/../gsd-core/bin/shared/exit-codes.sh"
+if [[ ! -f "$EXIT_CODES_SH" ]]; then
+  echo "prompt-injection-scan: FATAL: exit-code registry not found at $EXIT_CODES_SH" >&2
+  echo "  Regenerate with: node scripts/gen-exit-code-registry.cjs --write" >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+. "$EXIT_CODES_SH"
 
 # ─── Patterns ────────────────────────────────────────────────────────────────
 # Each pattern is a POSIX extended regex. Keep alphabetized by category.
@@ -72,6 +89,15 @@ PATTERNS=(
   # `eval('...')` (single-quoted) silently went undetected on macOS while
   # passing on GNU-grep CI runners. Found auditing #3175; fixed here since it
   # is the same unanchored/portability defect class as the boundary fix.
+  #
+  # `exec` stays receiver-blind on purpose. A left boundary that excludes a
+  # preceding `.` would drop every member-position `.exec('…')` — including
+  # `require('child_process').exec('…')`, the single most common Node spelling
+  # of the vector this pattern exists to catch — and a receiver allowlist
+  # cannot restore it, because the literal `child_process` is not adjacent to
+  # `.exec`. The cost is that `RegExp.prototype.exec`, which takes a subject
+  # string rather than code, also matches; files that legitimately call it are
+  # handled by ALLOWLIST below, never by narrowing the pattern.
   '(^|[^[:alnum:]])eval[[:space:]]*\([[:space:]]*["'"'"']'
   'exec[[:space:]]*\([[:space:]]*["'"'"']'
   '(^|[^[:alnum:]])Function[[:space:]]*\([[:space:]]*["'"'"'].*return'
@@ -129,6 +155,48 @@ ALLOWLIST=(
   # asserts nothing: it is the payload the guard is required to catch, carried
   # as test DATA. Same class as the read-injection-scanner suites above.
   'tests/kimi-payload-field-shadowing.security.test.cjs'
+  # Phase-ID grammar regression tests exercise `RegExp.prototype.exec` via
+  # `re.exec('<phase-id>')` against fixtures like 'MANIFOLD-64-auth' / 'CK-64-auth'.
+  # The scanner's `exec('` code-execution pattern matches that benign method call,
+  # not an attack vector — same DEFECT.PROMPT-INJECTION-SCAN-COLLISION class as the
+  # test fixtures above. Pre-existing content (16 such calls on `next`); it surfaces
+  # here only because #2573's W024 `state_head` assertions make the file appear in
+  # the changed-file set the diff-mode scan walks.
+  'tests/health-validation.test.cjs'
+  # #2528 — same collision, same disposition: the continuation-grammar suite
+  # drives the tokenizer regexes directly via `re.exec('05-80-20')`, so the
+  # argument is the subject string, not a command. Exempted per file rather
+  # than by narrowing the `exec(` pattern: a left boundary excluding a preceding
+  # `.` would drop `require('child_process').exec('…')`, and a receiver
+  # allowlist cannot reach it either, because the literal `child_process` is
+  # not adjacent to `.exec`. See the note at the pattern itself.
+  'tests/continuation-grammar-parity.test.cjs'
+  # #4906 Phase 5 — regex.exec('### Phase 03: ...') fixtures.
+  # Same DEFECT.PROMPT-INJECTION-SCAN-COLLISION class as above:
+  # RegExp.prototype.exec, not code execution.
+  'tests/phase-id.test.cjs'
+  # #3676 row 11b — quick-batch's task-list parser must treat a
+  # prompt-injection-shaped task description as inert data, never
+  # interpreted. The fixture has to be a real "ignore all previous
+  # instructions…" phrase or the test asserts nothing: it is the payload the
+  # parser is required to carry byte-for-byte through createBatch and STATE
+  # rendering, never a command. Same DEFECT.PROMPT-INJECTION-SCAN-COLLISION
+  # class as the input-validator fixtures above.
+  'tests/quick-batch.test.cjs'
+  # #4209 — the regression test pinning gsd-code-reviewer.md's untrusted-evidence
+  # contract discusses the injection attack it defends against (embedded
+  # redirection, "act as an instruction") without performing it. gsd-code-reviewer.md
+  # ITSELF is deliberately NOT allowlisted — R2 (#4209 review): a production prompt
+  # that ingests untrusted third-party output should stay in-scope for this scanner,
+  # not be exempted wholesale; its defense-contract wording was reworded instead to
+  # avoid literally spelling out the trigger phrase (see git blame on that section).
+  # Same DEFECT.PROMPT-INJECTION-SCAN-COLLISION class as the entries above.
+  'tests/code-review-pipeline-regression.test.cjs'
+  # #4209 agy-F1 regression test — a crafted-filename fixture containing the literal
+  # phrase "Ignore all prior instructions." to prove validatePaths rejects it before
+  # it ever reaches an external-reviewer prompt. Discusses/detects the attack pattern
+  # as test data, never performs it. Same class as the entries above.
+  'tests/reviewer-step-dispatch.test.cjs'
 )
 
 is_allowlisted() {
@@ -150,33 +218,73 @@ collect_files() {
   case "$mode" in
     --diff)
       local base="${1:-origin/main}"
-      # Get changed files in the diff, filter to scannable extensions
-      git diff --name-only --diff-filter=ACMR "$base"...HEAD 2>/dev/null \
-        | grep -E '\.(md|cjs|js|json|yml|yaml|sh)$' || true
+      # Run git separately from the filter pipe so its OWN exit status (not
+      # grep's) decides whether the diff could be established. stdout and
+      # stderr are captured SEPARATELY (never merged with `2>&1`) so that a
+      # warning git writes to stderr on an otherwise successful diff can
+      # never be mistaken for a filename in the file list. On failure the
+      # captured stderr is emitted as the diagnostic; on success it is
+      # forwarded as a warning, never folded into the file list.
+      # `|| true` on the filter below is CORRECT (not gratuitous): `grep -E`
+      # exits 1 when nothing matches the scannable extensions (e.g. a diff
+      # touching only non-scannable file types), which is a legitimate empty
+      # result, not a failure to run.
+      local raw status err_file
+      err_file=$(mktemp)
+      raw=$(git diff --name-only --diff-filter=ACMR "$base"...HEAD 2>"$err_file")
+      status=$?
+      if (( status != 0 )); then
+        cat "$err_file" >&2
+        rm -f "$err_file"
+        exit "$EXIT_UNAVAILABLE"
+      fi
+      if [[ -s "$err_file" ]]; then
+        echo "Warning: git diff emitted stderr output:" >&2
+        cat "$err_file" >&2
+      fi
+      rm -f "$err_file"
+      printf '%s\n' "$raw" | grep -E '\.(md|cjs|js|json|yml|yaml|sh)$' || true
       ;;
     --file)
       if [[ -f "$1" ]]; then
         echo "$1"
       else
         echo "Error: file not found: $1" >&2
-        exit 2
+        exit "$EXIT_USAGE"
       fi
       ;;
     --dir)
       local dir="$1"
       if [[ ! -d "$dir" ]]; then
         echo "Error: directory not found: $dir" >&2
-        exit 2
+        exit "$EXIT_USAGE"
       fi
-      find "$dir" -type f \( -name '*.md' -o -name '*.cjs' -o -name '*.js' -o -name '*.json' -o -name '*.yml' -o -name '*.yaml' -o -name '*.sh' \) \
-        ! -path '*/node_modules/*' ! -path '*/.git/*' ! -path '*/dist/*' 2>/dev/null || true
+      # Same treatment as --diff: a `find` that fails (e.g. permission
+      # denied) must not be reported as an empty directory, and stdout/stderr
+      # are captured separately so a stderr warning never enters the file list.
+      local raw status err_file
+      err_file=$(mktemp)
+      raw=$(find "$dir" -type f \( -name '*.md' -o -name '*.cjs' -o -name '*.js' -o -name '*.json' -o -name '*.yml' -o -name '*.yaml' -o -name '*.sh' \) \
+        ! -path '*/node_modules/*' ! -path '*/.git/*' ! -path '*/dist/*' 2>"$err_file")
+      status=$?
+      if (( status != 0 )); then
+        cat "$err_file" >&2
+        rm -f "$err_file"
+        exit "$EXIT_UNAVAILABLE"
+      fi
+      if [[ -s "$err_file" ]]; then
+        echo "Warning: find emitted stderr output:" >&2
+        cat "$err_file" >&2
+      fi
+      rm -f "$err_file"
+      printf '%s\n' "$raw"
       ;;
     --stdin)
       cat
       ;;
     *)
       echo "Usage: $0 --diff [base] | --file <path> | --dir <path> | --stdin" >&2
-      exit 2
+      exit "$EXIT_USAGE"
       ;;
   esac
 }
@@ -215,7 +323,7 @@ scan_file() {
 main() {
   if [[ $# -eq 0 ]]; then
     echo "Usage: $0 --diff [base] | --file <path> | --dir <path>" >&2
-    exit 2
+    exit "$EXIT_USAGE"
   fi
 
   local mode="$1"
@@ -225,8 +333,12 @@ main() {
   files=$(collect_files "$mode" "$@")
 
   if [[ -z "$files" ]]; then
+    # collect_files already exited (UNAVAILABLE/USAGE) for anything that
+    # could not establish scope. Reaching here with an empty result means
+    # scope WAS established and is genuinely empty — that is NO_INPUT, not a
+    # silent clean pass.
     echo "prompt-injection-scan: no files to scan"
-    exit 0
+    exit "$EXIT_NO_INPUT"
   fi
 
   local total=0

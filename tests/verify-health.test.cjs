@@ -22,6 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
 const { VALID_PROFILES } = require('../gsd-core/bin/lib/model-catalog.cjs');
+const { gitOrThrow } = require('./helpers/git-fixture.cjs');
 
 // ─── Helpers for setting up minimal valid projects ────────────────────────────
 
@@ -173,7 +174,13 @@ describe('validate health command', () => {
 
   // ─── Check 4: STATE.md exists and references valid phases ─────────────────
 
-  test('errors when STATE.md is missing with repairable true', () => {
+  test('errors when STATE.md is missing with repairable false (DESTRUCTIVE remedy is never auto-applied)', () => {
+    // Phase 11 (#3309): E004's remedy (regenerateState) is DESTRUCTIVE, and
+    // `--repair` refuses to auto-apply a DESTRUCTIVE remedy (design doc,
+    // "--repair behavior change" section) — a disclosed breaking change from
+    // the pre-migration `repairable: true`. `repairable` now means "an
+    // automatic repair will actually run", not merely "a remedy exists to
+    // describe".
     writeMinimalProjectMd(tmpDir);
     writeMinimalRoadmap(tmpDir, ['1']);
     writeValidConfigJson(tmpDir);
@@ -186,7 +193,7 @@ describe('validate health command', () => {
     const output = JSON.parse(result.output);
     const e004 = output.errors.find(e => e.code === 'E004');
     assert.ok(e004, `Expected E004 in errors: ${JSON.stringify(output.errors)}`);
-    assert.strictEqual(e004.repairable, true, 'E004 should be repairable');
+    assert.strictEqual(e004.repairable, false, 'E004 (DESTRUCTIVE remedy) should not be marked repairable');
   });
 
   test('warns when STATE.md references nonexistent phase', () => {
@@ -977,6 +984,41 @@ describe('validate health command', () => {
     assert.strictEqual(output.errors.length, 0, 'should have no errors');
     assert.ok(output.warnings.length > 0, 'should have warnings');
   });
+
+  // #3225: sentinel phase dirs (999.x backlog/interim, 0.x drafts) are defined as
+  // never-on-roadmap (SENTINEL_RANGES=[0,999]). The W006/W007 disk↔roadmap loops
+  // never had the isSentinelPhaseId guard that phase.cts has, so every sentinel dir
+  // produced a spurious W007 with wrong fix advice ("Add to roadmap or remove
+  // directory"). Sentinels must be excluded; a real (non-sentinel) orphan must still warn.
+  test('#3225: sentinel phase dirs (999/0) do not trigger W007; real orphans still do', () => {
+    writeMinimalRoadmap(tmpDir, ['1']);
+    writeMinimalStateMd(tmpDir);
+    writeValidConfigJson(tmpDir);
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '01-a'), { recursive: true });
+    // Sentinel dirs — never-on-roadmap by convention.
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '999-interim'), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '0-drafts'), { recursive: true });
+    // A real orphan (non-sentinel) that SHOULD still trigger W007.
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '77-orphan'), { recursive: true });
+
+    const result = runGsdTools('validate health', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+
+    const sentinelW007s = output.warnings.filter(
+      w => w.code === 'W007' && /\b(0|999)\b/.test(w.message)
+    );
+    assert.strictEqual(
+      sentinelW007s.length, 0,
+      `sentinel phase dirs must not trigger W007; got: ${JSON.stringify(sentinelW007s)}`
+    );
+
+    // Negative space: the non-sentinel orphan must still be flagged.
+    assert.ok(
+      output.warnings.some(w => w.code === 'W007' && /77\b/.test(w.message)),
+      `expected W007 for the real orphan 77; got: ${JSON.stringify(output.warnings.filter(w => w.code === 'W007'))}`
+    );
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1033,10 +1075,15 @@ describe('validate health --repair command', () => {
     assert.strictEqual(diskConfig.milestone_branch_template, 'gsd/{milestone}-{slug}');
   });
 
-  test('resets config.json when JSON is invalid', () => {
+  test('Phase 11 (#3309): refuses to reset config.json when JSON is invalid — resetConfig is DESTRUCTIVE, --repair leaves it untouched', () => {
+    // Pre-migration this repair action applied unconditionally; the design
+    // doc's "--repair behavior change" section makes this a disclosed
+    // breaking change: a DESTRUCTIVE remedy is reported (still visible in
+    // repairs_performed, as a refusal) but never executed by --repair.
     writeMinimalStateMd(tmpDir, '# Session State\n\nPhase 1 in progress.\n');
     const configPath = path.join(tmpDir, '.planning', 'config.json');
-    fs.writeFileSync(configPath, '{broken json');
+    const originalContent = '{broken json';
+    fs.writeFileSync(configPath, originalContent);
 
     const result = runGsdTools('validate health --repair', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
@@ -1047,16 +1094,15 @@ describe('validate health --repair command', () => {
       `Expected repairs_performed: ${JSON.stringify(output)}`
     );
     const resetAction = output.repairs_performed.find(r => r.action === 'resetConfig');
-    assert.ok(resetAction, `Expected resetConfig action: ${JSON.stringify(output.repairs_performed)}`);
+    assert.ok(resetAction, `Expected a resetConfig refusal entry: ${JSON.stringify(output.repairs_performed)}`);
+    assert.strictEqual(resetAction.success, false, 'resetConfig must be refused, not applied');
+    assert.match(resetAction.error || '', /destructive/i, 'refusal must explain WHY it was not applied');
 
-    // Verify config.json is now valid JSON with correct nested structure
-    const diskConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    assert.ok(typeof diskConfig === 'object', 'config.json should be valid JSON after repair');
-    assert.ok(diskConfig.workflow, 'reset config should have nested workflow object');
-    assert.strictEqual(diskConfig.workflow.research, true, 'workflow.research should be true after reset');
+    // config.json must remain exactly as it was — untouched.
+    assert.strictEqual(fs.readFileSync(configPath, 'utf-8'), originalContent, 'config.json must not be modified by a refused repair');
   });
 
-  test('regenerates STATE.md when missing', () => {
+  test('Phase 11 (#3309): refuses to regenerate STATE.md when missing — regenerateState is DESTRUCTIVE, --repair leaves it absent', () => {
     writeValidConfigJson(tmpDir);
     // No STATE.md
     const statePath = path.join(tmpDir, '.planning', 'STATE.md');
@@ -1071,13 +1117,18 @@ describe('validate health --repair command', () => {
       `Expected repairs_performed: ${JSON.stringify(output)}`
     );
     const regenerateAction = output.repairs_performed.find(r => r.action === 'regenerateState');
-    assert.ok(regenerateAction, `Expected regenerateState action: ${JSON.stringify(output.repairs_performed)}`);
-    assert.strictEqual(regenerateAction.success, true, 'regenerateState should succeed');
+    assert.ok(regenerateAction, `Expected a regenerateState refusal entry: ${JSON.stringify(output.repairs_performed)}`);
+    assert.strictEqual(regenerateAction.success, false, 'regenerateState must be refused, not applied');
+    assert.match(regenerateAction.error || '', /destructive/i, 'refusal must explain WHY it was not applied');
 
-    // Verify STATE.md now exists and contains "# Session State"
-    assert.ok(fs.existsSync(statePath), 'STATE.md should now exist on disk');
-    const stateContent = fs.readFileSync(statePath, 'utf-8');
-    assert.ok(stateContent.includes('# Session State'), 'regenerated STATE.md should contain "# Session State"');
+    // STATE.md must remain absent, and no backup file should have been created.
+    assert.strictEqual(fs.existsSync(statePath), false, 'STATE.md must remain absent — the DESTRUCTIVE remedy is refused');
+    const planningFiles = fs.readdirSync(path.join(tmpDir, '.planning'));
+    assert.strictEqual(
+      planningFiles.some(f => f.startsWith('STATE.md.bak-')),
+      false,
+      'no backup file should be created for a refused repair',
+    );
   });
 
   test('does not rewrite existing STATE.md for invalid phase references', () => {
@@ -1133,8 +1184,12 @@ describe('validate health --repair command', () => {
     assert.strictEqual(diskConfig.workflow.nyquist_validation, true, 'nyquist_validation should be true');
   });
 
-  test('reports repairable_count correctly', () => {
-    // No config.json (W003, repairable=true) and no STATE.md (E004, repairable=true)
+  test('reports repairable_count correctly — counts NONE-risk findings only, not the DESTRUCTIVE E004', () => {
+    // No config.json (W003, createConfig, NONE risk -> repairable=true) and no
+    // STATE.md (E004, regenerateState, DESTRUCTIVE risk -> repairable=false,
+    // Phase 11 #3309: --repair never auto-applies a DESTRUCTIVE remedy, so it
+    // is deliberately excluded from this count — see the `diagnosticToIssueEntry`
+    // comment in src/verify.cts for the full reasoning).
     const configPath = path.join(tmpDir, '.planning', 'config.json');
     if (fs.existsSync(configPath)) fs.unlinkSync(configPath);
     const statePath = path.join(tmpDir, '.planning', 'STATE.md');
@@ -1145,9 +1200,15 @@ describe('validate health --repair command', () => {
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
-    assert.ok(
-      output.repairable_count >= 2,
-      `Expected repairable_count >= 2, got ${output.repairable_count}. Full output: ${JSON.stringify(output)}`
+    const w003 = output.warnings.find(w => w.code === 'W003');
+    const e004 = output.errors.find(e => e.code === 'E004');
+    assert.ok(w003, `Expected W003 in warnings: ${JSON.stringify(output.warnings)}`);
+    assert.ok(e004, `Expected E004 in errors: ${JSON.stringify(output.errors)}`);
+    assert.strictEqual(w003.repairable, true, 'W003 (createConfig, NONE risk) should be repairable');
+    assert.strictEqual(e004.repairable, false, 'E004 (regenerateState, DESTRUCTIVE risk) should not be repairable');
+    assert.strictEqual(
+      output.repairable_count, 1,
+      `Expected repairable_count 1 (W003 only), got ${output.repairable_count}. Full output: ${JSON.stringify(output)}`
     );
   });
 
@@ -1486,6 +1547,77 @@ describe('validate health — #1454 W017 excludes active worktree', () => {
     assert.ok(
       !output.warnings.some(w => w.code === 'W017'),
       `W017 should not fire for a non-git project dir: ${JSON.stringify(output.warnings)}`
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W029 — .planning/ tracked-and-gitignored (#3586, epic #2292)
+//
+// Test matrix: .gsd/phase/fix-3586-tracked-gitignored-planning/50-test-matrix.md
+// section C (C1/C2) — CLI-LEVEL integration, through the real `gsd-tools
+// validate health` dispatch path (unlike tests/health-diagnostic-rules/
+// config-validation.test.cjs's B-group, which drives `ruleFor('W029').check`
+// directly against a hand-built snapshot). These two prove W029 is actually
+// REACHABLE end-to-end — registered in RULES is not the same claim as wired
+// into `cmdValidateHealth`'s JSON output.
+//
+// Asserted on the parsed JSON's `code` field only (never rendered text, per
+// CONTRIBUTING's ban on raw-text output matching) — the real CLI response
+// shape carries no per-diagnostic `severity` field; severity is expressed
+// structurally by which top-level array (`errors` vs `warnings`) an entry
+// lands in, so "W029 is in `warnings`" already encodes SEVERITY.WARNING.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('validate health — W029 .planning/ tracked-and-gitignored (#3586)', () => {
+  function initGitRepo(cwd) {
+    gitOrThrow(['init'], { cwd });
+    gitOrThrow(['config', 'user.email', 'test@test.com'], { cwd });
+    gitOrThrow(['config', 'user.name', 'Test'], { cwd });
+    gitOrThrow(['config', 'commit.gpgsign', 'false'], { cwd });
+  }
+
+  function commitAll(cwd, message) {
+    gitOrThrow(['add', '-A'], { cwd });
+    gitOrThrow(['commit', '-m', message], { cwd });
+  }
+
+  test('C1: healthReportsTrackedIgnoredState — a temp git project with .planning/ committed then gitignored reports W029', () => {
+    const cwd = createTempProject();
+    // createTempProject() writes only an EMPTY .planning/phases/ dir — git
+    // never tracks an empty directory, so without a real file under
+    // .planning/ the initial commit would track nothing and this fixture
+    // could never reach the "tracked" half of the contradiction.
+    fs.writeFileSync(path.join(cwd, '.planning', 'PROJECT.md'), '# Project\n');
+    initGitRepo(cwd);
+    commitAll(cwd, 'initial commit — .planning/ tracked');
+    fs.writeFileSync(path.join(cwd, '.gitignore'), '.planning/\n');
+    commitAll(cwd, 'add gitignore — .planning/ now contradictorily ignored-but-tracked');
+
+    const result = runGsdTools('validate health', cwd);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const w029 = output.warnings.find(w => w.code === 'W029');
+    assert.ok(w029, `Expected W029 in warnings: ${JSON.stringify(output.warnings)}`);
+    assert.strictEqual(w029.code, 'W029');
+  });
+
+  test('C2: healthSilentOnHealthyProject — the same project layout with .planning/ tracked and NOT ignored reports no W029', () => {
+    const cwd = createTempProject();
+    fs.writeFileSync(path.join(cwd, '.planning', 'PROJECT.md'), '# Project\n');
+    initGitRepo(cwd);
+    commitAll(cwd, 'initial commit — .planning/ tracked, no .gitignore at all');
+    // No .gitignore written — the default, healthy state of essentially
+    // every GSD project (mirrors the B2a/A3 fixture convention).
+
+    const result = runGsdTools('validate health', cwd);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.ok(
+      !output.warnings.some(w => w.code === 'W029'),
+      `Should not have W029 on a healthy tracked-not-ignored project: ${JSON.stringify(output.warnings)}`
     );
   });
 });

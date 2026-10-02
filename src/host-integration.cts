@@ -99,6 +99,13 @@ interface DispatchCapability {
   subagentToolkit: SubagentToolkit;
   backgroundDispatch: boolean;
   isolation: DispatchIsolation;
+  // ADR-1239 Phase 1 (#3673): a numeric dispatch sub-field — not an enum axis
+  // member (same "numeric dispatch sub-field, excluded from
+  // HOST_INTEGRATION_AXES" precedent as maxDepth above). How many same-wave
+  // executors this host can run concurrently. Fail-closed floor is 1
+  // (strictly sequential); there is no engine-side ceiling to reduce
+  // against (unlike maxDepth) — see negotiateHostCapabilities below.
+  maxConcurrency: number;
 }
 
 interface HostIntegrationAxes {
@@ -127,7 +134,7 @@ interface DegradationResult {
 const SAFE_DEFAULTS: HostIntegrationAxes = {
   embeddingMode:  'declarative',
   commandSurface: 'prose-only',
-  dispatch: { namedDispatch: false, nested: false, maxDepth: 0, background: false, subagentToolkit: 'read-only', backgroundDispatch: false, isolation: 'none' },
+  dispatch: { namedDispatch: false, nested: false, maxDepth: 0, background: false, subagentToolkit: 'read-only', backgroundDispatch: false, isolation: 'none', maxConcurrency: 1 },
   modelMode:      'passive',
   hookBus:        'none',
   stateIO:        'session-log-append',
@@ -141,7 +148,7 @@ const PROFILE_BASELINES: Readonly<Record<'programmatic-cli' | 'declarative-cli' 
     'programmatic-cli': Object.freeze({
       embeddingMode:  'imperative',
       commandSurface: 'slash-file',
-      dispatch: Object.freeze({ namedDispatch: true, nested: true, maxDepth: -1, background: true, subagentToolkit: 'full', backgroundDispatch: true, isolation: 'none' }),
+      dispatch: Object.freeze({ namedDispatch: true, nested: true, maxDepth: -1, background: true, subagentToolkit: 'full', backgroundDispatch: true, isolation: 'none', maxConcurrency: 1 }),
       modelMode:      'passive',
       hookBus:        'host',
       stateIO:        'filesystem',
@@ -152,7 +159,7 @@ const PROFILE_BASELINES: Readonly<Record<'programmatic-cli' | 'declarative-cli' 
     'declarative-cli': Object.freeze({
       embeddingMode:  'declarative',
       commandSurface: 'slash-file',
-      dispatch: Object.freeze({ namedDispatch: true, nested: false, maxDepth: 1, background: false, subagentToolkit: 'full', backgroundDispatch: false, isolation: 'none' }),
+      dispatch: Object.freeze({ namedDispatch: true, nested: false, maxDepth: 1, background: false, subagentToolkit: 'full', backgroundDispatch: false, isolation: 'none', maxConcurrency: 1 }),
       modelMode:      'passive',
       hookBus:        'host',
       stateIO:        'filesystem',
@@ -163,7 +170,7 @@ const PROFILE_BASELINES: Readonly<Record<'programmatic-cli' | 'declarative-cli' 
     'ide': Object.freeze({
       embeddingMode:  'imperative',
       commandSurface: 'palette',
-      dispatch: Object.freeze({ namedDispatch: true, nested: true, maxDepth: 5, background: true, subagentToolkit: 'full', backgroundDispatch: true, isolation: 'none' }),
+      dispatch: Object.freeze({ namedDispatch: true, nested: true, maxDepth: 5, background: true, subagentToolkit: 'full', backgroundDispatch: true, isolation: 'none', maxConcurrency: 1 }),
       modelMode:      'active',
       hookBus:        'engine',
       stateIO:        'sandboxed-storage',
@@ -296,7 +303,7 @@ const DEFAULT_ENGINE: EngineCapabilities = {
   axes: {
     embeddingMode:  'imperative',
     commandSurface: 'slash-file',
-    dispatch: { namedDispatch: true, nested: true, maxDepth: -1, background: true, subagentToolkit: 'full', backgroundDispatch: true, isolation: 'none' },
+    dispatch: { namedDispatch: true, nested: true, maxDepth: -1, background: true, subagentToolkit: 'full', backgroundDispatch: true, isolation: 'none', maxConcurrency: 1 },
     modelMode:      'active',
     hookBus:        'host',
     stateIO:        'filesystem',
@@ -316,6 +323,21 @@ interface NegotiationResult {
   effective: HostIntegrationAxes;
   points: Record<InterfacePoint, { hostLevel: DegradationLevel; effectiveLevel: DegradationLevel; fallback: string }>;
   warnings: string[];
+}
+
+// ---------------------------------------------------------------------------
+// isPositiveSafeInteger — shared predicate (#3673)
+// ---------------------------------------------------------------------------
+
+/**
+ * True iff `v` is a positive (>0) JS safe integer. Single source of truth for
+ * the dispatch.maxConcurrency contract: used by negotiateHostCapabilities
+ * below, and by gsd-core/bin/gsd-tools.cjs's routeDispatchCapacity (which
+ * requires this module's compiled output rather than reimplementing the
+ * predicate), so the two consumers cannot silently diverge.
+ */
+function isPositiveSafeInteger(v: unknown): boolean {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +445,7 @@ function negotiateHostCapabilities(
   let effectiveSubagentToolkit: SubagentToolkit;
   let effectiveMaxDepth: number;
   let effectiveIsolation: DispatchIsolation;
+  let effectiveMaxConcurrency: number;
 
   if (hostDispatch === null) {
     // Host didn't declare dispatch at all — fail-closed to most-restrictive values
@@ -434,6 +457,7 @@ function negotiateHostCapabilities(
     effectiveSubagentToolkit    = 'read-only';
     effectiveMaxDepth           = 0;
     effectiveIsolation          = 'none';
+    effectiveMaxConcurrency     = 1;
   } else {
     // N1: observability warnings for 'undocumented' sentinel on dispatch fields
     if (hostDispatch.namedDispatch === 'undocumented') {
@@ -501,6 +525,36 @@ function negotiateHostCapabilities(
     const minDepth  = Math.min(hDepthNum, eDepthNum);
     effectiveMaxDepth = minDepth === Infinity ? -1 : minDepth;
 
+    // maxConcurrency (#3673, ADR-1239 Phase 1): a positive-safe-integer
+    // passthrough with a fail-closed floor of 1. UNLIKE maxDepth, there is no
+    // min(host, engine) reduction here — the design doc explicitly rejects an
+    // engine-side ceiling for this field (no competing intrinsic worker
+    // ceiling to cap against at the negotiation layer); a `--jobs N` cap is
+    // applied later, at the Phase 4 scheduler.
+    const hostMaxConcurrency = hostDispatch.maxConcurrency;
+    if (hostMaxConcurrency === UNDOCUMENTED) {
+      warnings.push(`dispatch.maxConcurrency is undocumented — degraded closed (1)`);
+      effectiveMaxConcurrency = 1;
+    } else if (isPositiveSafeInteger(hostMaxConcurrency)) {
+      effectiveMaxConcurrency = hostMaxConcurrency as number;
+    } else if (hostMaxConcurrency === undefined) {
+      warnings.push(`host did not declare 'dispatch.maxConcurrency' — treating as 1`);
+      effectiveMaxConcurrency = 1;
+    } else if (typeof hostMaxConcurrency !== 'number') {
+      warnings.push(`host dispatch.maxConcurrency is not a number — treating as 1`);
+      effectiveMaxConcurrency = 1;
+    } else if (!Number.isSafeInteger(hostMaxConcurrency)) {
+      if (Number.isInteger(hostMaxConcurrency)) {
+        warnings.push(`host dispatch.maxConcurrency is an unsafe integer — treating as 1`);
+      } else {
+        warnings.push(`host dispatch.maxConcurrency is not an integer — treating as 1`);
+      }
+      effectiveMaxConcurrency = 1;
+    } else {
+      warnings.push(`host dispatch.maxConcurrency is non-positive — treating as 1`);
+      effectiveMaxConcurrency = 1;
+    }
+
     // If namedDispatch is false, cap maxDepth/nested/background/backgroundDispatch to 0/false/false/false (struct consistency)
     if (!effectiveNamedDispatch) {
       effectiveMaxDepth           = 0;
@@ -518,6 +572,7 @@ function negotiateHostCapabilities(
     subagentToolkit:    effectiveSubagentToolkit,
     backgroundDispatch: effectiveBackgroundDispatch,
     isolation:          effectiveIsolation,
+    maxConcurrency:     effectiveMaxConcurrency,
   };
 
   // ---------------------------------------------------------------------------
@@ -798,6 +853,7 @@ interface OrchestratorExec {
   args?: string[];
   cwdFlag?: string | null;
   promptFlag?: string | null;
+  modelFlag?: string | null;
 }
 
 type OrchestratorExecResolution =
@@ -823,13 +879,29 @@ type OrchestratorExecResolution =
  * per-host branch ADR-1239 exists to remove. Omit `prompt` entirely and the
  * resolution is byte-identical to Phase 2's (the unconsumed-resolver shape).
  *
- * Argv order is base args → cwd flag → prompt, so the prompt stays the final
- * positional token for the hosts that read it that way.
+ * Argv order is base args → model flag → cwd flag → prompt, so the prompt
+ * stays the final positional token for the hosts that read it that way. The
+ * model flag is placed BEFORE the cwd flag (not after, and not appended at
+ * the very end) purely to keep it clear of that trailing positional — the
+ * model value itself is never the prompt-adjacent token a host might scan
+ * for last.
+ *
+ * `model` (Phase 4, #3714) is optional, descriptor-gated exactly like prompt:
+ * a `modelFlag` string on the descriptor names the flag that pins the
+ * spawned executor's model (codex: `--model`); `null`/absent means the host
+ * exposes no such override on this exec path, and `[modelFlag, model]` is
+ * appended ONLY when both the descriptor's `modelFlag` and the caller's
+ * `model` are non-empty strings. Omitting `model` entirely (or passing it to
+ * a host with no `modelFlag`) is byte-identical to the resolver's behavior
+ * before this parameter existed. This function decides no policy about WHICH
+ * model to pass or what 'inherit' means — that is entirely the caller's job;
+ * this seam only shapes descriptor + values into argv.
  */
 function resolveOrchestratorExec(
   orchestratorExec: OrchestratorExec | undefined,
   cwd: string,
   prompt?: string,
+  model?: string,
 ): OrchestratorExecResolution {
   if (!orchestratorExec || typeof orchestratorExec !== 'object' || Array.isArray(orchestratorExec)) {
     return { ok: false, reason: 'missing_command' };
@@ -850,10 +922,21 @@ function resolveOrchestratorExec(
   if (oe.promptFlag !== undefined && oe.promptFlag !== null && typeof oe.promptFlag !== 'string') {
     return { ok: false, reason: 'invalid_prompt_flag' };
   }
+  if (oe.modelFlag !== undefined && oe.modelFlag !== null && typeof oe.modelFlag !== 'string') {
+    return { ok: false, reason: 'invalid_model_flag' };
+  }
   // An executor spawned with no instruction is a hang, not a degraded run —
   // fail closed rather than launching a prompt-less process.
   if (prompt !== undefined && (typeof prompt !== 'string' || prompt.length === 0)) {
     return { ok: false, reason: 'invalid_prompt' };
+  }
+  // Unlike `prompt` — where empty is a hang, not a degraded run, hence the
+  // fail-closed check above — an absent/null/empty model is simply "use the
+  // host default", the same benign degradation `cwdFlag: null` already
+  // expresses. Only a present-but-non-string value (number/bool/array/object)
+  // is a caller error; null/undefined/'' fall through to "omit the flag".
+  if (model !== undefined && model !== null && typeof model !== 'string') {
+    return { ok: false, reason: 'invalid_model' };
   }
   // Leading-dash guard, mirroring worktree-safety.cts's `unsafe_leading_dash`
   // check on git arguments. A positional prompt (or a cwd) beginning with '-'
@@ -869,11 +952,20 @@ function resolveOrchestratorExec(
   if (cwd.startsWith('-')) {
     return { ok: false, reason: 'unsafe_leading_dash_cwd' };
   }
+  if (typeof model === 'string' && model.startsWith('-')) {
+    return { ok: false, reason: 'unsafe_leading_dash_model' };
+  }
 
   const baseArgs = Array.isArray(oe.args) ? [...oe.args] : [];
-  const args = typeof oe.cwdFlag === 'string' && oe.cwdFlag.length > 0
-    ? [...baseArgs, oe.cwdFlag, cwd]
-    : baseArgs;
+  let args = baseArgs;
+
+  if (typeof oe.modelFlag === 'string' && oe.modelFlag.length > 0 && typeof model === 'string' && model.length > 0) {
+    args = [...args, oe.modelFlag, model];
+  }
+
+  args = typeof oe.cwdFlag === 'string' && oe.cwdFlag.length > 0
+    ? [...args, oe.cwdFlag, cwd]
+    : args;
 
   if (typeof prompt === 'string') {
     if (typeof oe.promptFlag === 'string' && oe.promptFlag.length > 0) {
@@ -901,6 +993,7 @@ export = {
   EXTENSION_EVENT_SURFACES,
   degradationFor,
   profileOf,
+  isPositiveSafeInteger,
   negotiateHostCapabilities,
   shouldFlattenDispatch,
   resolveDispatchType,

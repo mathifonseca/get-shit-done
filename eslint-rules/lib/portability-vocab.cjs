@@ -22,6 +22,14 @@
  * deeper nesting (e.g. `String(path.join(...)).toLowerCase().replace(/\\/g,'/')`)
  * is not covered — only the outermost call and one level of String() cast are
  * visible to the rule.
+ *
+ * countWindowsExecutableExtensions matches by spelling (case-insensitive)
+ * against the fixed WINDOWS_EXECUTABLE_EXTENSIONS set below — it does not
+ * parse the string as a PATHEXT-style delimited list, so it also matches a
+ * bare substring occurrence (e.g. `.exe` inside `.exeFoo`). That is
+ * deliberate: the rule this feeds (local/no-private-binary-resolution) only
+ * needs "does this string carry two-or-more of these extensions", the same
+ * shape both deleted private resolvers had, not a strict grammar.
  */
 
 /**
@@ -52,6 +60,8 @@ const PATH_RETURNING_FNS = [
   // #2088 (ADR-1239 upgrade 3): resolves the on-disk skills-install dir honoring
   // a skills-kind `home` override (e.g. Codex → $HOME/.agents/skills).
   '_resolveSkillsRootDir',
+  // #3664: shared kind-destination resolver (skills/agents/kimi-agents kinds).
+  '_kindDestDir',
   'getGlobalSkillDir',
   'getGlobalSkillDisplayPath',
   'resolveSkillsBaseFromDescriptor',
@@ -73,6 +83,86 @@ const PATH_RETURNING_FNS = [
   'normalizeInstallRelativePath',
   'toPosixPath',
 ];
+
+/**
+ * Windows executable extensions (lowercase canonical). This is the fixed
+ * candidate-extension set both deleted private resolvers (`fallow-runner`'s
+ * `['fallow.exe','fallow.cmd','fallow.bat','fallow']` and `gsd-tools`'
+ * `'.EXE;.CMD;.BAT;.COM'`) hardcoded; local/no-private-binary-resolution
+ * flags a re-occurrence of two-or-more of these outside the seam.
+ */
+const WINDOWS_EXECUTABLE_EXTENSIONS = ['.exe', '.cmd', '.bat', '.com'];
+
+/**
+ * The Windows PATHEXT environment variable name. Windows environment variable
+ * names are case-insensitive, so a read of ANY casing of this name (`Pathext`,
+ * `pathext`, ...) is the signal local/no-private-binary-resolution matches on.
+ */
+const PATHEXT_VAR_NAME = 'PATHEXT';
+
+/**
+ * Windows environment variable names whose CONVENTIONAL casing varies from the
+ * all-uppercase POSIX convention (`Path` not `PATH`, `ComSpec` not `COMSPEC`,
+ * `TEMP`/`TMP`/`APPDATA`/`USERPROFILE` as shipped by Windows). `process.env` is
+ * a case-insensitive Proxy that hides this on every platform, so
+ * `process.env.PATH` is always safe — but a plain object (a spread of
+ * `process.env`, a function parameter, any object that is not literally
+ * `process.env` at the access site) keeps the OS's actual casing and an
+ * exact-case lookup against it silently returns `undefined` on Windows.
+ * local/no-exact-case-env-access matches a read of ANY casing of ANY of these
+ * names off ANY receiver that is not `process.env` itself (#3624, epic #3411
+ * Phase 4).
+ */
+const WINDOWS_CASE_VARYING_ENV_VARS = ['PATH', 'PATHEXT', 'ComSpec', 'USERPROFILE', 'TEMP', 'TMP', 'APPDATA'];
+
+const WINDOWS_CASE_VARYING_ENV_VARS_LOWER = new Set(WINDOWS_CASE_VARYING_ENV_VARS.map((v) => v.toLowerCase()));
+
+/**
+ * True when `name` case-insensitively matches one of WINDOWS_CASE_VARYING_ENV_VARS.
+ * @param {string} name
+ * @returns {boolean}
+ */
+function isCaseVaryingEnvVarName(name) {
+  return typeof name === 'string' && WINDOWS_CASE_VARYING_ENV_VARS_LOWER.has(name.toLowerCase());
+}
+
+/**
+ * Boundary-aware match for each WINDOWS_EXECUTABLE_EXTENSIONS entry, in the
+ * same order. A plain substring test misfires on ordinary prose/event-name
+ * tokens that merely start with the same three letters — e.g. `.execute`
+ * contains the substring `.exe`, and `.compacting` contains `.com`, neither
+ * of which is a Windows executable extension (a real false positive this
+ * caught in src/host-integration.cts's OPENCODE_EXTENSION_EVENTS list). The
+ * negative lookahead requires the match NOT be immediately followed by
+ * another letter, so `.exe` at the end of a token or before a delimiter
+ * (`;`, `.`, `'`, whitespace, end-of-string) still matches, but `.exe` inside
+ * `.execute` does not. Hand-written RegExp literals (not built from a
+ * runtime string) so this itself is not an adhoc-regex-escape construction.
+ */
+const WINDOWS_EXECUTABLE_EXTENSION_PATTERNS = [
+  /\.exe(?![a-zA-Z])/i,
+  /\.cmd(?![a-zA-Z])/i,
+  /\.bat(?![a-zA-Z])/i,
+  /\.com(?![a-zA-Z])/i,
+];
+
+/**
+ * Returns how many DISTINCT entries of WINDOWS_EXECUTABLE_EXTENSIONS appear
+ * (case-insensitively, boundary-aware) in `str`. Used by
+ * local/no-private-binary-resolution to apply its two-or-more threshold —
+ * see the "Known boundaries" note above for the matching semantics.
+ *
+ * @param {string} str
+ * @returns {number}
+ */
+function countWindowsExecutableExtensions(str) {
+  if (typeof str !== 'string' || str.length === 0) return 0;
+  let count = 0;
+  for (const pattern of WINDOWS_EXECUTABLE_EXTENSION_PATTERNS) {
+    if (pattern.test(str)) count += 1;
+  }
+  return count;
+}
 
 /**
  * Returns true when `node` is a CallExpression whose callee matches one of the
@@ -337,6 +427,11 @@ function unwrapNonNormalizerMethodChain(node) {
 
 module.exports = {
   PATH_RETURNING_FNS,
+  WINDOWS_EXECUTABLE_EXTENSIONS,
+  PATHEXT_VAR_NAME,
+  WINDOWS_CASE_VARYING_ENV_VARS,
+  isCaseVaryingEnvVarName,
+  countWindowsExecutableExtensions,
   isPathReturningCall,
   isPosixSlashStringLiteral,
   isPosixNormalizerCall,

@@ -1,4 +1,3 @@
-// allow-test-rule: pending-migration-to-typed-ir [#3090]
 // Phase 5 kimi-variant disambiguation is verified via install.js subprocess
 // output capture (regex on printed notices), since disambiguateKimiVariant
 // is inline in bin/install.js (not exported) and emits no structured/JSON
@@ -13,6 +12,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { cleanup } = require('./helpers.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const INSTALL_JS = path.join(__dirname, '..', 'bin', 'install.js');
 
@@ -30,7 +30,7 @@ function runInstall(args, home) {
   const r = spawnSync('node', [INSTALL_JS, ...args], {
     env: { ...process.env, HOME: home, USERPROFILE: home, GSD_TEST_MODE: '1' },
     encoding: 'utf8',
-    timeout: 15000,
+    timeout: PROBE_TIMEOUT_MS,
   });
   return { stdout: r.stdout || '', stderr: r.stderr || '', exit: r.status };
 }

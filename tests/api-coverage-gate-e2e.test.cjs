@@ -16,35 +16,21 @@
 
 const { describe, test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
+const fc = require('fast-check');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { cleanup } = require('./helpers.cjs');
+const { cleanup, TEST_ENV_BASE } = require('./helpers.cjs');
 const { runNode, OUTCOME } = require('./helpers/process-seam.cjs');
+const { LOOP_HOOK_POINT_CLI_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 // In-process seam for the fail-closed read-injection tests at the bottom of this
 // file (#2365 review): readPhaseScope is the pure phase-scope reader behind the
 // gate. Those tests monkeypatch fs rather than drive a subprocess.
 const { readPhaseScope } = require('../gsd-core/bin/lib/check-command-router.cjs');
+const { escapeRegex } = require('../gsd-core/bin/lib/pattern.cjs');
 
 const TOOLS_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
-
-const TEST_ENV_BASE = {
-  GSD_SESSION_KEY: '',
-  CODEX_THREAD_ID: '',
-  CLAUDE_SESSION_ID: '',
-  CLAUDE_CODE_SSE_PORT: '',
-  OPENCODE_SESSION_ID: '',
-  GEMINI_SESSION_ID: '',
-  CURSOR_SESSION_ID: '',
-  WINDSURF_SESSION_ID: '',
-  TERM_SESSION: '',
-  WT_SESSION: '',
-  TMUX_PANE: '',
-  ZELLIJ_SESSION_NAME: '',
-  TTY: '',
-  SSH_TTY: '',
-};
 
 function runTools(args, cwd) {
   const argv = Array.isArray(args)
@@ -54,7 +40,7 @@ function runTools(args, cwd) {
   const r = runNode([TOOLS_PATH, ...argv], {
     cwd,
     env: { ...process.env, ...TEST_ENV_BASE },
-    timeoutMs: 60000,
+    timeoutMs: LOOP_HOOK_POINT_CLI_TIMEOUT_MS,
   });
   if (r.outcome === OUTCOME.EXITED && r.exitCode === 0) {
     return { success: true, output: r.stdout.trim(), exitCode: 0, error: '' };
@@ -359,7 +345,7 @@ describe('readPhaseScope — fail-closed on a real read failure (#2365 review)',
     tmpDir = makeProject({ api_coverage_gate: true });
     const phaseDir = makePhaseDir(tmpDir, '01-pay');
     writePlan(phaseDir, '01-PLAN.md', '# Plan\nIntegrate the Stripe API.');
-    const res = withFsThrow('readdirSync', new RegExp(phaseDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'), 'EACCES', () =>
+    const res = withFsThrow('readdirSync', new RegExp(escapeRegex(phaseDir) + '$'), 'EACCES', () =>
       readPhaseScope(tmpDir, phaseDir, '01'));
     assert.ok(res.readError, 'an unreadable phase directory must set readError, not read as empty');
   });
@@ -383,5 +369,164 @@ describe('readPhaseScope — fail-closed on a real read failure (#2365 review)',
     const res = readPhaseScope(tmpDir, missing, '99');
     assert.strictEqual(res.readError, null, 'ENOENT is absence, not a read failure — must not block');
     assert.strictEqual(res.text, '');
+  });
+});
+
+// ─── Unestablished scope is not a negative verdict (#3909, ADR-3889 P5) ───────
+// The gate's two neighbouring arms already fail closed (unresolvable phase →
+// block; unreadable plan → block). Certifying "no external-API integration"
+// from ZERO examined bytes was the remaining fabrication: nothing was read, yet
+// the blocking seal gate cleared. The discriminator is BYTES EXAMINED, never
+// SIGNALS FOUND — a phase with real plans and no API vocabulary must keep
+// passing exactly as it did before.
+describe('api-coverage.verify-pre — unestablished scope blocks (#3909)', () => {
+  let tmpDir;
+  afterEach(() => { if (tmpDir) { cleanup(tmpDir); tmpDir = null; } });
+
+  function gateJson(phaseDir) {
+    return JSON.parse(runGate(tmpDir, phaseDir).output);
+  }
+
+  test('CONTROL: a real plan with no API vocabulary still passes', () => {
+    tmpDir = makeProject({ api_coverage_gate: true });
+    const phaseDir = makePhaseDir(tmpDir, '01-refactor');
+    writePlan(phaseDir, '01-PLAN.md', '# Plan\nRefactor the internal state machine and rename fields.');
+    const j = gateJson(phaseDir);
+    assert.strictEqual(j.block, false, 'an examined phase with no signal must still pass');
+    assert.strictEqual(j.passed, true);
+    assert.strictEqual(j.detected, false);
+    assert.strictEqual(
+      j.scope_unavailable,
+      undefined,
+      'an examined scope must NOT be reported as unavailable',
+    );
+  });
+
+  test('a phase dir with no plans and no roadmap section BLOCKS instead of certifying', () => {
+    tmpDir = makeProject({ api_coverage_gate: true });
+    const phaseDir = makePhaseDir(tmpDir, '02-empty');
+    const j = gateJson(phaseDir);
+    assert.strictEqual(j.block, true, 'zero examined bytes must not clear the blocking seal gate');
+    assert.strictEqual(j.passed, false);
+    assert.strictEqual(j.scope_unavailable, true, 'the reason must be reported, not implied');
+    assert.strictEqual(
+      j.detected,
+      false,
+      'detected stays false — nothing was found because nothing was examined',
+    );
+    assert.match(j.message, /scope/i);
+  });
+
+  test('BOUNDARY: whitespace-only scope is unestablished', () => {
+    tmpDir = makeProject({ api_coverage_gate: true });
+    const phaseDir = makePhaseDir(tmpDir, '03-ws');
+    writePlan(phaseDir, '01-PLAN.md', '   \n\t\n  ');
+    const j = gateJson(phaseDir);
+    assert.strictEqual(j.block, true, 'whitespace is not examined content');
+    assert.strictEqual(j.scope_unavailable, true);
+  });
+
+  test('BOUNDARY: CRLF-only scope is unestablished', () => {
+    tmpDir = makeProject({ api_coverage_gate: true });
+    const phaseDir = makePhaseDir(tmpDir, '04-crlf');
+    writePlan(phaseDir, '01-PLAN.md', '\r\n\r\n');
+    const j = gateJson(phaseDir);
+    assert.strictEqual(j.block, true, 'CRLF-only content carries no scope');
+    assert.strictEqual(j.scope_unavailable, true);
+  });
+
+  test('BOUNDARY: a single non-whitespace character IS examined content', () => {
+    tmpDir = makeProject({ api_coverage_gate: true });
+    const phaseDir = makePhaseDir(tmpDir, '05-one');
+    writePlan(phaseDir, '01-PLAN.md', 'x');
+    const j = gateJson(phaseDir);
+    assert.strictEqual(j.block, false, 'one byte of real scope is examined — normal detection applies');
+    assert.strictEqual(j.scope_unavailable, undefined);
+  });
+
+  test('a COVERAGE.md matrix short-circuits before scope is ever read', () => {
+    tmpDir = makeProject({ api_coverage_gate: true });
+    const phaseDir = makePhaseDir(tmpDir, '06-matrix');
+    // No plans at all — scope would be unestablished, but the matrix decides.
+    writeCoverage(phaseDir, [
+      '# API Coverage — Stripe',
+      '',
+      '| capability | decision | reason |',
+      '|---|---|---|',
+      '| charge | INTEGRATE | |',
+    ].join('\n'));
+    const j = gateJson(phaseDir);
+    assert.strictEqual(j.block, false, 'a valid matrix passes regardless of scope readability');
+    assert.strictEqual(j.coverage_present, true);
+    assert.strictEqual(j.scope_unavailable, undefined);
+  });
+
+  test('a no-integration DECLARATION passes even with an unestablished scope', () => {
+    tmpDir = makeProject({ api_coverage_gate: true });
+    const phaseDir = makePhaseDir(tmpDir, '07-decl');
+    writeCoverage(phaseDir, 'No external API integration: pure internal refactor.\n');
+    const j = gateJson(phaseDir);
+    assert.strictEqual(j.block, false, 'the human declaration is the reasoned overrule');
+    assert.strictEqual(j.none_declared, true);
+    assert.strictEqual(j.scope_unavailable, undefined);
+  });
+
+  test('a project with no .planning/phases tree still fails OPEN (not a scope block)', () => {
+    const noPhases = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-apicov-nophases-'));
+    try {
+      fs.mkdirSync(path.join(noPhases, '.planning'), { recursive: true });
+      fs.writeFileSync(
+        path.join(noPhases, '.planning', 'config.json'),
+        JSON.stringify({ workflow: { api_coverage_gate: true } }),
+        'utf8',
+      );
+      const r = runTools(['check', 'api-coverage.verify-pre', '01-x', '--raw'], noPhases);
+      const j = JSON.parse(r.output);
+      assert.strictEqual(j.block, false, 'a non-GSD layout must stay fail-open');
+      assert.strictEqual(j.passed, true);
+      assert.strictEqual(
+        j.scope_unavailable,
+        undefined,
+        'the new block must not widen to swallow the non-GSD-project pass',
+      );
+    } finally {
+      cleanup(noPhases);
+    }
+  });
+});
+
+// ─── Property: the scope discriminator is emptiness, nothing else (#3909) ─────
+// The gate reports `scope_unavailable` exactly when the scope it read is
+// whitespace-only. This pins that predicate against arbitrary input — unicode
+// whitespace, CRLF, strings that merely look blank — so the discriminator can
+// never quietly become "no signals found" instead of "nothing examined".
+describe('api-coverage scope emptiness — properties (#3909)', () => {
+  let tmpDir;
+  afterEach(() => { if (tmpDir) { cleanup(tmpDir); tmpDir = null; } });
+
+  test('P1: the scope read back is whitespace-only iff the plan body was', () => {
+    fc.assert(
+      fc.property(fc.string(), (body) => {
+        tmpDir = makeProject({ api_coverage_gate: true });
+        try {
+          const phaseDir = makePhaseDir(tmpDir, '01-prop');
+          writePlan(phaseDir, '01-PLAN.md', body);
+          // No ROADMAP.md is written, so the roadmap fallback contributes
+          // nothing and the plan body is the entire scope.
+          const res = readPhaseScope(tmpDir, phaseDir, '01');
+          assert.strictEqual(res.readError, null, 'a written plan file must always be readable');
+          assert.strictEqual(
+            res.text.trim() === '',
+            body.trim() === '',
+            'the gate blocks on an unestablished scope, so its emptiness test must agree '
+              + 'with the emptiness of what the author actually wrote',
+          );
+        } finally {
+          cleanup(tmpDir);
+          tmpDir = null;
+        }
+      }),
+      { numRuns: 200, seed: 3909 },
+    );
   });
 });

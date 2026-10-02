@@ -105,6 +105,7 @@ GSD はプロジェクト設定を `.planning/config.json` に保存します。
 | `workflow.discuss_mode` | string | `'discuss'` | `/gsd-discuss-phase` のコンテキスト収集方法を制御。`'discuss'`（デフォルト）は質問を1つずつ行います。`'assumptions'` はまずコードベースを読み取り、信頼度レベル付きの構造化された仮説を生成し、誤っている点のみ修正を求めます。v1.28 で追加 |
 | `workflow.skip_discuss` | boolean | `false` | `true` の場合、`/gsd-autonomous` は discuss-phase を完全にスキップし、ROADMAP のフェーズ目標から最小限の CONTEXT.md を作成します。開発者の要望が PROJECT.md/REQUIREMENTS.md に十分に記載されているプロジェクトに適しています。v1.28 で追加 |
 | `workflow.text_mode` | boolean | `false` | AskUserQuestion の TUI メニューをプレーンテキストの番号付きリストに置き換えます。TUI メニューが表示されない Claude Code リモートセッション（`/rc` モード）で必要です。discuss-phase で `--text` フラグを使用してセッションごとに設定することもできます。v1.28 で追加 |
+| `planner.stall_detection_enabled` | boolean | `true` | 標準プランナー、チャンク化されたアウトライン/プラン別プランナー、プランチェッカー、改訂プランナーの有界な停止検出を制御します。`gsd config-set planner.stall_detection_enabled false` を設定すると watchdog ポーリングを省略し、各エージェントをランタイムネイティブの完了機構で待機します。**警告:** `false` はランタイムが完了通知を失った場合の有界な復旧を放棄します。既存のファイルシステムフォールバックを使うために中断が必要になることがあります。 |
 
 ### 推奨プリセット
 
@@ -121,6 +122,7 @@ GSD はプロジェクト設定を `.planning/config.json` に保存します。
 | 設定 | 型 | デフォルト | 説明 |
 |------|-----|-----------|------|
 | `planning.commit_docs` | boolean | `true` | `.planning/` ファイルを git にコミットするかどうか |
+| `planning.pr_strict` | boolean | `false` | `/gsd-pr-branch` のフィルタモード。`false` は STATE.md、ROADMAP.md、MILESTONES.md、PROJECT.md、REQUIREMENTS.md、milestones/ などの構造的なプランニング状態を PR ブランチに残す。`true` はすべての `.planning/` パスを削除する |
 | `planning.search_gitignored` | boolean | `false` | `.planning/` を含めるために広範な検索に `--no-ignore` を追加 |
 
 ### 自動検出
@@ -297,7 +299,7 @@ quick タスクのブランチ設定例：
 
 有効なオーバーライド値: `opus`、`sonnet`、`haiku`、`inherit`、または完全修飾モデル ID（例: `"openai/o3"`、`"google/gemini-2.5-pro"`）。
 
-### 非 Claude ランタイム（Codex、OpenCode、Gemini CLI、Kilo）
+### 非 Claude ランタイム（Codex、OpenCode、Antigravity CLI、Kilo）
 
 GSD が非 Claude ランタイム向けにインストールされると、インストーラーは自動的に `~/.gsd/defaults.json` に `resolve_model_ids: "omit"` を設定します。これにより GSD はすべてのエージェントに対して空のモデルパラメータを返し、各エージェントはランタイムで設定されたモデルを使用します。デフォルトの場合、追加のセットアップは不要です。
 
@@ -332,7 +334,7 @@ GSD が非 Claude ランタイム向けにインストールされると、イ�
 |----|------|---------|
 | `false`（デフォルト） | Claude エイリアス（`opus`、`sonnet`、`haiku`）を返す | Claude Code + ネイティブ Anthropic API |
 | `true` | エイリアスを完全な Claude モデル ID（`claude-opus-4-8`）にマッピング | 完全な ID が必要な API を使用する Claude Code |
-| `"omit"` | 空文字列を返す（ランタイムがデフォルトを選択） | 非 Claude ランタイム（Codex、OpenCode、Gemini CLI、Kilo） |
+| `"omit"` | 空文字列を返す（ランタイムがデフォルトを選択） | 非 Claude ランタイム（Codex、OpenCode、Antigravity CLI、Kilo） |
 
 ### プロファイルの設計思想
 

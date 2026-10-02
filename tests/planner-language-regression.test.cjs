@@ -20,6 +20,7 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const { collectSection } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const AGENTS_DIR = path.join(ROOT, 'agents');
@@ -114,8 +115,6 @@ const ALLOWLIST = {
   'gsd-debugger.md': ['time_sizing'],
   // Doc-writer uses "15 minutes" in API rate limit example, "2 minutes" for doc quality
   'gsd-doc-writer.md': ['time_sizing'],
-  // Discovery-phase uses time for level descriptions (operational, not scope)
-  'discovery-phase.md': ['time_sizing'],
   // Explore uses "~30 seconds" as operational estimate
   'explore.md': ['time_sizing'],
   // Review uses "up to 5 minutes" for CodeRabbit timeout
@@ -124,8 +123,6 @@ const ALLOWLIST = {
   'fast.md': ['time_sizing'],
   // Execute-phase uses a configurable test-gate timeout (workflow.test_gate_timeout, #1857)
   'execute-phase.md': ['time_sizing'],
-  // Verify-phase uses a configurable test-gate timeout (workflow.test_gate_timeout, #1857)
-  'verify-phase.md': ['time_sizing'],
   // Map-codebase documents subagent_timeout
   'map-codebase.md': ['time_sizing'],
   // Help documents CodeRabbit timing
@@ -295,9 +292,9 @@ describe('plan-phase.md — source audit orchestration (#2091)', () => {
 
   test('step 9b does not use "too complex" language', () => {
     // Extract just step 9b content (between "## 9b" and "## 9c" or "## 10")
-    const step9bMatch = workflowContent.match(/## 9b\.([\s\S]*?)(?=## 9c|## 10)/);
-    if (step9bMatch) {
-      const step9b = step9bMatch[1];
+    const step9bSection = collectSection(workflowContent, (h) => h.text.startsWith('9b.'));
+    if (step9bSection) {
+      const step9b = step9bSection.body;
       assert.ok(
         !step9b.includes('too complex'),
         'step 9b must not use "too complex" — use context budget language instead'

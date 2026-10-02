@@ -35,6 +35,8 @@ files_modified:
   - src/components/PostFeed.tsx
   - src/components/PostCard.tsx
   - src/app/feed/page.tsx
+files_deleted:
+  - src/components/LegacyFeed.tsx
 autonomous: true
 requirements: ["FEED-01", "FEED-03"]
 user_setup: []
@@ -67,15 +69,32 @@ must_haves:
 | `plan` | Yes | string | Plan number within the phase, e.g. `02`. |
 | `type` | Yes | `execute` or `tdd` | `execute` for standard plans; `tdd` for test-driven plans where tests are written before implementation. |
 | `wave` | Yes | integer | Execution wave. Plans in wave 1 run in parallel (no dependencies). Plans in wave 2+ wait for all plans in the previous wave to complete. Pre-computed at plan time by `gsd-planner`. |
-| `depends_on` | Yes | array of plan IDs | Plans this plan must wait for. Empty array = wave 1. Example: `["03-01"]` means this plan runs after Plan 01 in Phase 3. |
+| `depends_on` | Yes | array of plan IDs | Plans this plan must wait for. Empty array = wave 1. Accepts three forms, resolved in order: the full plan id (`"03-01-auth-hardening"`), the canonical phase-plan prefix (`"03-01"`), or the bare plan number (`"01"`, #3897) — which resolves to the sibling plan in the **same phase** whose canonical id ends `-01`. The bare form is in-phase only; it never resolves across phases. If two plans in the same phase share a bare form, the first one (by sorted plan-file order) wins — deterministic, but arbitrary when the collision happens, so prefer the full or canonical form when phase has any short-form collision risk. Example: `["03-01"]` means this plan runs after Plan 01 in Phase 3; from within Phase 3 itself, `["01"]` means the same thing. |
 | `files_modified` | Yes | array of paths | Every file this plan creates or modifies. Used by the plan-checker to detect same-wave file conflicts and by execute-phase for merge tracking. |
+| `files_deleted` | No | array of paths | Every file this plan deliberately **removes**. The post-wave cleanup gauntlet blocks the merge of any executor branch whose diff deletes a file — a net against a mass-deletion accident — and this field is the opt-in that names the exceptions. Matching is exact per path after separator normalization: a declared path merges, an undeclared one still blocks that plan's entry (and only that entry). There are no globs and no directory prefixes, so a declaration can never authorize more than it literally lists. Omit the field and the guard's original unconditional block stays in force, which is why absence is always the safe default (#3003). Counts toward same-wave conflict detection alongside `files_modified`: a plan deleting a file another plan in the same wave is editing is the sharpest conflict there is — one branch removes what the other is writing — so the two plans are pushed into different waves regardless of which side holds the deletion. |
+| `coupling_justified` | No | array of `"plan-id: reason"` strings | One entry per deliberately coupled same-wave peer, e.g. `["03-02: both append independent config keys"]` — declares that the coupling with that plan through a shared mutable resource (config key, table, migration, env var) is deliberate and order-independent. The plan-checker's Dimension 3b recognizes the declaration and does not flag the pair, so intentionally coupled plans can pass verification without serializing waves. The `"plan-id: reason"` shape is a prompt-level convention read by the checker, not a schema — the plan parser (`src/plan-document.cts`) neither validates nor rejects the field, so a typo'd plan-id silently exempts nothing (#3724). |
 | `autonomous` | Yes | boolean | `true` when all tasks are type `auto`. `false` when the plan contains any `checkpoint:*` task that requires human interaction. |
 | `requirements` | Yes | array of IDs | Requirement IDs from ROADMAP.md that this plan addresses. Every phase requirement ID must appear in at least one plan's `requirements` field. Empty arrays are a BLOCKER. |
 | `user_setup` | No | array of objects | External-service setup steps that Claude cannot automate (account creation, secret retrieval, dashboard configuration). When present, execute-phase generates a `USER-SETUP.md` checklist for the developer. |
 | `status` | No | `superseded` | Marks a plan that was deliberately reassigned or abandoned mid-phase and will never be executed. A `status: superseded` plan is excluded from the phase's plan and summary counts, so it never holds the phase below 100%. See [Superseded plans](#superseded-plans). Any other value (or the field's absence) has no effect on counting. |
 | `estimate` | No | object | Projected execution cost: `{tokens, raw_tokens, tasks, confidence}` (#2631, [ADR-2629](../adr/2629-phase-effort-estimation-calibration.md)). `tokens` is an `estimateTokens`-scale projection with the project's calibration factor **already applied** (which is why the plan-checker passes `--calibrated` to `estimate-check` — re-applying it would square the correction); `confidence` (`low`/`med`/`high`) is **derived from the calibration sample count, never self-rated**. Additive and optional — a plan without it behaves exactly as before. A plan estimated above `workflow.smart_zone_tokens` is flagged with a split recommendation at plan time; the flag is advisory and never blocks. |
 | `must_haves` | Yes | object | Goal-backward verification criteria. See below. |
+| `agent_hint` | No | string | Per-plan specialist executor routing (#1689). Name of a subagent that shares the `gsd-executor` execution contract (reads `execute-plan.md`, atomic-commit protocol). When the named agent resolves on the active runtime (an agent file exists in the runtime's agent dir), `execute-phase` dispatches it instead of `gsd-executor`. Unset/unresolved → `gsd-executor`, byte-identical to today. Default-on via `workflow.agent_hint_routing`; set `false` to disable. See [Per-plan executor routing](#per-plan-executor-routing). |
 | `gap_closure` | Only in gap-closure mode | string, exact match | Must be exactly the literal lowercase `true` — validated as a string comparison, not a YAML boolean, so `True`, `TRUE`, `yes`, and `1` are all rejected. Required on every plan generated by `/gsd-plan-phase --gaps`, checked by the `plan-gap-closure` schema (`src/frontmatter.cts`) rather than `plan`. `/gsd-execute-phase --gaps-only` filters strictly on this field, so an omitted or wrong-valued `gap_closure` on a gap-closure plan means it is silently skipped — zero executors spawned, no error (#2847). Standard and reviews-mode plans validate against the unmodified `plan` schema, which neither requires nor checks this field (nothing rejects it as an extra field either, if present). |
+
+### Per-plan executor routing
+
+A plan can opt into a **specialist executor** by setting `agent_hint:` to the name of a subagent that shares the `gsd-executor` execution contract — it reads `execute-plan.md`, follows the atomic-commit protocol, and carries Read/Edit/Write/Bash. A Flutter specialist, for example:
+
+```yaml
+---
+agent_hint: well-me-flutter-engineer
+---
+```
+
+At dispatch, `execute-phase` resolves the hint against the **active runtime's agent directory** (both project-local and user-global, across the runtime's filename variants — `.md`, `.agent.md`, `.toml`, …) and dispatches the named subagent via `subagent_type`. If the field is absent, blank, or the named agent does not resolve, the plan dispatches to `gsd-executor` — byte-identical to behavior without the field. Routing is gated by `workflow.agent_hint_routing` (default-on; see [CONFIGURATION](../CONFIGURATION.md#workflow-toggles)).
+
+The specialist agent is an ordinary agent file (e.g. `agents/well-me-flutter-engineer.md` on Claude Code); there is no separate registration manifest.
 
 ### Superseded plans
 
@@ -225,14 +244,48 @@ Full taxonomy, emission rules, and anti-patterns (chiefly: rating everything `on
 
 ---
 
+## Auto-select
+
+`auto_select` is an **optional** attribute on a `<task type="checkpoint:decision">` element (issue #4095). It names the `id` of the `<option>` that auto-mode (`workflow._auto_chain_active` / `workflow.auto_advance`) should select when the checkpoint is reached unattended.
+
+```xml
+<task type="checkpoint:decision" gate="blocking" auto_select="nextauth">
+  <decision>Select authentication provider</decision>
+  <options>
+    <option id="supabase"><name>Supabase Auth</name></option>
+    <option id="clerk"><name>Clerk</name></option>
+    <option id="nextauth"><name>NextAuth.js</name></option>
+  </options>
+  <resume-signal>Select: supabase, clerk, or nextauth</resume-signal>
+</task>
+```
+
+**Semantics:**
+
+| `auto_select` | Auto-mode behavior |
+|---|---|
+| Absent | Escalates to a human — same treatment as `gate="blocking-human"`. Auto-mode does not guess an answer from option order. |
+| Names a real `<option id="…">` | Selects that option and logs `⚡ Auto-selected: [option id]`, then continues. |
+| Names an id that does not match any `<option id="…">` | `verify plan-structure` fails at plan-parse time. Never a silent fallback to the first option. |
+
+`gate="blocking-human"` continues to win over everything, unchanged — it stops for a human in every mode regardless of `auto_select`.
+
+**Why:** before this attribute existed, auto-mode always picked the first `<option>`, and the planner convention of front-loading the recommended choice meant the safety of every decision checkpoint depended on presentation order — a detail no plan author was told was load-bearing. `auto_select` makes the unattended answer an authored decision instead of a byproduct of layout.
+
+**Optional and back-compat for the structural validator:** a plan that omits `auto_select` on every `checkpoint:decision` task still passes `verify plan-structure` — the validator only rejects a *declared* `auto_select` that doesn't match any option id. What changes is auto-mode's *runtime* behavior (escalate instead of guessing), not plan-structure validity.
+
+Full behavioral reference: `gsd-core/references/checkpoints.md` → `checkpoint:decision`.
+
+---
+
 ## Task types
 
 | Type | Use | Autonomy |
 |---|---|---|
 | `auto` | Everything the executor can do independently. | Fully autonomous. |
-| `tracer` | The leading thin end-to-end slice a plan starts with by default (tracer-first) — production-quality, wired through every layer, with a real end-to-end `<verify>`. | Fully autonomous; after committing, the executor runs the tracer's `<verify>` as an early integration gate — autonomous runs halt on failure before expansion, interactive runs present a `checkpoint:human-verify`. |
+| `tracer` | The leading thin end-to-end slice a plan starts with by default (tracer-first) — production-quality, wired through every layer, with a real end-to-end `<verify>`. | Fully autonomous; after committing, the executor runs the tracer's `<verify>` as an early integration gate. A tracer carrying `gate="blocking-human"` STOPs for a human in every mode, auto included. Otherwise autonomous runs halt on failure before expansion, and interactive runs honor `workflow.human_verify_mode` (#3299): under the `end-of-phase` default a `<verify>` carrying only `<automated>` is re-run and, on success, expansion continues with **no** checkpoint (failure still halts); under `mid-flight`, or when the tracer carries `<human-check>`, a `checkpoint:human-verify` is presented. Full precedence chain: `gsd-core/references/checkpoints.md` → "Tracer feedback gate". |
 | `checkpoint:human-verify` | Visual or functional verification that requires a human to look at a running UI or service. | Pauses execution; presents to the developer; resumes on approval. |
-| `checkpoint:decision` | Implementation choices that arose during execution and require the developer's input. | Pauses execution; presents options; resumes on selection. |
+| `checkpoint:decision` | Implementation choices that arose during execution and require the developer's input. | Pauses execution; presents options; resumes on selection. In auto-mode, an `auto_select="<option-id>"` attribute lets the plan name the unattended answer — see [Auto-select](#auto-select). |
 | `checkpoint:human-action` | Truly unavoidable manual steps (account creation, hardware interaction). Used sparingly. | Pauses execution; resumes on confirmation. |
 
 Plans that contain any checkpoint task must set `autonomous: false` in frontmatter.
@@ -266,7 +319,7 @@ Plans that contain any checkpoint task must set `autonomous: false` in frontmatt
 | `<files>` | Every file the task creates or modifies. The executor writes only these files. |
 | `<read_first>` | Files the executor must read before touching anything — the file being modified, any source-of-truth pattern file, any file whose types or conventions must be replicated. |
 | `<action>` | Concrete instructions with exact identifiers, file paths, function signatures, and expected values. Never says "align X with Y" without specifying the target state. Never contains fenced code blocks or full implementations. |
-| `<verify>` | A runnable command or check that proves the task succeeded. Must distinguish pass from fail — `echo "done"` is not valid. |
+| `<verify>` | A runnable command or check that proves the task succeeded. Must distinguish pass from fail — `echo "done"` is not valid. Accepts either the wrapped form (`<verify><automated>cmd</automated></verify>`) or the legacy bare-text form (`<verify>cmd</verify>`); both are valid. **On a `type="tracer"` task, prefer the wrapped form:** the tracer feedback gate's auto-continue (#3299) requires a `<verify>` carrying only `<automated>`, so a bare-text tracer verify falls through to the STOP fallback and still presents a `checkpoint:human-verify` in interactive runs even under `end-of-phase`. |
 | `<acceptance_criteria>` | Verifiable conditions: grep-verifiable strings, command exit codes, observable behaviours. No subjective language ("looks correct", "properly configured"). Negative greps (`! grep -Eq 'PAT' file`) are file-scoped — region-scope them (`sed -n`/`awk` range, then grep) when a sibling task needs the construct elsewhere in the same file (#968). |
 | `<done>` | A short measurable statement of the completed outcome. |
 

@@ -25,10 +25,39 @@ import path from 'node:path';
 // ─── Path Traversal Prevention ──────────────────────────────────────────────
 
 /**
+ * THE containment comparison — the single place this repo decides whether an
+ * already-resolved path lies inside an already-resolved root (ADR-4650).
+ *
+ * Separator-aware on purpose: comparing the bare strings would accept a
+ * sibling that merely shares a prefix (`<root>-evil` against `<root>`), so both
+ * sides get a trailing separator before the prefix test. `target === root` is
+ * contained.
+ *
+ * `pathImpl` lets a caller supply `path.win32` / `path.posix` instead of the
+ * ambient module, so win32 separator semantics are testable off Windows.
+ *
+ * Exported for callers that have ALREADY resolved both operands themselves
+ * and need only this comparison step (e.g. a caller that owns its own
+ * `fs.realpathSync` calls to preserve an exists-vs-escaped tri-state). A
+ * caller that has NOT resolved its operands must NOT reach for this function
+ * directly — the comparison alone is not a containment check — and should use
+ * `assertWithinRoot` / `tryWithinRoot` (or the `assertWithinRootLexical` /
+ * `tryWithinRootLexical` pair) instead.
+ */
+export function isContainedIn(
+  resolvedTarget: string,
+  resolvedRoot: string,
+  pathImpl: { sep: string } = path,
+): boolean {
+  if (resolvedTarget === resolvedRoot) return true;
+  return (resolvedTarget + pathImpl.sep).startsWith(resolvedRoot + pathImpl.sep); // allow-handrolled-containment: this IS the canonical comparison every other site routes through
+}
+
+/**
  * Validate that a file path resolves within an allowed base directory.
  * Prevents path traversal attacks via ../ sequences, symlinks, or absolute paths.
  */
-export function validatePath(filePath: unknown, baseDir: unknown, opts: { allowAbsolute?: boolean } = {}): { safe: boolean; resolved: string; error?: string } {
+function validatePath(filePath: unknown, baseDir: unknown, opts: { allowAbsolute?: boolean } = {}): { safe: boolean; resolved: string; error?: string } {
   if (!filePath || typeof filePath !== 'string') {
     return { safe: false, resolved: '', error: 'Empty or invalid file path' };
   }
@@ -56,17 +85,53 @@ export function validatePath(filePath: unknown, baseDir: unknown, opts: { allowA
   try {
     resolvedPath = fs.realpathSync(resolvedPath);
   } catch {
-    const parentDir = path.dirname(resolvedPath);
+    // realpathSync failed — either resolvedPath doesn't exist at all, or it's
+    // a dangling symlink (the link itself exists but its target doesn't).
+    // lstat (unlike stat/realpath) stats the link itself and does NOT follow
+    // it, so it succeeds for a dangling symlink and throws ENOENT for a
+    // genuinely absent path. That's the discriminator: without it, a dangling
+    // symlink to a non-existent OUTSIDE path would fall through to the
+    // parent-resolution fallback below and be re-accepted as an in-project
+    // path, while a symlink to an EXISTING outside path is correctly
+    // rejected via the realpathSync success branch above — a state
+    // difference an attacker can use as an existence oracle for arbitrary
+    // absolute paths.
     try {
-      const realParent = fs.realpathSync(parentDir);
-      resolvedPath = path.join(realParent, path.basename(resolvedPath));
+      if (fs.lstatSync(resolvedPath).isSymbolicLink()) {
+        return { safe: false, resolved: '', error: 'Path is an unresolvable symbolic link' };
+      }
     } catch {
-      // Parent doesn't exist either — keep the resolved path as-is
+      // lstat also threw — resolvedPath (and its would-be link) genuinely
+      // doesn't exist. Fall through to ancestor resolution below.
+    }
+    // Walk up to the nearest ancestor that exists and realpath THAT, then
+    // re-append the remaining (not-yet-created) segments. This canonicalizes
+    // resolvedPath the same way resolvedBase was canonicalized above,
+    // regardless of how many leading directories are missing — a single
+    // parent-only check would leave resolvedPath un-canonicalized whenever
+    // the parent is also missing, which breaks the startsWith comparison
+    // below on any non-canonical cwd (e.g. macOS /var/... vs
+    // /private/var/...).
+    let ancestor = path.dirname(resolvedPath);
+    const remainder: string[] = [path.basename(resolvedPath)];
+    for (;;) {
+      try {
+        const realAncestor = fs.realpathSync(ancestor);
+        resolvedPath = path.join(realAncestor, ...remainder);
+        break;
+      } catch {
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) {
+          // Reached filesystem root without finding an existing ancestor —
+          // keep resolvedPath as-is.
+          break;
+        }
+        remainder.unshift(path.basename(ancestor));
+        ancestor = parent;
+      }
     }
   }
-  const normalizedBase = resolvedBase + path.sep;
-  const normalizedPath = resolvedPath + path.sep;
-  if (resolvedPath !== resolvedBase && !normalizedPath.startsWith(normalizedBase)) {
+  if (!isContainedIn(resolvedPath, resolvedBase)) {
     return {
       safe: false,
       resolved: resolvedPath,
@@ -145,15 +210,135 @@ export function loadTrustedGlobalRoots(config: unknown): string[] {
 }
 
 /**
+ * A path proven to resolve inside a declared root.
+ *
+ * A plain `string` is NOT assignable to `ContainedPath` — that asymmetry is
+ * the entire point. The shape being replaced (`validatePath`'s
+ * `{ resolved: string }`) returns a usable-looking path even when the answer
+ * is unsafe (the traversal branch still populates `resolved` with the
+ * escaping path), so a plain string in hand proves nothing. A
+ * `ContainedPath` can only be produced by `assertWithinRoot` /
+ * `tryWithinRoot` on their success paths, so possessing one is proof the
+ * containment check already passed.
+ */
+export type ContainedPath = string & { readonly __containedIn: unique symbol };
+
+/**
+ * Named acceptance policy for what kind of candidate path is even considered.
+ *
+ * This replaces the old per-call-site `{ allowAbsolute: true }` boolean flag.
+ * At a call site, `{ allowAbsolute: true }` reads as "containment is relaxed
+ * here" — which is FALSE. An absolute path that resolves OUTSIDE the root is
+ * still rejected; the flag only ever controlled whether an absolute candidate
+ * was considered at all. `AbsoluteInsideRoot` states the real contract: an
+ * absolute candidate is accepted for consideration, but containment is
+ * enforced exactly as it is for a relative one.
+ */
+export const PathAcceptance = {
+  /** Relative candidates only; an absolute candidate is rejected outright. */
+  RelativeOnly: 'relative-only',
+  /**
+   * An absolute candidate is accepted — but ONLY if it still resolves inside the
+   * root. Containment is NOT relaxed by this policy; an absolute path outside the
+   * root is rejected exactly as a traversal is. This is the distinction the old
+   * `{ allowAbsolute: true }` flag failed to make at its call sites.
+   */
+  AbsoluteInsideRoot: 'absolute-inside-root',
+} as const;
+
+export type PathAcceptancePolicy = (typeof PathAcceptance)[keyof typeof PathAcceptance];
+
+/**
  * Validate a file path and throw on traversal attempt.
  * Convenience wrapper around validatePath for use in CLI commands.
  */
-export function requireSafePath(filePath: unknown, baseDir: unknown, label: string | null | undefined, opts: { allowAbsolute?: boolean } = {}): string {
-  const result = validatePath(filePath, baseDir, opts);
+export function assertWithinRoot(candidate: unknown, root: unknown, label?: string | null, policy: PathAcceptancePolicy = PathAcceptance.RelativeOnly): ContainedPath {
+  const result = validatePath(candidate, root, { allowAbsolute: policy === PathAcceptance.AbsoluteInsideRoot });
   if (!result.safe) {
     throw new Error(`${label || 'Path'} validation failed: ${result.error}`);
   }
-  return result.resolved;
+  return result.resolved as ContainedPath;
+}
+
+/**
+ * Validate a file path and return null on traversal attempt (no throw).
+ *
+ * Returns exactly `null` when unsafe — never `''`, never `result.resolved`.
+ * `validatePath` populates `resolved` with the ESCAPING path on the
+ * traversal branch, so returning it here would reproduce the defect this
+ * narrowing exists to remove.
+ */
+export function tryWithinRoot(candidate: unknown, root: unknown, policy: PathAcceptancePolicy = PathAcceptance.RelativeOnly): ContainedPath | null {
+  const result = validatePath(candidate, root, { allowAbsolute: policy === PathAcceptance.AbsoluteInsideRoot });
+  if (!result.safe) {
+    return null;
+  }
+  return result.resolved as ContainedPath;
+}
+
+/**
+ * Validate a file path and throw on traversal attempt.
+ * Convenience wrapper around validatePath for use in CLI commands.
+ *
+ * Delegates to assertWithinRoot so there is one implementation beneath both
+ * names; its declared return type is ContainedPath (a branded string, still
+ * assignable to string) so existing callers keep compiling untouched.
+ */
+export function requireSafePath(filePath: unknown, baseDir: unknown, label: string | null | undefined, policy: PathAcceptancePolicy = PathAcceptance.RelativeOnly): ContainedPath {
+  return assertWithinRoot(filePath, baseDir, label, policy);
+}
+
+/**
+ * LEXICAL containment — `path.resolve` only, never any filesystem access.
+ *
+ * Shares `isContainedIn` with the realpath-based predicate, so there is ONE
+ * containment decision in this repo; these differ only in how a path is
+ * RESOLVED before that decision, never in the decision itself (ADR-4650
+ * decisions 1 and 6).
+ *
+ * Use this — and say why at the call site — only where a symlink must be
+ * PRESERVED rather than resolved, or where the target legitimately does not
+ * exist yet. Three such cases exist: a destination validated before the
+ * `mkdirSync` that creates it, a migration that snapshots and restores a
+ * symlinked path AS A LINK, and a restore gate that refuses links outright.
+ * Everywhere else the realpath-based `assertWithinRoot` / `tryWithinRoot` is
+ * the correct predicate, because a lexical check CANNOT SEE A SYMLINK: a
+ * caller relying on one for a write-confinement guarantee must pair it with
+ * its own symlink refusal.
+ *
+ * `candidate` is resolved RELATIVE TO `root` (so an absolute candidate is
+ * taken as-is, matching `path.resolve` semantics). `target === root` is
+ * contained.
+ *
+ * DELIBERATELY ABSENT: no NUL-byte rejection here. The existing lexical
+ * callers do not reject NUL at this layer (one of them checks NUL itself,
+ * separately), and adding it here would change their behavior. Callers that
+ * need it keep their own check.
+ */
+export function tryWithinRootLexical(
+  candidate: unknown,
+  root: unknown,
+  opts: { pathImpl?: { resolve(...segments: string[]): string; sep: string } } = {},
+): ContainedPath | null {
+  const p = opts.pathImpl || path;
+  if (typeof candidate !== 'string' || candidate === '') return null;
+  if (typeof root !== 'string' || root === '') return null;
+  const rootResolved = p.resolve(root);
+  const targetResolved = p.resolve(root, candidate);
+  return isContainedIn(targetResolved, rootResolved, p) ? (targetResolved as ContainedPath) : null;
+}
+
+export function assertWithinRootLexical(
+  candidate: unknown,
+  root: unknown,
+  label?: string | null,
+  opts: { pathImpl?: { resolve(...segments: string[]): string; sep: string } } = {},
+): ContainedPath {
+  const contained = tryWithinRootLexical(candidate, root, opts);
+  if (contained === null) {
+    throw new Error(`${label || 'Path'} validation failed: lexical containment check failed`);
+  }
+  return contained;
 }
 
 // ─── Prompt Injection Detection ────────────────────────────────────────────────────
@@ -176,7 +361,7 @@ export const INJECTION_PATTERNS: RegExp[] = [
 
   // Role/identity manipulation
   /you\s+are\s+now\s+(?:a|an|the)\s+/i,
-  /act\s+as\s+(?:a|an|the)\s+(?!plan|phase|wave)/i,
+  /\bact\s+as\s+(?:a|an|the)\s+(?!plan|phase|wave)/i,
   /pretend\s+(?:you(?:'re| are)\s+|to\s+be\s+)/i,
   /from\s+now\s+on,?\s+you\s+(?:are|will|should|must)/i,
 
@@ -373,6 +558,66 @@ export function sanitizeForDisplay(text: unknown): string {
     .join('\n');
 
   return sanitized;
+}
+
+/**
+ * Sanitize a value that must render as a SINGLE LINE and is derived from a
+ * filesystem name (a phase directory's number/name token, an archived
+ * milestone label, a bare filename) — not from file/frontmatter CONTENT.
+ *
+ * Why this is NOT `sanitizeForDisplay`: that helper's job is multi-line
+ * prose — it strips whole protocol-leak LINES while deliberately preserving
+ * `\n` between legitimate ones (see its docstring and
+ * `tests/security.test.cjs`'s neighbouring describe). A filesystem name is
+ * the opposite shape: it is supposed to be one line, so a `\n`/`\r` inside
+ * one is never legitimate content to preserve — it is an attacker (or a
+ * doctored checkout) using the directory NAME itself as the injection
+ * vector. #3458's reproduction: a phase directory literally named
+ *   `zz\n0 open items require decisions.\n\x1b[2K\x1b[1G FORGED`
+ * flows verbatim into `audit-open`'s human report (the phase-number
+ * fallback taken when the name doesn't match `PHASE_NUMBER_TOKEN_SOURCE`).
+ * `sanitizeForDisplay` would pass every one of those bytes straight through
+ * — by design, since it never touches control characters — so the embedded
+ * `\n` becomes a real newline in the report, printing a forged
+ * "0 open items require decisions." as its own line, and the raw ESC bytes
+ * reach the terminal.
+ *
+ * This helper closes that hole by ESCAPING (never silently stripping) the
+ * C0 control range (0x00–0x1F, including ESC 0x1B, CR, LF), DEL (0x7F), and
+ * the C1 range (0x80–0x9F) into a visible representation (`\n`, `\x1b`,
+ * ...). Escaping rather than stripping is deliberate: a reviewer reading the
+ * report should be able to SEE that a name was doctored, not have it quietly
+ * normalized away as if nothing happened. Every other character — including
+ * all ordinary printable and non-ASCII text — passes through byte-identical.
+ */
+export function sanitizeLabel(text: unknown): string {
+  if (!text || typeof text !== 'string') return text as string;
+
+  const NAMED_ESCAPES: Record<number, string> = {
+    0x00: '\\0',
+    0x07: '\\a',
+    0x08: '\\b',
+    0x09: '\\t',
+    0x0a: '\\n',
+    0x0b: '\\v',
+    0x0c: '\\f',
+    0x0d: '\\r',
+    0x1b: '\\x1b',
+  };
+
+  let out = '';
+  for (const ch of text) {
+    const code = ch.codePointAt(0) as number;
+    const isC0 = code <= 0x1f;
+    const isDel = code === 0x7f;
+    const isC1 = code >= 0x80 && code <= 0x9f;
+    if (isC0 || isDel || isC1) {
+      out += NAMED_ESCAPES[code] ?? `\\x${code.toString(16).padStart(2, '0')}`;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
 }
 
 // ─── Shell Safety ───────────────────────────────────────────────────────────────────────

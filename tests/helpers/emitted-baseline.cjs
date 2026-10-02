@@ -47,8 +47,14 @@ const BASELINE_ENV = 'GSD_EMITTED_BASELINE';
 /** Default on-disk cache location, relative to the repo root. */
 const DEFAULT_CACHE_PATH = '.gsd-cache/emitted-baseline.json';
 
-/** Baseline artifact schema version — pinned so a format change fails loudly. */
-const BASELINE_VERSION = 1;
+/** Baseline artifact schema version — pinned so a format change fails loudly.
+ * v2 (#3547): the harness now measures every global family in the REAL
+ * config-home shape (<root>/<globalSuffix> instead of the collapsed
+ * <root>), so manifests from a v1 baseline — built with the collapsed
+ * harness — are not comparable (HOME-level paths present, prefix bytes
+ * absent). Bumping refuses v1 caches and forces the same-schema fallback
+ * build; the push-to-next job republishes at v2 when this merges. */
+const BASELINE_VERSION = 2;
 
 /**
  * Validate a baseline artifact's shape and freshness.
@@ -111,7 +117,7 @@ function validateBaseline(doc, expectedSha, source) {
  *
  *   1. `GSD_EMITTED_BASELINE` — an operator pin; a mismatch here is a HARD STOP
  *   2. the on-disk cache, validated against the expected sha — a mismatch RECOVERS
- *   3. an in-job build at `origin/next` (slow fallback)
+ *   3. an in-job build at the expected sha — merge-base(base, HEAD), #5008 (slow fallback)
  *   4. none → explicit failure (NEVER a silent pass)
  *
  * #2854: steps 1 and 2 differ only in what a mismatch means, so which door a given
@@ -202,10 +208,10 @@ function resolveBaseline({
     try {
       built = buildFallback();
     } catch (err) {
-      attempts.push(`in-job build at origin/next failed: ${err.message}`);
+      attempts.push(`in-job build at merge-base(base, HEAD) failed: ${err.message}`);
       return { ok: false, via: 'build', attempted, errors: attempts };
     }
-    const v = validateBaseline(built, expectedSha, 'in-job build at origin/next');
+    const v = validateBaseline(built, expectedSha, 'in-job build at merge-base(base, HEAD)');
     if (v.ok) return { ok: true, via: 'build', attempted, ...v };
     attempts.push(...v.errors);
     return { ok: false, via: 'build', attempted, errors: attempts };

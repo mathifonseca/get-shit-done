@@ -29,8 +29,9 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const { cleanup } = require('./helpers.cjs');
+const { cleanup, installSpawnEnv, withAmbientCapabilityHome } = require('./helpers.cjs');
 const { gitOrThrow } = require('./helpers/git-fixture.cjs');
+const { LOOP_HOOK_POINT_CLI_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 // This suite exercises the GATE pipeline at execute:wave:post. Hook-count assertions
 // are scoped to kind === 'gate' so they remain exact as contributions are registered
@@ -67,19 +68,18 @@ function gitAddCommit(dir, message) {
  * When raw=true the tool emits JSON; parsed is set on success.
  */
 function runTool(args, { cwd, env = {} } = {}) {
-  const childEnv = {
-    ...process.env,
+  const childEnv = installSpawnEnv({
     GSD_SESSION_KEY: '',
     CODEX_THREAD_ID: '',
     CLAUDE_SESSION_ID: '',
     CLAUDE_CODE_SSE_PORT: '',
     ...env,
-  };
+  });
   const r = spawnSync(process.execPath, [GSD_TOOLS, ...args], {
     cwd: cwd || os.tmpdir(),
     encoding: 'utf8',
     env: childEnv,
-    timeout: 60000,
+    timeout: LOOP_HOOK_POINT_CLI_TIMEOUT_MS,
   });
   const result = { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
   if (r.stdout && r.stdout.trim().startsWith('{')) {
@@ -102,6 +102,22 @@ after(() => { for (const d of tmpDirs) { try { cleanup(d); } catch { /* best-eff
 // ─── Section A: loop render-hooks execute:wave:post ──────────────────────────
 
 describe('A. loop render-hooks execute:wave:post — resolution', () => {
+
+  test('#4485: render-hooks ignores capabilities installed in ambient user locations', (t) => {
+    withAmbientCapabilityHome(t, 'gsd-ambient-wave-post-', 'ambient-wave-post', 'execute:wave:post');
+
+    const dir = makeTmpDir();
+    const result = runTool(['loop', 'render-hooks', 'execute:wave:post', '--raw'], { cwd: dir });
+    assert.strictEqual(result.status, 0, result.stderr);
+    assert.deepStrictEqual(
+      result.parsed.activeHooks.map((hook) => [hook.capId, hook.check?.query]),
+      [
+        // Fork: three repo capabilities contribute at execute:wave:post (default-on knobs).
+        ['adversarial-validation', undefined], ['definition-of-done', undefined], ['playwright', undefined],
+        ['drift', 'verify.schema-drift'], ['drift', 'verify.codebase-drift'], ['ui', 'ui.safety-gate'],
+      ],
+    );
+  });
 
   test('[happy] full resolution: all 3 gates present with default config', () => {
     const dir = makeTmpDir();
@@ -641,13 +657,32 @@ describe('F. Real registry execute:wave:post shape — guard against accidental 
       `ui.safety-gate onError must be 'halt'; got ${uiGate.onError}`);
   });
 
-  test('[happy] real registry: execute:wave:post has no steps and 2 contributions (external-job executor + mempalace capture-problems)', () => {
+  test('[happy] real registry: execute:wave:post has exactly 2 steps (#3661 code-review ref.skill:code-review pointFrom:workflow.code_review_point onError:skip; #2856 live-dom-uat gsd-dom-verifier, onError:skip) and 2 contributions (external-job executor + mempalace capture-problems)', () => {
     const point = realRegistry.byLoopPoint['execute:wave:post'];
-    assert.strictEqual(point.steps.length, 0,
-      `execute:wave:post steps must be empty; got ${point.steps.length}`);
-    // #2285: claude-orchestration's dispatch-backend-selector contribution moved
-    // from execute:wave:post to execute:wave:pre — wave:post fires AFTER the
-    // wave already dispatched inline, too late to select a dispatch backend.
+    assert.strictEqual(point.steps.length, 2,
+      `execute:wave:post must have exactly 2 steps; got ${point.steps.length}`);
+    const [codeReviewStep, domUatStep] = point.steps;
+    // #3661: code-review's execute:wave:post step is config-gated (inactive by default)
+    // and can also live at execute:post via workflow.code_review_point.
+    assert.strictEqual(codeReviewStep.capId, 'code-review',
+      `execute:wave:post first step capId must be 'code-review'; got ${codeReviewStep.capId}`);
+    assert.deepStrictEqual(codeReviewStep.ref, { skill: 'code-review' },
+      `execute:wave:post code-review step ref must be { skill: 'code-review' }; got ${JSON.stringify(codeReviewStep.ref)}`);
+    assert.strictEqual(codeReviewStep.pointFrom, 'workflow.code_review_point',
+      `execute:wave:post code-review step pointFrom must be 'workflow.code_review_point'; got ${codeReviewStep.pointFrom}`);
+    assert.strictEqual(codeReviewStep.when, 'workflow.code_review',
+      `execute:wave:post code-review step when must be 'workflow.code_review'; got ${codeReviewStep.when}`);
+    assert.strictEqual(codeReviewStep.onError, 'skip',
+      `execute:wave:post code-review step onError must be 'skip'; got ${codeReviewStep.onError}`);
+    assert.strictEqual(domUatStep.capId, 'live-dom-uat',
+      `execute:wave:post step capId must be 'live-dom-uat'; got ${domUatStep.capId}`);
+    assert.deepStrictEqual(domUatStep.ref, { agent: 'gsd-dom-verifier' },
+      `execute:wave:post step ref must be { agent: 'gsd-dom-verifier' }; got ${JSON.stringify(domUatStep.ref)}`);
+    assert.strictEqual(domUatStep.onError, 'skip',
+      `execute:wave:post step onError must be 'skip'; got ${domUatStep.onError}`);
+    // #4740: claude-orchestration never contributed here (external-job +
+    // mempalace are unrelated capabilities), so this assertion is unaffected
+    // by #4740 removing claude-orchestration's execute:wave:pre contribution.
     // Fork: playwright, definition-of-done and adversarial-validation contribute here
     // (were inline <step> blocks in execute-phase.md before the capability migration).
     assert.strictEqual(point.contributions.length, 5,
@@ -658,15 +693,21 @@ describe('F. Real registry execute:wave:post shape — guard against accidental 
       `execute:wave:post contributions mismatch; got ${capIds.join(',')}`);
   });
 
-  test('[happy] real registry: execute:wave:pre has 1 contribution (claude-orchestration dispatch-backend selector, #2285)', () => {
+  test('[happy] real registry: execute:wave:pre has 0 contributions (#4740 removed claude-orchestration\'s)', () => {
+    // #4740: the execute:wave:pre / into:executor contribution was pure
+    // orchestrator procedure (build a wave manifest, resolve the dispatch
+    // backend, spawn executor agents) with nothing an executor agent could
+    // act on — orchestration is not delivered through an agent contribution,
+    // so it was removed outright rather than retargeted. No capability
+    // contributes at execute:wave:pre anymore.
     const point = realRegistry.byLoopPoint['execute:wave:pre'];
     assert.strictEqual(point.steps.length, 0,
       `execute:wave:pre steps must be empty; got ${point.steps.length}`);
-    assert.strictEqual(point.contributions.length, 1,
-      `execute:wave:pre must have 1 contribution (claude-orchestration); got ${point.contributions.length}`);
+    assert.strictEqual(point.contributions.length, 0,
+      `execute:wave:pre must have 0 contributions (#4740); got ${point.contributions.length}`);
     const capIds = point.contributions.map(c => c.capId).sort();
-    assert.deepStrictEqual(capIds, ['claude-orchestration'],
-      `execute:wave:pre contributions must be claude-orchestration; got ${capIds.join(',')}`);
+    assert.deepStrictEqual(capIds, [],
+      `execute:wave:pre contributions must be empty; got ${capIds.join(',')}`);
   });
 
 });

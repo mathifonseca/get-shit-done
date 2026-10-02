@@ -130,6 +130,11 @@ describe('#3024 review finding 2: LEGACY_NON_REGISTRY_RUNTIME_IDS drift guard', 
     assert.ok(
       !registryIds.includes(SENTINEL_ID) &&
         !legacyIds.includes(SENTINEL_ID) &&
+        // allow-test-rule: source-text-is-the-product (#3545) — sourceParsedIds
+        // is enumeration scaffolding derived from readFileSync'd source text
+        // (see parseHardcodedBranchIds doc comment above); every id it turns
+        // up is verified BEHAVIORALLY below via getGlobalConfigDir, never
+        // trusted on its own
         !sourceParsedIds.includes(SENTINEL_ID),
       `sentinel id ${SENTINEL_ID} unexpectedly collides with a real candidate id — pick a different sentinel`,
     );
@@ -179,16 +184,29 @@ describe('#3024 review finding 2: LEGACY_NON_REGISTRY_RUNTIME_IDS drift guard', 
     );
   });
 
-  test('gemini (an unregistered id with no dedicated branch) resolves to the generic fallback, not runtime-specifically', (t) => {
+  // #4709 AC#1: gemini stopped being merely-unknown and became explicitly
+  // retired (assertNotRetiredRuntime throws before any fallback logic runs),
+  // so it can no longer serve as the sample for "an unregistered id resolves
+  // to the generic fallback" — that property is still true and still pinned
+  // here, just against a genuinely-unknown sample id instead.
+  test('notarealruntime (an unregistered id with no dedicated branch) resolves to the generic fallback, not runtime-specifically', (t) => {
     const saved = clearEnv(collectDescriptorEnvVars());
     t.after(() => restoreEnv(saved));
 
     const fallbackPath = getGlobalConfigDir(SENTINEL_ID);
     assert.strictEqual(
-      getGlobalConfigDir('gemini'),
+      getGlobalConfigDir('notarealruntime'),
       fallbackPath,
-      'gemini must resolve to the same generic fallback as an unregistered id — it has no registry descriptor ' +
-        'and no dedicated branch',
+      'notarealruntime must resolve to the same generic fallback as an unregistered id — it has no registry ' +
+        'descriptor and no dedicated branch',
+    );
+
+    // Side-by-side with the above: gemini is NOT merely unregistered — it is
+    // explicitly retired, and refuses instead of falling back.
+    assert.throws(
+      () => getGlobalConfigDir('gemini'),
+      /retired by #1928/,
+      'gemini must refuse (RetiredRuntimeError), not resolve to the generic fallback like a merely-unregistered id',
     );
   });
 });

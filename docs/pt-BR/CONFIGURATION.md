@@ -25,6 +25,9 @@ O GSD armazena as configurações do projeto em `.planning/config.json`. Criado 
     "search_gitignored": false,
     "sub_repos": []
   },
+  "planner": {
+    "stall_detection_enabled": true
+  },
   "context": null,
   "workflow": {
     "research": true,
@@ -47,6 +50,7 @@ O GSD armazena as configurações do projeto em `.planning/config.json`. Criado 
     "use_worktrees": true,
     "code_review": true,
     "code_review_depth": "standard",
+    "code_review_depth_overrides": [],
     "plan_bounce": false,
     "plan_bounce_script": null,
     "plan_bounce_passes": 2,
@@ -194,7 +198,6 @@ Os campos de chave de API aceitam um valor string (a própria chave). Também po
 |---------|------|---------|-------------|
 | `review.models.claude` | string | (modelo da sessão) | Comando para revisão com sabor Claude. Usa o modelo da sessão quando não definido |
 | `review.models.codex` | string | `null` | Comando para revisão Codex, por exemplo `"codex exec --model gpt-5"` |
-| `review.models.gemini` | string | `null` | Comando para revisão Gemini, por exemplo `"gemini -m gemini-2.5-pro"` |
 | `review.models.opencode` | string | `null` | Comando para revisão OpenCode, por exemplo `"opencode run --model claude-sonnet-4"` |
 
 O slug `<cli>` é validado contra `[a-zA-Z0-9_-]+`. Slugs vazios ou que contenham caminhos são rejeitados pelo `config-set`.
@@ -205,14 +208,14 @@ Use `review.default_reviewers` para limitar a execução de `/gsd-review` sem fl
 
 | Configuração | Tipo | Padrão | Descrição |
 |---------|------|---------|-------------|
-| `review.default_reviewers` | string[] \| null | `null` (todos os revisores detectados) | Subconjunto padrão opcional para `/gsd-review` sem flags, por exemplo `["gemini","codex"]`. Precedência: flags de revisor explícitas > `--all` > `review.default_reviewers` > todos detectados. Slugs desconhecidos são ignorados com aviso; slugs conhecidos mas não detectados são ignorados com uma nota informativa; arrays vazios são rejeitados pelo `config-set`. |
+| `review.default_reviewers` | string[] \| null | `null` (todos os revisores detectados) | Subconjunto padrão opcional para `/gsd-review` sem flags, por exemplo `["codex","claude"]`. Precedência: flags de revisor explícitas > `--all` > `review.default_reviewers` > todos detectados. Slugs desconhecidos são ignorados com aviso; slugs conhecidos mas não detectados são ignorados com uma nota informativa; arrays vazios são rejeitados pelo `config-set`. |
 
 Exemplo:
 
 ```json
 {
   "review": {
-    "default_reviewers": ["gemini", "codex"]
+    "default_reviewers": ["codex", "claude"]
   }
 }
 ```
@@ -248,11 +251,12 @@ Todos os controles de fluxo de trabalho seguem o padrão **ausente = habilitado*
 | `workflow.worktree_skip_hooks` | boolean | `false` | Quando `true`, os agentes executores no modo worktree passam `--no-verify` (ignorando hooks de pré-commit) e a validação de hook pós-onda é executada contra o resultado mesclado. Válvula de escape opt-in para projetos cujos hooks não podem ser executados em worktrees de agente. Padrão `false` executa hooks em cada commit (#2924). |
 | `workflow.code_review` | boolean | `true` | Habilita os comandos `/gsd-code-review` e `/gsd-code-review --fix`. Quando `false`, os comandos saem com uma mensagem de gate de configuração. Adicionado na v1.34 |
 | `workflow.code_review_depth` | string | `standard` | Profundidade de revisão padrão para `/gsd-code-review`: `quick` (somente correspondência de padrão), `standard` (análise por arquivo) ou `deep` (entre arquivos com grafos de importação). Pode ser substituído por execução com `--depth=`. Adicionado na v1.34 |
+| `workflow.code_review_depth_overrides` | array | `[]` | Lista ordenada de regras `{ paths: string[], depth }` que aumentam a profundidade de `/gsd-code-review` para diretórios específicos, ex.: `[{ "paths": ["src/auth"], "depth": "deep" }]`. Cada `paths` da regra é comparado com o conjunto de arquivos alterados da revisão por prefixo de diretório com segmentos completos (`src/auth` corresponde a `src/auth/token.ts`, nunca a `src/authfoo/x.ts` ou `docs/src/auth/x.ts`); a comparação diferencia maiúsculas/minúsculas, como o git. Sintaxe glob (`*`, `?`) é um erro de configuração, não um atalho para prefixo. Um único arquivo correspondido eleva a profundidade de toda a revisão — a profundidade não é aplicada por arquivo. Ordem de resolução: flag `--depth=` → regra correspondente mais forte → `workflow.code_review_depth` → `standard`; uma regra correspondente prevalece mesmo quando seu nível é mais fraco que o padrão global. Uma regra malformada (`depth` inválido, sintaxe glob, caminho absoluto, segmento `..`, caminho vazio, `overrides` que não é array, regra que não é objeto, `paths` malformado) é um erro de configuração e a revisão é interrompida em vez de usar um valor padrão silenciosamente. A profundidade resolvida e a regra correspondente são exibidas na saída da revisão. Adicionado em #2554 |
 | `workflow.plan_bounce` | boolean | `false` | Executa script de validação externo nos planos gerados. Quando habilitado, o orquestrador de fase de planejamento encaminha cada PLAN.md pelo script especificado por `plan_bounce_script` e bloqueia em saída diferente de zero. Adicionado na v1.36 |
 | `workflow.plan_bounce_script` | string | (nenhum) | Caminho para o script externo invocado na validação de bounce de plano. Recebe o caminho do PLAN.md como primeiro argumento. Obrigatório quando `plan_bounce` é `true`. Adicionado na v1.36 |
 | `workflow.plan_bounce_passes` | number | `2` | Número de passagens sequenciais de bounce a executar. Cada passagem alimenta a saída da passagem anterior de volta no validador. Valores maiores aumentam o rigor ao custo de latência. Adicionado na v1.36 |
 | `workflow.post_planning_gaps` | boolean | `true` | Relatório unificado de lacunas pós-planejamento (#2493). Após todos os planos serem gerados e commitados, verifica REQUIREMENTS.md e as `<decisions>` de CONTEXT.md em relação a cada PLAN.md no diretório da fase, então imprime uma tabela `Source \| Item \| Status`. Correspondência por limite de palavra (REQ-1 vs REQ-10) e ordenação natural (REQ-02 antes de REQ-10). Não bloqueante — apenas relatório informativo. Defina como `false` para pular o Passo 13e da fase de planejamento. |
-| `workflow.plan_review_convergence` | boolean | `false` | Habilita o comando `/gsd-plan-review-convergence`. Desabilitado por padrão — o comando sai com instrução de habilitação quando esta chave é `false`. O comando automatiza o loop manual de plan→review→replan: gera revisores configurados (Codex, Gemini, Claude, OpenCode, Ollama, LM Studio, llama.cpp), conta preocupações HIGH não resolvidas via contrato CYCLE_SUMMARY, replaneja com feedback `--reviews` e repete até convergir ou atingir o número máximo de ciclos. Habilite com `gsd config-set workflow.plan_review_convergence true`. Adicionado na v1.39 |
+| `workflow.plan_review_convergence` | boolean | `false` | Habilita o comando `/gsd-plan-review-convergence`. Desabilitado por padrão — o comando sai com instrução de habilitação quando esta chave é `false`. O comando automatiza o loop manual de plan→review→replan: gera revisores configurados (Codex, Claude, OpenCode, Ollama, LM Studio, llama.cpp), conta preocupações HIGH não resolvidas via contrato CYCLE_SUMMARY, replaneja com feedback `--reviews` e repete até convergir ou atingir o número máximo de ciclos. Habilite com `gsd config-set workflow.plan_review_convergence true`. Adicionado na v1.39 |
 | `workflow.plan_chunked` | boolean | `false` | Habilita o modo de planejamento em chunks. Quando `true` (ou quando a flag `--chunked` é passada para `/gsd-plan-phase`), o orquestrador divide a única Task de planejamento de longa duração em uma Task curta de esboço seguida de N Tasks curtas por plano (~3-5 min cada). Cada plano é commitado individualmente para resiliência a falhas. Se uma Task travar e o terminal for forçado a fechar, reexecutar com `--chunked` retoma a partir do último plano concluído. Particularmente útil no Windows onde Tasks de longa duração podem travar em stdio. Adicionado na v1.38 |
 | `workflow.code_review_command` | string | (nenhum) | Comando shell para integração de revisão de código externa em `/gsd-ship`. Recebe caminhos de arquivos alterados via stdin. Saída diferente de zero bloqueia o fluxo de trabalho de ship. Adicionado na v1.36 |
 | `workflow.tdd_mode` | boolean | `false` | Habilita o pipeline TDD como modo de execução de primeira classe. Quando `true`, o planejador aplica agressivamente `type: tdd` a tarefas elegíveis (lógica de negócios, APIs, validações, algoritmos) e o executor impõe a sequência de gate RED/GREEN/REFACTOR. Um ponto de revisão colaborativa ao final da fase verifica a conformidade com o gate. Adicionado na v1.36 |
@@ -266,6 +270,9 @@ Todos os controles de fluxo de trabalho seguem o padrão **ausente = habilitado*
 | `workflow.subagent_timeout` | number | `600` | Timeout em segundos para invocações individuais de subagente. Aumente para fases de pesquisa ou execução de longa duração |
 | `executor.stall_detect_interval_minutes` | number | `5` | Minutos entre verificações de travamento do executor enquanto um agente executor está ativo. O orquestrador de fase de execução usa essa cadência para inspecionar commits recentes e evitar espera eterna por um agente silencioso. |
 | `executor.stall_threshold_minutes` | number | `10` | Minutos sem conclusão do executor ou atividade de commit no branch esperado antes que a fase de execução ofereça opções de recuperação para um possível executor travado. |
+| `planner.stall_detection_enabled` | boolean | `true` | Controla a detecção limitada de travamento do planejador padrão, dos planejadores de esboço/por plano em chunks, do verificador de planos e do planejador de revisão. Use `gsd config-set planner.stall_detection_enabled false` para ignorar o polling do watchdog e aguardar cada agente pelo mecanismo de conclusão nativa do runtime. **Aviso:** `false` abre mão da recuperação limitada se o runtime perder a entrega da conclusão; pode ser necessário interromper e usar o fallback existente do sistema de arquivos. A execução e o tratamento do resultado nunca são ignorados. |
+| `planner.stall_detect_interval_minutes` | number | `5` | Minutos entre verificações de travamento enquanto um planejador ou verificador de planos está ativo. O orquestrador inspeciona a atividade em disco de `*-PLAN.md` nessa cadência (#2650). |
+| `planner.stall_threshold_minutes` | number | `10` | Minutos sem marcador de conclusão ou atividade recente em planos antes que a fase de planejamento ofereça automaticamente as opções aceitar/tentar novamente/parar (#2650). |
 | `workflow.inline_plan_threshold` | number | `3` | Número máximo de tasks em uma fase antes que o planejador gere um arquivo PLAN.md separado em vez de incorporar tasks no prompt |
 | `workflow.drift_threshold` | number | `3` | Número mínimo de novos elementos estruturais (novos diretórios, exportações barrel, migrações, módulos de rota) introduzidos durante uma fase antes que o gate de deriva pós-execução da base de código tome ação. Consulte [#2003](https://github.com/open-gsd/gsd-core/issues/2003). Adicionado na v1.39 |
 | `workflow.drift_action` | string | `warn` | O que fazer quando `workflow.drift_threshold` é excedido após `/gsd-execute-phase`. `warn` imprime uma mensagem sugerindo `/gsd-map-codebase --paths …`; `auto-remap` gera `gsd-codebase-mapper` com escopo para os caminhos afetados. Adicionado na v1.39 |
@@ -350,6 +357,7 @@ As seguintes combinações de `mode`, `granularity`, `model_profile` e controles
 | Configuração | Tipo | Padrão | Descrição |
 |---------|------|---------|-------------|
 | `planning.commit_docs` | boolean | `true` | Define se os arquivos de `.planning/` são commitados no git |
+| `planning.pr_strict` | boolean | `false` | Modo de filtro para `/gsd-pr-branch`. `false` mantém o estado estrutural de planejamento (STATE.md, ROADMAP.md, MILESTONES.md, PROJECT.md, REQUIREMENTS.md, milestones/) no branch de PR; `true` remove todos os caminhos de `.planning/` |
 | `planning.search_gitignored` | boolean | `false` | Adiciona `--no-ignore` em buscas amplas para incluir `.planning/` |
 | `planning.sub_repos` | array de strings | `[]` | Caminhos de sub-repositórios aninhados relativos à raiz do projeto. Quando definido, as ferramentas com reconhecimento de GSD limitam a busca de fase, resolução de caminho e operações de commit por sub-repo em vez de tratar o repositório externo como um monorepo |
 
@@ -689,7 +697,6 @@ Configure a seleção de modelo por CLI para `/gsd-review`. Quando definido, sub
 
 | Configuração | Tipo | Padrão | Descrição |
 |---------|------|---------|-------------|
-| `review.models.gemini` | string | (padrão da CLI) | Modelo usado quando o revisor `--gemini` é invocado |
 | `review.models.claude` | string | (padrão da CLI) | Modelo usado quando o revisor `--claude` é invocado |
 | `review.models.codex` | string | (padrão da CLI) | Modelo usado quando o revisor `--codex` é invocado |
 | `review.models.opencode` | string | (padrão da CLI) | Modelo usado quando o revisor `--opencode` é invocado |
@@ -698,9 +705,9 @@ Configure a seleção de modelo por CLI para `/gsd-review`. Quando definido, sub
 | `review.models.ollama` | string | (padrão do servidor) | Nome do modelo passado ao Ollama quando o revisor `--ollama` é invocado. Se não definido, o primeiro modelo disponível reportado pelo servidor é usado (por exemplo `llama3`). Defina para uma tag específica: `gsd config-set review.models.ollama codellama` |
 | `review.models.lm_studio` | string | (padrão do servidor) | Nome do modelo passado ao LM Studio quando o revisor `--lm-studio` é invocado. Se não definido, o primeiro modelo disponível reportado pelo servidor é usado. |
 | `review.models.llama_cpp` | string | (padrão do servidor) | Nome do modelo passado ao llama.cpp quando o revisor `--llama-cpp` é invocado. Se não definido, o primeiro modelo reportado por `/v1/models` é usado. |
-| `review.default_reviewers` | string[] \| null | (todos os revisores detectados) | Subconjunto de revisores padrão para `/gsd-review` sem flags. Exemplo: `["gemini","codex"]`. Flags explícitas e `--all` substituem esta configuração. |
+| `review.default_reviewers` | string[] \| null | (todos os revisores detectados) | Subconjunto de revisores padrão para `/gsd-review` sem flags. Exemplo: `["codex","claude"]`. Flags explícitas e `--all` substituem esta configuração. |
 | `review.max_prompt_tokens` | number\|null | null | Máximo padrão de tokens estimados para o prompt de revisão montado. Quando definido, o prompt é cortado deterministicamente antes de ser enviado a cada revisor. Substituições por revisor via `review.max_prompt_tokens_per_reviewer` têm precedência. null = sem corte (comportamento atual). |
-| `review.max_prompt_tokens_per_reviewer` | object | {} | Substituições de orçamento de tokens por revisor. As chaves são slugs de revisor (ollama, llama_cpp, lm_studio, gemini, claude, codex, opencode, qwen, cursor). Os valores substituem `review.max_prompt_tokens` para aquele revisor. Recomendado para servidores de modelos locais. |
+| `review.max_prompt_tokens_per_reviewer` | object | {} | Substituições de orçamento de tokens por revisor. As chaves são slugs de revisor (ollama, llama_cpp, lm_studio, claude, codex, opencode, qwen, cursor). Os valores substituem `review.max_prompt_tokens` para aquele revisor. Recomendado para servidores de modelos locais. |
 | `review.ollama_host` | string | `http://localhost:11434` | URL base do servidor Ollama. Substitua quando executar o Ollama em uma porta não padrão ou host remoto: `gsd config-set review.ollama_host http://192.168.1.10:11434` |
 | `review.lm_studio_host` | string | `http://localhost:1234` | URL base do servidor local LM Studio. Substitua quando usar uma porta não padrão. |
 | `review.llama_cpp_host` | string | `http://localhost:8080` | URL base do servidor llama.cpp (`llama-server`). Substitua quando usar uma porta não padrão. |
@@ -715,7 +722,7 @@ Servidores de modelos locais (Ollama, llama.cpp, LM Studio) geralmente aceitam m
 {
   "review": {
     "models": {
-      "gemini": "gemini-2.5-pro",
+      "agy": "gemini-3.1-pro-preview",
       "qwen": "qwen-max"
     }
   }
@@ -779,7 +786,7 @@ Tokens de flag inválidos são sanitizados e registrados como avisos. Apenas fla
 | gsd-doc-writer | Opus | Sonnet | Haiku | Sonnet | Inherit |
 | gsd-doc-verifier | Sonnet | Sonnet | Haiku | Haiku | Inherit |
 
-> **Todos os 33 agentes incluídos possuem atribuições explícitas de nível por perfil** no catálogo (`sdk/shared/model-catalog.json`). A tabela acima mostra um subconjunto representativo dos agentes mais usados. Para agentes não listados aqui, `model_overrides` aceita qualquer nome de agente incluído. Os dados autoritativos de perfil são derivados de `sdk/shared/model-catalog.json` via `gsd-core/bin/lib/model-catalog.cjs` e `sdk/src/model-catalog.ts`.
+> **Todos os 33 agentes incluídos possuem atribuições explícitas de nível por perfil** no catálogo (`gsd-core/bin/shared/model-catalog.json`). A tabela acima mostra um subconjunto representativo dos agentes mais usados. Para agentes não listados aqui, `model_overrides` aceita qualquer nome de agente incluído. Os dados autoritativos de perfil são derivados de `gsd-core/bin/shared/model-catalog.json` via `src/model-catalog.cts`.
 
 ### Substituições por Agente
 
@@ -865,7 +872,7 @@ As cinco camadas compõem de cima para baixo: `model_profile` é o nível base, 
 | `"opus"` / `"sonnet"` / `"haiku"` | Nível padrão — a resolução de runtime mapeia para o modelo do runtime ativo para aquele nível |
 | `"inherit"` | Agentes nesta fase seguem o modelo da sessão (mesma semântica que `model_profile: "inherit"`) |
 
-Se você precisar de um ID de modelo totalmente qualificado (`"openai/gpt-5"`, `"google/gemini-2.5-pro"`), use `model_overrides` por agente. `models.*` é intencionalmente apenas de nível para que o mapeamento com reconhecimento de runtime permaneça correto nas instalações Codex / OpenCode / Gemini CLI.
+Se você precisar de um ID de modelo totalmente qualificado (`"openai/gpt-5"`, `"google/gemini-2.5-pro"`), use `model_overrides` por agente. `models.*` é intencionalmente apenas de nível para que o mapeamento com reconhecimento de runtime permaneça correto nas instalações Codex / OpenCode / Antigravity CLI.
 
 #### Quando usar qual
 
@@ -1088,7 +1095,7 @@ Use `node gsd-tools.cjs resolve-execution <agent-type> [--effort <level>] [--fas
 
 ---
 
-### Runtimes Não-Claude (Codex, OpenCode, Gemini CLI, Kilo)
+### Runtimes Não-Claude (Codex, OpenCode, Antigravity CLI, Kilo)
 
 > **Versão mínima suportada do Codex CLI: `0.130.0`** (issue [#3562](https://github.com/open-gsd/gsd-core/issues/3562)).
 >
@@ -1127,7 +1134,7 @@ A intenção é a mesma que os níveis de perfil do Claude -- use um modelo mais
 |-------|----------|----------|
 | `false` (padrão) | Retorna aliases Claude (`opus`, `sonnet`, `haiku`) | Claude Code com API Anthropic nativa |
 | `true` | Mapeia aliases para IDs completos de modelo Claude (`claude-opus-4-8`) | Claude Code com API que requer IDs completos |
-| `"omit"` | Retorna string vazia (runtime escolhe seu padrão) | Runtimes não-Claude (Codex, OpenCode, Gemini CLI, Kilo) |
+| `"omit"` | Retorna string vazia (runtime escolhe seu padrão) | Runtimes não-Claude (Codex, OpenCode, Antigravity CLI, Kilo) |
 
 ### Perfis com Reconhecimento de Runtime (#2517)
 

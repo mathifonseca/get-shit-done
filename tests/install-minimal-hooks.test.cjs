@@ -1,7 +1,4 @@
-// allow-test-rule: source-text-is-the-product
-// Reads .md/.json/.yml product files whose deployed text IS what the
-// runtime loads — testing text content tests the deployed contract.
-
+// docs-guard-exempt: docs/... substrings are external URL citations (qwenlm/code.claude.com) in comments, not repo paths.
 /**
  * Installer Module — Sections 9–11 + 13.
  *
@@ -23,7 +20,7 @@
 
 process.env.GSD_TEST_MODE = '1';
 
-const { test, describe, beforeEach, afterEach, before } = require('node:test');
+const { test, describe, beforeEach, afterEach, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -32,12 +29,28 @@ const os = require('node:os');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { throwIfFailed } = require('./helpers/git-fixture.cjs');
 
+const {
+  PROBE_TIMEOUT_MS,
+  INSTALL_TIMEOUT_MS,
+  FIXTURE_HOOK_TIMEOUT_SECONDS,
+} = require('./helpers/timeouts.cjs');
+
+/**
+ * Bounds executing a single already-staged hook script directly (not the
+ * installer itself, just the emitted script under a real node process).
+ * 30000ms digits coincide with the shared BUILD_TIMEOUT_MS, but this is a
+ * different operation class (running staged output vs. bundling it), so it
+ * is kept as its own local constant rather than aliased onto that norm.
+ */
+const INSTALLED_HOOK_EXEC_TIMEOUT_MS = 30000;
+
 const { createTempDir, cleanup } = require('./helpers.cjs');
 
 const {
   writeManifest,
   GSD_UNINSTALL_HOOKS,
   resolveSharedHooksDirName,
+  stripStaleGsdHookBlocks,
 } = require('../bin/install.js');
 
 const {
@@ -117,41 +130,36 @@ describe('install-profiles: MINIMAL_SKILL_ALLOWLIST', () => {
 
 describe('install: --help profile counts match PROFILES (#834)', () => {
   function helpText() {
-    const r = runNode([INSTALL_SCRIPT, '--help'], { env: installerEnv(), timeoutMs: 15000 });
+    const r = runNode([INSTALL_SCRIPT, '--help'], { env: installerEnv(), timeoutMs: PROBE_TIMEOUT_MS });
     throwIfFailed(r, `node ${INSTALL_SCRIPT} --help`);
     return r.stdout;
   }
 
-  test('core line advertises PROFILES.core.length main-loop skills', () => {
+  test('core/standard/full lines advertise correct, drift-tracked skill counts', () => {
     const out = helpText();
-    const m = out.match(/core\s+—\s+~?(\d+)\s+main-loop skills/);
-    assert.ok(m, `--help must advertise a core profile skill count; got:\n${out}`);
+
+    const mCore = out.match(/core\s+—\s+~?(\d+)\s+main-loop skills/);
+    assert.ok(mCore, `--help must advertise a core profile skill count; got:\n${out}`);
     assert.strictEqual(
-      Number(m[1]),
+      Number(mCore[1]),
       PROFILES.core.length,
-      `--help core count (${m[1]}) must equal PROFILES.core.length (${PROFILES.core.length})`,
+      `--help core count (${mCore[1]}) must equal PROFILES.core.length (${PROFILES.core.length})`,
     );
-  });
 
-  test('standard line advertises PROFILES.standard.length skills', () => {
-    const out = helpText();
-    const m = out.match(/standard\s+—\s+~?(\d+)\s+skills/);
-    assert.ok(m, `--help must advertise a standard profile skill count; got:\n${out}`);
+    const mStandard = out.match(/standard\s+—\s+~?(\d+)\s+skills/);
+    assert.ok(mStandard, `--help must advertise a standard profile skill count; got:\n${out}`);
     assert.strictEqual(
-      Number(m[1]),
+      Number(mStandard[1]),
       PROFILES.standard.length,
-      `--help standard count (${m[1]}) must equal PROFILES.standard.length (${PROFILES.standard.length})`,
+      `--help standard count (${mStandard[1]}) must equal PROFILES.standard.length (${PROFILES.standard.length})`,
     );
-  });
 
-  test('full line does not hardcode a drift-prone skill count', () => {
-    const out = helpText();
-    const m = out.match(/full\s+—\s+([^\n]*?)\s+\(default\)/);
-    assert.ok(m, `--help must advertise a full profile line; got:\n${out}`);
+    const mFull = out.match(/full\s+—\s+([^\n]*?)\s+\(default\)/);
+    assert.ok(mFull, `--help must advertise a full profile line; got:\n${out}`);
     assert.doesNotMatch(
-      m[1],
+      mFull[1],
       /\d/,
-      `--help full line must not hardcode a numeric skill count (drifts); got: "${m[1]}"`,
+      `--help full line must not hardcode a numeric skill count (drifts); got: "${mFull[1]}"`,
     );
   });
 });
@@ -353,41 +361,36 @@ describe('install-profiles: allowlist scope guards', () => {
 
 // ─── Section 10: --minimal install — per-runtime E2E (spawned) ───────────────
 
-describe('install: --minimal honoured for every runtime in --global mode', () => {
+describe('install: --minimal honoured for every runtime, on-disk matches manifest', () => {
   for (const runtime of SKILL_RUNTIMES) {
-    test(`${runtime} --global --minimal: mode=minimal, correct skills, zero agents`, () => {
-      const { manifest, root } = runMinimalInstall({ runtime, scope: 'global', extraArgs: ['--minimal'] });
-      try {
-        assert.ok(manifest, `${runtime} global must produce manifest`);
-        assert.strictEqual(manifest.mode, 'minimal');
-        assert.deepStrictEqual(
-          [...manifestSkillSet(manifest)].sort(),
-          [...MINIMAL_SKILL_ALLOWLIST].sort(),
-        );
-        assert.strictEqual(manifestAgentCount(manifest), 0);
-      } finally {
-        cleanup(root);
-      }
-    });
-  }
-});
+    for (const scope of ['global', 'local']) {
+      test(`${runtime} --${scope} --minimal: mode, skills, zero agents, on-disk matches manifest`, () => {
+        const { manifest, configDir, root } = runMinimalInstall({ runtime, scope, extraArgs: ['--minimal'] });
+        try {
+          assert.ok(manifest, `${runtime} ${scope} must produce manifest`);
+          assert.strictEqual(manifest.mode, 'minimal');
+          assert.deepStrictEqual(
+            [...manifestSkillSet(manifest)].sort(),
+            [...MINIMAL_SKILL_ALLOWLIST].sort(),
+          );
+          assert.strictEqual(manifestAgentCount(manifest), 0);
 
-describe('install: --minimal honoured for every runtime in --local mode', () => {
-  for (const runtime of SKILL_RUNTIMES) {
-    test(`${runtime} --local --minimal: mode=minimal, correct skills, zero agents`, () => {
-      const { manifest, root } = runMinimalInstall({ runtime, scope: 'local', extraArgs: ['--minimal'] });
-      try {
-        assert.ok(manifest, `${runtime} local must produce manifest`);
-        assert.strictEqual(manifest.mode, 'minimal');
-        assert.deepStrictEqual(
-          [...manifestSkillSet(manifest)].sort(),
-          [...MINIMAL_SKILL_ALLOWLIST].sort(),
-        );
-        assert.strictEqual(manifestAgentCount(manifest), 0);
-      } finally {
-        cleanup(root);
-      }
-    });
+          const onDisk = collectSkillBasenamesOnDiskSandboxed(configDir, runtime, scope, root);
+          const inManifest = manifestSkillSet(manifest);
+          assert.deepStrictEqual([...onDisk].sort(), [...inManifest].sort());
+          // Not the shared listAgentFiles() helper: asserts on the INSTALLED
+          // dest dir (must be empty in --minimal mode), not the source roster.
+          const agentsDir = path.join(configDir, 'agents');
+          if (fs.existsSync(agentsDir)) {
+            const gsdAgents = fs.readdirSync(agentsDir)
+              .filter(f => f.startsWith('gsd-') && f.endsWith('.md'));
+            assert.deepStrictEqual(gsdAgents, []);
+          }
+        } finally {
+          cleanup(root);
+        }
+      });
+    }
   }
 });
 
@@ -409,35 +412,35 @@ describe('install: Cline --minimal (rules-based, no skills/ dir)', () => {
   }
 });
 
-describe('install: on-disk skill files match manifest for --minimal', () => {
-  for (const runtime of SKILL_RUNTIMES) {
-    for (const scope of ['global', 'local']) {
-      test(`${runtime} --${scope} --minimal: on-disk matches manifest`, () => {
-        const { manifest, configDir, root } = runMinimalInstall({
-          runtime, scope, extraArgs: ['--minimal'],
-        });
-        try {
-          assert.ok(manifest);
-          const onDisk = collectSkillBasenamesOnDiskSandboxed(configDir, runtime, scope, root);
-          const inManifest = manifestSkillSet(manifest);
-          assert.deepStrictEqual([...onDisk].sort(), [...inManifest].sort());
-          // Not the shared listAgentFiles() helper: asserts on the INSTALLED
-          // dest dir (must be empty in --minimal mode), not the source roster.
-          const agentsDir = path.join(configDir, 'agents');
-          if (fs.existsSync(agentsDir)) {
-            const gsdAgents = fs.readdirSync(agentsDir)
-              .filter(f => f.startsWith('gsd-') && f.endsWith('.md'));
-            assert.deepStrictEqual(gsdAgents, []);
-          }
-        } finally {
-          cleanup(root);
-        }
-      });
-    }
-  }
-});
-
 // ─── Section 11: --minimal manifest mode + downgrade ─────────────────────────
+
+// Shared across "manifest records mode" and "install-minimal-backcompat": both
+// describe blocks below independently re-installed the IDENTICAL
+// `--claude --global --minimal` configuration just to check different fields
+// of the same manifest/profile-marker output. Install it once and derive
+// everything both sets of tests need.
+let _sharedMinimalManifestInstall;
+function sharedMinimalManifestInstall() {
+  if (_sharedMinimalManifestInstall) return _sharedMinimalManifestInstall;
+  const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-minimal-shared-'));
+  runNode(
+    [INSTALL_SCRIPT, '--claude', '--global', '--config-dir', targetDir, '--minimal'],
+    { env: installerEnv(), timeoutMs: INSTALL_TIMEOUT_MS },
+  );
+  const manifestPath = path.join(targetDir, MANIFEST_NAME);
+  const m = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : {};
+  const skillCount = Object.keys(m.files || {}).filter(
+    k => k.startsWith('skills/') && k.endsWith('/SKILL.md'),
+  ).length;
+  const markerPath = path.join(targetDir, '.gsd-profile');
+  const profileMarker = fs.existsSync(markerPath) ? fs.readFileSync(markerPath, 'utf8').trim() : null;
+  const agentCount = Object.keys(m.files || {}).filter(k => k.startsWith('agents/')).length;
+  _sharedMinimalManifestInstall = { targetDir, mode: m.mode, skillCount, agentCount, profileMarker };
+  return _sharedMinimalManifestInstall;
+}
+after(() => {
+  if (_sharedMinimalManifestInstall) cleanup(_sharedMinimalManifestInstall.targetDir);
+});
 
 describe('install: manifest records mode for both profiles', () => {
   function manifestModeAfterInstall(extraArgs) {
@@ -445,7 +448,7 @@ describe('install: manifest records mode for both profiles', () => {
     try {
       runNode(
         [INSTALL_SCRIPT, '--claude', '--global', '--config-dir', targetDir, ...extraArgs],
-        { env: installerEnv(), timeoutMs: 120000 },
+        { env: installerEnv(), timeoutMs: INSTALL_TIMEOUT_MS },
       );
       const manifestPath = path.join(targetDir, MANIFEST_NAME);
       if (!fs.existsSync(manifestPath)) return { mode: '<no manifest>', skillCount: 0, agentCount: 0 };
@@ -469,7 +472,7 @@ describe('install: manifest records mode for both profiles', () => {
   });
 
   test('--minimal records mode: "minimal" with exactly 8 skills and 0 agents', () => {
-    const r = manifestModeAfterInstall(['--minimal']);
+    const r = sharedMinimalManifestInstall();
     assert.strictEqual(r.mode, 'minimal');
     assert.strictEqual(r.skillCount, 8);
     assert.strictEqual(r.agentCount, 0);
@@ -498,7 +501,7 @@ describe('install-minimal-backcompat: --minimal and --profile=core produce same 
     try {
       runNode(
         [INSTALL_SCRIPT, '--claude', '--global', '--config-dir', targetDir, ...extraArgs],
-        { env: installerEnv(), timeoutMs: 120000 },
+        { env: installerEnv(), timeoutMs: INSTALL_TIMEOUT_MS },
       );
       const manifestPath = path.join(targetDir, MANIFEST_NAME);
       if (!fs.existsSync(manifestPath)) return { mode: null, skillCount: 0, profileMarker: null };
@@ -516,13 +519,13 @@ describe('install-minimal-backcompat: --minimal and --profile=core produce same 
   }
 
   test('--minimal produces mode "minimal" with exactly 8 skills', () => {
-    const r = installAndGetManifest(['--minimal']);
+    const r = sharedMinimalManifestInstall();
     assert.strictEqual(r.mode, 'minimal');
     assert.strictEqual(r.skillCount, 8);
   });
 
   test('--minimal writes .gsd-profile marker "core"', () => {
-    const r = installAndGetManifest(['--minimal']);
+    const r = sharedMinimalManifestInstall();
     assert.strictEqual(r.profileMarker, 'core');
   });
 
@@ -574,7 +577,7 @@ describe('install: Codex full → minimal downgrade cleans stale agent state', (
       // config.toml (both under targetDir), so the sandbox has no effect on intent.
       const result = runNode(
         [INSTALL_SCRIPT, '--codex', '--global', '--config-dir', targetDir, '--minimal'],
-        { env: installerEnv({ HOME: targetDir, USERPROFILE: targetDir }), timeoutMs: 120000 },
+        { env: installerEnv({ HOME: targetDir, USERPROFILE: targetDir }), timeoutMs: INSTALL_TIMEOUT_MS },
       );
       assert.ok(result.stdout || result.stderr);
 
@@ -611,7 +614,7 @@ describe('install: Claude full → minimal downgrade removes stale agents', () =
 
       runNode(
         [INSTALL_SCRIPT, '--claude', '--global', '--config-dir', targetDir, '--minimal'],
-        { env: installerEnv(), timeoutMs: 120000 },
+        { env: installerEnv(), timeoutMs: INSTALL_TIMEOUT_MS },
       );
 
       const remaining = fs.existsSync(agentsDir) ? fs.readdirSync(agentsDir) : [];
@@ -703,7 +706,7 @@ describe('#1821/#2305: ZCode receives no dead hook files; Kilo/OpenCode/Claude k
     try {
       const result = runNode(
         [INSTALL_SCRIPT, `--${runtime}`, '--global', '--config-dir', targetDir],
-        { env: installerEnv(), timeoutMs: 120000 },
+        { env: installerEnv(), timeoutMs: INSTALL_TIMEOUT_MS },
       );
       assert.strictEqual(result.exitCode, 0,
         `installer exited with status ${result.exitCode} for --${runtime} --global\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
@@ -973,10 +976,20 @@ describe('uninstall settings cleanup preserves user hooks', () => {
 });
 
 describe('Codex legacy gsd-update-check migration', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'bin', 'install.js'), 'utf8');
-
+  // #3508: behavioral replacement for a source-grep that used to check
+  // install.js's own text for the literal strings 'gsd-update-check' and
+  // 'replace(' -- i.e. it asserted characteristics of the SOURCE CODE, not
+  // an observable effect. `stripStaleGsdHookBlocks` (bin/install.js) is the
+  // REAL exported function that performs this migration; drive it directly
+  // with a legacy Shape-1 config.toml block (same shape the two tests below
+  // already exercise) and assert the stale hook block is actually removed.
   test('install.js strips legacy gsd-update-check hook blocks', () => {
-    assert.ok(src.includes('gsd-update-check') && src.includes('replace('));
+    const legacyToml = ['[features]', 'codex_hooks = true', '',
+      '# GSD Hooks', '[[hooks]]', 'event = "SessionStart"',
+      'command = "node /old/path/gsd-update-check.js"', ''].join('\n');
+    const stripped = stripStaleGsdHookBlocks(legacyToml);
+    assert.ok(!stripped.includes('gsd-update-check'), 'legacy gsd-update-check hook block must be stripped');
+    assert.ok(stripped.includes('[features]'), 'unrelated config content must survive stripping');
   });
 
   test('migration regex removes LF legacy hook block', () => {
@@ -1021,104 +1034,111 @@ describe('Codex legacy gsd-update-check migration', () => {
  *
  * The .sh hooks already had fs.existsSync() guards (added in #1817). This
  * test verifies the same defensive pattern exists for all .js hooks.
+ *
+ * Behavioral (#3466): drives the real `applySettingsJsonHooks` (the exported
+ * function `bin/install.js` calls at finishInstall time) against a temp
+ * target dir, rather than grepping install.js's source text for
+ * `fs.existsSync`. A missing hook file must produce NO settings.json entry
+ * plus a skip warning; a present hook file (positive control) must be
+ * registered — proving the guard discriminates per-file, not wholesale.
  */
 
 'use strict';
 
-const { describe, test, before } = require('node:test');
+const { describe, test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-
-const INSTALL_SRC = path.join(__dirname, '..', 'bin', 'install.js');
-// ADR-857 phase 5f-1b: settings-json hook registration moved to runtime-hooks-surface.cts.
-const HOOKS_SURFACE_SRC = path.join(__dirname, '..', 'src', 'runtime-hooks-surface.cts');
+const { createTempDir, cleanup, captureConsole } = require('./helpers.cjs');
+const { applySettingsJsonHooks } = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
 
 const JS_HOOKS = [
-  { name: 'gsd-check-update.js',      registrationAnchor: 'hasGsdUpdateHook' },
-  { name: 'gsd-context-monitor.js',   registrationAnchor: 'hasContextMonitorHook' },
-  { name: 'gsd-prompt-guard.js',      registrationAnchor: 'hasPromptGuardHook' },
-  { name: 'gsd-read-guard.js',        registrationAnchor: 'hasReadGuardHook' },
-  { name: 'gsd-workflow-guard.js',    registrationAnchor: 'hasWorkflowGuardHook' },
-  { name: 'gsd-worktree-path-guard.js', registrationAnchor: 'hasWorktreePathGuardHook' },
-  { name: 'gsd-write-guard.js',         registrationAnchor: 'hasWriteGuardHook' },
+  'gsd-check-update.js',
+  'gsd-context-monitor.js',
+  'gsd-prompt-guard.js',
+  'gsd-read-guard.js',
+  'gsd-workflow-guard.js',
+  'gsd-worktree-path-guard.js',
+  'gsd-write-guard.js',
+  'gsd-secret-read-guard.js',
 ];
 
-describe('bug #1754: .js hook registration guards', () => {
-  let src;
-
-  before(() => {
-    // ADR-857 phase 5f-1b: hook registration moved to runtime-hooks-surface.cts.
-    // Concatenate both sources so structural assertions find patterns in either file.
-    const installSrc = fs.readFileSync(INSTALL_SRC, 'utf-8');
-    let hooksSurfaceSrc = '';
-    try { hooksSurfaceSrc = fs.readFileSync(HOOKS_SURFACE_SRC, 'utf-8'); } catch { /* ok */ }
-    src = installSrc + '\n' + hooksSurfaceSrc;
+// Drives the real guarded registration function directly (local-install
+// shape: isGlobal=false routes every *Command through the supplied
+// localCmd/localShellCmd, so no real node/bash-path resolution is needed).
+// `presentHooks` controls which hook basenames actually exist on disk under
+// targetDir/hooks/ before the call — every other referenced hook file is
+// left absent, exercising the fs.existsSync guard for that hook.
+function runApplySettingsJsonHooks(targetDir, presentHooks) {
+  fs.mkdirSync(path.join(targetDir, 'hooks'), { recursive: true });
+  for (const hook of presentHooks) {
+    fs.writeFileSync(path.join(targetDir, 'hooks', hook), '// stub\n');
+  }
+  const settings = {};
+  const localCmd = (hookFile) => `node ${path.join(targetDir, 'hooks', hookFile)}`;
+  const localShellCmd = (hookFile) => `bash ${path.join(targetDir, 'hooks', hookFile)}`;
+  const { stdout, stderr } = captureConsole(() => {
+    applySettingsJsonHooks(settings, {
+      runtime: 'claude',
+      isGlobal: false,
+      targetDir,
+      postToolEvent: 'PostToolUse',
+      hookEvents: 'claude',
+      extendedHookEvents: [],
+      hooksSurface: 'settings-json',
+      updateCheckCommand: localCmd('gsd-check-update.js'),
+      contextMonitorCommand: localCmd('gsd-context-monitor.js'),
+      promptGuardCommand: localCmd('gsd-prompt-guard.js'),
+      readGuardCommand: localCmd('gsd-read-guard.js'),
+      readInjectionScannerCommand: localCmd('gsd-read-injection-scanner.js'),
+      configReloadCommand: null,
+      hookOpts: { portableHooks: false, runtime: 'claude' },
+      localCmd,
+      localShellCmd,
+    });
   });
+  return { settings, stdout, stderr };
+}
 
-  for (const { name, registrationAnchor } of JS_HOOKS) {
-    describe(`${name} registration`, () => {
-      test(`install.js checks file existence before registering ${name}`, () => {
-        // Find the registration block by locating the "has...Hook" variable
-        const anchorIdx = src.indexOf(registrationAnchor);
-        assert.ok(
-          anchorIdx !== -1,
-          `${registrationAnchor} variable not found in install.js`
+function settingsReferencesHook(settings, hookBaseName) {
+  const events = Object.values(settings.hooks || {});
+  return events.some((entries) =>
+    Array.isArray(entries) && entries.some((entry) =>
+      Array.isArray(entry.hooks) && entry.hooks.some((h) => h.command && h.command.includes(hookBaseName))
+    )
+  );
+}
+
+describe('bug #1754: .js hook registration guards', () => {
+  let targetDir;
+  beforeEach(() => { targetDir = createTempDir('gsd-hook-guard-js-'); });
+  afterEach(() => { cleanup(targetDir); });
+
+  for (const hookName of JS_HOOKS) {
+    test(`${hookName} is NOT registered in settings.json when its file is missing at the target path`, () => {
+      // Every OTHER JS hook is present (positive control keeps the guard
+      // honest — a wholesale skip of all hooks would falsely satisfy the
+      // negative assertion below).
+      const present = JS_HOOKS.filter((h) => h !== hookName);
+      const { settings, stderr } = runApplySettingsJsonHooks(targetDir, present);
+
+      assert.equal(
+        settingsReferencesHook(settings, hookName), false,
+        `settings.json must NOT register ${hookName} when its file was never copied (root cause of #1754)`,
+      );
+      assert.ok(
+        stderr.includes(hookName.replace('.js', '')),
+        `install must emit a skip warning naming ${hookName} when it is missing (stderr: ${stderr})`,
+      );
+
+      for (const otherHook of present) {
+        assert.equal(
+          settingsReferencesHook(settings, otherHook), true,
+          `${otherHook} (present on disk) must still be registered — the guard must be per-file, not wholesale`,
         );
-
-        // Extract a window around the registration block to find the guard
-        const blockStart = anchorIdx;
-        const blockEnd = Math.min(src.length, anchorIdx + 1200);
-        const block = src.slice(blockStart, blockEnd);
-
-        // The block must contain an fs.existsSync check for the hook file
-        assert.ok(
-          block.includes('fs.existsSync') || block.includes('existsSync'),
-          `install.js must call fs.existsSync on the target path before registering ${name} ` +
-          `in settings.json. Without this guard, hooks are registered even when the .js file ` +
-          `was never copied (the root cause of #1754).`
-        );
-      });
-
-      test(`install.js emits a warning when ${name} is missing`, () => {
-        // The hook file name (without extension) should appear in a warning message
-        const hookBaseName = name.replace('.js', '');
-        const warnPattern = `Skipped`;
-        const anchorIdx = src.indexOf(registrationAnchor);
-        const block = src.slice(anchorIdx, Math.min(src.length, anchorIdx + 1200));
-
-        assert.ok(
-          block.includes(warnPattern) && block.includes(hookBaseName),
-          `install.js must emit a skip warning when ${name} is not found at the target path`
-        );
-      });
+      }
     });
   }
-
-  test('all .js hooks use the same guard pattern as .sh hooks', () => {
-    // Count existsSync calls in the hook registration section.
-    // There should be guards for all JS hooks plus the existing SH hooks.
-    // This test ensures new hooks added in the future follow the same pattern.
-    // ADR-857 phase 5f-1b: registration moved to runtime-hooks-surface.cts so scan the
-    // full concatenated source (install.js + runtime-hooks-surface.cts) rather than slicing.
-    const registrationSection = src;
-
-    // Count unique hook file existence checks (pattern: path.join(targetDir, 'hooks', 'gsd-*.js'))
-    const jsGuards = (registrationSection.match(/gsd-[\w-]+\.js.*not found at target/g) || []);
-    const shGuards = (registrationSection.match(/gsd-[\w-]+\.sh.*not found at target/g) || []);
-
-    assert.ok(
-      jsGuards.length >= JS_HOOKS.length,
-      `Expected at least ${JS_HOOKS.length} .js hook guards, found ${jsGuards.length}. ` +
-      `Every .js hook registration must check file existence before registering.`
-    );
-
-    assert.ok(
-      shGuards.length >= 3,
-      `Expected at least 3 .sh hook guards (validate-commit, session-state, phase-boundary), ` +
-      `found ${shGuards.length}.`
-    );
-  });
 });
   });
 }
@@ -1142,61 +1162,95 @@ describe('bug #1754: .js hook registration guards', () => {
  * Defensive guard: before registering each .sh hook in settings.json,
  * install.js must verify the target file exists. If it doesn't, skip
  * registration and emit a warning.
+ *
+ * Behavioral (#3466): see the bug-1754 block above — same
+ * `applySettingsJsonHooks` seam, applied to the three opt-in `.sh` hooks.
  */
 
 'use strict';
 
-const { describe, test } = require('node:test');
+const { describe, test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-
-const INSTALL_SRC = path.join(__dirname, '..', 'bin', 'install.js');
-// ADR-857 phase 5f-1b: settings-json hook registration moved to runtime-hooks-surface.cts.
-const HOOKS_SURFACE_SRC = path.join(__dirname, '..', 'src', 'runtime-hooks-surface.cts');
+const { createTempDir, cleanup, captureConsole } = require('./helpers.cjs');
+const { applySettingsJsonHooks } = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
 
 const SH_HOOKS = [
-  { name: 'gsd-validate-commit.sh', settingsVar: 'validateCommitCommand' },
-  { name: 'gsd-session-state.sh',   settingsVar: 'sessionStateCommand' },
-  { name: 'gsd-phase-boundary.sh',  settingsVar: 'phaseBoundaryCommand' },
+  'gsd-validate-commit.sh',
+  'gsd-session-state.sh',
+  'gsd-phase-boundary.sh',
 ];
 
-describe('bug #1817: .sh hook registration guards', () => {
-  let src;
-
-  // Read once — all tests in this suite share the same source snapshot.
-  // ADR-857 phase 5f-1b: hook registration moved to runtime-hooks-surface.cts.
-  // Concatenate both sources so structural assertions find patterns in either file.
-  try {
-    const installSrc = fs.readFileSync(INSTALL_SRC, 'utf-8');
-    let hooksSurfaceSrc = '';
-    try { hooksSurfaceSrc = fs.readFileSync(HOOKS_SURFACE_SRC, 'utf-8'); } catch { /* ok */ }
-    src = installSrc + '\n' + hooksSurfaceSrc;
-  } catch {
-    src = '';
+// Same seam as the bug-1754 block above, duplicated locally rather than
+// imported across the fold boundary — each folded block is a standalone
+// module scope (see the __foldDescribe wrapper), matching this file's
+// existing folding convention.
+function runApplySettingsJsonHooksForSh(targetDir, presentHooks) {
+  fs.mkdirSync(path.join(targetDir, 'hooks'), { recursive: true });
+  for (const hook of presentHooks) {
+    fs.writeFileSync(path.join(targetDir, 'hooks', hook), '#!/bin/sh\n');
   }
+  const settings = {};
+  const localCmd = (hookFile) => `node ${path.join(targetDir, 'hooks', hookFile)}`;
+  const localShellCmd = (hookFile) => `bash ${path.join(targetDir, 'hooks', hookFile)}`;
+  const { stdout, stderr } = captureConsole(() => {
+    applySettingsJsonHooks(settings, {
+      runtime: 'claude',
+      isGlobal: false,
+      targetDir,
+      postToolEvent: 'PostToolUse',
+      hookEvents: 'claude',
+      extendedHookEvents: [],
+      hooksSurface: 'settings-json',
+      updateCheckCommand: localCmd('gsd-check-update.js'),
+      contextMonitorCommand: localCmd('gsd-context-monitor.js'),
+      promptGuardCommand: localCmd('gsd-prompt-guard.js'),
+      readGuardCommand: localCmd('gsd-read-guard.js'),
+      readInjectionScannerCommand: localCmd('gsd-read-injection-scanner.js'),
+      configReloadCommand: null,
+      hookOpts: { portableHooks: false, runtime: 'claude' },
+      localCmd,
+      localShellCmd,
+    });
+  });
+  return { settings, stdout, stderr };
+}
 
-  for (const { name, settingsVar } of SH_HOOKS) {
-    describe(`${name} registration`, () => {
-      test(`install.js checks file existence before registering ${name}`, () => {
-        // Find the block where this .sh hook is registered.
-        // Each registration block is preceded by the command variable declaration
-        // and followed by the next hook or end of registration section.
-        const varIdx = src.indexOf(settingsVar);
-        assert.ok(varIdx !== -1, `${settingsVar} variable not found in install.js`);
+function shSettingsReferencesHook(settings, hookBaseName) {
+  const events = Object.values(settings.hooks || {});
+  return events.some((entries) =>
+    Array.isArray(entries) && entries.some((entry) =>
+      Array.isArray(entry.hooks) && entry.hooks.some((h) => h.command && h.command.includes(hookBaseName))
+    )
+  );
+}
 
-        // Extract ~900 chars around the variable to find the registration block
-        const blockStart = Math.max(0, varIdx - 50);
-        const blockEnd = Math.min(src.length, varIdx + 900);
-        const block = src.slice(blockStart, blockEnd);
+describe('bug #1817: .sh hook registration guards', () => {
+  let targetDir;
+  beforeEach(() => { targetDir = createTempDir('gsd-hook-guard-sh-'); });
+  afterEach(() => { cleanup(targetDir); });
 
-        assert.ok(
-          block.includes('fs.existsSync') || block.includes('existsSync'),
-          `install.js must call fs.existsSync on the target path before registering ${name} in settings.json. ` +
-          `Without this guard, hooks are registered even when the .sh file was never copied ` +
-          `(the root cause of #1817).`
+  for (const hookName of SH_HOOKS) {
+    test(`${hookName} is NOT registered in settings.json when its file is missing at the target path`, () => {
+      const present = SH_HOOKS.filter((h) => h !== hookName);
+      const { settings, stderr } = runApplySettingsJsonHooksForSh(targetDir, present);
+
+      assert.equal(
+        shSettingsReferencesHook(settings, hookName), false,
+        `settings.json must NOT register ${hookName} when its file was never copied (root cause of #1817)`,
+      );
+      assert.ok(
+        stderr.includes(hookName.replace('.sh', '')),
+        `install must emit a skip warning naming ${hookName} when it is missing (stderr: ${stderr})`,
+      );
+
+      for (const otherHook of present) {
+        assert.equal(
+          shSettingsReferencesHook(settings, otherHook), true,
+          `${otherHook} (present on disk) must still be registered — the guard must be per-file, not wholesale`,
         );
-      });
+      }
     });
   }
 });
@@ -1237,28 +1291,15 @@ const { test, describe, before } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { runNode } = require('./helpers/process-seam.cjs');
-const { throwIfFailed } = require('./helpers/git-fixture.cjs');
+const { ensureHooksDist } = require('./helpers/hooks-dist.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
-const HOOKS_DIST_DIR = path.join(REPO_ROOT, 'hooks', 'dist');
-const BUILD_HOOKS_SCRIPT = path.join(REPO_ROOT, 'scripts', 'build-hooks.js');
-
-// #3145: class-norm timeout, not a per-suite value — see helpers/timeouts.cjs.
-const { BUILD_TIMEOUT_MS: BUILD_HOOKS_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-
-/** Idempotently ensure hooks/dist contains built .js files. */
-function ensureHooksDist() {
-  if (!fs.existsSync(HOOKS_DIST_DIR) || fs.readdirSync(HOOKS_DIST_DIR).filter(f => f.endsWith('.js')).length === 0) {
-    throwIfFailed(runNode([BUILD_HOOKS_SCRIPT], { timeoutMs: BUILD_HOOKS_TIMEOUT_MS }), `node ${BUILD_HOOKS_SCRIPT}`);
-  }
-}
 
 before(() => {
   ensureHooksDist();
 });
 
-const { applySettingsJsonHooks } = require('../bin/install.js');
+const { applySettingsJsonHooks } = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
 const { cleanup } = require('./helpers.cjs');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1680,8 +1721,7 @@ const { test, describe, before, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { runNode } = require('./helpers/process-seam.cjs');
-const { throwIfFailed } = require('./helpers/git-fixture.cjs');
+const { ensureHooksDist } = require('./helpers/hooks-dist.cjs');
 
 const { install } = require('../bin/install.js');
 const { createTempDir, cleanup } = require('./helpers.cjs');
@@ -1693,23 +1733,6 @@ const { createTempDir, cleanup } = require('./helpers.cjs');
 // tests, so install() finds no hook files → event arrays come back empty →
 // every "expected AfterTool/PostToolUse/BeforeTool/PreToolUse hooks" assertion
 // fails. This mirrors the pattern in bug-376-claude-js-hook-gsd-rewriter.test.cjs.
-
-const REPO_ROOT = path.resolve(__dirname, '..');
-const HOOKS_DIST_DIR = path.join(REPO_ROOT, 'hooks', 'dist');
-const BUILD_HOOKS_SCRIPT = path.join(REPO_ROOT, 'scripts', 'build-hooks.js');
-
-// #3145: class-norm timeout, not a per-suite value — see helpers/timeouts.cjs.
-const { BUILD_TIMEOUT_MS: BUILD_HOOKS_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-
-/**
- * Idempotently ensure hooks/dist contains built .js files.
- * Runs build-hooks.js only when the directory is absent or empty of .js files.
- */
-function ensureHooksDist() {
-  if (!fs.existsSync(HOOKS_DIST_DIR) || fs.readdirSync(HOOKS_DIST_DIR).filter(f => f.endsWith('.js')).length === 0) {
-    throwIfFailed(runNode([BUILD_HOOKS_SCRIPT], { timeoutMs: BUILD_HOOKS_TIMEOUT_MS }), `node ${BUILD_HOOKS_SCRIPT}`);
-  }
-}
 
 before(() => {
   ensureHooksDist();
@@ -2763,1319 +2786,6 @@ describe('enh-770: managed-hooks-registry includes gsd-config-reload.js', () => 
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-1754-js-hook-guard.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-1754-js-hook-guard (consolidation epic #1969 B1 #1970)", () => {
-/**
- * Regression tests for bug #1754
- *
- * The installer must NOT register .js hook entries in settings.json when the
- * corresponding .js file does not exist at the target path. The original bug:
- * on fresh installs where hooks/dist/ was missing from the npm package (as in
- * v1.32.0), the hook copy step produced no files, yet the registration step
- * ran unconditionally for .js hooks — leaving users with "PreToolUse:Bash
- * hook error" on every tool invocation.
- *
- * The .sh hooks already had fs.existsSync() guards (added in #1817). This
- * test verifies the same defensive pattern exists for all .js hooks.
- */
-
-'use strict';
-
-const { describe, test, before } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
-
-const INSTALL_SRC = path.join(__dirname, '..', 'bin', 'install.js');
-// ADR-857 phase 5f-1b: settings-json hook registration moved to runtime-hooks-surface.cts.
-const HOOKS_SURFACE_SRC = path.join(__dirname, '..', 'src', 'runtime-hooks-surface.cts');
-
-const JS_HOOKS = [
-  { name: 'gsd-check-update.js',      registrationAnchor: 'hasGsdUpdateHook' },
-  { name: 'gsd-context-monitor.js',   registrationAnchor: 'hasContextMonitorHook' },
-  { name: 'gsd-prompt-guard.js',      registrationAnchor: 'hasPromptGuardHook' },
-  { name: 'gsd-read-guard.js',        registrationAnchor: 'hasReadGuardHook' },
-  { name: 'gsd-workflow-guard.js',    registrationAnchor: 'hasWorkflowGuardHook' },
-  { name: 'gsd-worktree-path-guard.js', registrationAnchor: 'hasWorktreePathGuardHook' },
-  { name: 'gsd-write-guard.js',         registrationAnchor: 'hasWriteGuardHook' },
-];
-
-describe('bug #1754: .js hook registration guards', () => {
-  let src;
-
-  before(() => {
-    // ADR-857 phase 5f-1b: hook registration moved to runtime-hooks-surface.cts.
-    // Concatenate both sources so structural assertions find patterns in either file.
-    const installSrc = fs.readFileSync(INSTALL_SRC, 'utf-8');
-    let hooksSurfaceSrc = '';
-    try { hooksSurfaceSrc = fs.readFileSync(HOOKS_SURFACE_SRC, 'utf-8'); } catch { /* ok */ }
-    src = installSrc + '\n' + hooksSurfaceSrc;
-  });
-
-  for (const { name, registrationAnchor } of JS_HOOKS) {
-    describe(`${name} registration`, () => {
-      test(`install.js checks file existence before registering ${name}`, () => {
-        // Find the registration block by locating the "has...Hook" variable
-        const anchorIdx = src.indexOf(registrationAnchor);
-        assert.ok(
-          anchorIdx !== -1,
-          `${registrationAnchor} variable not found in install.js`
-        );
-
-        // Extract a window around the registration block to find the guard
-        const blockStart = anchorIdx;
-        const blockEnd = Math.min(src.length, anchorIdx + 1200);
-        const block = src.slice(blockStart, blockEnd);
-
-        // The block must contain an fs.existsSync check for the hook file
-        assert.ok(
-          block.includes('fs.existsSync') || block.includes('existsSync'),
-          `install.js must call fs.existsSync on the target path before registering ${name} ` +
-          `in settings.json. Without this guard, hooks are registered even when the .js file ` +
-          `was never copied (the root cause of #1754).`
-        );
-      });
-
-      test(`install.js emits a warning when ${name} is missing`, () => {
-        // The hook file name (without extension) should appear in a warning message
-        const hookBaseName = name.replace('.js', '');
-        const warnPattern = `Skipped`;
-        const anchorIdx = src.indexOf(registrationAnchor);
-        const block = src.slice(anchorIdx, Math.min(src.length, anchorIdx + 1200));
-
-        assert.ok(
-          block.includes(warnPattern) && block.includes(hookBaseName),
-          `install.js must emit a skip warning when ${name} is not found at the target path`
-        );
-      });
-    });
-  }
-
-  test('all .js hooks use the same guard pattern as .sh hooks', () => {
-    // Count existsSync calls in the hook registration section.
-    // There should be guards for all JS hooks plus the existing SH hooks.
-    // This test ensures new hooks added in the future follow the same pattern.
-    // ADR-857 phase 5f-1b: registration moved to runtime-hooks-surface.cts so scan the
-    // full concatenated source (install.js + runtime-hooks-surface.cts) rather than slicing.
-    const registrationSection = src;
-
-    // Count unique hook file existence checks (pattern: path.join(targetDir, 'hooks', 'gsd-*.js'))
-    const jsGuards = (registrationSection.match(/gsd-[\w-]+\.js.*not found at target/g) || []);
-    const shGuards = (registrationSection.match(/gsd-[\w-]+\.sh.*not found at target/g) || []);
-
-    assert.ok(
-      jsGuards.length >= JS_HOOKS.length,
-      `Expected at least ${JS_HOOKS.length} .js hook guards, found ${jsGuards.length}. ` +
-      `Every .js hook registration must check file existence before registering.`
-    );
-
-    assert.ok(
-      shGuards.length >= 3,
-      `Expected at least 3 .sh hook guards (validate-commit, session-state, phase-boundary), ` +
-      `found ${shGuards.length}.`
-    );
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-1817-sh-hook-guard.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-1817-sh-hook-guard (consolidation epic #1969 B1 #1970)", () => {
-/**
- * Regression tests for bug #1817
- *
- * The installer must NOT register .sh hook entries in settings.json when the
- * corresponding .sh file does not exist at the target path. The original bug:
- * v1.32.0's npm package omitted the .sh files from hooks/dist/, so the copy
- * step produced no files, yet the registration step ran unconditionally —
- * leaving users with hook errors on every tool invocation.
- *
- * Defensive guard: before registering each .sh hook in settings.json,
- * install.js must verify the target file exists. If it doesn't, skip
- * registration and emit a warning.
- */
-
-'use strict';
-
-const { describe, test } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
-
-const INSTALL_SRC = path.join(__dirname, '..', 'bin', 'install.js');
-// ADR-857 phase 5f-1b: settings-json hook registration moved to runtime-hooks-surface.cts.
-const HOOKS_SURFACE_SRC = path.join(__dirname, '..', 'src', 'runtime-hooks-surface.cts');
-
-const SH_HOOKS = [
-  { name: 'gsd-validate-commit.sh', settingsVar: 'validateCommitCommand' },
-  { name: 'gsd-session-state.sh',   settingsVar: 'sessionStateCommand' },
-  { name: 'gsd-phase-boundary.sh',  settingsVar: 'phaseBoundaryCommand' },
-];
-
-describe('bug #1817: .sh hook registration guards', () => {
-  let src;
-
-  // Read once — all tests in this suite share the same source snapshot.
-  // ADR-857 phase 5f-1b: hook registration moved to runtime-hooks-surface.cts.
-  // Concatenate both sources so structural assertions find patterns in either file.
-  try {
-    const installSrc = fs.readFileSync(INSTALL_SRC, 'utf-8');
-    let hooksSurfaceSrc = '';
-    try { hooksSurfaceSrc = fs.readFileSync(HOOKS_SURFACE_SRC, 'utf-8'); } catch { /* ok */ }
-    src = installSrc + '\n' + hooksSurfaceSrc;
-  } catch {
-    src = '';
-  }
-
-  for (const { name, settingsVar } of SH_HOOKS) {
-    describe(`${name} registration`, () => {
-      test(`install.js checks file existence before registering ${name}`, () => {
-        // Find the block where this .sh hook is registered.
-        // Each registration block is preceded by the command variable declaration
-        // and followed by the next hook or end of registration section.
-        const varIdx = src.indexOf(settingsVar);
-        assert.ok(varIdx !== -1, `${settingsVar} variable not found in install.js`);
-
-        // Extract ~900 chars around the variable to find the registration block
-        const blockStart = Math.max(0, varIdx - 50);
-        const blockEnd = Math.min(src.length, varIdx + 900);
-        const block = src.slice(blockStart, blockEnd);
-
-        assert.ok(
-          block.includes('fs.existsSync') || block.includes('existsSync'),
-          `install.js must call fs.existsSync on the target path before registering ${name} in settings.json. ` +
-          `Without this guard, hooks are registered even when the .sh file was never copied ` +
-          `(the root cause of #1817).`
-        );
-      });
-    });
-  }
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/enh-1076-extended-hook-events-drive.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:enh-1076-extended-hook-events-drive (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-/**
- * ADR-857 phase 5f-3: extended hook event guards are driven by the
- * extendedHookEvents descriptor field, not hardcoded runtime-name checks.
- *
- * Before this change:
- *   - SubagentStop/Stop/PreCompact were wired only when (isQwen || runtime==='claude')
- *   - FileChanged was wired only when (runtime === 'claude')
- *   - BeforeAgent/AfterAgent/BeforeModel were wired only when (isGemini)
- *
- * After this change:
- *   - All three guard blocks are driven purely by extendedEvents.includes(eventName)
- *   - Any runtime (or arbitrary string) that passes the right extendedHookEvents
- *     array gets exactly those events registered, regardless of its runtime name.
- *
- * This suite proves descriptor-drive by calling applySettingsJsonHooks directly
- * with a controlled extendedHookEvents array and asserting on settings.hooks.
- * No source-grep; purely behavioral.
- */
-
-const { test, describe, before } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const { runNode } = require('./helpers/process-seam.cjs');
-const { throwIfFailed } = require('./helpers/git-fixture.cjs');
-
-const REPO_ROOT = path.resolve(__dirname, '..');
-const HOOKS_DIST_DIR = path.join(REPO_ROOT, 'hooks', 'dist');
-const BUILD_HOOKS_SCRIPT = path.join(REPO_ROOT, 'scripts', 'build-hooks.js');
-
-// #3145: class-norm timeout, not a per-suite value — see helpers/timeouts.cjs.
-const { BUILD_TIMEOUT_MS: BUILD_HOOKS_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-
-/** Idempotently ensure hooks/dist contains built .js files. */
-function ensureHooksDist() {
-  if (!fs.existsSync(HOOKS_DIST_DIR) || fs.readdirSync(HOOKS_DIST_DIR).filter(f => f.endsWith('.js')).length === 0) {
-    throwIfFailed(runNode([BUILD_HOOKS_SCRIPT], { timeoutMs: BUILD_HOOKS_TIMEOUT_MS }), `node ${BUILD_HOOKS_SCRIPT}`);
-  }
-}
-
-before(() => {
-  ensureHooksDist();
-});
-
-const { applySettingsJsonHooks } = require('../bin/install.js');
-const { cleanup } = require('./helpers.cjs');
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Return all hook commands registered under an event key. */
-function hooksForEvent(settings, eventName) {
-  if (!settings || !settings.hooks || !Array.isArray(settings.hooks[eventName])) return [];
-  return settings.hooks[eventName].flatMap(entry =>
-    (entry && Array.isArray(entry.hooks) ? entry.hooks : [])
-      .map(h => h && h.command)
-      .filter(Boolean)
-  );
-}
-
-/** True if any hook is registered under eventName. */
-function hasHooksFor(settings, eventName) {
-  return hooksForEvent(settings, eventName).length > 0;
-}
-
-/**
- * Create a temporary directory with stub hook files so fs.existsSync guards pass.
- * Returns the targetDir path.
- */
-function createStubTargetDir() {
-  const tmpDir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'gsd-1076-'));
-  const hooksDir = path.join(tmpDir, 'hooks');
-  fs.mkdirSync(hooksDir, { recursive: true });
-  // Stubs for the hooks applySettingsJsonHooks existsSync-checks
-  const stubs = [
-    'gsd-check-update.js',
-    'gsd-context-monitor.js',
-    'gsd-prompt-guard.js',
-    'gsd-read-guard.js',
-    'gsd-read-injection-scanner.js',
-    'gsd-config-reload.js',
-    'gsd-workflow-guard.js',
-    'gsd-worktree-path-guard.js',
-    'gsd-validate-commit.sh',
-    'gsd-session-state.sh',
-    'gsd-phase-boundary.sh',
-    'gsd-graphify-update.sh',
-  ];
-  const hooksDistDir = path.join(REPO_ROOT, 'hooks', 'dist');
-  for (const stub of stubs) {
-    const dest = path.join(hooksDir, stub);
-    const distSrc = path.join(hooksDistDir, stub);
-    if (fs.existsSync(distSrc)) {
-      fs.copyFileSync(distSrc, dest);
-    } else {
-      // Minimal stub so existsSync passes
-      const ext = path.extname(stub);
-      fs.writeFileSync(dest, ext === '.sh' ? '#!/bin/bash\n# stub\n' : '#!/usr/bin/env node\n// stub\n');
-    }
-    try { fs.chmodSync(dest, 0o755); } catch { /* Windows */ }
-  }
-  return tmpDir;
-}
-
-function cleanupDir(dir) {
-  cleanup(dir);
-}
-
-/**
- * Build the minimal opts bag for applySettingsJsonHooks.
- * postToolEvent: 'PostToolUse' (default dialect).
- * All commands: non-null strings so the "command truthy" guard passes.
- */
-function buildOpts(targetDir, { runtime, extendedHookEvents }) {
-  const hookOpts = { platform: process.platform, runtime };
-  const node = process.execPath;
-  return {
-    runtime,
-    isGlobal: true,
-    targetDir,
-    postToolEvent: 'PostToolUse',
-    hookEvents: undefined,         // not the hookEvents dialect — we're testing extendedHookEvents
-    extendedHookEvents,
-    updateCheckCommand: `${node} "${path.join(targetDir, 'hooks', 'gsd-check-update.js')}"`,
-    contextMonitorCommand: `${node} "${path.join(targetDir, 'hooks', 'gsd-context-monitor.js')}"`,
-    promptGuardCommand: `${node} "${path.join(targetDir, 'hooks', 'gsd-prompt-guard.js')}"`,
-    readGuardCommand: `${node} "${path.join(targetDir, 'hooks', 'gsd-read-guard.js')}"`,
-    readInjectionScannerCommand: `${node} "${path.join(targetDir, 'hooks', 'gsd-read-injection-scanner.js')}"`,
-    configReloadCommand: `${node} "${path.join(targetDir, 'hooks', 'gsd-config-reload.js')}"`,
-    hookOpts,
-    localCmd: () => null,
-    localShellCmd: () => null,
-  };
-}
-
-// ─── Suite 1: claude shape (SubagentStop+Stop+PreCompact+FileChanged) ─────────
-
-describe('enh-1076 phase 5f-3: claude extendedHookEvents → SubagentStop/Stop/PreCompact/FileChanged', () => {
-  let targetDir;
-  let settings;
-
-  before(() => {
-    targetDir = createStubTargetDir();
-    settings = { hooks: {} };
-    const opts = buildOpts(targetDir, {
-      runtime: 'claude',
-      extendedHookEvents: ['SubagentStop', 'Stop', 'PreCompact', 'FileChanged'],
-    });
-    applySettingsJsonHooks(settings, opts);
-  });
-
-  test('SubagentStop is wired (descriptor-driven)', () => {
-    assert.ok(
-      hasHooksFor(settings, 'SubagentStop'),
-      `Expected SubagentStop hooks; hooks keys: ${JSON.stringify(Object.keys(settings.hooks || {}))}`
-    );
-  });
-
-  test('Stop is wired (descriptor-driven)', () => {
-    assert.ok(
-      hasHooksFor(settings, 'Stop'),
-      `Expected Stop hooks; hooks keys: ${JSON.stringify(Object.keys(settings.hooks || {}))}`
-    );
-  });
-
-  test('PreCompact is wired (descriptor-driven)', () => {
-    assert.ok(
-      hasHooksFor(settings, 'PreCompact'),
-      `Expected PreCompact hooks; hooks keys: ${JSON.stringify(Object.keys(settings.hooks || {}))}`
-    );
-  });
-
-  test('FileChanged is wired (descriptor-driven)', () => {
-    assert.ok(
-      hasHooksFor(settings, 'FileChanged'),
-      `Expected FileChanged hooks; hooks keys: ${JSON.stringify(Object.keys(settings.hooks || {}))}`
-    );
-  });
-
-  test('cleanup', () => {
-    cleanupDir(targetDir);
-  });
-});
-
-// ─── Suite 2: qwen shape (SubagentStop+Stop+PreCompact, no FileChanged) ───────
-
-describe('enh-1076 phase 5f-3: qwen extendedHookEvents → SubagentStop/Stop/PreCompact only', () => {
-  let targetDir;
-  let settings;
-
-  before(() => {
-    targetDir = createStubTargetDir();
-    settings = { hooks: {} };
-    const opts = buildOpts(targetDir, {
-      runtime: 'qwen',
-      extendedHookEvents: ['SubagentStop', 'Stop', 'PreCompact'],
-    });
-    applySettingsJsonHooks(settings, opts);
-  });
-
-  test('SubagentStop is wired', () => {
-    assert.ok(hasHooksFor(settings, 'SubagentStop'));
-  });
-
-  test('Stop is wired', () => {
-    assert.ok(hasHooksFor(settings, 'Stop'));
-  });
-
-  test('PreCompact is wired', () => {
-    assert.ok(hasHooksFor(settings, 'PreCompact'));
-  });
-
-  test('FileChanged is NOT wired (not in extendedHookEvents)', () => {
-    assert.strictEqual(
-      hasHooksFor(settings, 'FileChanged'),
-      false,
-      `FileChanged must NOT be wired for qwen shape; hooks keys: ${JSON.stringify(Object.keys(settings.hooks || {}))}`
-    );
-  });
-
-  test('cleanup', () => {
-    cleanupDir(targetDir);
-  });
-});
-
-// ─── Suite 3: gemini shape (BeforeAgent+AfterAgent+BeforeModel) ───────────────
-
-describe('enh-1076 phase 5f-3: extendedHookEvents → BeforeAgent/AfterAgent/BeforeModel (Gemini-3 backend dialect)', () => {
-  let targetDir;
-  let settings;
-
-  before(() => {
-    targetDir = createStubTargetDir();
-    settings = { hooks: {} };
-    const opts = buildOpts(targetDir, {
-      runtime: 'antigravity',
-      extendedHookEvents: ['BeforeAgent', 'AfterAgent', 'BeforeModel'],
-    });
-    applySettingsJsonHooks(settings, opts);
-  });
-
-  test('BeforeAgent is wired', () => {
-    assert.ok(
-      hasHooksFor(settings, 'BeforeAgent'),
-      `Expected BeforeAgent hooks; hooks keys: ${JSON.stringify(Object.keys(settings.hooks || {}))}`
-    );
-  });
-
-  test('AfterAgent is wired', () => {
-    assert.ok(hasHooksFor(settings, 'AfterAgent'));
-  });
-
-  test('BeforeModel is wired', () => {
-    assert.ok(hasHooksFor(settings, 'BeforeModel'));
-  });
-
-  test('SubagentStop is NOT wired (not in extendedHookEvents)', () => {
-    assert.strictEqual(
-      hasHooksFor(settings, 'SubagentStop'),
-      false,
-      'SubagentStop must NOT be wired for gemini shape'
-    );
-  });
-
-  test('FileChanged is NOT wired (not in extendedHookEvents)', () => {
-    assert.strictEqual(
-      hasHooksFor(settings, 'FileChanged'),
-      false,
-      'FileChanged must NOT be wired for gemini shape'
-    );
-  });
-
-  test('cleanup', () => {
-    cleanupDir(targetDir);
-  });
-});
-
-// ─── Suite 4: empty extendedHookEvents → none of the extended events ──────────
-
-describe('enh-1076 phase 5f-3: empty extendedHookEvents → no extended events wired', () => {
-  let targetDir;
-  let settings;
-
-  before(() => {
-    targetDir = createStubTargetDir();
-    settings = { hooks: {} };
-    // Use runtime='someruntime' to prove it's the descriptor, not the name, that matters
-    const opts = buildOpts(targetDir, {
-      runtime: 'someruntime',
-      extendedHookEvents: [],
-    });
-    applySettingsJsonHooks(settings, opts);
-  });
-
-  const EXTENDED_EVENTS = [
-    'SubagentStop', 'Stop', 'PreCompact', 'FileChanged',
-    'BeforeAgent', 'AfterAgent', 'BeforeModel',
-  ];
-
-  for (const event of EXTENDED_EVENTS) {
-    test(`${event} is NOT wired when extendedHookEvents is empty`, () => {
-      assert.strictEqual(
-        hasHooksFor(settings, event),
-        false,
-        `${event} must not be wired when extendedHookEvents=[] (runtime=someruntime); hooks keys: ${JSON.stringify(Object.keys(settings.hooks || {}))}`
-      );
-    });
-  }
-
-  test('cleanup', () => {
-    cleanupDir(targetDir);
-  });
-});
-
-// ─── Suite 5: descriptor-drive is runtime-name-agnostic ───────────────────────
-// Pass an arbitrary runtime name ('hypothetical') with SubagentStop in its
-// extendedHookEvents. This could NEVER have worked under the old hardcoded check.
-// Under the new descriptor-driven guard it MUST work.
-
-describe('enh-1076 phase 5f-3: arbitrary runtime with SubagentStop in descriptor gets it wired', () => {
-  let targetDir;
-  let settings;
-
-  before(() => {
-    targetDir = createStubTargetDir();
-    settings = { hooks: {} };
-    const opts = buildOpts(targetDir, {
-      runtime: 'hypothetical',   // NOT 'claude' or 'qwen' — would have been skipped before
-      extendedHookEvents: ['SubagentStop'],
-    });
-    applySettingsJsonHooks(settings, opts);
-  });
-
-  test('SubagentStop IS wired for a hypothetical runtime when descriptor includes it', () => {
-    assert.ok(
-      hasHooksFor(settings, 'SubagentStop'),
-      `SubagentStop must be wired via descriptor even for unknown runtime names; hooks keys: ${JSON.stringify(Object.keys(settings.hooks || {}))}`
-    );
-  });
-
-  test('Stop is NOT wired (not in extendedHookEvents)', () => {
-    assert.strictEqual(hasHooksFor(settings, 'Stop'), false);
-  });
-
-  test('cleanup', () => {
-    cleanupDir(targetDir);
-  });
-});
-
-// ─── Suite 6: hooksSurface drive (ADR-857 phase 5g drive 3) ──────────────────
-//
-// applySettingsJsonHooks is gated by opts.hooksSurface !== 'none'.
-// - hooksSurface:'none'         → entire body is skipped; no hooks written
-// - hooksSurface:'settings-json'→ hooks are written (even for a runtime whose
-//   name was previously hardcoded to skip, e.g. 'opencode')
-//
-// This proves the skip is driven by the descriptor field, not the runtime name.
-
-describe('enh-1076 phase 5g drive 3: hooksSurface:none skips all hooks regardless of runtime', () => {
-  let targetDir;
-  let settings;
-
-  before(() => {
-    targetDir = createStubTargetDir();
-    settings = { hooks: {} };
-    // 'claude' would normally write hooks, but hooksSurface:'none' must skip entirely.
-    const opts = {
-      ...buildOpts(targetDir, { runtime: 'claude', extendedHookEvents: ['SubagentStop'] }),
-      hooksSurface: 'none',
-    };
-    applySettingsJsonHooks(settings, opts);
-  });
-
-  test('SessionStart is NOT written when hooksSurface is "none"', () => {
-    assert.strictEqual(
-      hasHooksFor(settings, 'SessionStart'),
-      false,
-      `SessionStart must not be written when hooksSurface="none"; hooks keys: ${JSON.stringify(Object.keys(settings.hooks || {}))}`
-    );
-  });
-
-  test('PostToolUse is NOT written when hooksSurface is "none"', () => {
-    assert.strictEqual(hasHooksFor(settings, 'PostToolUse'), false);
-  });
-
-  test('PreToolUse is NOT written when hooksSurface is "none"', () => {
-    assert.strictEqual(hasHooksFor(settings, 'PreToolUse'), false);
-  });
-
-  test('cleanup', () => {
-    cleanupDir(targetDir);
-  });
-});
-
-describe('enh-1076 phase 5g drive 3: hooksSurface:settings-json writes hooks even for previously-skipped runtime name', () => {
-  let targetDir;
-  let settings;
-
-  before(() => {
-    targetDir = createStubTargetDir();
-    settings = { hooks: {} };
-    // 'opencode' previously was hardcoded to skip hooks; with descriptor drive it
-    // should write hooks whenever hooksSurface !== 'none'.
-    const opts = {
-      ...buildOpts(targetDir, { runtime: 'opencode', extendedHookEvents: [] }),
-      hooksSurface: 'settings-json',
-    };
-    applySettingsJsonHooks(settings, opts);
-  });
-
-  test('SessionStart IS written with at least one command when hooksSurface is "settings-json" (even for opencode name)', () => {
-    // ensureHooksDist() in before() guarantees hooks/dist is built, so the
-    // existsSync guards inside applySettingsJsonHooks pass and commands are registered.
-    assert.ok(
-      settings.hooks && typeof settings.hooks === 'object',
-      `settings.hooks must be initialized when hooksSurface="settings-json"`,
-    );
-    assert.ok(
-      hasHooksFor(settings, 'SessionStart'),
-      `settings.hooks.SessionStart must contain at least one registered command when hooksSurface="settings-json"; ` +
-      `keys: ${JSON.stringify(Object.keys(settings.hooks))}`,
-    );
-  });
-
-  test('cleanup', () => {
-    cleanupDir(targetDir);
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/enh-1077-install-hook-events-dialect-drive.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:enh-1077-install-hook-events-dialect-drive (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-/**
- * ADR-857 phase 5f-2: hook-events dialect is driven from the registry descriptor.
- *
- * Before this change, postToolEvent and preToolEvent were hardcoded strings
- * derived from runtime-name checks:
- *
- *   (runtime === 'gemini' || runtime === 'antigravity') ? 'AfterTool'  : 'PostToolUse'
- *   (runtime === 'gemini' || runtime === 'antigravity') ? 'BeforeTool' : 'PreToolUse'
- *
- * After phase 5f-2, both are driven by the registry descriptor's
- * `hookEvents` field: hookEvents === 'gemini' → AfterTool/BeforeTool;
- * any other value (or missing) → PostToolUse/PreToolUse.
- *
- * Equivalence (i.e. identical observable behaviour for all runtimes):
- *   hookEvents === 'gemini'  iff  runtime ∈ {gemini, antigravity}
- *
- * This suite asserts the equivalence and the registry-parity invariant:
- * any runtime whose descriptor carries hookEvents='gemini' gets the
- * AfterTool/BeforeTool dialect; all others get PostToolUse/PreToolUse.
- */
-
-const { test, describe, before, beforeEach, afterEach } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const { runNode } = require('./helpers/process-seam.cjs');
-const { throwIfFailed } = require('./helpers/git-fixture.cjs');
-
-const { install } = require('../bin/install.js');
-const { createTempDir, cleanup } = require('./helpers.cjs');
-
-// ─── hooks/dist build guard ───────────────────────────────────────────────────
-//
-// hooks/dist/ is gitignored and only produced by `npm run build:hooks`.
-// In CI the scoped/windows test jobs do NOT run build:hooks before running
-// tests, so install() finds no hook files → event arrays come back empty →
-// every "expected AfterTool/PostToolUse/BeforeTool/PreToolUse hooks" assertion
-// fails. This mirrors the pattern in bug-376-claude-js-hook-gsd-rewriter.test.cjs.
-
-const REPO_ROOT = path.resolve(__dirname, '..');
-const HOOKS_DIST_DIR = path.join(REPO_ROOT, 'hooks', 'dist');
-const BUILD_HOOKS_SCRIPT = path.join(REPO_ROOT, 'scripts', 'build-hooks.js');
-
-// #3145: class-norm timeout, not a per-suite value — see helpers/timeouts.cjs.
-const { BUILD_TIMEOUT_MS: BUILD_HOOKS_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-
-/**
- * Idempotently ensure hooks/dist contains built .js files.
- * Runs build-hooks.js only when the directory is absent or empty of .js files.
- */
-function ensureHooksDist() {
-  if (!fs.existsSync(HOOKS_DIST_DIR) || fs.readdirSync(HOOKS_DIST_DIR).filter(f => f.endsWith('.js')).length === 0) {
-    throwIfFailed(runNode([BUILD_HOOKS_SCRIPT], { timeoutMs: BUILD_HOOKS_TIMEOUT_MS }), `node ${BUILD_HOOKS_SCRIPT}`);
-  }
-}
-
-before(() => {
-  ensureHooksDist();
-});
-
-// ─── Registry lookup ──────────────────────────────────────────────────────────
-
-const REGISTRY_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'capability-registry.cjs');
-const registry = (() => {
-  try { return require(REGISTRY_PATH); } catch { return undefined; }
-})();
-
-/**
- * Return the hookEvents dialect for a runtime ID from the live registry.
- * Returns undefined when the registry is absent or the runtime has no descriptor.
- */
-function registryHookEvents(runtimeId) {
-  return registry?.runtimes?.[runtimeId]?.runtime?.hookEvents;
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Collect all hook commands registered under a settings event key. */
-function hooksForEvent(settings, eventName) {
-  if (!settings || !settings.hooks || !Array.isArray(settings.hooks[eventName])) return [];
-  return settings.hooks[eventName].flatMap(entry =>
-    (entry && Array.isArray(entry.hooks) ? entry.hooks : [])
-      .map(h => h && h.command)
-      .filter(Boolean)
-  );
-}
-
-/** True if at least one hook is registered under eventName. */
-function hasHooksFor(settings, eventName) {
-  return hooksForEvent(settings, eventName).length > 0;
-}
-
-// ─── Suite 1: Gemini-dialect runtimes use AfterTool/BeforeTool ───────────────
-//
-// Registry runtimes with hookEvents='gemini': gemini, antigravity
-
-describe('enh-1077 phase 5f-2: gemini hookEvents dialect → AfterTool/BeforeTool', () => {
-  // #1928: the gemini runtime was removed (Google sunset Gemini CLI
-  // 2026-06-18). antigravity — the Gemini-backend successor — is the only
-  // remaining runtime whose descriptor carries hookEvents='gemini'.
-
-  describe('antigravity install uses AfterTool/BeforeTool (gemini dialect)', () => {
-    let tmpDir;
-    let previousCwd;
-    let settings;
-
-    beforeEach(() => {
-      tmpDir = createTempDir('gsd-1077-antigrav-');
-      previousCwd = process.cwd();
-      process.chdir(tmpDir);
-
-      const agDir = path.join(tmpDir, '.gemini', 'antigravity');
-      fs.mkdirSync(agDir, { recursive: true });
-      const result = install(false, 'antigravity');
-      settings = result && result.settings;
-    });
-
-    afterEach(() => {
-      process.chdir(previousCwd);
-      cleanup(tmpDir);
-    });
-
-    test('registry confirms antigravity hookEvents is "gemini"', () => {
-      const he = registryHookEvents('antigravity');
-      if (he !== undefined) {
-        assert.strictEqual(he, 'gemini',
-          'Registry descriptor for antigravity must declare hookEvents="gemini"');
-      }
-    });
-
-    test('antigravity install returns a settings object', () => {
-      assert.ok(settings !== null && typeof settings === 'object',
-        'antigravity install must return a non-null settings object');
-    });
-
-    test('antigravity install registers at least one hook under AfterTool', () => {
-      assert.ok(hasHooksFor(settings, 'AfterTool'),
-        `Expected AfterTool hooks on antigravity; got hooks keys: ${JSON.stringify(Object.keys((settings && settings.hooks) || {}))}`);
-    });
-
-    test('antigravity install does NOT register context-monitor under PostToolUse', () => {
-      const cmds = hooksForEvent(settings, 'PostToolUse');
-      const hasMonitor = cmds.some(c => c && c.includes('gsd-context-monitor'));
-      assert.strictEqual(hasMonitor, false,
-        `antigravity must NOT use PostToolUse for context-monitor; got: ${JSON.stringify(cmds)}`);
-    });
-
-    test('antigravity install registers at least one pre-tool hook (prompt-guard) under BeforeTool', () => {
-      const cmds = hooksForEvent(settings, 'BeforeTool');
-      const hasPromptGuard = cmds.some(c => c && c.includes('gsd-prompt-guard'));
-      assert.ok(hasPromptGuard,
-        `Expected prompt-guard hook under BeforeTool on antigravity; BeforeTool commands: ${JSON.stringify(cmds)}; hooks keys: ${JSON.stringify(Object.keys((settings && settings.hooks) || {}))}`);
-    });
-
-    test('antigravity install does NOT register prompt-guard under PreToolUse (wrong pre-tool dialect)', () => {
-      const cmds = hooksForEvent(settings, 'PreToolUse');
-      const hasPromptGuard = cmds.some(c => c && c.includes('gsd-prompt-guard'));
-      assert.strictEqual(hasPromptGuard, false,
-        `antigravity must NOT use PreToolUse for prompt-guard; got PreToolUse commands: ${JSON.stringify(cmds)}`);
-    });
-  });
-});
-
-// ─── Suite 2: Claude-dialect runtimes use PostToolUse/PreToolUse ──────────────
-//
-// Registry runtimes with hookEvents='claude': claude, augment
-
-describe('enh-1077 phase 5f-2: claude hookEvents dialect → PostToolUse/PreToolUse', () => {
-  // ── claude ──
-
-  describe('claude install uses PostToolUse for post-tool hooks', () => {
-    let tmpDir;
-    let previousCwd;
-    let settings;
-
-    beforeEach(() => {
-      tmpDir = createTempDir('gsd-1077-claude-');
-      previousCwd = process.cwd();
-      process.chdir(tmpDir);
-
-      const claudeDir = path.join(tmpDir, '.claude');
-      fs.mkdirSync(claudeDir, { recursive: true });
-      const result = install(false, 'claude');
-      settings = result && result.settings;
-    });
-
-    afterEach(() => {
-      process.chdir(previousCwd);
-      cleanup(tmpDir);
-    });
-
-    test('registry confirms claude hookEvents is "claude"', () => {
-      const he = registryHookEvents('claude');
-      if (he !== undefined) {
-        assert.strictEqual(he, 'claude',
-          'Registry descriptor for claude must declare hookEvents="claude"');
-      }
-    });
-
-    test('claude install returns a settings object', () => {
-      assert.ok(settings !== null && typeof settings === 'object',
-        'claude install must return a non-null settings object');
-    });
-
-    test('claude install registers at least one hook under PostToolUse', () => {
-      assert.ok(hasHooksFor(settings, 'PostToolUse'),
-        `Expected PostToolUse hooks on claude; got hooks keys: ${JSON.stringify(Object.keys((settings && settings.hooks) || {}))}`);
-    });
-
-    test('claude install does NOT register context-monitor under AfterTool (wrong dialect)', () => {
-      const cmds = hooksForEvent(settings, 'AfterTool');
-      const hasMonitor = cmds.some(c => c && c.includes('gsd-context-monitor'));
-      assert.strictEqual(hasMonitor, false,
-        `claude must NOT use AfterTool for context-monitor; got AfterTool commands: ${JSON.stringify(cmds)}`);
-    });
-
-    test('claude install registers at least one pre-tool hook (prompt-guard) under PreToolUse', () => {
-      const cmds = hooksForEvent(settings, 'PreToolUse');
-      const hasPromptGuard = cmds.some(c => c && c.includes('gsd-prompt-guard'));
-      assert.ok(hasPromptGuard,
-        `Expected prompt-guard hook under PreToolUse on claude; PreToolUse commands: ${JSON.stringify(cmds)}; hooks keys: ${JSON.stringify(Object.keys((settings && settings.hooks) || {}))}`);
-    });
-
-    test('claude install does NOT register prompt-guard under BeforeTool (wrong pre-tool dialect)', () => {
-      const cmds = hooksForEvent(settings, 'BeforeTool');
-      const hasPromptGuard = cmds.some(c => c && c.includes('gsd-prompt-guard'));
-      assert.strictEqual(hasPromptGuard, false,
-        `claude must NOT use BeforeTool for prompt-guard; got BeforeTool commands: ${JSON.stringify(cmds)}`);
-    });
-  });
-
-  // ── augment ──
-
-  describe('augment install uses PostToolUse/PreToolUse (claude dialect)', () => {
-    let tmpDir;
-    let previousCwd;
-    let settings;
-
-    beforeEach(() => {
-      tmpDir = createTempDir('gsd-1077-augment-');
-      previousCwd = process.cwd();
-      process.chdir(tmpDir);
-
-      const augDir = path.join(tmpDir, '.augment');
-      fs.mkdirSync(augDir, { recursive: true });
-      const result = install(false, 'augment');
-      settings = result && result.settings;
-    });
-
-    afterEach(() => {
-      process.chdir(previousCwd);
-      cleanup(tmpDir);
-    });
-
-    test('registry confirms augment hookEvents is "claude"', () => {
-      const he = registryHookEvents('augment');
-      if (he !== undefined) {
-        assert.strictEqual(he, 'claude',
-          'Registry descriptor for augment must declare hookEvents="claude"');
-      }
-    });
-
-    test('augment install returns a settings object', () => {
-      assert.ok(settings !== null && typeof settings === 'object',
-        'augment install must return a non-null settings object');
-    });
-
-    test('augment install registers at least one hook under PostToolUse', () => {
-      assert.ok(hasHooksFor(settings, 'PostToolUse'),
-        `Expected PostToolUse hooks on augment; got hooks keys: ${JSON.stringify(Object.keys((settings && settings.hooks) || {}))}`);
-    });
-
-    test('augment install does NOT register context-monitor under AfterTool', () => {
-      const cmds = hooksForEvent(settings, 'AfterTool');
-      const hasMonitor = cmds.some(c => c && c.includes('gsd-context-monitor'));
-      assert.strictEqual(hasMonitor, false,
-        `augment must NOT use AfterTool for context-monitor; got: ${JSON.stringify(cmds)}`);
-    });
-
-    test('augment install registers at least one pre-tool hook (prompt-guard) under PreToolUse', () => {
-      const cmds = hooksForEvent(settings, 'PreToolUse');
-      const hasPromptGuard = cmds.some(c => c && c.includes('gsd-prompt-guard'));
-      assert.ok(hasPromptGuard,
-        `Expected prompt-guard hook under PreToolUse on augment; PreToolUse commands: ${JSON.stringify(cmds)}; hooks keys: ${JSON.stringify(Object.keys((settings && settings.hooks) || {}))}`);
-    });
-
-    test('augment install does NOT register prompt-guard under BeforeTool (wrong pre-tool dialect)', () => {
-      const cmds = hooksForEvent(settings, 'BeforeTool');
-      const hasPromptGuard = cmds.some(c => c && c.includes('gsd-prompt-guard'));
-      assert.strictEqual(hasPromptGuard, false,
-        `augment must NOT use BeforeTool for prompt-guard; got BeforeTool commands: ${JSON.stringify(cmds)}`);
-    });
-  });
-});
-
-// ─── Suite 3: Registry-parity invariant ──────────────────────────────────────
-//
-// For every runtime in the registry that exposes a settings.json surface
-// (i.e. hookEvents is defined), assert that the installed hook dialect matches
-// the registry value. This is the generative-fix parity assertion
-// (DEFECT.GENERATIVE-FIX): adding a new runtime with hookEvents to the
-// registry automatically requires a passing install test for that runtime.
-
-describe('enh-1077 phase 5f-2: registry-parity — hookEvents descriptor drives install dialect', () => {
-  test('all registry runtimes with hookEvents use the matching install dialect', () => {
-    if (!registry || !registry.runtimes) {
-      // Registry absent — skip parity check (equivalence still verified above)
-      return;
-    }
-
-    // Runtimes that have settings.json surfaces and a hookEvents descriptor
-    const SETTINGS_JSON_RUNTIMES = ['claude', 'antigravity', 'augment', 'qwen', 'hermes', 'codebuddy'];
-
-    const failures = [];
-
-    for (const runtimeId of SETTINGS_JSON_RUNTIMES) {
-      const he = registryHookEvents(runtimeId);
-      if (he === undefined) continue; // no hookEvents in descriptor — skip
-
-      const expectedPostEvent = he === 'gemini' ? 'AfterTool' : 'PostToolUse';
-      const unexpectedPostEvent = he === 'gemini' ? 'PostToolUse' : 'AfterTool';
-      const expectedPreEvent = he === 'gemini' ? 'BeforeTool' : 'PreToolUse';
-      const unexpectedPreEvent = he === 'gemini' ? 'PreToolUse' : 'BeforeTool';
-
-      const previousCwd = process.cwd();
-      const tmpDir = createTempDir(`gsd-1077-parity-${runtimeId}-`);
-      try {
-        process.chdir(tmpDir);
-        const result = install(false, runtimeId);
-        const settings = result && result.settings;
-        if (!settings) continue; // non-settings-json surface, skip
-
-        // Post-tool event assertions
-        const hasExpected = hasHooksFor(settings, expectedPostEvent);
-        const hasUnexpected = hooksForEvent(settings, unexpectedPostEvent)
-          .some(c => c && c.includes('gsd-context-monitor'));
-
-        if (!hasExpected) {
-          failures.push(`${runtimeId}: expected context-monitor hook under ${expectedPostEvent} (hookEvents=${he}), but none found`);
-        }
-        if (hasUnexpected) {
-          failures.push(`${runtimeId}: must NOT register context-monitor under ${unexpectedPostEvent}, but it was found`);
-        }
-
-        // Pre-tool event assertions: prompt-guard must land under the dialect-correct key.
-        const preToolCmdsExpected = hooksForEvent(settings, expectedPreEvent);
-        const hasPromptGuardExpected = preToolCmdsExpected.some(c => c && c.includes('gsd-prompt-guard'));
-        const preToolCmdsUnexpected = hooksForEvent(settings, unexpectedPreEvent);
-        const hasPromptGuardUnexpected = preToolCmdsUnexpected.some(c => c && c.includes('gsd-prompt-guard'));
-
-        if (!hasPromptGuardExpected) {
-          failures.push(`${runtimeId}: expected prompt-guard hook under ${expectedPreEvent} (hookEvents=${he}), but none found; ${expectedPreEvent} cmds: ${JSON.stringify(preToolCmdsExpected)}`);
-        }
-        if (hasPromptGuardUnexpected) {
-          failures.push(`${runtimeId}: must NOT register prompt-guard under ${unexpectedPreEvent} (hookEvents=${he}), but it was found`);
-        }
-      } finally {
-        process.chdir(previousCwd);
-        cleanup(tmpDir);
-      }
-    }
-
-    assert.deepEqual(failures, [],
-      'Registry-parity failures (hookEvents descriptor must drive install dialect):\n' +
-      failures.join('\n'));
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/enh-788-qwen-hook-events.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:enh-788-qwen-hook-events (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-/**
- * Enhancement #788: Expand Qwen Code hook-event coverage.
- *
- * Qwen Code supports 15 hook events; gsd previously registered only
- * SessionStart and PostToolUse.  This suite asserts that a Qwen install
- * registers the 3 new high-value events:
- *   - SubagentStop  — subagent lifecycle finalisation (context tracking)
- *   - Stop          — model stop / final-response hook (context tracking)
- *   - PreCompact    — pre-compaction awareness (context tracking)
- *
- * All three are wired to gsd-context-monitor.js — the same hook used for
- * PostToolUse — so context headroom warnings surface at these moments too.
- *
- * Note: UserPromptSubmit is NOT wired — gsd-prompt-guard exits unless
- * tool_name is Write|Edit (PreToolUse shape), so it would be a no-op for
- * the UserPromptSubmit payload.  Deferred to a follow-on issue.
- *
- * Also asserts the inverse: Claude Code installs do NOT gain these events
- * (strict isQwen scope guard).
- *
- * Source: https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/
- */
-
-const { test, describe, beforeEach, afterEach } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-
-const { install, uninstall, validateHookFields } = require('../bin/install.js');
-const { createTempDir, cleanup } = require('./helpers.cjs');
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Extract all hook commands registered under `eventName` from settings. */
-function hooksForEvent(settings, eventName) {
-  if (!settings || !settings.hooks || !Array.isArray(settings.hooks[eventName])) return [];
-  return settings.hooks[eventName].flatMap(entry =>
-    (entry && Array.isArray(entry.hooks) ? entry.hooks : [])
-      .map(h => h && h.command)
-      .filter(Boolean)
-  );
-}
-
-// Stub JS hook files that the installer checks with fs.existsSync() so hook
-// registration guards pass even when hooks/dist/ isn't built.
-const HOOKS_SRC = path.join(__dirname, '..', 'hooks');
-const STUB_HOOKS = [
-  'gsd-context-monitor.js',
-  'gsd-prompt-guard.js',
-  'gsd-check-update.js',
-  'gsd-config-reload.js', // Added in #770
-];
-
-function stubHooksIntoTarget(targetDir) {
-  const hooksDest = path.join(targetDir, 'hooks');
-  fs.mkdirSync(hooksDest, { recursive: true });
-  for (const hookFile of STUB_HOOKS) {
-    const src = path.join(HOOKS_SRC, hookFile);
-    const dest = path.join(hooksDest, hookFile);
-    if (fs.existsSync(src)) {
-      fs.copyFileSync(src, dest);
-    } else {
-      // Minimal stub so existsSync passes
-      fs.writeFileSync(dest, '#!/usr/bin/env node\n// stub\n');
-    }
-    try { fs.chmodSync(dest, 0o755); } catch { /* Windows */ }
-  }
-}
-
-/**
- * Persist in-memory settings to disk, simulating what finishInstall() does
- * (finishInstall is not exported).  Required for tests that call install()
- * twice and need the second call to read the first call's hook registrations.
- */
-function persistSettings(settingsPath, settings) {
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, JSON.stringify(validateHookFields(settings), null, 2) + '\n', 'utf8');
-}
-
-// ─── Suite 1: Qwen — new events are registered ───────────────────────────────
-
-describe('enh-788: Qwen install registers 3 new hook events', () => {
-  let tmpDir;
-  let previousCwd;
-  let settings;
-
-  beforeEach(() => {
-    tmpDir = createTempDir('gsd-788-qwen-');
-    previousCwd = process.cwd();
-    process.chdir(tmpDir);
-
-    const targetDir = path.join(tmpDir, '.qwen');
-    fs.mkdirSync(targetDir, { recursive: true });
-    // Pre-populate hook files so installer registration guards (fs.existsSync)
-    // pass and hooks are actually registered in settings.json.
-    stubHooksIntoTarget(targetDir);
-
-    const result = install(false, 'qwen');
-    settings = result.settings;
-  });
-
-  afterEach(() => {
-    process.chdir(previousCwd);
-    cleanup(tmpDir);
-  });
-
-  test('install returns a settings object (not null)', () => {
-    assert.ok(settings !== null && typeof settings === 'object',
-      'Qwen install must return a non-null settings object');
-  });
-
-  test('SubagentStop event is registered with at least one hook', () => {
-    const cmds = hooksForEvent(settings, 'SubagentStop');
-    assert.ok(cmds.length > 0,
-      `Expected SubagentStop hooks; got hooks: ${JSON.stringify(settings && settings.hooks)}`);
-  });
-
-  test('Stop event is registered with at least one hook', () => {
-    const cmds = hooksForEvent(settings, 'Stop');
-    assert.ok(cmds.length > 0,
-      `Expected Stop hooks; got hooks: ${JSON.stringify(settings && settings.hooks)}`);
-  });
-
-  test('PreCompact event is registered with at least one hook', () => {
-    const cmds = hooksForEvent(settings, 'PreCompact');
-    assert.ok(cmds.length > 0,
-      `Expected PreCompact hooks; got hooks: ${JSON.stringify(settings && settings.hooks)}`);
-  });
-
-  test('UserPromptSubmit is NOT registered (handler not yet implemented for that payload shape)', () => {
-    // gsd-prompt-guard exits unless tool_name is Write|Edit — it is a no-op
-    // for UserPromptSubmit payloads.  Registration is deferred until a
-    // dedicated hook can process the user-prompt payload shape.
-    const cmds = hooksForEvent(settings, 'UserPromptSubmit');
-    assert.strictEqual(cmds.length, 0,
-      `UserPromptSubmit should NOT be registered yet; got: ${JSON.stringify(cmds)}`);
-  });
-
-  test('SubagentStop / Stop / PreCompact all use gsd-context-monitor', () => {
-    for (const event of ['SubagentStop', 'Stop', 'PreCompact']) {
-      const cmds = hooksForEvent(settings, event);
-      assert.ok(
-        cmds.some(c => c.includes('gsd-context-monitor')),
-        `Event ${event} should use gsd-context-monitor; got commands: ${JSON.stringify(cmds)}`
-      );
-    }
-  });
-
-  test('FileChanged is NOT registered for Qwen (Claude-only event)', () => {
-    // gsd-config-reload / FileChanged is a Claude Code-only registration.
-    // Qwen does not support the FileChanged hook event at all.
-    const cmds = hooksForEvent(settings, 'FileChanged');
-    assert.strictEqual(cmds.length, 0,
-      `FileChanged should NOT be registered for Qwen; got: ${JSON.stringify(cmds)}`);
-  });
-});
-
-// ─── Suite 2: Claude install DOES get the context events (since #770) ───────
-// Note: Prior to #770, these were Qwen-only events.  #770 extended them to
-// Claude Code.  This suite is updated to match the new expected behavior.
-
-describe('enh-788 (updated by #770): Claude install registers context lifecycle events', () => {
-  let tmpDir;
-  let previousCwd;
-  let settings;
-
-  beforeEach(() => {
-    tmpDir = createTempDir('gsd-788-claude-');
-    previousCwd = process.cwd();
-    process.chdir(tmpDir);
-    stubHooksIntoTarget(path.join(tmpDir, '.claude'));
-
-    const result = install(false, 'claude', { installerMigrations: [] });
-    settings = result && result.settings;
-  });
-
-  afterEach(() => {
-    process.chdir(previousCwd);
-    cleanup(tmpDir);
-  });
-
-  test('Claude install registers SubagentStop (since #770)', () => {
-    const cmds = hooksForEvent(settings, 'SubagentStop');
-    assert.ok(cmds.length > 0,
-      `Claude should have SubagentStop since #770; got: ${JSON.stringify(cmds)}`);
-  });
-
-  test('Claude install registers Stop (since #770)', () => {
-    const cmds = hooksForEvent(settings, 'Stop');
-    assert.ok(cmds.length > 0,
-      `Claude should have Stop since #770; got: ${JSON.stringify(cmds)}`);
-  });
-
-  test('Claude install registers PreCompact (since #770)', () => {
-    const cmds = hooksForEvent(settings, 'PreCompact');
-    assert.ok(cmds.length > 0,
-      `Claude should have PreCompact since #770; got: ${JSON.stringify(cmds)}`);
-  });
-});
-
-// ─── Suite 3: Idempotency — persisted reinstall does not duplicate hooks ──────
-
-describe('enh-788: Qwen install is idempotent across persisted reinstalls', () => {
-  let tmpDir;
-  let previousCwd;
-
-  beforeEach(() => {
-    tmpDir = createTempDir('gsd-788-idem-');
-    previousCwd = process.cwd();
-    process.chdir(tmpDir);
-
-    const targetDir = path.join(tmpDir, '.qwen');
-    fs.mkdirSync(targetDir, { recursive: true });
-    stubHooksIntoTarget(targetDir);
-  });
-
-  afterEach(() => {
-    process.chdir(previousCwd);
-    cleanup(tmpDir);
-  });
-
-  test('re-running after persisted first install does not duplicate hook entries', () => {
-    // First install: get settings and persist to disk (simulating finishInstall)
-    const result1 = install(false, 'qwen');
-    persistSettings(result1.settingsPath, result1.settings);
-
-    // Second install: reads the persisted settings.json — dedup guards apply
-    process.chdir(tmpDir);
-    const result2 = install(false, 'qwen');
-    const s2 = result2.settings;
-
-    for (const event of ['SubagentStop', 'Stop', 'PreCompact']) {
-      const cmds = hooksForEvent(s2, event);
-      assert.strictEqual(cmds.length, 1,
-        `Event ${event} should have exactly 1 hook command after idempotent reinstall; got ${cmds.length}: ${JSON.stringify(cmds)}`);
-    }
-  });
-});
-
-// ─── Suite 4: Uninstall removes the new event registrations ──────────────────
-
-describe('enh-788: Qwen uninstall removes new hook event entries', () => {
-  let tmpDir;
-  let previousCwd;
-
-  beforeEach(() => {
-    tmpDir = createTempDir('gsd-788-uninstall-');
-    previousCwd = process.cwd();
-    process.chdir(tmpDir);
-
-    const targetDir = path.join(tmpDir, '.qwen');
-    fs.mkdirSync(targetDir, { recursive: true });
-    stubHooksIntoTarget(targetDir);
-
-    // Install and persist to disk so uninstall has a settings.json to clean
-    const result = install(false, 'qwen');
-    persistSettings(result.settingsPath, result.settings);
-  });
-
-  afterEach(() => {
-    process.chdir(previousCwd);
-    cleanup(tmpDir);
-  });
-
-  test('settings.json hook entries are removed on uninstall', () => {
-    uninstall(false, 'qwen');
-    const settingsPath = path.join(tmpDir, '.qwen', 'settings.json');
-    if (!fs.existsSync(settingsPath)) return; // file removed entirely is fine
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    for (const event of ['SubagentStop', 'Stop', 'PreCompact']) {
-      const cmds = hooksForEvent(settings, event);
-      assert.strictEqual(cmds.length, 0,
-        `After uninstall, ${event} should have 0 hooks; got: ${JSON.stringify(cmds)}`);
-    }
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
 // Folded from tests/bug-1834-sh-hooks-installed.test.cjs — consolidation epic #1969 (B6 #1975)
 // ────────────────────────────────────────────────────────────────────────
 {
@@ -4156,7 +2866,7 @@ function runInstaller(configDir) {
   // in install-smoke.yml).
   throwIfFailed(
     runNode([INSTALL_SCRIPT, '--claude', '--global', '--yes', '--no-sdk'], {
-      timeoutMs: 120000,
+      timeoutMs: INSTALL_TIMEOUT_MS,
       env: {
         ...process.env,
         CLAUDE_CONFIG_DIR: configDir,
@@ -4182,35 +2892,27 @@ describe('#1834: installer deploys .sh hooks alongside .js hooks', () => {
     cleanup(tmpDir);
   });
 
-  test('gsd-session-state.sh is present after install', () => {
+  test('gsd-session-state.sh, gsd-validate-commit.sh, gsd-phase-boundary.sh, and all SH_HOOKS are present after install', () => {
     const hooksDir = runInstaller(tmpDir);
-    const target = path.join(hooksDir, 'gsd-session-state.sh');
+
+    const sessionStateTarget = path.join(hooksDir, 'gsd-session-state.sh');
     assert.ok(
-      fs.existsSync(target),
+      fs.existsSync(sessionStateTarget),
       'gsd-session-state.sh must be installed to hooks/ — missing file causes SessionStart hook errors'
     );
-  });
 
-  test('gsd-validate-commit.sh is present after install', () => {
-    const hooksDir = runInstaller(tmpDir);
-    const target = path.join(hooksDir, 'gsd-validate-commit.sh');
+    const validateCommitTarget = path.join(hooksDir, 'gsd-validate-commit.sh');
     assert.ok(
-      fs.existsSync(target),
+      fs.existsSync(validateCommitTarget),
       'gsd-validate-commit.sh must be installed to hooks/ — missing file causes PreToolUse hook errors'
     );
-  });
 
-  test('gsd-phase-boundary.sh is present after install', () => {
-    const hooksDir = runInstaller(tmpDir);
-    const target = path.join(hooksDir, 'gsd-phase-boundary.sh');
+    const phaseBoundaryTarget = path.join(hooksDir, 'gsd-phase-boundary.sh');
     assert.ok(
-      fs.existsSync(target),
+      fs.existsSync(phaseBoundaryTarget),
       'gsd-phase-boundary.sh must be installed to hooks/ — missing file causes PostToolUse hook errors'
     );
-  });
 
-  test('all three .sh hooks are present after a single install', () => {
-    const hooksDir = runInstaller(tmpDir);
     for (const hook of SH_HOOKS) {
       assert.ok(
         fs.existsSync(path.join(hooksDir, hook)),
@@ -4235,6 +2937,271 @@ describe('#1834: installer deploys .sh hooks alongside .js hooks', () => {
   });
 }
 
+// ─── #4087 / #4098: the Codex hook bundle must ship the helpers it requires ───
+//
+// CODEX_HOOKS_TO_COPY is a flat, hand-maintained filename allowlist that never
+// recursed, and Codex is excluded from installSharedHooksBundle (the path that
+// stages hooks/lib/ for full-bundle runtimes). Excluding hooks/lib/ was a
+// correct, scoped decision for #3579 — until #3911 (2ea5efc15) gave
+// gsd-context-monitor.js a real `require('./lib/hook-exit.js')`. From then on a
+// fresh --codex install staged the hook without its helper, and the hook died
+// with MODULE_NOT_FOUND at module load — before its own try/catch — on every
+// event Codex registers it for. The install still exited 0, so nothing surfaced
+// it but the user's own broken session.
+//
+// These rows drive the REAL installer into a sandboxed config dir and then
+// EXECUTE the installed hook. Asserting the files exist is not enough: the
+// failure is at load, and a require chain one level deeper than the assertion
+// looks identical to success on a file listing.
+describe('#4087 regression: Codex install stages the hook helpers its hooks require', () => {
+  // These rows spawn a REAL install. The host suite sets GSD_TEST_MODE=1 at
+  // collection time, which the child inherits and which gates bin/install.js's
+  // whole main() block — the install then writes nothing at all and every
+  // assertion below fails on an absent hooks/ dir rather than on the defect.
+  // Same clear-and-restore the folded #1834 block uses for the same reason.
+  const { before: __gtmBefore, after: __gtmAfter } = require('node:test');
+  let __savedGsdTestMode;
+  __gtmBefore(() => { __savedGsdTestMode = process.env.GSD_TEST_MODE; delete process.env.GSD_TEST_MODE; });
+  __gtmAfter(() => { if (__savedGsdTestMode === undefined) delete process.env.GSD_TEST_MODE; else process.env.GSD_TEST_MODE = __savedGsdTestMode; });
+
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempDir('gsd-install-4087-');
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  function installCodex(configDir) {
+    // HOME/USERPROFILE must be sandboxed for the CHILD, not just --config-dir.
+    // Codex's "skills" kind declares a global `home` override, so it resolves
+    // from os.homedir() rather than the configDir — and install/uninstall PRUNE
+    // GSD entries there. Without this the #3712 real-home guard refuses the call
+    // outright (correctly: it would otherwise write into and prune the
+    // developer's real ~/.agents/skills). sandboxHome() from helpers covers
+    // IN-PROCESS calls; this install is spawned, so the sandbox goes in the
+    // child's env.
+    throwIfFailed(
+      runNode([INSTALL_SCRIPT, '--codex', '--global', '--yes', '--no-sdk', '--config-dir', configDir], {
+        timeoutMs: INSTALL_TIMEOUT_MS,
+        env: { ...process.env, HOME: configDir, USERPROFILE: configDir },
+      }),
+      `node ${INSTALL_SCRIPT} --codex --global --config-dir ${configDir}`,
+    );
+    return path.join(configDir, 'hooks');
+  }
+
+  test('#2586: no longer staged, dependency closure empty, staged set equals closure', () => {
+    // Was: "the installed context-monitor hook LOADS AND RUNS, not merely
+    // exists" — that row's premise (Codex ships this hook) is exactly what
+    // #2586 removes: its only documented metrics source is Claude's own
+    // statusline hook, which Codex never installs, so every registered Codex
+    // event was a guaranteed silent no-op. The #4087 bug class this describe
+    // block guards (a staged hook requiring an unshipped hooks/lib/ helper)
+    // remains covered live via Windsurf's own guards — see the
+    // "#4087 review: Windsurf install..." describe block below, unaffected
+    // by this change.
+    const hooksDir = installCodex(tmpDir);
+    const libDir = path.join(hooksDir, 'lib');
+
+    assert.strictEqual(fs.existsSync(path.join(hooksDir, 'gsd-context-monitor.js')), false,
+      'gsd-context-monitor.js must not be staged for Codex post-#2586');
+    assert.strictEqual(fs.existsSync(libDir), false,
+      'hooks/lib/ must not exist at all — nothing else Codex stages requires a lib/ helper');
+
+    // AC4: this proves the requirement graph derived from the SHIPPED files
+    // rather than restating today's helpers, so a Codex-bundled hook that
+    // grows a new lib dependency fails here instead of in a user's session.
+    //
+    // Seed from hook scripts: only the explicit './lib/X' spelling is a lib
+    // requirement. A bare './X' from a hook script is a sibling in hooks/
+    // (gsd-check-update-worker.js requires './managed-hooks-registry.cjs'),
+    // which is NOT under lib/ — conflating the two demands the wrong file.
+    const seedRe = /require\(\s*['"]\.\/lib\/([A-Za-z0-9._-]+)['"]\s*\)/g;
+    // From inside lib/, a sibling is already local, so './X' IS a lib require.
+    const libRe = /require\(\s*['"]\.\/(?:lib\/)?([A-Za-z0-9._-]+)['"]\s*\)/g;
+
+    const required = new Set();
+    const scan = (source, re) => {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(source)) !== null) required.add(m[1]);
+    };
+
+    for (const entry of fs.readdirSync(hooksDir)) {
+      const full = path.join(hooksDir, entry);
+      if (!fs.statSync(full).isFile()) continue;
+      if (!/\.(js|cjs)$/.test(entry)) continue;
+      scan(fs.readFileSync(full, 'utf8'), seedRe);
+    }
+    // #2586: gsd-context-monitor.js was the only staged Codex hook requiring
+    // a ./lib/ helper; it is no longer staged for Codex at all, so the
+    // dependency closure is correctly empty. This row still proves the
+    // GRAMMAR holds (whatever IS required must be staged) — it is just that
+    // "whatever is required" is now the empty set for Codex specifically.
+    // The non-trivial case (closure size > 0) is covered live by the
+    // "#4087 review: Windsurf install..." describe block below.
+    assert.strictEqual(required.size, 0,
+      'no staged Codex hook should require a ./lib/ helper post-#2586 — if this becomes non-zero, '
+      + 'extend this row (do not just raise the bar back to ">0") so the new dependency stays proven');
+    assert.strictEqual(fs.existsSync(libDir), false, 'hooks/lib/ must not exist when nothing requires it');
+
+    // Walk to a fixed point, exactly as the installer must.
+    const checked = new Set();
+    let next = [...required].find((f) => !checked.has(f));
+    while (next !== undefined) {
+      checked.add(next);
+      const staged = path.join(libDir, next);
+      assert.ok(
+        fs.existsSync(staged),
+        `hooks/lib/${next} is required (directly or transitively) by a staged Codex hook but was `
+        + 'not installed. A Codex-bundled hook gained a helper the installer does not stage — the '
+        + 'hook will throw MODULE_NOT_FOUND at load on every event (#4087, #4098).',
+      );
+      scan(fs.readFileSync(staged, 'utf8'), libRe);
+      next = [...required].find((f) => !checked.has(f));
+    }
+
+    // Was: "fewer staged than available, and graphify absent". That passes while
+    // over-staging (an extra git-cmd.js keeps the count below the total and
+    // leaves graphify absent), so it did not prove its own title — the #3579
+    // boundary is that helpers nothing requires must NOT ship (review of #4087).
+    // Now compared as SETS, with the difference asserted in both directions.
+    const stagedLibs = fs.existsSync(libDir) ? fs.readdirSync(libDir).sort() : [];
+    // #2586: Codex's closure is now legitimately empty (gsd-context-monitor.js,
+    // the only staged Codex hook that ever required a helper, is no longer
+    // staged) — the deepStrictEqual below is still the real assertion and
+    // holds for the empty case too; the non-empty case remains covered live
+    // by the "#4087 review: Windsurf install..." describe block below.
+    assert.strictEqual(stagedLibs.length, 0, 'no helpers should be staged for Codex post-#2586');
+
+    // Derive the closure independently of the installer.
+    const seedRe3 = /require\(\s*['"]\.\/lib\/([A-Za-z0-9._-]+)['"]\s*\)/g;
+    const libRe3 = /require\(\s*['"]\.\/(?:lib\/)?([A-Za-z0-9._-]+)['"]\s*\)/g;
+    const srcLibDir = path.join(__dirname, '..', 'hooks', 'lib');
+    const required3 = new Set();
+    const scan3 = (source, re) => {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(source)) !== null) {
+        if (/[A-Za-z0-9]/.test(m[1])) required3.add(m[1]);
+      }
+    };
+    const resolveName = (name) => [name, `${name}.js`, `${name}.cjs`]
+      .find((c) => fs.existsSync(path.join(srcLibDir, c)));
+
+    for (const entry of fs.readdirSync(hooksDir)) {
+      const full = path.join(hooksDir, entry);
+      if (!fs.statSync(full).isFile() || !/\.(js|cjs)$/.test(entry)) continue;
+      scan3(fs.readFileSync(full, 'utf8'), seedRe3);
+    }
+    const closure3 = new Set();
+    let next3 = [...required3].find((f) => !closure3.has(resolveName(f) || f));
+    while (next3 !== undefined) {
+      const resolved = resolveName(next3);
+      assert.ok(resolved, `hooks/lib/${next3} is required but absent from source — packaging bug`);
+      closure3.add(resolved);
+      scan3(fs.readFileSync(path.join(srcLibDir, resolved), 'utf8'), libRe3);
+      next3 = [...required3].find((f) => !closure3.has(resolveName(f) || f));
+    }
+
+    const expected3 = [...closure3].sort();
+    assert.deepStrictEqual(
+      stagedLibs, expected3,
+      'the staged helper set must equal the dependency closure exactly. Extra files violate the '
+      + '#3579 boundary (helpers no Codex hook requires must not ship); missing files mean a hook '
+      + `throws MODULE_NOT_FOUND at load. staged=${JSON.stringify(stagedLibs)} `
+      + `expected=${JSON.stringify(expected3)}`,
+    );
+    // Non-vacuity: the source dir must hold MORE than the closure, or an
+    // over-staging bug would be undetectable by this comparison.
+    const available3 = fs.readdirSync(srcLibDir);
+    assert.ok(
+      available3.length > expected3.length,
+      `precondition: source must offer more helpers than the closure needs (available=${available3.length}, closure=${expected3.length})`,
+    );
+  });
+
+  // The #3579 boundary this fix must preserve: derive what is needed, do not
+  // dump the whole helper directory into the reduced bundle.
+  // ─── the grammar itself, unit-level (review of #4087) ───
+  //
+  // The install rows above prove today's three-helper chain. These pin the
+  // DISCOVERY GRAMMAR directly, which is what has to hold for the
+  // "future dependencies cannot silently regress" claim to mean anything.
+  describe('stageTransitiveHookLibs discovery grammar', () => {
+    const { stageTransitiveHookLibs } = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
+    let dir;
+
+    beforeEach(() => { dir = createTempDir('gsd-stage-libs-'); });
+    afterEach(() => { cleanup(dir); });
+
+    function fixture(libFiles) {
+      const srcLibDir = path.join(dir, 'src', 'lib');
+      const destLibDir = path.join(dir, 'dest', 'lib');
+      fs.mkdirSync(srcLibDir, { recursive: true });
+      for (const [name, content] of Object.entries(libFiles)) {
+        fs.writeFileSync(path.join(srcLibDir, name), content);
+      }
+      return { srcLibDir, destLibDir };
+    }
+
+    test('an EXTENSIONLESS require resolves — valid CommonJS, was failing the install', () => {
+      const { srcLibDir, destLibDir } = fixture({ 'helper.js': '// no requires\n' });
+      const staged = stageTransitiveHookLibs({
+        seedSources: ["require('./lib/helper')"],
+        srcLibDir, destLibDir, runtimeLabel: 'Test',
+      });
+      assert.deepStrictEqual(staged, ['helper.js'],
+        "require('./lib/helper') must resolve to helper.js — matching only the extension-bearing "
+        + 'spelling resolved "helper" literally and failed the install on a legitimate require');
+      assert.ok(fs.existsSync(path.join(destLibDir, 'helper.js')),
+        'and it must land under its RESOLVED name, or Node cannot resolve it at the destination');
+    });
+
+    test('a NESTED lib require is refused LOUDLY, never silently skipped', () => {
+      const { srcLibDir, destLibDir } = fixture({ 'helper.js': '' });
+      assert.throws(
+        () => stageTransitiveHookLibs({
+          seedSources: ["require('./lib/sub/helper.js')"],
+          srcLibDir, destLibDir, runtimeLabel: 'Test',
+        }),
+        /NESTED hooks\/lib path/,
+        'hooks/lib/ is flat and the scan cannot express a nested path, so a nested require would '
+        + 'stage nothing and ship a hook that dies at load — it must fail the install instead',
+      );
+    });
+
+    test('prose that merely LOOKS like a require does not become a dependency', () => {
+      // hooks/lib/injection-patterns.js's own header documents this mechanism
+      // with the literal string require('./lib/...'), which captured `...` and
+      // sent the resolver hunting for hooks/lib/... — failing the install on a
+      // comment. Measured before the fix.
+      const { srcLibDir, destLibDir } = fixture({ 'helper.js': '' });
+      const staged = stageTransitiveHookLibs({
+        seedSources: ["/* the stager auto-discovers require('./lib/...') in staged scripts */"],
+        srcLibDir, destLibDir, runtimeLabel: 'Test',
+      });
+      assert.deepStrictEqual(staged, [],
+        'a capture with no alphanumeric character is prose, not a module name');
+    });
+
+    test('a genuinely missing helper still fails loudly (the guard must not be softened)', () => {
+      const { srcLibDir, destLibDir } = fixture({ 'other.js': '' });
+      assert.throws(
+        () => stageTransitiveHookLibs({
+          seedSources: ["require('./lib/absent.js')"],
+          srcLibDir, destLibDir, runtimeLabel: 'Test',
+        }),
+        /absent\.js is required by a staged Test hook/,
+        'the extension-fallback must not turn a real missing helper into a silent skip',
+      );
+    });
+  });
+});
+
 // ─── #3023: pi must not stage its shared-hooks bundle in pi's reserved hooks/ ──
 //
 // pi (pi.dev) renamed its `hooks/` directory to `extensions/` and now prints a
@@ -4247,13 +3214,75 @@ describe('#1834: installer deploys .sh hooks alongside .js hooks', () => {
 // The expected directory name is asserted as a LITERAL on purpose: importing the
 // production constant would make the assertion re-derive the very value under
 // test, and it could then never catch that value changing.
+describe('#4087 review: Windsurf install stages the hook helpers its hooks require', () => {
+  // Same defect class as the Codex rows above, one runtime over. Windsurf sets
+  // skipSharedHooksInstall, so it never reaches installSharedHooksBundle, and
+  // writeWindsurfHooksJson staged the two Cascade guards without the hooks/lib
+  // helpers both require at module load. Measured before the fix against a real
+  // `--windsurf --global` install: installer exit 0, hooks/ holding only the two
+  // scripts, and each one exiting 1 with "Cannot find module './lib/hook-exit.js'".
+  //
+  // tests/windsurf-hooks-bridge.test.cjs runs these guards from the SOURCE tree,
+  // where hooks/lib/ is a sibling and require() trivially resolves — the same
+  // "assert existence, never execute the installed copy" blind spot that let
+  // #4087 ship. These rows execute the INSTALLED copy.
+  const { before: __gtmBefore, after: __gtmAfter } = require('node:test');
+  let __savedGsdTestMode;
+  __gtmBefore(() => { __savedGsdTestMode = process.env.GSD_TEST_MODE; delete process.env.GSD_TEST_MODE; });
+  __gtmAfter(() => { if (__savedGsdTestMode === undefined) delete process.env.GSD_TEST_MODE; else process.env.GSD_TEST_MODE = __savedGsdTestMode; });
+
+  let tmpDir;
+  beforeEach(() => { tmpDir = createTempDir('gsd-install-4087-windsurf-'); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  function installWindsurf(configDir) {
+    // HOME/USERPROFILE sandboxed for the CHILD, for the same reason as installCodex.
+    throwIfFailed(
+      runNode([INSTALL_SCRIPT, '--windsurf', '--global', '--yes', '--config-dir', configDir], {
+        timeoutMs: INSTALL_TIMEOUT_MS,
+        env: { ...process.env, HOME: configDir, USERPROFILE: configDir },
+      }),
+      `node ${INSTALL_SCRIPT} --windsurf --global --config-dir ${configDir}`,
+    );
+    return path.join(configDir, 'hooks');
+  }
+
+  test('both installed Windsurf guards LOAD AND RUN, and their transitive helpers are staged', () => {
+    const hooksDir = installWindsurf(tmpDir);
+
+    for (const script of ['gsd-windsurf-pre-write.js', 'gsd-windsurf-pre-command.js']) {
+      const hook = path.join(hooksDir, script);
+      assert.ok(fs.existsSync(hook), `precondition: ${script} must be staged`);
+      const result = runNode([hook], { timeoutMs: INSTALLED_HOOK_EXEC_TIMEOUT_MS, input: '{}', env: { ...process.env } });
+      assert.strictEqual(result.outcome, 'exited',
+        `${script} must run to completion, not time out or be killed. outcome=${result.outcome}`);
+      assert.strictEqual(result.exitCode, 0,
+        `the installed ${script} must load and exit 0 — a MODULE_NOT_FOUND at load fires on every `
+        + `pre_write_code / pre_run_command event and is invisible to the installer's exit code. stderr: ${result.stderr}`);
+      assert.doesNotMatch(String(result.stderr || ''), /MODULE_NOT_FOUND|Cannot find module/,
+        `no missing-module error may reach stderr for ${script}`);
+    }
+
+    const libDir = path.join(hooksDir, 'lib');
+    assert.ok(fs.existsSync(libDir), 'hooks/lib/ must be staged for Windsurf');
+    // Direct requires of the two guards, plus what hook-exit.js itself requires
+    // (cli-exit.js → exit-code-registry.js). The exact set is also pinned by
+    // tests/fixtures/install-tree/windsurf.json via the golden-install-tree test;
+    // this row states the reason each file must be present.
+    for (const helper of ['hook-exit.js', 'git-probe.js', 'cli-exit.js', 'exit-code-registry.js']) {
+      assert.ok(fs.existsSync(path.join(libDir, helper)),
+        `${helper} is on the require path of a staged Windsurf guard and must be staged`);
+    }
+  });
+});
+
 describe('#3023 pi shared-hooks bundle avoids the host-reserved hooks/ directory', () => {
   const PI_RESERVED_DIR = 'hooks';
   const PI_BUNDLE_DIR = 'gsd-hooks';
 
   for (const scope of ['local', 'global']) {
-    test(`pi ${scope} install does not create the host-reserved hooks/ directory`, (t) => {
-      const { configDir, root } = runMinimalInstall({ runtime: 'pi', scope });
+    test(`pi ${scope} install: no host-reserved hooks/ dir, bundle staged under ${PI_BUNDLE_DIR}/, manifested`, (t) => {
+      const { manifest, configDir, root } = runMinimalInstall({ runtime: 'pi', scope });
       t.after(() => cleanup(root));
 
       const reserved = path.join(configDir, PI_RESERVED_DIR);
@@ -4263,11 +3292,6 @@ describe('#3023 pi shared-hooks bundle avoids the host-reserved hooks/ directory
         `pi reserves <configDir>/${PI_RESERVED_DIR} as its deprecated extension location; ` +
         `GSD must not create it (found ${reserved})`
       );
-    });
-
-    test(`pi ${scope} install stages the shared hooks bundle under ${PI_BUNDLE_DIR}/`, (t) => {
-      const { configDir, root } = runMinimalInstall({ runtime: 'pi', scope });
-      t.after(() => cleanup(root));
 
       const bundle = path.join(configDir, PI_BUNDLE_DIR);
       assert.equal(
@@ -4291,11 +3315,6 @@ describe('#3023 pi shared-hooks bundle avoids the host-reserved hooks/ directory
         true,
         'the CommonJS marker must live inside the bundle directory'
       );
-    });
-
-    test(`pi ${scope} install manifests the bundle under ${PI_BUNDLE_DIR}/`, (t) => {
-      const { manifest, root } = runMinimalInstall({ runtime: 'pi', scope });
-      t.after(() => cleanup(root));
 
       assert.ok(manifest && manifest.files, 'pi install must write a file manifest');
       const keys = Object.keys(manifest.files);
@@ -4314,4 +3333,140 @@ describe('#3023 pi shared-hooks bundle avoids the host-reserved hooks/ directory
       );
     });
   }
+});
+
+// ─── #3981: blocking PreToolUse guards must not fail open on a host stall ────
+
+describe('bug #3981: blocking-guard timeout budget + migration', () => {
+  let targetDir;
+  beforeEach(() => { targetDir = createTempDir('gsd-3981-'); });
+  afterEach(() => { cleanup(targetDir); });
+
+  // Local to this describe: the #1754 helpers above are scoped to their own
+  // describe, so re-require the seam and rebuild the runner here.
+  const { applySettingsJsonHooks } = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
+  const { captureConsole } = require('./helpers.cjs');
+  function runApplySettingsJsonHooks(dir, presentHooks) {
+    fs.mkdirSync(path.join(dir, 'hooks'), { recursive: true });
+    for (const hook of presentHooks) {
+      fs.writeFileSync(path.join(dir, 'hooks', hook), '// stub\n');
+    }
+    const settings = {};
+    const localCmd = (hookFile) => `node ${path.join(dir, 'hooks', hookFile)}`;
+    const localShellCmd = (hookFile) => `bash ${path.join(dir, 'hooks', hookFile)}`;
+    captureConsole(() => {
+      applySettingsJsonHooks(settings, {
+        runtime: 'claude',
+        isGlobal: false,
+        targetDir: dir,
+        postToolEvent: 'PostToolUse',
+        hookEvents: 'claude',
+        extendedHookEvents: [],
+        hooksSurface: 'settings-json',
+        updateCheckCommand: localCmd('gsd-check-update.js'),
+        contextMonitorCommand: localCmd('gsd-context-monitor.js'),
+        promptGuardCommand: localCmd('gsd-prompt-guard.js'),
+        readGuardCommand: localCmd('gsd-read-guard.js'),
+        readInjectionScannerCommand: localCmd('gsd-read-injection-scanner.js'),
+        configReloadCommand: null,
+        hookOpts: { portableHooks: false, runtime: 'claude' },
+        localCmd,
+        localShellCmd,
+      });
+    });
+    return { settings };
+  }
+
+  const BLOCKING_GUARDS = [
+    'gsd-prompt-guard.js',
+    'gsd-workflow-guard.js',
+    'gsd-worktree-path-guard.js',
+    'gsd-agent-isolation-guard.js',
+    'gsd-write-guard.js',
+    'gsd-secret-read-guard.js',
+    'gsd-validate-commit.sh',
+  ];
+
+  test('blocking PreToolUse guards register with a host-stall-proof timeout (#3981)', () => {
+    const { settings } = runApplySettingsJsonHooks(targetDir, ['gsd-prompt-guard.js']);
+    const entry = (settings.hooks.PreToolUse || []).find((e) =>
+      (e.hooks || []).some((h) => h.command && h.command.includes('gsd-prompt-guard.js')));
+    assert.ok(entry, 'prompt guard should be registered on a fresh install');
+    const h = entry.hooks.find((x) => x.command.includes('gsd-prompt-guard.js'));
+    assert.equal(h.timeout, 120,
+      `Claude Code treats a timed-out hook as non-blocking, so a 5 s budget silently disables the gate under host stalls; expected 120, got ${h.timeout}`);
+  });
+
+  test('managed timeout:5 blocking-guard entries are migrated to 120 (#3981)', () => {
+    // Same shape as the context-monitor backfill: raising the source constant
+    // alone never reaches an existing settings.json, because registration
+    // skips entries whose command is already referenced.
+    for (const guard of BLOCKING_GUARDS) {
+      const settings = {
+        hooks: {
+          PreToolUse: [{
+            matcher: 'Write|Edit',
+            hooks: [{ type: 'command', command: `node ${path.join(targetDir, 'hooks', guard)}`, timeout: FIXTURE_HOOK_TIMEOUT_SECONDS }],
+          }],
+        },
+      };
+      const localCmd = (hookFile) => `node ${path.join(targetDir, 'hooks', hookFile)}`;
+      captureConsole(() => {
+        applySettingsJsonHooks(settings, {
+          runtime: 'claude',
+          isGlobal: false,
+          targetDir,
+          postToolEvent: 'PostToolUse',
+          hookEvents: 'claude',
+          extendedHookEvents: [],
+          hooksSurface: 'settings-json',
+          updateCheckCommand: null,
+          contextMonitorCommand: null,
+          promptGuardCommand: null,
+          readGuardCommand: null,
+          readInjectionScannerCommand: null,
+          configReloadCommand: null,
+          hookOpts: { portableHooks: false, runtime: 'claude' },
+          localCmd,
+          localShellCmd: localCmd,
+        });
+      });
+      const h = settings.hooks.PreToolUse[0].hooks[0];
+      assert.equal(h.timeout, 120,
+        `existing managed ${guard} entry at timeout:5 must be migrated to 120, got ${h.timeout}`);
+    }
+  });
+
+  test('non-managed timeout:5 entries are left alone (#3981)', () => {
+    const mine = { type: 'command', command: 'node /usr/local/bin/my-own-hook.js', timeout: FIXTURE_HOOK_TIMEOUT_SECONDS };
+    const settings = { hooks: { PreToolUse: [{ matcher: 'Write', hooks: [mine] }] } };
+    const localCmd = (hookFile) => `node ${path.join(targetDir, 'hooks', hookFile)}`;
+    captureConsole(() => {
+      applySettingsJsonHooks(settings, {
+        runtime: 'claude', isGlobal: false, targetDir,
+        postToolEvent: 'PostToolUse', hookEvents: 'claude', extendedHookEvents: [],
+        hooksSurface: 'settings-json', updateCheckCommand: null, contextMonitorCommand: null,
+        promptGuardCommand: null, readGuardCommand: null, readInjectionScannerCommand: null,
+        configReloadCommand: null, hookOpts: { portableHooks: false, runtime: 'claude' },
+        localCmd, localShellCmd: localCmd,
+      });
+    });
+    assert.equal(mine.timeout, 5, 'the migration must only touch entries referencing managed GSD guards');
+  });
+
+  test('advisory hook budgets are unchanged (#3981)', () => {
+    const { settings } = runApplySettingsJsonHooks(targetDir, ['gsd-read-guard.js', 'gsd-context-monitor.js']);
+    const events = Object.values(settings.hooks).flat();
+    const findTimeout = (basename) => {
+      for (const entry of events) {
+        if (!Array.isArray(entry.hooks)) continue;
+        for (const h of entry.hooks) {
+          if (h.command && h.command.includes(basename)) return h.timeout;
+        }
+      }
+      return undefined;
+    };
+    assert.equal(findTimeout('gsd-read-guard.js'), 5, 'advisory read guard keeps its 5 s budget');
+    assert.equal(findTimeout('gsd-context-monitor.js'), 10, 'context monitor keeps its 10 s budget');
+  });
 });

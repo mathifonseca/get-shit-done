@@ -1,7 +1,7 @@
 {
   "id": "design-spec",
   "role": "feature",
-  "version": "1.10.0",
+  "version": "1.15.0",
   "title": "Frozen design spec",
   "description": "Emits a frozen DESIGN.md after discuss when the phase produced enough architecturally-weighted locked decisions, so planning builds against a fixed contract instead of re-deriving structure.",
   "tier": "full",

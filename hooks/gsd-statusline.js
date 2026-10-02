@@ -9,9 +9,43 @@ const os = require('os');
 // Namespace (not destructured) so tests can inject spawn failures by
 // monkeypatching childProcess.execFileSync.
 const childProcess = require('child_process');
+const { HOOK_ON_CRASH, allow, crash } = require('./lib/hook-exit.js');
+
+// This hook's build-seam outer catch (require.main guard just below) has
+// always exited 0 (fail open — the statusline renders on EVERY prompt, so a
+// build failure must degrade to a blank line rather than break Claude Code's
+// per-render hook). Declared ONCE so that catch's crash() call states its
+// policy explicitly rather than inheriting a default (#3911).
+const ON_CRASH = HOOK_ON_CRASH.ALLOW;
+// #3582: gsd-core/bin/lib/*.cjs (semver-compare.cjs, state-document.cjs,
+// active-workstream-store.cjs, planning-workspace.cjs — required below) and
+// package-identity.cjs are tsc build artifacts (ADR-457), gitignored and
+// absent on a raw plugin-marketplace / git-clone install that never ran
+// `npm run build:lib`. The statusline renders on EVERY prompt, so a build
+// failure here must DEGRADE (print nothing, exit 0) rather than crash
+// Claude Code's per-render statusline hook. Scoped to the spawned-as-a-script
+// path (`require.main === module`) — a test `require()` of this module for
+// its pure helpers assumes a built tree, same as every other hook test.
+if (require.main === module) {
+  try {
+    const { ensureRuntimeBuild } = require('../gsd-core/bin/ensure-runtime-build.cjs');
+    ensureRuntimeBuild();
+  } catch (e) {
+    // #3911: crash(ON_CRASH, ...) with an undefined payload preserves the
+    // pre-migration `process.stdout.write(''); process.exit(0);` byte-for-
+    // byte — undefined makes terminateNow's stdout JSON.stringify throw
+    // internally (swallowed there), so fd 1 stays untouched, same as writing
+    // an explicit empty string did.
+    crash(ON_CRASH, undefined);
+  }
+}
 const { isSemverNewer } = require('../gsd-core/bin/lib/semver-compare.cjs');
 const { PACKAGE_NAME, updateCacheFileName } = require('../gsd-core/bin/lib/package-identity.cjs');
 const { normalizeStateStatus } = require('../gsd-core/bin/lib/state-document.cjs');
+const {
+  renderBracketPhaseDisplay,
+  renderBracketMilestoneDisplay,
+} = require('../gsd-core/bin/lib/phase-id-display.cjs');
 // #2850: reuse the existing workstream resolution seams rather than
 // re-implementing CLI>env>store precedence or path construction inline.
 // peekActiveWorkstream is the read-only sibling of the store-tier lookup
@@ -151,13 +185,27 @@ function readStateFileOrNull(statePath) {
  *   - null when no .planning marker is found at all (GSD not present), or
  *     when a workstream DOES resolve but its STATE.md doesn't exist yet
  *     (negative space: mirrors flat-mode's own silent pre-STATE.md window)
+ *
+ * @param {string} dir
+ * @param {{ stateFreshness?: boolean }} [opts] — #2734, additive/default-off.
+ *   When true and the resolved state carries a truthy `.stateHead`, attaches
+ *   `state.freshness` (deriveStateFreshness) before returning — `current` at
+ *   that point is the project root the walk resolved, which is what AC-4's
+ *   repo-pinning check needs. Never derived when false or the stamp is
+ *   absent, so existing callers (default opts) spend zero extra spawns.
  */
-function readGsdState(dir) {
+function readGsdState(dir, opts = {}) {
+  const { stateFreshness = false } = opts;
   const home = os.homedir();
   let current = dir;
   for (let i = 0; i < 10; i++) {
     const flatState = readStateFileOrNull(path.join(current, '.planning', 'STATE.md'));
-    if (flatState !== null) return flatState;
+    if (flatState !== null) {
+      if (stateFreshness && flatState.stateHead) {
+        flatState.freshness = deriveStateFreshness(current, flatState.stateHead);
+      }
+      return flatState;
+    }
 
     if (listAvailableWorkstreams(current).length > 0) {
       let resolvedWs = null;
@@ -169,7 +217,11 @@ function readGsdState(dir) {
 
       if (!resolvedWs) return { noActiveWorkstream: true };
 
-      return readStateFileOrNull(planningPaths(current, resolvedWs).state);
+      const wsState = readStateFileOrNull(planningPaths(current, resolvedWs).state);
+      if (wsState !== null && stateFreshness && wsState.stateHead) {
+        wsState.freshness = deriveStateFreshness(current, wsState.stateHead);
+      }
+      return wsState;
     }
 
     const parent = path.dirname(current);
@@ -220,6 +272,10 @@ function parseStateMd(content) {
       if (key === 'active_phase') state.activePhase = (v === 'null' || v === '') ? null : v;
       // next_action: recommended command when idle (discuss-phase / plan-phase / execute-phase / verify-phase)
       if (key === 'next_action') state.nextAction = (v === 'null' || v === '') ? null : v;
+      // #2734: state_head — the commit STATE.md was written against, consumed
+      // by deriveStateFreshness() below. Mirrors active_phase/next_action's
+      // null/empty handling exactly.
+      if (key === 'state_head') state.stateHead = (v === 'null' || v === '') ? null : v;
     }
     // next_phases supports both flow array and block-list YAML forms.
     const npFlowMatch = fm.match(/^next_phases:\s*\[([^\]]*)\]/m);
@@ -307,16 +363,26 @@ function renderProgressBar(percent) {
  * Progress bar is opt-in: appended to the milestone segment only when
  * progress.percent is present in frontmatter; absent → empty string.
  */
-function formatGsdState(s) {
+function formatGsdState(s, opts = {}) {
   // #2850: workstream mode with nothing resolvable — an observable signal,
   // never silent emptiness (distinguishes from "GSD isn't installed here").
   if (s.noActiveWorkstream) return NO_ACTIVE_WORKSTREAM_LABEL;
 
   const parts = [];
+  const bracket = opts.convention === 'bracket';
+  const bracketMilestone = bracket
+    ? renderBracketMilestoneDisplay(s.milestone, opts.projectCode)
+    : null;
+  const phaseLabel = (phase) => {
+    const display = bracket
+      ? renderBracketPhaseDisplay(s.milestone, phase, opts.projectCode)
+      : null;
+    return display ?? `Phase ${phase}`;
+  };
 
   // Milestone segment: version + name + (opt-in) progress bar
   if (s.milestone || s.milestoneName) {
-    const ver = s.milestone || '';
+    const ver = bracketMilestone ?? s.milestone ?? '';
     const name = (s.milestoneName && s.milestoneName !== 'milestone') ? s.milestoneName : '';
     const bar = renderProgressBar(s.percent);
     const pieces = [ver, name, bar].filter(Boolean);
@@ -332,13 +398,18 @@ function formatGsdState(s) {
     // stage = whichever lifecycle status was written by the orchestrator
     //   (discussing / planning / executing / verifying)
     const stage = s.status || '';
-    parts.push(stage ? `Phase ${s.activePhase} ${stage}` : `Phase ${s.activePhase}`);
+    const phase = phaseLabel(s.activePhase);
+    parts.push(stage ? `${phase} ${stage}` : phase);
   } else if (s.nextAction && phasesStr) {
     // Scene 2: idle + a recommended next command is visible to the user.
     // Surfaces "what to run next" without the user opening STATE.md.
     parts.push(`next ${s.nextAction} ${phasesStr}`);
-  } else if (Number(s.percent) === 100 || (s.completedPhases && s.totalPhases && s.completedPhases === s.totalPhases)) {
-    // Scene 3: milestone complete (every phase done).
+  } else if (Number(s.percent) === 100 || (Number(s.totalPhases) > 0 && Number(s.completedPhases) === Number(s.totalPhases))) {
+    // Scene 3: milestone complete (every phase done). #3945: the counters are
+    // regex-captured STRINGS, so the old `cp && tp && cp === tp` guard fired on
+    // the empty set ('0' is truthy, '0' === '0') — "0% · milestone complete".
+    // Numeric coercion + a non-empty denominator makes "nothing to measure"
+    // stop meaning "everything is done".
     parts.push('milestone complete');
   } else {
     // Backward-compatible default — preserved EXACTLY for STATE.md files that
@@ -346,12 +417,23 @@ function formatGsdState(s) {
     // earlier so no existing project's status-line changes shape.
     if (s.status) parts.push(s.status);
     if (s.phaseNum && s.phaseTotal) {
+      const bracketPhase = bracket
+        ? renderBracketPhaseDisplay(s.milestone, s.phaseNum, opts.projectCode)
+        : null;
       const phase = s.phaseName
-        ? `${s.phaseName} (${s.phaseNum}/${s.phaseTotal})`
-        : `ph ${s.phaseNum}/${s.phaseTotal}`;
+        ? bracketPhase
+          ? `${bracketPhase} ${s.phaseName} (${s.phaseNum}/${s.phaseTotal})`
+          : `${s.phaseName} (${s.phaseNum}/${s.phaseTotal})`
+        : bracketPhase
+          ? `${bracketPhase} (${s.phaseNum}/${s.phaseTotal})`
+          : `ph ${s.phaseNum}/${s.phaseTotal}`;
       parts.push(phase);
     }
   }
+
+  // #2734: STATE.md freshness marker — opt-in, appended last.
+  const fresh = formatStateFreshness(s.freshness);
+  if (fresh) parts.push(fresh);
 
   return parts.join(' · ');
 }
@@ -389,13 +471,17 @@ function contextTokenSuffix(currentUsage) {
 // --- Compact state format (opt-in) ---------------------------------------------
 
 /**
- * Collapse GSD's free-text status (often a multi-sentence narrative) to a
- * single keyword, built on the canonical normalizer (#2162 approval
- * condition): normalizeStateStatus() in state-document.cjs owns the status
- * vocabulary (discussing / planning / executing / verifying / completed /
- * paused) so the two can't drift. "paused" — the canonical stuck state — is
- * uppercased to PAUSED, the one state worth shouting about. Statuses the
- * normalizer passes through unrecognized fall back to their first word,
+ * Collapse GSD's status value to a single keyword, built on the canonical
+ * normalizer (#2162 approval condition): normalizeStateStatus() in
+ * state-document.cjs owns the status vocabulary (discussing / planning /
+ * executing / verifying / completed / paused) so the two can't drift.
+ * #4186: the normalizer recognizes the DECLARED vocabulary by anchored
+ * whole-field match — vocabulary values (the state writer persists tokens)
+ * collapse to their keyword; free-text narratives are no longer
+ * keyword-guessed from substrings (a `.planning/` mention in non-English
+ * prose used to render `planning`), and pass through unrecognized to the
+ * first-word fallback below. "paused" — the canonical stuck state — is
+ * uppercased to PAUSED, the one state worth shouting about. The fallback is
  * capped at 16 chars so a rogue STATE.md can't blow up the line.
  * Returns null for empty input.
  */
@@ -426,17 +512,24 @@ function shortGsdStatus(status) {
  * default format — and collapses narrative statuses via shortGsdStatus().
  * The default "full" format is untouched.
  */
-function formatGsdStateCompact(s) {
+function formatGsdStateCompact(s, opts = {}) {
   // #2850: mirrors formatGsdState's observable "nothing resolvable" signal.
   if (s.noActiveWorkstream) return NO_ACTIVE_WORKSTREAM_LABEL;
 
   const parts = [];
+  const bracket = opts.convention === 'bracket';
+  const bracketMilestone = bracket
+    ? renderBracketMilestoneDisplay(s.milestone, opts.projectCode)
+    : null;
 
-  if (s.milestone) parts.push(s.milestone);
+  if (s.milestone) parts.push(bracketMilestone ?? s.milestone);
 
   const phaseId = s.activePhase || s.phaseNum;
   if (phaseId) {
-    parts.push(s.phaseTotal ? `P${phaseId}/${s.phaseTotal}` : `P${phaseId}`);
+    const bracketPhase = bracket
+      ? renderBracketPhaseDisplay(s.milestone, phaseId, opts.projectCode)
+      : null;
+    parts.push(bracketPhase ?? (s.phaseTotal ? `P${phaseId}/${s.phaseTotal}` : `P${phaseId}`));
   }
 
   // Scene exclusivity mirrors formatGsdState's if/else chain: an in-flight
@@ -444,7 +537,7 @@ function formatGsdStateCompact(s) {
   // still completes) wins over milestone-complete (Scene 3), even if a
   // non-atomic STATE.md edit leaves percent=100 alongside a lifecycle phase.
   const done = !s.activePhase && (Number(s.percent) === 100 ||
-    (s.completedPhases && s.totalPhases && s.completedPhases === s.totalPhases));
+    (Number(s.totalPhases) > 0 && Number(s.completedPhases) === Number(s.totalPhases)));
 
   if (done) {
     parts.push('complete');
@@ -457,6 +550,10 @@ function formatGsdStateCompact(s) {
       parts.push(`next ${s.nextAction}${phasesStr ? ' ' + phasesStr : ''}`);
     }
   }
+
+  // #2734: STATE.md freshness marker \u2014 opt-in, appended last.
+  const fresh = formatStateFreshness(s.freshness);
+  if (fresh) parts.push(fresh);
 
   return parts.join(' \u00b7 ');
 }
@@ -554,13 +651,168 @@ function buildGitSegment(info) {
   return ` │ \x1b[2m${info.branch}\x1b[0m${state}`;
 }
 
+// --- STATE.md freshness marker (opt-in, #2734) --------------------------------
+//
+// Opt-in via `statusline.show_state_freshness: true`. Renders `state ~N
+// commits back` inside the GSD-state segment when STATE.md's `state_head`
+// stamp (#2573) is at least STATE_HEAD_ADVISORY_COMMITS commits behind HEAD.
+// Same impure-reader -> pure-IR -> pure-formatter shape as the git segment
+// above. See .gsd/phase/feat-2734-statusline-state-freshness/40-design.md.
+
+// Deliberate mirror of the fence in src/state.cts (STATE_HEAD_HASH_RE) — kept
+// hook-side rather than requiring state.cjs on the per-render path (measured
+// ~20ms; see design doc "Laws that apply"). tests/gsd-statusline.test.cjs
+// asserts behavioral parity against readStateHeadFreshness rather than
+// comparing source (local/no-source-grep forbids the latter anyway).
+const STATE_HEAD_HASH_RE = /^[0-9a-f]{4,40}$/i;
+
+// Mirror of the constant verify.cts's W024 health check thresholds on
+// (STATE_HEAD_ADVISORY_COMMITS). A test asserts equality with verify.cjs's
+// export so the two copies can't drift.
+const STATE_HEAD_ADVISORY_COMMITS = 20;
+
+// Same bound class as GIT_STATUS_TIMEOUT_MS above.
+const STATE_FRESHNESS_GIT_TIMEOUT_MS = 1500;
+
+/**
+ * Pure function: does raw pass the state_head hash fence? Must run BEFORE any
+ * value from STATE.md reaches a git argv slot.
+ */
+function isValidStateHeadStamp(raw) {
+  return typeof raw === 'string' && STATE_HEAD_HASH_RE.test(raw.trim());
+}
+
+/**
+ * Run `git rev-list --left-right --count <stamp>...HEAD` in root. Returns raw
+ * stdout, or null when git is missing, root isn't a repo, the stamp is
+ * unknown, or the call times out. Never throws. Only call with a stamp that
+ * already passed isValidStateHeadStamp/the hash fence above.
+ */
+function readStateHeadCommits(root, stamp) {
+  try {
+    return childProcess.execFileSync('git',
+      ['-C', root, 'rev-list', '--left-right', '--count', `${stamp}...HEAD`],
+      { encoding: 'utf8', timeout: STATE_FRESHNESS_GIT_TIMEOUT_MS,
+        stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Pure function: parse `git rev-list --left-right --count A...B` output
+ * ("<left>\t<right>"). Returns { left, right } as non-negative integers, or
+ * null when text isn't a matching string (covers null, '', 'garbage', '1',
+ * 'a\tb', '\t', and any other unparseable shape).
+ */
+function parseRevListCounts(text) {
+  if (typeof text !== 'string') return null;
+  const m = text.match(/^(\d+)\s+(\d+)\s*$/);
+  if (!m) return null;
+  return { left: parseInt(m[1], 10), right: parseInt(m[2], 10) };
+}
+
+/**
+ * Impure -> pure IR: derive the freshness signal for a recorded state_head
+ * stamp. Returns { state_head, commits_behind, commit_stale } — never throws,
+ * every unresolvable input degrades to the all-null-but-state_head shape.
+ *
+ * Order (each failure returns immediately, no further work):
+ *   a. hash fence — malformed/absent stamp never reaches a spawn
+ *   b. repo pinning — root must own its own .git (mirrors projectOwnsItsRepo
+ *      in src/state.cts: a filesystem-identity check, not a --show-toplevel
+ *      string compare, which is unreliable on macOS /private/var and Windows
+ *      8.3 paths). Costs no subprocess.
+ *   c. sub_repos guard — a planning.sub_repos workspace's outer HEAD never
+ *      advances when code lands in nested children, so a "fresh" answer here
+ *      would be a confident lie. Costs no subprocess.
+ *   d. one bounded git spawn: rev-list --left-right --count answers ancestry
+ *      and distance together. left > 0 means the stamp is not an ancestor of
+ *      HEAD (reset/rebase/force-push) -> unknown, never "fresh".
+ */
+function deriveStateFreshness(root, stamp, deps = {}) {
+  const { existsSync = fs.existsSync, readConfig = readGsdConfig, readCounts = readStateHeadCommits } = deps;
+
+  const raw = typeof stamp === 'string' ? stamp.trim() : '';
+  const valid = STATE_HEAD_HASH_RE.test(raw);
+  const state_head = valid ? raw.slice(0, 7) : null;
+  const nullResult = { state_head, commits_behind: null, commit_stale: null };
+  if (!valid || !root) return nullResult;
+
+  try {
+    if (!existsSync(path.join(root, '.git'))) return nullResult;
+  } catch (e) {
+    return nullResult;
+  }
+
+  try {
+    const cfg = readConfig(root);
+    const sub = getConfigValue(cfg, 'planning.sub_repos') ?? getConfigValue(cfg, 'sub_repos');
+    if (Array.isArray(sub) && sub.length > 0) return nullResult;
+  } catch (e) {
+    return nullResult;
+  }
+
+  const counts = parseRevListCounts(readCounts(root, raw));
+  if (!counts || counts.left > 0) return nullResult;
+
+  return { state_head, commits_behind: counts.right, commit_stale: counts.right > 0 };
+}
+
+/**
+ * Pure function: format the freshness IR into the marker text, or '' below
+ * STATE_HEAD_ADVISORY_COMMITS (including when commits_behind is absent/null —
+ * the unknown case must never render, never mind alarm on it).
+ */
+function formatStateFreshness(fresh) {
+  if (!fresh || typeof fresh.commits_behind !== 'number' || fresh.commits_behind < STATE_HEAD_ADVISORY_COMMITS) return '';
+  return `state ~${fresh.commits_behind} commits back`;
+}
+
+/**
+ * Pure function: single source of truth for statusline config resolution.
+ * `runStatusline()` and `renderStatusline()` previously read this config
+ * independently, which had drifted into a live divergence between the two
+ * entry points — this collapses both onto one resolver.
+ *
+ * @param {object} cfg — parsed .planning/config.json (readGsdConfig())
+ * @returns {{ showLastCommand: boolean, position: 'end'|'front', stateFormat: 'full'|'compact', showGit: boolean, showStateFreshness: boolean, convention: string|null, projectCode: string|null }}
+ */
+function resolveStatuslineOptions(cfg) {
+  const showLastCommand = getConfigValue(cfg, 'statusline.show_last_command') === true;
+  const cfgPos = getConfigValue(cfg, 'statusline.context_position');
+  // Clamp any non-'front' value (including absent/null) to 'end' — the single
+  // source of truth for this default; composeStatusline's own coercion stays
+  // as belt-and-suspenders defense for direct callers.
+  const position = cfgPos === 'front' ? 'front' : 'end';
+  const stateFormat = getConfigValue(cfg, 'statusline.state_format') === 'compact' ? 'compact' : 'full';
+  const showGit = getConfigValue(cfg, 'statusline.show_git') === true;
+  const showStateFreshness = getConfigValue(cfg, 'statusline.show_state_freshness') === true;
+  const convention = getConfigValue(cfg, 'phase_id_convention') === 'bracket'
+    ? 'bracket'
+    : null;
+  const projectCodeValue = getConfigValue(cfg, 'project_code');
+  const projectCode = typeof projectCodeValue === 'string' && projectCodeValue !== ''
+    ? projectCodeValue
+    : null;
+  return {
+    showLastCommand,
+    position,
+    stateFormat,
+    showGit,
+    showStateFreshness,
+    convention,
+    projectCode,
+  };
+}
+
 // --- stdin ------------------------------------------------------------------
 
 function runStatusline() {
   let input = '';
   // Timeout guard: if stdin doesn't close within 3s (e.g. pipe issues on
   // Windows/Git Bash), exit silently instead of hanging. See #775.
-  const stdinTimeout = setTimeout(() => process.exit(0), 3000);
+  const stdinTimeout = setTimeout(() => allow(undefined), 3000);
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', chunk => input += chunk);
   process.stdin.on('end', () => {
@@ -709,31 +961,36 @@ function runStatusline() {
     // Last-slash-command suffix and context_position config (#2538, #2937).
     // Reads the active session transcript for the most recent <command-name> tag.
     // Failure here must never break the statusline — wrap the entire lookup.
+    // #2734: config resolution moved to resolveStatuslineOptions() — the single
+    // source of truth shared with renderStatusline() below. The two entry
+    // points duplicated this resolution byte-for-byte; one copy is what keeps
+    // a new key from reaching only one of them.
     let lastCmdSuffix = '';
-    let position = 'end';
-    let stateFormat = 'full';
     let gitSuffix = '';
+    const options = resolveStatuslineOptions(cfg);
     try {
-      if (getConfigValue(cfg, 'statusline.show_last_command') === true) {
+      if (options.showLastCommand) {
         const transcriptPath = data.transcript_path;
         const lastCmd = readLastSlashCommand(transcriptPath);
         if (lastCmd) {
           lastCmdSuffix = ` │ \x1b[2mlast: /${lastCmd}\x1b[0m`;
         }
       }
-      const cfgPos = getConfigValue(cfg, 'statusline.context_position');
-      if (cfgPos != null) position = cfgPos;
-      if (getConfigValue(cfg, 'statusline.state_format') === 'compact') stateFormat = 'compact';
-      if (getConfigValue(cfg, 'statusline.show_git') === true) {
+      if (options.showGit) {
         gitSuffix = buildGitSegment(parseGitStatus(readGitStatus(dir)));
       }
     } catch (e) {
       // Never break the statusline on config/transcript/git errors
     }
 
+    // #2734: readGsdState is inside `if (!task)` deliberately — when a todo
+    // task is in flight the GSD-state segment is not rendered, so spending a
+    // freshness git spawn here would spend a subprocess on discarded output.
     if (!task) {
-      const state = readGsdState(dir) || {};
-      gsdStateStr = stateFormat === 'compact' ? formatGsdStateCompact(state) : formatGsdState(state);
+      const state = readGsdState(dir, { stateFreshness: options.showStateFreshness }) || {};
+      gsdStateStr = options.stateFormat === 'compact'
+        ? formatGsdStateCompact(state, options)
+        : formatGsdState(state, options);
     }
 
     // Output
@@ -744,7 +1001,7 @@ function runStatusline() {
         ? `\x1b[2m${gsdStateStr}\x1b[0m`
         : null;
 
-    process.stdout.write(composeStatusline({ gsdUpdate, model, ctx, middle, dirname, lastCmdSuffix, gitSuffix, position }));
+    process.stdout.write(composeStatusline({ gsdUpdate, model, ctx, middle, dirname, lastCmdSuffix, gitSuffix, position: options.position }));
   } catch (e) {
     // Silent fail - don't break statusline on parse errors
   }
@@ -838,6 +1095,10 @@ module.exports = {
   shortGsdStatus, formatGsdStateCompact,
   compactModelName,
   readGitStatus, parseGitStatus, buildGitSegment,
+  STATE_HEAD_ADVISORY_COMMITS, isValidStateHeadStamp,
+  readStateHeadCommits, parseRevListCounts, deriveStateFreshness,
+  formatStateFreshness, resolveStatuslineOptions,
+  renderBracketPhaseDisplay, renderBracketMilestoneDisplay,
 };
 
 /**
@@ -849,30 +1110,41 @@ function renderStatusline(data) {
   const dir = data.workspace?.current_dir || process.cwd();
   const dirname = path.basename(dir);
 
+  // #2734: config resolution moved to resolveStatuslineOptions() — the single
+  // source of truth shared with runStatusline() above. The two entry points
+  // duplicated this resolution byte-for-byte; one copy is what keeps a new
+  // key from reaching only one of them.
   let lastCmdSuffix = '';
-  let position = 'end';
-  let stateFormat = 'full';
   let gitSuffix = '';
+  let options = {
+    showLastCommand: false,
+    position: 'end',
+    stateFormat: 'full',
+    showGit: false,
+    showStateFreshness: false,
+    convention: null,
+    projectCode: null,
+  };
   try {
     const cfg = readGsdConfig(dir);
-    if (getConfigValue(cfg, 'statusline.show_last_command') === true) {
+    options = resolveStatuslineOptions(cfg);
+    if (options.showLastCommand) {
       const lastCmd = readLastSlashCommand(data.transcript_path);
       if (lastCmd) {
         lastCmdSuffix = ` │ \x1b[2mlast: /${lastCmd}\x1b[0m`;
       }
     }
-    const cfgPos = getConfigValue(cfg, 'statusline.context_position');
-    if (cfgPos != null) position = cfgPos;
-    if (getConfigValue(cfg, 'statusline.state_format') === 'compact') stateFormat = 'compact';
-    if (getConfigValue(cfg, 'statusline.show_git') === true) {
+    if (options.showGit) {
       gitSuffix = buildGitSegment(parseGitStatus(readGitStatus(dir)));
     }
   } catch (e) { /* swallow */ }
 
-  const state = readGsdState(dir) || {};
-  const gsdStateStr = stateFormat === 'compact' ? formatGsdStateCompact(state) : formatGsdState(state);
+  const state = readGsdState(dir, { stateFreshness: options.showStateFreshness }) || {};
+  const gsdStateStr = options.stateFormat === 'compact'
+    ? formatGsdStateCompact(state, options)
+    : formatGsdState(state, options);
   const middle = gsdStateStr ? `\x1b[2m${gsdStateStr}\x1b[0m` : null;
-  return composeStatusline({ model, ctx: '', middle, dirname, lastCmdSuffix, gitSuffix, position });
+  return composeStatusline({ model, ctx: '', middle, dirname, lastCmdSuffix, gitSuffix, position: options.position });
 }
 
 module.exports.renderStatusline = renderStatusline;

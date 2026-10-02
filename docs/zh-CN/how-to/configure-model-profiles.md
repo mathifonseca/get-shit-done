@@ -16,7 +16,7 @@
 | `adaptive` | Opus | Sonnet | Sonnet | Sonnet | 与其他层级在运行时感知配置文件下的解析方式相同；在频繁切换运行时环境时使用 |
 | `inherit` | （会话模型） | （会话模型） | （会话模型） | （会话模型） | 非 Anthropic 提供商（OpenRouter、本地模型）——所有代理遵循当前会话模型 |
 
-上表展示的是代表性子集。全部 33 个内置代理在 `sdk/shared/model-catalog.json` 中均有明确的按配置文件层级分配。完整表格请参阅配置参考中的 [模型配置文件](../CONFIGURATION.md#model-profiles)。
+上表展示的是代表性子集。全部 33 个内置代理在 `gsd-core/bin/shared/model-catalog.json` 中均有明确的按配置文件层级分配。完整表格请参阅配置参考中的 [模型配置文件](../CONFIGURATION.md#model-profiles)。
 
 **通过命令快速切换：**
 
@@ -154,7 +154,7 @@ npx @opengsd/gsd-core@latest --codex --global   # or --opencode, --kilo, etc.
 
 ## 在非 Anthropic 运行时上使用 GSD Core
 
-如果您为 Codex、OpenCode、Gemini CLI 或 Kilo 安装了 GSD Core，安装程序已在您的配置中设置了 `resolve_model_ids: "omit"`。这告知 GSD Core 跳过 Anthropic 模型 ID 解析，让运行时选择其自己的默认模型。基本情况下无需手动设置。
+如果您为 Codex、OpenCode、Antigravity CLI 或 Kilo 安装了 GSD Core，安装程序已在您的配置中设置了 `resolve_model_ids: "omit"`。这告知 GSD Core 跳过 Anthropic 模型 ID 解析，让运行时选择其自己的默认模型。基本情况下无需手动设置。
 
 **如果您希望在 Codex 上使用分层模型：**
 

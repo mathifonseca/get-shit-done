@@ -146,6 +146,12 @@ function parseInventoryMd(raw) {
     if (cells.length <= primaryDocColIndex) continue;
 
     const agentSlug = cells[0];
+    // #4407: .compact.md variant-sibling rows (the "### Compact Payload
+    // Variants" subsection) are not part of the primary/advanced/inventory-only
+    // classification this test validates — a compact row documents an EXISTING
+    // agent's alternate rendition, not a new roster entry, and never gets its
+    // own AGENTS.md heading. Excluded here rather than at every call site.
+    if (agentSlug.endsWith('.compact')) continue;
     const primaryDoc = cells[primaryDocColIndex];
     result.set(agentSlug, primaryDoc);
   }
@@ -299,6 +305,7 @@ describe('agent-classification-parity: AGENTS.md section structure is the single
     // --- (c) parenthetical slug list ---
     // The prose lists short slugs without "gsd-" prefix, e.g.:
     //   (pattern-mapper, debug-session-manager, ...)
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses docs/AGENTS.md, a maintainer-authored repo doc with bounded prose, not adversarial input
     const parenMatch = rawAgentsMd.match(/\(([^)]+)\)\s+have concise stubs/);
     assert.ok(
       parenMatch,

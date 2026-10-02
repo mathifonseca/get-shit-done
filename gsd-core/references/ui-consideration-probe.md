@@ -15,11 +15,16 @@ here. Forcing them into a closed compiled taxonomy is the wrong model.
 
 ## Inputs
 
-A list of UI elements, each a `{ id, text, elements? }` record where `text` is the
-researcher-authored description and `elements` is an optional author-supplied override of the
-element classification. The six element kinds are: `form`, `list-collection`, `nav`, `media`,
-`interactive-control`, `static-content`. When `elements` is absent, a heuristic classifier
-proposes kinds from the prose (propose-then-confirm) — the author may correct the kind.
+A list of UI elements, each a `{ id, text, text_en?, elements? }` record where `text` is the
+researcher-authored description, `elements` is an optional author-supplied override of the
+element classification, and `text_en` is an optional English translation of `text`
+(#4657). The element cues are English word-boundary patterns, so a non-English `text` (a
+project running with `response_language` set) classifies to zero kinds unless `text_en`
+carries a faithful English rendering — engine input, never user-facing output; `text`
+itself keeps the UI-SPEC's own language and is never translated. The six element kinds are:
+`form`, `list-collection`, `nav`, `media`, `interactive-control`, `static-content`. When
+`elements` is absent, a heuristic classifier proposes kinds from the prose
+(`text_en ?? text`, propose-then-confirm) — the author may correct the kind.
 
 ## Taxonomy (8 categories)
 
@@ -69,5 +74,5 @@ closed). The **open subset is prose-owned in [domain-probes.md](./domain-probes.
 real-time/offline/optimistic-UI, deep accessibility (WCAG breadth), i18n / RTL depth, and
 emerging interaction paradigms (gesture/voice/reduced-motion/print) are open-ended and
 cue-triggered — they do not belong in this closed taxonomy. This probe **complements** the
-`gsd-ui-checker` six quality dimensions (it adds a state-coverage axis); it does not change the
+`gsd-ui-checker` seven quality dimensions (it adds a state-coverage axis); it does not change the
 BLOCK/FLAG/PASS enum or the dimensions themselves.

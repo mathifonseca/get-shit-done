@@ -27,6 +27,9 @@
  */
 
 import fs from 'node:fs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import cliExitModule = require('./cli-exit.cjs');
+const { ExitError } = cliExitModule;
 
 /** Resolution lifecycle — shared across every probe adapter. */
 export type Status = 'resolved' | 'dismissed' | 'unresolved';
@@ -66,6 +69,11 @@ export interface CoverageReport<V extends string = string> {
     applicable: number;
     resolved: number;
     unresolved: number;
+    /** #4656: items in the soft-signal `unclassified` category. Subset of
+     *  `applicable`; a spec where every requirement is unclassified reports
+     *  `unclassified === applicable`, which is the signal the zero-applicable
+     *  guards in spec-phase/ui-phase widen on. */
+    unclassified: number;
     byVerification: Record<string, number>;
   };
 }
@@ -278,6 +286,12 @@ export function analyzeCoverage<V extends string>(
   const unresolved = merged.filter((i) => i.status === 'unresolved').length;
   const applicable = merged.length;
   const resolved = applicable - unresolved; // closed set: resolved-status + dismissed
+  // #4656: the unclassified soft-signal rows count toward `applicable` (the
+  // rollup is count-preserving and `resolved = applicable - unresolved` is a
+  // documented identity), so the count is exposed as a SIBLING field — the
+  // zero-applicable guards can then also fire when EVERY requirement is
+  // unclassified, the case the spec-phase/ui-phase docs promise to catch.
+  const unclassified = merged.filter((i) => i.category === 'unclassified').length;
   const byVerification: Record<string, number> = {};
   for (const tier of validators.verification) byVerification[tier] = 0;
   for (const i of merged) {
@@ -285,7 +299,7 @@ export function analyzeCoverage<V extends string>(
       byVerification[i.verification] = (byVerification[i.verification] ?? 0) + 1;
     }
   }
-  return { items: merged, coverage: { applicable, resolved, unresolved, byVerification } };
+  return { items: merged, coverage: { applicable, resolved, unresolved, unclassified, byVerification } };
 }
 
 /* ------------------------------------------------------------------------- *
@@ -494,7 +508,7 @@ export function dispositionForProhibition(
   }
 
   // D4 GUARD: a judgment-tier (or unknown-tier) prohibition is NEVER a silent green from this
-  // deterministic helper — it always routes to human/LLM judgment review (ADR-550 D4; verify-phase.md).
+  // deterministic helper — it always routes to human/LLM judgment review (ADR-550 D4; gsd-verifier.md + references/verifier-phase-gates.md).
   // Only a test-tier item with wired enforcement evidence may go green; the producer that supplies
   // that evidence (`prohibition-enforcement`, #1259) runs the wired check and requires a genuine pass.
   if (tier === 'test') {
@@ -692,7 +706,7 @@ export function runProbeCli(
   const readFile = options.readFile ?? ((p: string) => fs.readFileSync(p, 'utf8'));
   const write = options.write ?? ((s: string) => { process.stdout.write(s); });
   const writeErr = options.writeErr ?? ((s: string) => { process.stderr.write(s); });
-  const exit = options.exit ?? ((code: number) => { process.exit(code); });
+  const exit = options.exit ?? ((code: number) => { throw new ExitError(code); });
 
   const reqPath: string | undefined = argv[2];
   const resPath: string | undefined = argv[3];

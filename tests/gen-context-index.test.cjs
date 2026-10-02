@@ -1,3 +1,4 @@
+// docs-guard-exempt: docs/CONTEXT-INDEX.json is mentioned only in module-doc comments; the test reads root CONTEXT.md and mocked fs, never a real docs/ path.
 'use strict';
 
 /**
@@ -43,6 +44,7 @@ const { execFileSync } = require('node:child_process');
 
 const { createTempDir, cleanup } = require('./helpers.cjs');
 const { serializeIndex, buildFreshIndex, checkReport, REASON } = require('../scripts/gen-context-index.cjs');
+const { GENERATOR_SCRIPT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const SCRIPT = path.join(ROOT, 'scripts', 'gen-context-index.cjs');
@@ -70,7 +72,7 @@ function runGenContextIndex(args, paths = {}) {
       cwd: ROOT,
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 30000,
+      timeout: GENERATOR_SCRIPT_TIMEOUT_MS,
     });
     return { code: 0, stdout, stderr: '' };
   } catch (err) {
@@ -148,6 +150,7 @@ describe('gen-context-index.cjs --check (F)', () => {
   test('checkExitsOneWhenPredicateValueChanged', () => {
     const real = fs.readFileSync(REAL_CONTEXT_PATH, 'utf8');
     const modified = real.replace(
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own maintainer-authored CONTEXT.md, bounded, not adversarial input
       /`RULESET\.PR-SCOPE\.one-concern-per-pr=[^`]*`/,
       '`RULESET.PR-SCOPE.one-concern-per-pr=CHANGED VALUE FOR TEST`',
     );
@@ -171,6 +174,7 @@ describe('gen-context-index.cjs --check (F)', () => {
 
   test('checkExitsOneWhenPredicateRemoved', () => {
     const real = fs.readFileSync(REAL_CONTEXT_PATH, 'utf8');
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own maintainer-authored CONTEXT.md, bounded, not adversarial input
     const removed = real.replace(/`RULESET\.PR-SCOPE\.one-concern-per-pr=[^`]*`\r?\n/, '');
     assert.notEqual(removed, real, 'fixture setup sanity: the removal must actually apply');
     const removedPath = path.join(tmpDir, 'CONTEXT-removed.md');

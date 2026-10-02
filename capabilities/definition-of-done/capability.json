@@ -1,7 +1,7 @@
 {
   "id": "definition-of-done",
   "role": "feature",
-  "version": "1.10.0",
+  "version": "1.15.0",
   "title": "Definition of Done",
   "description": "Runs the fork's Definition of Done checklist after each execution wave so a phase cannot be called complete on task-completion alone.",
   "tier": "full",

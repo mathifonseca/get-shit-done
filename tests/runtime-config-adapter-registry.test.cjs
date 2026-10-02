@@ -26,6 +26,19 @@ const {
 } = require(path.join(ROOT, 'gsd-core', 'bin', 'lib', 'runtime-config-adapter-registry.cjs'));
 const registry = require(path.join(ROOT, 'gsd-core', 'bin', 'lib', 'capability-registry.cjs'));
 
+// Folded from tests/issue-57-runtime-install-no-drift.test.cjs (issue #57).
+process.env.GSD_TEST_MODE = '1'; // must precede require of bin/install.js
+const fs = require('node:fs');
+const os = require('node:os');
+const { allRuntimes, runtimeMap } = require(path.join(ROOT, 'bin', 'install.js'));
+const { resolveRuntimeArtifactLayout } = require(
+  path.join(ROOT, 'gsd-core', 'bin', 'lib', 'runtime-artifact-layout.cjs'),
+);
+const { getGlobalConfigDir } = require(path.join(ROOT, 'gsd-core', 'bin', 'lib', 'runtime-homes.cjs'));
+const { createTempDir, cleanup } = require('./helpers.cjs');
+
+const sorted = (iterable) => [...iterable].sort();
+
 // ---------------------------------------------------------------------------
 // Source-of-truth table — DERIVED from the capability registry descriptors.
 // Each row is the descriptor projection of one runtime's config intent. This is
@@ -373,3 +386,214 @@ describe('resolveInstallPlan — descriptor-projection contract (count-agnostic)
     }
   });
 });
+
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe('folded:issue-57-runtime-install-no-drift', () => {
+// ---------------------------------------------------------------------------
+// Folded from tests/issue-57-runtime-install-no-drift.test.cjs (issue #57,
+// H3 Wave 4 consolidation). Protects the Runtime Install Policy Module
+// boundary (ADR-58) and the explicit Runtime Config Adapter Registry (#60):
+// these guards fail when supported-runtime metadata bypasses the registry
+// projection (AC1) or config-mutation dispatch bypasses the explicit adapter
+// registry (AC2). Known intentional asymmetry: `grok` appears in
+// runtime-homes.cjs's getGlobalConfigDir switch but not in the registry /
+// artifact-layout supported sets, and getGlobalConfigDir() falls back to
+// ~/.claude for an unknown runtime instead of throwing (deliberately
+// liberal) — only the registry and artifact-layout projections are loud
+// gates. One source case was dropped as subsumed (see note below).
+// ---------------------------------------------------------------------------
+
+describe('issue-57 AC1 — supported-runtime metadata has one projected source of truth', () => {
+  test('installer allRuntimes, interactive runtimeMap, and registry agree on the supported set', () => {
+    const installable = sorted(allRuntimes);
+    assert.deepStrictEqual(
+      installable,
+      sorted(Object.values(runtimeMap)),
+      'Drift: bin/install.js `allRuntimes` and the interactive `runtimeMap` selection menu '
+        + 'diverged. A runtime selectable in the prompt but absent from allRuntimes (or vice '
+        + 'versa) is a supported-runtime call site that skipped the projection.',
+    );
+    assert.deepStrictEqual(
+      installable,
+      sorted(ALLOWED_CONFIG_RUNTIMES),
+      'Drift: bin/install.js `allRuntimes` and `ALLOWED_CONFIG_RUNTIMES` (runtime config '
+        + 'adapter registry) diverged. A runtime added to an installer call site without a '
+        + 'registry adapter entry bypasses the registry projection — register it in '
+        + 'src/runtime-config-adapter-registry.cts.',
+    );
+  });
+
+  // NOTE: source also asserted `resolveRuntimeConfigIntent(runtime).runtime === runtime`
+  // for every `allRuntimes` entry — dropped here as subsumed by the
+  // descriptor-projection contract test above (deep-equal over every registry
+  // runtime, a strict superset of `allRuntimes` per the equality just asserted).
+
+  test('every installable runtime resolves a global config dir through runtime-homes', () => {
+    for (const runtime of allRuntimes) {
+      const dir = getGlobalConfigDir(runtime);
+      assert.equal(typeof dir, 'string', `${runtime} config dir must be a string`);
+      assert.ok(dir.length > 0, `${runtime} must resolve a non-empty global config dir`);
+    }
+  });
+});
+
+describe('issue-57 AC2 — config-mutation dispatch is closed over the explicit registry', () => {
+  test('every config intent uses a registry-declared install surface', () => {
+    const surfaces = new Set(INSTALL_SURFACES);
+    for (const runtime of allRuntimes) {
+      const { installSurface } = resolveRuntimeConfigIntent(runtime);
+      assert.ok(
+        surfaces.has(installSurface),
+        `${runtime} dispatches config via unregistered surface "${installSurface}" — add it `
+          + 'to INSTALL_SURFACES in the registry instead of branching on it inline.',
+      );
+    }
+  });
+
+  test('every finishInstall permission writer is null or a registry-known runtime', () => {
+    for (const runtime of allRuntimes) {
+      const { finishPermissionWriter } = resolveRuntimeConfigIntent(runtime);
+      assert.ok(
+        finishPermissionWriter === null || ALLOWED_CONFIG_RUNTIMES.has(finishPermissionWriter),
+        `${runtime} uses finishPermissionWriter "${finishPermissionWriter}", which is neither `
+          + 'null nor a registry-known runtime — route it through a registered adapter.',
+      );
+    }
+  });
+
+  test('unknown runtime fails loudly through both strict projections (no silent fallthrough)', () => {
+    const SENTINEL = '__drift_sentinel_runtime__';
+    assert.throws(
+      () => resolveRuntimeConfigIntent(SENTINEL),
+      TypeError,
+      'config adapter registry must reject an unknown runtime, not dispatch it silently',
+    );
+    assert.throws(
+      () => resolveRuntimeArtifactLayout(SENTINEL, path.join(os.tmpdir(), 'gsd-57'), 'global'),
+      TypeError,
+      'artifact-layout projection must reject an unknown runtime',
+    );
+  });
+
+  test('registry rejects prototype-chain keys (no proto-pollution dispatch bypass)', () => {
+    // Overlaps __proto__/constructor/toString with the individually-named
+    // cases above; folded anyway to keep the 'prototype' key covered (not
+    // asserted individually elsewhere in this file).
+    for (const key of ['__proto__', 'constructor', 'prototype', 'toString']) {
+      assert.throws(
+        () => resolveRuntimeConfigIntent(key),
+        TypeError,
+        `${key} must throw, not resolve via the prototype chain`,
+      );
+    }
+  });
+
+  // structural guard over bin/install.js source. Behavioral assertions
+  // cannot observe inline `runtime === '...'` config branching, so this enforces that
+  // every inline per-runtime branch references a runtime the adapter registry knows
+  // about — a NEW branch against an unregistered runtime name fails here.
+  test('every inline `runtime === "..."` branch references a registry-known runtime', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'bin', 'install.js'), 'utf8');
+    const literals = new Set(
+      // allow-test-rule: structural-regression-guard — structural guard over bin/install.js source; behavioral assertions cannot observe inline `runtime === '...'` config branching, so this enforces every inline per-runtime branch references a runtime the adapter registry knows about (#3336)
+      [...src.matchAll(/runtime === (?:'([a-z][a-z0-9-]*)'|"([a-z][a-z0-9-]*)")/g)]
+        .map((m) => m[1] ?? m[2]),
+    );
+    assert.ok(literals.size > 0, 'expected to find inline runtime comparisons in bin/install.js');
+    const unregistered = [...literals].filter((r) => !ALLOWED_CONFIG_RUNTIMES.has(r));
+    assert.deepStrictEqual(
+      unregistered,
+      [],
+      `inline 'runtime === "..."' branch(es) reference runtimes absent from the config adapter `
+        + `registry: ${unregistered.join(', ')} — register them in `
+        + 'src/runtime-config-adapter-registry.cts or route the logic through '
+        + 'resolveRuntimeConfigIntent instead of branching inline.',
+    );
+  });
+
+  // VS Code is a registry runtime but is NEVER CLI-installed (Marketplace/VSIX
+  // extension); it must stay fully descriptor-driven — bin/install.js must
+  // never special-case it by name.
+  test('#2103: bin/install.js has ZERO runtime === "vscode" / isVscode branches (vscode stays fully descriptor-driven)', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'bin', 'install.js'), 'utf8');
+    // allow-test-rule: structural-regression-guard — vscode is a registry runtime but is NEVER CLI-installed (Marketplace/VSIX); it must stay fully descriptor-driven, so bin/install.js must never special-case it by name (#2103)
+    const runtimeComparisons = [...src.matchAll(/runtime === (?:'vscode'|"vscode")/g)];
+    assert.deepStrictEqual(
+      runtimeComparisons.map((m) => m[0]),
+      [],
+      'bin/install.js must not special-case vscode via `runtime === "vscode"` — vscode has no '
+        + 'install surface at all (installSurface: "none") and is never CLI-installed; any '
+        + 'vscode-specific behavior belongs in capabilities/vscode/capability.json, not an inline branch.',
+    );
+    // allow-test-rule: structural-regression-guard — same #2103 vscode-descriptor-driven guard as above, this time for the isVscode flag name (#2103)
+    const isVscodeRefs = [...src.matchAll(/\bisVscode\b/g)];
+    assert.deepStrictEqual(
+      isVscodeRefs.map((m) => m[0]),
+      [],
+      'bin/install.js must not introduce an isVscode flag — vscode is intentionally excluded '
+        + 'from runtimeFlags (Marketplace-distributed, never CLI-installed).',
+    );
+  });
+
+  // Behavioral replacement for the delegation-presence source grep (#3466).
+  //
+  // The EXPECTED_TABLE / resolveInstallPlan projection-contract tests above
+  // (`resolveInstallPlan — descriptor-projection contract`) prove resolveInstallPlan
+  // ITSELF maps every registry descriptor correctly — but they call the registry
+  // function directly and never touch bin/install.js, so they cannot by themselves
+  // prove install.js actually CONSULTS it rather than reimplementing an equivalent
+  // per-runtime branch. This test closes that gap: it stubs the registry's
+  // resolveInstallPlan (the SAME module object bin/install.js requires and
+  // destructures) so it reports a different installSurface for every runtime,
+  // re-requires a fresh bin/install.js so its destructured reference picks up the
+  // stub, and asserts a REAL install(false, 'copilot') run STOPS producing the
+  // copilot-instructions.md artifact that installSurface === 'copilot-instructions'
+  // gates directly inside install() (bin/install.js:~12164 — no finishInstall/CLI
+  // orchestration layer involved, so this is reachable from install() alone). If
+  // install.js ever reverts to a `runtime === 'copilot'` inline branch instead of
+  // reading resolveInstallPlan(runtime).installSurface, the stub has no effect on
+  // that branch and the artifact keeps getting written — which is exactly the
+  // divergence this test would then catch (verified by mutating install.js to that
+  // exact inline form during authoring: the assertion below goes red).
+  test('bin/install.js dispatches config through the REAL resolveInstallPlan (stubbing it changes install() output)', () => {
+    const installPath = require.resolve('../bin/install.js');
+    const registryPath = require.resolve('../gsd-core/bin/lib/runtime-config-adapter-registry.cjs');
+    const registryModule = require(registryPath);
+    const originalResolveInstallPlan = registryModule.resolveInstallPlan;
+
+    registryModule.resolveInstallPlan = (runtime) => ({
+      ...originalResolveInstallPlan(runtime),
+      // Force every gate bin/install.js checks against
+      // resolveInstallPlan(runtime).installSurface to read as "nothing special for
+      // this runtime" — including copilot's own surface, which the real descriptor
+      // sets to 'copilot-instructions'.
+      installSurface: 'settings-json',
+    });
+
+    delete require.cache[installPath];
+    const stubbedInstaller = require(installPath);
+
+    const tmpDir = createTempDir('gsd-3466-delegation-guard-');
+    const previousCwd = process.cwd();
+    process.chdir(tmpDir);
+    try {
+      const result = stubbedInstaller.install(false, 'copilot');
+      const instructionsPath = path.join(result.configDir, 'copilot-instructions.md');
+      assert.equal(
+        fs.existsSync(instructionsPath), false,
+        'with resolveInstallPlan stubbed to report installSurface: "settings-json" for every '
+          + 'runtime, install(\'copilot\') must NOT write copilot-instructions.md — if it still '
+          + 'does, bin/install.js is not actually gating on resolveInstallPlan(runtime) for this '
+          + 'decision (a regression to scattered per-runtime branching)',
+      );
+    } finally {
+      process.chdir(previousCwd);
+      cleanup(tmpDir);
+      registryModule.resolveInstallPlan = originalResolveInstallPlan;
+      delete require.cache[installPath];
+    }
+  });
+});
+  });
+}

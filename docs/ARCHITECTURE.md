@@ -277,7 +277,7 @@ Markdown templates for all planning artifacts. Used by `gsd-tools.cjs template f
 - `DEBUG.md` — Debug session tracking template
 - `UI-SPEC.md`, `UAT.md`, `VALIDATION.md` — Specialized verification templates
 - `discussion-log.md` — Discussion audit trail template
-- `codebase/` — Brownfield mapping templates (stack, architecture, conventions, concerns, structure, testing, integrations)
+- `codebase/` — Brownfield mapping templates (architecture, stack)
 - `research-project/` — Research output templates (SUMMARY, STACK, FEATURES, ARCHITECTURE, PITFALLS)
 
 ### Hooks (`hooks/`)
@@ -287,19 +287,32 @@ Runtime hooks that integrate with the host AI agent:
 | Hook | Event | Purpose |
 |------|-------|---------|
 | `gsd-statusline.js` | `statusLine` | Displays model (long-context suffixes like `(1M context)` collapse to a compact `(1M)` badge), task, directory, and context usage bar |
-| `gsd-context-monitor.js` | `PostToolUse` / `AfterTool` | Injects agent-facing context warnings at 35%/25% remaining |
+| `gsd-context-monitor.js` | `PostToolUse` / `AfterTool` | Injects agent-facing context warnings at 35%/25% remaining by default (configurable — see [CONFIGURATION.md](CONFIGURATION.md)) |
 | `gsd-check-update.js` | `SessionStart` | Foreground trigger for the background update check |
 | `gsd-ensure-canonical-path.js` | `SessionStart` | For Claude Code plugin installs, symlinks `~/.claude/gsd-core/{bin,contexts,references,templates,workflows}` to the plugin's bundled tree so `@~/.claude/gsd-core/...` includes resolve; runs first in `SessionStart`, no-op in classic installs, self-heals after `claude plugin update` (#997) |
 | `gsd-check-update-worker.js` | (helper) | Background worker spawned by `gsd-check-update.js`; no direct event registration |
 | `gsd-prompt-guard.js` | `PreToolUse` | Scans `.planning/` writes for prompt injection patterns (advisory) |
 | `gsd-read-injection-scanner.js` | `PostToolUse` | Scans Read tool output for injected instructions in untrusted content |
 | `gsd-workflow-guard.js` | `PreToolUse` | Detects file edits outside GSD workflow context (advisory, opt-in via `hooks.workflow_guard`) |
+| `gsd-secret-read-guard.js` | `PreToolUse` | Hard-blocks Read / Grep / Bash reads of `.env`, `.env.<suffix>` (templates such as `.env.example` exempt) and `.secrets`; replaces the installer-written `Read(.env*)` permission deny rules, which made every `cd DIR && grep …` compound prompt for approval on Claude Code ≥ 2.1.259 (#4221) |
 | `gsd-read-guard.js` | `PreToolUse` | Advisory guard preventing Edit/Write on files not yet read in the session |
-| `gsd-session-state.sh` | `PostToolUse` | Session state tracking for shell-based runtimes |
-| `gsd-validate-commit.sh` | `PostToolUse` | Commit validation for conventional commit enforcement |
+| `gsd-session-state.sh` | `SessionStart` | Session state tracking for shell-based runtimes |
+| `gsd-validate-commit.sh` | `PreToolUse` | Commit validation for conventional commit enforcement |
 | `gsd-phase-boundary.sh` | `PostToolUse` | Phase boundary detection for workflow transitions |
 
 See [`docs/INVENTORY.md`](INVENTORY.md#hooks) for the authoritative hook roster.
+
+**Crash policy (ADR-3889 Phase 7, #3911).** Every enforcement hook terminates
+through `hooks/lib/hook-exit.js`'s `allow(payload)` (exit 0), `deny(payload,
+stderrPayload?)` (exit 2), or `crash(onCrash, payload)` — the last dispatching
+per a `HOOK_ON_CRASH` policy the hook must declare explicitly (`ALLOW` or
+`DENY`, no default), so a hook's fail-open/fail-closed stance is a visible
+declaration rather than an inference from a bare `process.exit(N)`. Two hooks
+are deliberate exceptions — `gsd-read-injection-scanner.js` (PostToolUse) and
+`gsd-cursor-subagent-start.js` (Cursor) — whose harnesses read the block
+decision from the JSON response body at exit 0, not from the exit code, so
+they never call `deny()`. See
+[Declare a hook's crash policy](how-to/declare-a-hook-crash-policy.md).
 
 ### Command Routing Hub (`gsd-core/bin/lib/command-routing-hub.cjs`)
 
@@ -315,6 +328,10 @@ Command families declared by capabilities (`commands: [{ family, module, router 
 2. **Third-party (installed overlay)** — `dispatchOverlayCapabilityCommand` calls `loadRegistry({ includeInstalled })` and dispatches a family only when its `capId` appears in `_overlay.commandRoots`. The loader lists a command root **only** for an accepted overlay capability with a **committed** ledger entry (consent gate), and the router module is `require()`'d **from that capability's install root**, confined by basename validation + `realpath` containment (rejecting `..` traversal and symlink escape). This is the one point where third-party capability code executes; see [the capability trust model](explanation/capability-trust-model.md) for the consent + confinement + project-scope trust boundary.
 
 Both paths share the same guards: prototype-pollution-safe command keys, an own-property router check, and synchronous-only routers (an async router is a fail-fast error).
+
+### Reviewer-Lane Capability Trait (#4209, ADR-2782)
+
+`/gsd-code-review` optionally corroborates its internal review with external reviewer lanes (`--codex`, `--agy`, ...), gated by the reusable `supportsReviewerLanes` capability-step trait and dispatched through the single `dispatchReviewerLanes` interpreter — see `gsd-core/references/loop-hook-dispatch.md` for the trait and `src/reviewer-step-dispatch.cts` for the interpreter's fail-closed contract. `gsd-code-reviewer` is the sole consolidator: it independently re-verifies every external claim against the actual source before writing anything to `REVIEW.md`, so a lane's evidence is corroborating input, never a second output schema.
 
 ### Research Module (`src/research-{store,provider}.cts`, `src/package-legitimacy.cts`)
 
@@ -459,7 +476,7 @@ Node.js CLI utility (`gsd-tools.cjs`) with domain modules split across `gsd-core
 | `graphify-command-router.cjs` | ADR-959 capability command router — first real capability command cutover (phase 4d-impl-2); extracted from the `case 'graphify':` arm in `gsd-tools.cjs`; dispatches build/query/status/diff subcommands; discovered via `commandFamilies` in the capability registry |
 | `audit-command-router.cjs` | ADR-959 capability command router (phase 4d-impl-3); extracted from the `case 'audit-uat':` and `case 'audit-open':` arms in `gsd-tools.cjs`; `routeAuditUat` → `uat.cjs:cmdAuditUat`, `routeAuditOpen` → `audit.cjs:{auditOpenArtifacts,formatAuditReport}`; discovered via `commandFamilies` in the capability registry |
 | `intel-command-router.cjs` | ADR-959 capability command router (phase 4d-impl-4, last first-party cutover); extracted from the `case 'intel':` arm in `gsd-tools.cjs`; `routeIntelCommand` → all 9 intel subcommands via lazy `require('./intel.cjs')`; preserves non-raw `timeAgo` transform on `status.files[*].updated_at`; discovered via `commandFamilies` in the capability registry |
-| `runtime-hooks-surface.cjs` | Standalone hook-surface writer module (ADR-857 phase 5f-1); owns Cline rules/agents-md/pre-tool-use hook generation, Cursor `hooks.json` reconciliation, Copilot session-hook config, and Codex hook-block management; extracted verbatim from `bin/install.js` with no logic change. |
+| `runtime-hooks-surface.cjs` | Hook-surface writer and configured-entrypoint validation module (ADR-857 phase 5f-1); owns Cline rules/agents-md/pre-tool-use hook generation, Cursor/Windsurf `hooks.json`, Kimi hook TOML, Copilot session-hook config, Codex hook-block management, and construction-time records for paths emitted into runtime configuration. Installer success requires those records to pass non-executing file-type and interpreter-resolution checks. |
 
 
 ---
@@ -544,6 +561,30 @@ When multiple executors run within the same wave, two mechanisms prevent conflic
 
 1. `--no-verify` commits — Parallel agents skip pre-commit hooks (which can cause build lock contention, e.g., cargo lock fights in Rust projects). The orchestrator runs `git hook run pre-commit` once after each wave completes.
 2. **STATE.md file locking** — All `writeStateMd()` calls use lockfile-based mutual exclusion (`STATE.md.lock` with `O_EXCL` atomic creation). This prevents the read-modify-write race condition where two agents read STATE.md, modify different fields, and the last writer overwrites the other's changes. Includes stale lock detection (10s timeout) and spin-wait with jitter.
+
+#### The STATE.md Write Path
+
+Locking decides *who* writes. A separate contract decides *what survives the write*.
+
+STATE.md carries the same fact in two places — YAML frontmatter and the document body — and the body is authoritative. Every write therefore re-derives frontmatter from the body, which raises the question the write path exists to answer: when a re-derived value disagrees with the one already in frontmatter, which wins?
+
+`FIELD_CLASSIFICATION` (`src/state-transition.cts`) answers it per field, declaring a `preservation` policy — `preserve-when-unchanged`, `preserve-always`, `preserve-if-placeholder`, `derive` — that `applyStatePreservation` executes after `syncStateFrontmatter` re-derives. (A fifth policy, `clear`, was listed here until ADR-3408 §8.6's amendment removed it: no row used it and no executor existed for it.)
+
+**The pipeline's precondition is a type, not a convention (ADR-3473 §8.6).** A policy row can only be honored if the pre-write frontmatter snapshot it compares against is actually present. That snapshot now travels as a `StateTransaction`, built by `openStateTransaction()` — preservation applies — or `rebuildStateTransaction()` — it does not. Both carry the snapshot, and a transaction cannot be constructed without one: an absent snapshot is a *construction failure*, not a runtime skip. That distinction is the whole point. Previously the snapshot was nulled to signal "re-derive from disk", so a declared `preserve-always` row and a silently-skipped one were indistinguishable at runtime, which is how a curated `progress:` block was erased by verbs that had nothing to do with progress.
+
+`rebuildStateTransaction()` is the typed form of ADR-3408 §8.3's closed exception list: `state sync`, which exists to let the body win, and `/gsd-health --repair`'s factory reset. Both are deliberate and permanent, not debt — and because the type names them, the write-path drift guard no longer has to track them as strings in a ratcheted baseline.
+
+**What a command reports it wrote is the same snapshot, read back (ADR-3473 §8.7).** Every `state.*` command returns an `updated` array. That array is now derived by comparing what was actually persisted against the transaction's pre-write snapshot: **a field appears if, and only if, its persisted value changed.** One comparison answers both of the questions that used to need separate machinery — a field the caller asked for that the pipeline then discarded is persisted-equals-snapshot and drops out, and a field nobody asked for that the write moved anyway is different and appears. Nothing is filtered by its preservation policy.
+
+Reporting is at **leaf granularity**: when a single counter moves you are told `progress.total_plans`, not `progress`. The leaves are the ones the field-classification table already declares, so the report is bounded by a schema rather than by walking the document.
+
+One field is excluded, and it is excluded for its *provenance* rather than its policy: `last_updated` is stamped on every save regardless of what you changed, so admitting it would make `state patch`'s success signal — which is simply whether `updated` is non-empty — permanently true, and a patch in which every field failed would report success. `state_head` is deliberately **not** excluded: it is recomputed on every save but only *changes* when the commit it records actually moved, so reporting it tells you something true.
+
+A practical consequence worth knowing: these arrays are now longer than they used to be, because they used to under-report. If you compare one exactly, expect more entries — and expect them to be the ones that really changed.
+
+**[ADR-3408](adr/3408-state-write-path-preservation.md) is the normative contract** for that path: one executor per declared policy, one write seam, and reports computed from what was actually persisted rather than from what the caller intended to write. Where the contract and the code disagree, the code is the defect. It is the write-side counterpart of [ADR-3180](adr/3180-planning-semantic-model-single-owner.md), which gave each read-side derivation a single owner.
+
+**[ADR-3473](adr/3473-enforcement-by-construction.md) owns the invariants that sit outside that contract.** ADR-3408 governs what survives a write; it does not govern the pipeline's precondition, what a command reports it wrote, or where the set of STATE.md keys, types and enums is declared. ADR-3473 owns those, alongside document parsing, enumeration, and the return contract of every routine that can fail. It is the third application of ADR-3180's mechanism and the first whose success metric requires the guard surface to *shrink* as each seam lands.
 
 ---
 
@@ -664,7 +705,7 @@ Equivalent paths for other runtimes:
 - **Kimi CLI:** first-existing generic global root (`~/.config/agents/` recommended, then `~/.agents/` if its `skills/` directory already exists); local install is deferred and guarded
 - **Codex:** `~/.codex/` global or `./.codex/` local
 - **Copilot:** `~/.copilot/` global or `./.github/` local
-- **Antigravity:** auto-detected global root (`~/.gemini/antigravity/`, `~/.gemini/antigravity-ide/`, or `~/.gemini/antigravity-cli/`) or `./.agent/` local
+- **Antigravity:** auto-detected global root (`~/.gemini/antigravity/`, `~/.gemini/antigravity-ide/`, or `~/.gemini/antigravity-cli/`) for settings and runtime files; global skills/agents under `~/.gemini/config/` (the machine-local discovery dir, #3738) or `./.agent/` local
 - **Cursor:** `~/.cursor/` global or `./.cursor/` local
 - **Windsurf/Devin Desktop:** `~/.codeium/windsurf/` global config or `./.windsurf/` local workflows
 - **Augment Code:** `~/.augment/` global or `./.augment/` local
@@ -751,6 +792,22 @@ verification.
 `.planning/codebase/*.md` file; `bin/lib/drift.cjs` provides
 `readMappedCommit` and `writeMappedCommit` round-trip helpers.
 
+The baseline is written by `gsd-tools stamp-codebase-map`, a shell step in the
+map-codebase workflow, not by the mapper agent. The mapper's own freshness
+markers (`**Analysis Date:**`, `<!-- refreshed: ... -->`) are restamped
+unconditionally on an Update run, so an agent that rewrites only the dates still
+looks current to a reader; the machine-readable stamp is the one marker that
+cannot be satisfied by a date-only rewrite, which is exactly why it is not the
+agent's to write. `--files a.md,b.md` narrows the stamp to the documents a
+caller actually refreshed, as the auto-remap path does.
+
+An absent or unresolvable baseline is reported as `skipped` with reason
+`no-mapped-commit` or `unresolvable-mapped-commit`, never as drift. Diffing
+HEAD against the empty tree would report every tracked file as newly added,
+which makes a stale map indistinguishable from a fresh one. Files under
+`.planning/` are excluded from the diff: the map's own commit is a planning
+artifact, not codebase structure.
+
 ---
 
 ## Installer Architecture
@@ -779,8 +836,19 @@ The installer (`bin/install.js`, ~10,700 lines) handles:
 5. **Path normalization** — Replaces `~/.claude/` paths with runtime-specific paths
 6. **Settings integration** — Registers hooks in runtime's `settings.json`
 7. **Patch backup** — Since v1.17, backs up locally modified files to `gsd-local-patches/` for `/gsd-update --reapply`
-8. **Manifest tracking** — Writes `gsd-file-manifest.json` for clean uninstall
+8. **Manifest tracking** — Writes `gsd-file-manifest.json` for clean uninstall. The manifest also records which `runtime` and which `scope` (`global`/`local`) wrote it, under a `manifestVersion` schema field, so a reader can answer "which surfaces are installed, at which scopes" without inferring it from the directory the file sits in ([ADR 2866](adr/2866-install-surface-resolution.md), #2872). Manifests written before that carry no such fields and are read without error — no reinstall is required. See [Installer Migrations → File Manifest](installer-migrations.md#file-manifest)
 9. **Uninstall mode** — `--uninstall` removes all GSD files, hooks, and settings
+
+`installRuntimeArtifacts` (`install-engine.cjs`) returns the executed plan it ran — per kind, per
+scope, including on the combined OpenCode/Kilo family path, which previously early-returned `void` —
+rather than being observable only by re-reading disk afterward. Its destination-writing IO (copies,
+removals, snapshot/restore, best-effort cleanup) now routes through an injectable fs seam,
+`install-fs-adapter.cjs`, so a full install can be exercised against a fake adapter with zero real
+destination IO; locating this package's own source tree remains real by design (a destination-fake
+is never seeded with the repo's own paths). Writes stay byte-identical and existing `void`-ignoring
+callers are unaffected. This completes [ADR 58](adr/58-runtime-install-policy-module.md)'s
+`registry → adapter → helpers → cleanup` rollout — the `cleanup` step had not previously landed
+(#2874, epic #2866 Phase 5).
 
 Install-time file moves, stale-artifact cleanup, config rewrites, and user-data
 preservation are governed by the Installer Migration Module. See
@@ -791,6 +859,8 @@ installs, classifying known runtime install surfaces before later migrations
 remove or rewrite anything.
 
 The plan drift guard (`plan_review.source_grounding`) — which verifies symbol references in generated plans against live source before execution — is specified in [ADR 22](adr/22-plan-drift-guard.md).
+
+The same switch gates a second, cross-artifact axis: a fact-drift pass that compares the *same* fact as stated in `ROADMAP.md`, `PLAN.md`, `STATE.md` and `CONTEXT.md` and reports contradictions (a phase status, a success criterion, a requirement ID, a glossary term) with both locations and the authoritative side named. Where the source-grounding axis grounds a plan against code, this one grounds the planning artifacts against each other. It keys on contradicting knowledge rather than similar-looking text, and is advisory only — it never sets `hardBlock` and never contributes to the convergence counts.
 
 ### Platform Handling
 
@@ -833,6 +903,11 @@ Runtime Engine (Claude Code / Antigravity CLI)
 | > 35%             | Normal   | No warning injected                     |
 | ≤ 35%             | WARNING  | "Avoid starting new complex work"       |
 | ≤ 25%             | CRITICAL | "Context nearly exhausted, inform user" |
+
+The two fire-points are defaults. `hooks.context_warning_threshold` and
+`hooks.context_critical_threshold` in `.planning/config.json` move them per
+project; see [context-monitor.md](context-monitor.md) for the resolution and
+fallback rules.
 
 
 Debounce: 5 tool uses between repeated warnings. Severity escalation (WARNING→CRITICAL) bypasses debounce.
@@ -877,6 +952,17 @@ For a conceptual overview of how the hook and guard layers fit into the broader 
 - Scans content for prompt injection patterns (role override, instruction bypass, system tag injection)
 - Advisory-only — logs detection, does not block
 - Patterns are inlined (subset of `security.cjs`) for hook independence
+- **Output contract:** `hookSpecificOutput` carries both `additionalContext` and `findings` — an array of `{ ruleId, match }` records (`INJECTION-PATTERN` or `INVISIBLE-UNICODE`), module-local to this hook (not shared with `gsd-read-injection-scanner.js`'s own `RULE_IDS`). The advisory is rendered from `findings` via a single mapper, so the two cannot disagree. Consumers should read `findings` rather than parsing the advisory text.
+
+**Read Injection Scanner** (`gsd-read-injection-scanner.js`):
+
+- Triggers on `Read` / `WebFetch` / `WebSearch` PostToolUse events
+- Advisory by default; blocks only `HIGH` severity, and only when `security.injection_blocking` is `true`
+- Severity is `LOW` for 1-2 matched patterns, `HIGH` for 3 or more
+- Skips content shorter than 20 characters, and skips excluded paths (`.planning/`, `REVIEW.md`, `CHECKPOINT*`, security/injection docs, and GSD's own staged hook bundle)
+- Rule ids: the `MD-LINK-*` markdown-link rules mirrored from `security.cjs`'s `MARKDOWN_LINK_PATTERNS`, plus `INJECTION-PATTERN`, `INVISIBLE-UNICODE`, and `UNICODE-TAG-BLOCK`
+- Patterns are shared with `gsd-prompt-guard.js` via `hooks/lib/injection-patterns.js` (#3504); the markdown-link list is inlined for hook independence
+- **Output contract:** `hookSpecificOutput` carries `additionalContext` (the human-readable advisory sentence), `findings` — an array of `{ ruleId, match }` records naming each rule that fired — plus `severity` (`LOW` for 1-2 matches, `HIGH` for 3+) and `source` (the scanned file path, URL, or `search: <query>` string). `findings` and `severity` are the structured surface; the advisory is rendered from them, so the three cannot disagree. `match` is `null` for rules with no captured text (`INVISIBLE-UNICODE`, `UNICODE-TAG-BLOCK`). Consumers should read `findings`/`severity`/`source` rather than parsing the advisory text.
 
 **Workflow Guard** (`gsd-workflow-guard.js`):
 
@@ -884,6 +970,7 @@ For a conceptual overview of how the hook and guard layers fit into the broader 
 - Detects edits outside GSD workflow context (no active `/gsd-` command or Task subagent)
 - Advises using `/gsd-quick` or `/gsd-fast` for state-tracked changes
 - Opt-in via `hooks.workflow_guard: true` (default: false)
+- **Output contract:** the advisory leg's `hookSpecificOutput` carries `code: 'WORKFLOW_ADVISORY'` alongside `additionalContext`. This is distinct from the hook's separate force-add block leg (`code: 'WORKTREE_AGENT_FORCE_ADD_FORBIDDEN'`, `decision: 'block'`) — the two are disambiguated by `code`, never by presence.
 
 ---
 
@@ -905,7 +992,7 @@ The migration-specific ownership and source snapshots live in
 | Kimi CLI | First-existing generic root: `~/.config/agents` recommended, then `~/.agents` when `~/.agents/skills` exists and `~/.config/agents/skills` does not | Deferred and guarded | `skills/gsd-*/SKILL.md` (flat) invoked as `/skill:gsd-*` | `agents/gsd.yaml`, `agents/gsd.md`, and `agents/subagents/gsd-*` YAML/prompt pairs | Explicit `kimi --agent-file <configRoot>/agents/gsd.yaml`; no GSD hooks or statusline |
 | Codex | `~/.codex` | `./.codex` | `skills/gsd-*/SKILL.md` (flat) | `agents/` source markdown plus per-agent TOML (Codex auto-discovers each `agents/gsd-*.toml`; this is the sole canonical role registration, #2406) | `config.toml` bare `[agents]` dispatch-tuning scalar (`max_depth`, no per-role `[agents.gsd-*]` tables), `[features].hooks` (canonical; legacy alias `codex_hooks` is recognized and migrated forward on reinstall, #3566), and hook tables |
 | GitHub Copilot | `~/.copilot` | `./.github` | `skills/gsd-*/SKILL.md` (flat), `copilot-instructions.md`, and `AGENTS.md` (repo root, local) | `.agent.md` files | Self-contained `sessionStart` hook (`hooks/gsd-session.json`, inline `command` type); no statusline |
-| Antigravity | auto-detected: `~/.gemini/antigravity`, `~/.gemini/antigravity-ide`, or `~/.gemini/antigravity-cli` | `./.agent` | `skills/gsd-*/SKILL.md` (flat, #1614) | `agents/gsd-*.md` | Gemini-style `settings.json` hook entries when installed by GSD |
+| Antigravity | auto-detected: `~/.gemini/antigravity`, `~/.gemini/antigravity-ide`, or `~/.gemini/antigravity-cli` | `./.agent` | `~/.gemini/config/skills/gsd-*/SKILL.md` (flat, #1614; global home override #3738) | `~/.gemini/config/agents/gsd-*.md` (#3738) | Gemini-style `settings.json` hook entries when installed by GSD |
 | Cursor | `~/.cursor` | `./.cursor` | `skills/gsd-*/SKILL.md` (flat) | `agents/gsd-*.md` | Rule references under `rules/`; `hooks.json` with sessionStart context injection and postToolUse STATE.md monitor (#777) |
 | Windsurf | `~/.codeium/windsurf` config | `./.windsurf` | `workflows/gsd-*.md` slash-command workflows | No custom-agent artifact surface | No GSD hooks |
 | Augment Code | `~/.augment` | `./.augment` | `skills/gsd-ns-*/SKILL.md` (6 routers) + `skills/gsd-ns-*/skills/<name>/SKILL.md` (nested concretes) | `agents/gsd-*.md` | No GSD hooks or statusline |

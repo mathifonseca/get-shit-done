@@ -25,6 +25,24 @@ const fs = require('node:fs');
 const { setTimeout: sleep } = require('node:timers/promises');
 const { createTempDir, cleanup } = require('./helpers.cjs');
 
+/**
+ * Backstop for spawnSync's OWN hard-kill, guarding against run-with-timeout's
+ * internal wall-clock cap failing to fire. Not a measured probe duration —
+ * this suite's verb-internal budgets top out at 10s (Windows .cmd/.bat
+ * mediation tests), so this preserves ~3x headroom over that ceiling, the
+ * pre-existing value unchanged by this migration.
+ */
+const RUN_WITH_TIMEOUT_HARNESS_BACKSTOP_MS = 30000;
+
+/**
+ * Tighter backstop for the tree-reap tests (the C1 POSIX group reap and the
+ * #4601 win32 tree kill): their own verb-internal budgets are 2-3s plus ~900ms
+ * of heartbeat-settle waits, so this keeps a smaller margin than the file
+ * default while still comfortably covering them. Pre-existing value, unchanged
+ * (generalized from C1-only to both reap tests by #4601).
+ */
+const RUN_WITH_TIMEOUT_REAP_BACKSTOP_MS = 20000;
+
 const ROOT = path.join(__dirname, '..');
 const GSD_TOOLS = path.join(ROOT, 'gsd-core', 'bin', 'gsd-tools.cjs');
 const NODE = process.execPath;
@@ -35,7 +53,7 @@ function runVerb(args, opts = {}) {
   return spawnSync(NODE, [GSD_TOOLS, 'run-with-timeout', ...args], {
     cwd: os.tmpdir(),
     encoding: 'utf8',
-    timeout: 30000, // test-harness backstop; the verb's own cap is what we assert
+    timeout: RUN_WITH_TIMEOUT_HARNESS_BACKSTOP_MS, // test-harness backstop; the verb's own cap is what we assert
     ...opts,
   });
 }
@@ -57,11 +75,11 @@ describe('#2351 run-with-timeout — exit-code contract', () => {
   });
 
   test('exits 124 when the wall-clock budget is exceeded (matches GNU timeout)', () => {
-    const start = Date.now();
     const r = runVerb(['1', '--', ...HANG]);
+    // exit 124 is itself the discriminator: a harness backstop kill surfaces
+    // as status === null (signal), never as 124 — so no elapsed-time
+    // assertion is needed or allowed here.
     assert.equal(r.status, 124, 'a timed-out command must exit 124');
-    // Sanity: the cap actually fired promptly, not the 30s harness backstop.
-    assert.ok(Date.now() - start < 15000, 'timeout should fire near the 1s budget');
   });
 
   test('exits 127 when the command is not found (matches GNU timeout)', () => {
@@ -139,7 +157,7 @@ describe('#2351 run-with-timeout — argument handling (negative matrix)', () =>
 
   test('the `query` meta-prefix form is accepted', () => {
     const r = spawnSync(NODE, [GSD_TOOLS, 'query', 'run-with-timeout', '5', '--', ...OK], {
-      cwd: os.tmpdir(), encoding: 'utf8', timeout: 30000,
+      cwd: os.tmpdir(), encoding: 'utf8', timeout: RUN_WITH_TIMEOUT_HARNESS_BACKSTOP_MS,
     });
     assert.equal(r.status, 0);
   });
@@ -183,7 +201,7 @@ describe('#2351 run-with-timeout — kill semantics (POSIX process groups)', () 
       'process.on("SIGTERM", () => process.exit(0));',
       'setInterval(() => {}, 1000);',
     ].join('\n'));
-    const r = runVerb(['3', '--', NODE, parentFile, hbFile], { timeout: 20000 });
+    const r = runVerb(['3', '--', NODE, parentFile, hbFile], { timeout: RUN_WITH_TIMEOUT_REAP_BACKSTOP_MS });
     assert.equal(r.status, 124, 'must report a timeout (124), not hang');
     assert.ok(fs.existsSync(hbFile), 'child heartbeat should exist');
     await sleep(300); // let any in-flight write settle after the SIGKILL
@@ -196,6 +214,92 @@ describe('#2351 run-with-timeout — kill semantics (POSIX process groups)', () 
   test('a command killed by a signal exits 128+signum (bash convention)', { skip: !posix }, () => {
     const r = runVerb(['10', '--', 'bash', '-c', 'kill -TERM $$']);
     assert.equal(r.status, 143, 'self-SIGTERM (15) → 128+15 = 143');
+  });
+});
+
+describe('#4601 run-with-timeout — tree reap (Windows has no process groups)', () => {
+  // The #4601 defect: on Windows `detached` is always false, so killTree fell
+  // through to a bare child.kill(), which terminates the DIRECT child only —
+  // any process the child launched survived the timeout and kept running
+  // (typically a model CLI wrapped via workflow.cross_ai_command, calling a
+  // paid API with nothing bounding it). The fix tree-kills via
+  // `taskkill /PID <pid> /T /F` on the FIRST kill attempt — it must run while
+  // the root is alive, because child.kill on Windows is TerminateProcess and
+  // the moment the direct child exits its descendants are orphaned and no
+  // taskkill can reach them (the issue's graceful-then-forceful staging prose
+  // is unsatisfiable there; its own snippet applies taskkill on every call).
+  // Methodology mirrors the C1 test above: HEARTBEAT liveness, not
+  // kill(pid,0); first sample written synchronously at startup; bounded
+  // settle waits >> the 100ms tick.
+  //
+  // KNOWN RUNNER MASKING, recorded deliberately: on GitHub's windows runners
+  // the test harness reaps orphaned descendants shortly after the verb exits,
+  // so the freeze assertion can pass even against UNFIXED code (observed: the
+  // direct tree test below was green on the unfixed RED head's windows tier).
+  // The environment where the bug manifests is a user's real Windows session,
+  // per the reporter's repro. These tests pin the contract; they are not a
+  // full differential witness on CI runners.
+  const isWin = process.platform === 'win32';
+
+  test("a timed-out command's descendant stops ticking — the tree dies, not just the direct child", { skip: !isWin ? 'win32-only' : false }, async (t) => {
+    const dir = createTempDir('rwt-4601-tree');
+    t.after(() => cleanup(dir));
+    const parentFile = path.join(dir, 'parent.js');
+    const hbFile = path.join(dir, 'heartbeat');
+    fs.writeFileSync(parentFile, [
+      'const cp = require("child_process");',
+      "const childCode = 'const fs=require(\"fs\");const hb=process.argv[1];const tick=()=>fs.writeFileSync(hb,String(Date.now()));tick();setInterval(tick,100);';",
+      'cp.spawn(process.execPath, ["-e", childCode, process.argv[2]], { stdio: "ignore" });',
+      // The parent does NOT trap or exit on SIGTERM: on Windows the graceful
+      // stage is TerminateProcess on the direct child either way — what #4601
+      // tests is that the DESCENDANT (which no direct kill can reach) is gone.
+      'setInterval(() => {}, 1000);',
+    ].join('\n'));
+    const r = runVerb(['2', '--', NODE, parentFile, hbFile], { timeout: RUN_WITH_TIMEOUT_REAP_BACKSTOP_MS });
+    assert.equal(r.status, 124, 'must report a timeout (124), not hang');
+    assert.ok(fs.existsSync(hbFile), 'descendant heartbeat should exist');
+    await sleep(300); // let any in-flight write settle after the tree kill
+    const first = fs.readFileSync(hbFile, 'utf8');
+    await sleep(600); // >> the 100ms heartbeat interval
+    const second = fs.readFileSync(hbFile, 'utf8');
+    assert.equal(second, first, 'descendant must be tree-killed (heartbeat frozen), not orphaned and still ticking');
+  });
+
+  test('a fast-exiting command still exits with its own code — the win32 branch never perturbs the normal path', { skip: !isWin ? 'win32-only' : false }, () => {
+    // Negative-space guard: for a fast command no timer fires and killTree is
+    // never invoked — the taskkill branch must only ever attach to killTree
+    // attempts, never to the timerless normal path.
+    const r = runVerb(['5', '--', NODE, '-e', 'process.exit(7)']);
+    assert.equal(r.status, 7);
+  });
+
+  test('a timed-out .cmd-mediated command has its whole subtree reaped (the model-CLI shape)', { skip: !isWin ? 'win32-only' : false }, async (t) => {
+    // The #2667 mediation makes cmd.exe the direct child, so the real command
+    // is a GRANDCHILD even with no further nesting — this is the shape of
+    // workflow.cross_ai_command wrapping a model CLI .cmd shim (the paid-orphan
+    // case from the issue). taskkill /T from the cmd.exe pid must reach it.
+    // The shim stays alive with a ping sleep-loop, NOT `pause`: pause blocks on
+    // stdin, which spawnSync-harness semantics resolve differently (observed on
+    // a real runner: the shim quit early and the verb exited 0, no timeout).
+    const dir = createTempDir('rwt-4601-cmd');
+    t.after(() => cleanup(dir));
+    const shim = path.join(dir, 'slow.cmd');
+    const hbFile = path.join(dir, 'heartbeat');
+    fs.writeFileSync(shim, [
+      '@echo off',
+      `start "" /b "${NODE}" -e "const fs=require('fs');const hb=process.argv[1];const tick=()=>fs.writeFileSync(hb,String(Date.now()));tick();setInterval(tick,100);" "${hbFile}"`,
+      ':loop',
+      'ping -n 2 127.0.0.1 > NUL',
+      'goto :loop',
+    ].join('\r\n'), 'utf8');
+    const r = runVerb(['2', '--', shim], { timeout: RUN_WITH_TIMEOUT_REAP_BACKSTOP_MS });
+    assert.equal(r.status, 124, 'the mediated .cmd must time out (124), not exit early or hang');
+    assert.ok(fs.existsSync(hbFile), 'grandchild heartbeat should exist');
+    await sleep(300); // let any in-flight write settle after the tree kill
+    const first = fs.readFileSync(hbFile, 'utf8');
+    await sleep(600); // >> the 100ms heartbeat interval
+    const second = fs.readFileSync(hbFile, 'utf8');
+    assert.equal(second, first, 'the .cmd grandchild must be tree-killed (heartbeat frozen), not orphaned and still ticking');
   });
 });
 
@@ -230,7 +334,7 @@ describe('#2667 run-with-timeout — Windows .cmd/.bat/.exe spawn mediation (CVE
       fs.writeFileSync(shim, '@echo {"verdict":"clean"}\r\n', 'utf8');
       const r = runVerb(['10', '--', shim]);
       assert.equal(r.status, 0, `expected the .bat shim to run (exit 0); got ${r.status}. stderr: ${r.stderr}`);
-      assert.ok((r.stdout || '').length > 0, 'expected non-empty stdout from the .bat shim');
+      assert.ok((r.stdout || '').includes('clean'), `expected JSON stdout from the .bat shim; got: ${r.stdout}`);
     } finally {
       cleanup(dir);
     }
@@ -341,5 +445,52 @@ describe('#2351 parity guard — no hardcoded timeout in workflow/agent/referenc
       [],
       `hardcoded timeout still present:\n${offenders.map((o) => `${o.file}:${o.line} ${o.snippet}`).join('\n')}`,
     );
+  });
+});
+
+// ─── #4797: the mediation must survive spaces in the shim path ──────────────
+
+describe('#4797 run-with-timeout — .cmd mediation with spaces in the shim path', () => {
+  // The #2667 mediation's private copy passed `/d /s /c <cmd> ...args` with the
+  // shim path as a discrete argv token: Node quotes the whole argv (a space in
+  // the path forces quotes) and `/s` strips the FIRST and LAST quote of the /c
+  // string — so cmd.exe took the pre-space fragment as the program name and
+  // every mediated call under a spaced path failed with exit 1 and empty
+  // stdout. The projectSpawnInvocation seam wraps the WHOLE command line in
+  // one extra quote pair with windowsVerbatimArguments, which is the shape
+  // that survives. The issue's own Windows repro is the pre-fix RED evidence
+  // (exit 1, cmd.exe "not recognized", 0-byte stdout); the linux bench cannot
+  // run cmd.exe, so these tests are win32-gated like their #2667 siblings.
+  const isWin = process.platform === 'win32';
+  const SPACED = 'rwt 4797 dir with spaces';
+
+  test('win32: a .cmd shim under a spaced path runs (the fallow pre-pass shape)', { skip: !isWin ? 'win32-only' : false }, () => {
+    const base = createTempDir('rwt-4797-base');
+    const dir = path.join(base, SPACED);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const shim = path.join(dir, 'fake.cmd');
+      fs.writeFileSync(shim, '@echo {"verdict":"clean"}\r\n', 'utf8');
+      const r = runVerb(['10', '--', shim]);
+      assert.equal(r.status, 0, `expected the spaced-path .cmd shim to run (exit 0); got ${r.status}. stderr: ${r.stderr}`);
+      assert.ok((r.stdout || '').includes('clean'), `expected JSON stdout; got: ${r.stdout}`);
+    } finally {
+      cleanup(base);
+    }
+  });
+
+  test('win32: a .bat shim under a spaced path runs too', { skip: !isWin ? 'win32-only' : false }, () => {
+    const base = createTempDir('rwt-4797-bat-base');
+    const dir = path.join(base, SPACED);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const shim = path.join(dir, 'fake.bat');
+      fs.writeFileSync(shim, '@echo {"verdict":"clean"}\r\n', 'utf8');
+      const r = runVerb(['10', '--', shim]);
+      assert.equal(r.status, 0, `expected the spaced-path .bat shim to run (exit 0); got ${r.status}. stderr: ${r.stderr}`);
+      assert.ok((r.stdout || '').includes('clean'), `expected JSON stdout from the .bat shim; got: ${r.stdout}`);
+    } finally {
+      cleanup(base);
+    }
   });
 });

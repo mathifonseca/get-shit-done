@@ -9,9 +9,9 @@
 
 ## Why this is still `Proposed` (audited 2026-07-17)
 
-Confirmed shipped, on-tree: the capability is real and registered, not vaporware. `capabilities/claude-orchestration/capability.json` exists with detection + emission (`detectWorkflowBackend` / `emitWorkflowScript`) in `src/claude-orchestration.cts` (compiled to `gsd-core/bin/lib/claude-orchestration.cjs`), federated config (`claude_orchestration.enabled` / `execution_backend` / `min_agent_sdk_version`), and 1,552 lines of tests across `tests/claude-orchestration.test.cjs`, `tests/claude-orchestration-command-router.test.cjs`, and `tests/fix-2285-claude-orchestration-wiring.test.cjs`. The previously-fatal wiring bug, #2285 ("claude-orchestration capability (#1143) registered as active but never wired into execute-phase orchestrator prompt"), is closed COMPLETED (2026-07-15) — one day before this audit — and the owning feature issue #1143 is also closed COMPLETED.
+Confirmed shipped, on-tree: the capability is real and registered, not vaporware. `capabilities/claude-orchestration/capability.json` exists with detection + emission (`detectWorkflowBackend` / `emitWorkflowScript`) in `src/claude-orchestration.cts` (compiled to `gsd-core/bin/lib/claude-orchestration.cjs`), federated config (`claude_orchestration.enabled` / `execution_backend` / `min_agent_sdk_version`), and 1,552 lines of tests across `tests/claude-orchestration.test.cjs` (which now includes the #2285 wiring-fix regression coverage, folded in per #3334) and `tests/claude-orchestration-command-router.test.cjs`. The previously-fatal wiring bug, #2285 ("claude-orchestration capability (#1143) registered as active but never wired into execute-phase orchestrator prompt"), is closed COMPLETED (2026-07-15) — one day before this audit — and the owning feature issue #1143 is also closed COMPLETED.
 
-**The blocker.** The ADR sets its own bar for ratification in its own Amendment (above): "flipping to Accepted follows maintainer sign-off on the E2E behaviour once exercised on Claude Code with the Workflow tool present." No such exercise is recorded anywhere in issues, PRs, or tests. Every test in the three files above operates at the contract or CLI-subprocess layer — asserting the *shape* of an emitted script or the return value of `resolve-wave-dispatch` — none constructs or executes an actual Workflow-tool run (`grep -rn "Workflow(" tests/claude-orchestration*.test.cjs tests/fix-2285-*.test.cjs` returns no hits). Two further gaps sit inside the ADR's own Decision section: (1) Decision §1's claimed net effect — "wave parallelism, the plan-checker, and the verifier are restored" — is narrower than what shipped: `capability.json`'s own description says "the plan-checker and verifier remain inline until separately wired — this capability delivers the parallel-execution backend, not those gates"; (2) Decision §3's fold-in of the `gsd-ultraplan-phase` skill into the capability's `skills[]` has not happened — `capability.json` still shows `"skills": []`, and no follow-up issue for the migration the Amendment promises exists (searched via `gh issue list --search`, no result).
+**The blocker.** The ADR sets its own bar for ratification in its own Amendment (above): "flipping to Accepted follows maintainer sign-off on the E2E behaviour once exercised on Claude Code with the Workflow tool present." No such exercise is recorded anywhere in issues, PRs, or tests. Every test in the two files above operates at the contract or CLI-subprocess layer — asserting the *shape* of an emitted script or the return value of `resolve-wave-dispatch` — none constructs or executes an actual Workflow-tool run (`grep -rn "Workflow(" tests/claude-orchestration*.test.cjs` returns no hits). Two further gaps sit inside the ADR's own Decision section: (1) Decision §1's claimed net effect — "wave parallelism, the plan-checker, and the verifier are restored" — is narrower than what shipped: `capability.json`'s own description says "the plan-checker and verifier remain inline until separately wired — this capability delivers the parallel-execution backend, not those gates"; (2) Decision §3's fold-in of the `gsd-ultraplan-phase` skill into the capability's `skills[]` has not happened — `capability.json` still shows `"skills": []`, and no follow-up issue for the migration the Amendment promises exists (searched via `gh issue list --search`, no result).
 
 **Unblock condition.** Ratify once: (a) a real Claude Code session with the Workflow tool present and `claude_orchestration.enabled=true` drives an `execute-phase` wave through the Workflow backend, and the result is recorded (issue comment, PR, or a test that actually builds/executes a `Workflow` script rather than asserting emitted-script shape) — that is the maintainer sign-off the ADR itself asks for; and (b) the Decision section's "plan-checker and verifier restored" language is reconciled with the shipped scope (either corrected to match, or backed by a tracked issue for the deferred wiring `capability.json` already discloses). The `skills[]` migration (item 3) is lower priority since it is openly disclosed as deferred rather than silently dropped, but should carry a tracked issue number before ratification so it doesn't quietly vanish.
 
@@ -130,3 +130,48 @@ execution path (actual orchestration via the Workflow tool inside Claude Code) i
 not verifiable outside that runtime. The capability is structurally complete and
 tested at the contract level; flipping to Accepted follows maintainer sign-off on
 the E2E behaviour once exercised on Claude Code with the Workflow tool present.
+
+## Amendment (2026-09-14): the `execute:wave:*` contribution is removed — orchestration is not an agent contribution
+
+Issue [#4740](https://github.com/open-gsd/gsd-core/issues/4740).
+
+Decision §2 and the 2026-07-06 amendment above are **historical record and are not rewritten**;
+this section supersedes them on the single point of loop registration.
+
+`capabilities/claude-orchestration/capability.json` declared a contribution at `execute:wave:pre`
+with `into: "executor"`. `gsd-core/references/loop-hook-dispatch.md` defines a contribution as
+*"Inject `fragment.inline` verbatim into the context for the role named in `into`"*, so that
+fragment was injected into **executor** prompts whenever `claude_orchestration.enabled`.
+
+Its 267 lines are orchestration end to end: construct a wave manifest, resolve the dispatch
+backend, invoke the Workflow tool to spawn executors, bridge per-agent results into the merge
+chain. An executor can act on none of it.
+
+**Retargeting it to `into: "orchestrator"` would not have been a fix.** `ROLE_TO_AGENT` carries no
+`orchestrator` entry by design — the orchestrator IS the host, not an agent, and the host's
+procedure lives in `gsd-core/workflows/execute-phase.md`. A step's `agentRoles` enumerates agents a
+capability may inject context INTO. Adding `orchestrator` there would model the host as an
+injectable agent: the same category error pointed the other way, and it would have required
+carving an exception into the role partition ADR-894 §3's 2026-09-14 amendment had just made
+normative.
+
+The defect is therefore the **mechanism**, not the label. A `contribution` injects into an agent's
+context; *"replace step 3's inline dispatch loop"* (`execute-phase.md:588`) is a change to what the
+**host** does. The contribution channel was being used as a host-behaviour directive because it was
+the only channel available at an `execute:*` point.
+
+**What changed:** the `execute:wave:pre` contribution is removed. The `plan:post` /
+`into: "planner"` contribution is correct and is untouched. The orchestrator-side procedure is
+preserved verbatim at `capabilities/claude-orchestration/docs/workflow-backend-dispatch.md` — it is
+the only copy in the repo — and is no longer injected anywhere.
+
+**Consequence, stated plainly:** the Workflow execution backend now has **no loop wiring**. Its
+detection and emission code (`detectWorkflowBackend`, `emitWorkflowScript`) and its federated
+config remain, and its design is intact in the preserved document, but nothing dispatches it. Under
+the orchestration/execution separation this ADR itself asserts — *"only the orchestrator (the
+script's return) writes shared files; executors stay in their worktrees"* — it never had a
+legitimate channel. This makes that visible rather than changing it, and the "Why this is still
+Proposed" audit above already records that the end-to-end path has never been exercised.
+
+Wiring it properly needs a **host-level mechanism** for a capability to alter the orchestrator's
+own dispatch procedure. That does not exist today and is not proposed here.

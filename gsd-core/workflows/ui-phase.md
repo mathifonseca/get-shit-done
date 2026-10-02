@@ -19,7 +19,7 @@ Valid GSD subagent types (use exact names — do not fall back to 'general-purpo
 ## 1. Initialize
 
 ```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { _gsd_at "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
 INIT=$(gsd_run query init.plan-phase "$PHASE")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 AGENT_SKILLS_UI=$(gsd_run query agent-skills gsd-ui-researcher)
@@ -28,7 +28,7 @@ AGENT_SKILLS_UI_CHECKER=$(gsd_run query agent-skills gsd-ui-checker)
 
 Parse JSON for: `phase_dir`, `phase_number`, `phase_name`, `phase_slug`, `padded_phase`, `has_context`, `has_research`, `commit_docs`, `response_language`.
 
-**If `response_language` is set:** All user-facing questions, prompts, and explanations in this workflow MUST be presented in `{response_language}`. Technical terms, code, file paths, and subagent prompts stay in English — only user-facing output is translated.
+**If `response_language` is set:** All user-facing output of this workflow — narration between tool calls, status updates, progress notes, findings, questions, prompts, and explanations — MUST be presented in `{response_language}`. Technical terms, code, file paths, and subagent prompts stay in English — only user-facing output is translated.
 
 **File paths:** `state_path`, `roadmap_path`, `requirements_path`, `context_path`, `research_path`.
 
@@ -47,7 +47,7 @@ UI_CHECKER_MODEL=$(gsd_run query resolve-model gsd-ui-checker --raw)
 Check config:
 
 ```bash
-UI_ENABLED=$(gsd_run query config-get workflow.ui_phase 2>/dev/null || echo "true")
+UI_ENABLED=$(gsd_run query config-get workflow.ui_phase --raw 2>/dev/null || echo "true")
 ```
 
 **If `UI_ENABLED` is `false`:**
@@ -98,8 +98,17 @@ Continue (non-blocking).
 UI_SPEC_FILE=$(ls "${PHASE_DIR}"/*-UI-SPEC.md 2>/dev/null | head -1)
 ```
 
-**Text mode (`workflow.text_mode: true` in config or `--text` flag):** Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `text_mode` from init JSON is `true`. When TEXT_MODE is active, replace every `AskUserQuestion` call with a plain-text numbered list and ask the user to type their choice number. This is required for non-Claude runtimes (OpenAI Codex, Gemini CLI, etc.) where `AskUserQuestion` is not available.
-**If exists:** Use AskUserQuestion:
+**Text mode (`workflow.text_mode: true` in config or `--text` flag):** Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `text_mode` from init JSON is `true`. When TEXT_MODE is active, replace every `AskUserQuestion` call with a plain-text numbered list and ask the user to type their choice number. This is required for non-Claude runtimes (OpenAI Codex, Antigravity, etc.) where `AskUserQuestion` is not available.
+**If exists:**
+
+**If `--auto`:** Auto-select "Skip" — keep the existing UI-SPEC untouched and proceed to step 7
+(checker). Log: `[auto] UI-SPEC exists — reusing as-is, proceeding to verification.` Skip is the
+auto choice because it is the only non-destructive one: "Update" re-runs the researcher, which
+rewrites the whole contract and drops answers a person already recorded in it, and "View" exits
+without verifying anything. A `--auto` run most often meets this file as an unverified draft from
+a run that ended before its checker ran, which is exactly the state the checker should now see.
+
+**Otherwise:** Use AskUserQuestion:
 - header: "Existing UI-SPEC"
 - question: "UI-SPEC.md already exists for Phase {N}. What would you like to do?"
 - options:
@@ -115,9 +124,7 @@ If "Update": continue to step 5.
 
 Display:
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- GSD ► UI DESIGN CONTRACT — PHASE {N}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+### GSD ► UI DESIGN CONTRACT — PHASE {N}
 
 ◆ Spawning UI researcher... (runs in a subagent — no output until it returns, ~1–5 min; expected, not a freeze)
 ```
@@ -132,14 +139,14 @@ Create UI design contract for Phase {phase_number}: {phase_name}
 Answer: "What visual and interaction contracts does this phase need?"
 </objective>
 
-<files_to_read>
+<required_reading>
 - {state_path} (Project State)
 - {roadmap_path} (Roadmap)
 - {requirements_path} (Requirements)
 - {context_path} (USER DECISIONS from /gsd:discuss-phase)
 - {research_path} (Technical Research — stack decisions)
 - {SKETCH_FINDINGS_PATH} (Sketch Findings — validated design decisions, CSS patterns, visual direction from /gsd:sketch, if exists)
-</files_to_read>
+</required_reading>
 
 ${AGENT_SKILLS_UI}
 
@@ -155,7 +162,7 @@ padded_phase: {padded_phase}
 </config>
 ```
 
-Omit null file paths from `<files_to_read>`.
+Omit null file paths from `<required_reading>`.
 
 <!-- #2508 runtime-aware-dispatch -->
 
@@ -188,9 +195,7 @@ Display blocker details and options. Exit workflow.
 
 Display:
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- GSD ► VERIFYING UI-SPEC
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+### GSD ► VERIFYING UI-SPEC
 
 ◆ Spawning UI checker... (runs in a subagent — no output until it returns, ~1–5 min; expected, not a freeze)
 ```
@@ -202,14 +207,14 @@ Read ~/.claude/agents/gsd-ui-checker.md for instructions.
 
 <objective>
 Validate UI design contract for Phase {phase_number}: {phase_name}
-Check all 6 dimensions. Return APPROVED or BLOCKED.
+Check all 7 dimensions. Return APPROVED or BLOCKED.
 </objective>
 
-<files_to_read>
+<required_reading>
 - {phase_dir}/{padded_phase}-UI-SPEC.md (UI Design Contract — PRIMARY INPUT)
 - {context_path} (USER DECISIONS — check compliance)
 - {research_path} (Technical Research — check stack alignment)
-</files_to_read>
+</required_reading>
 
 ${AGENT_SKILLS_UI_CHECKER}
 
@@ -242,8 +247,9 @@ Display blocking issues. Proceed to step 9.
 Track `revision_count` (starts at 0).
 
 **If `revision_count` < 2:**
-- Increment `revision_count`
-- Re-spawn gsd-ui-researcher with revision context:
+- Re-spawn gsd-ui-researcher with revision context. `revision_count` is incremented on the
+  researcher's RETURN, not here — a return of `## REVISION_CONFLICT` must not spend an
+  iteration, and an increment made before dispatch cannot be withheld afterwards:
 
 ```markdown
 <revision>
@@ -252,12 +258,32 @@ The UI checker found issues with the current UI-SPEC.md.
 ### Issues to Fix
 {paste blocking issues from checker return}
 
-Read the existing UI-SPEC.md, fix ONLY the listed issues, re-write the file.
+`required_property` + evidence + severity BIND. `fix_hint` is ONE non-binding example route: a
+smaller or different mechanism reaching the same property resolves the issue in full — say which
+you used. Re-check the user's locked answers, capability guidance (CLAUDE.md, project skills) and
+the constraints this UI-SPEC already encodes BEFORE editing; if a hint would contradict one, or
+the property is unreachable without breaking one, return `## REVISION_CONFLICT` with the conflict
+and the alternatives rather than applying or working around it — see your `## Revision Conflict`
+section for its shape.
+
+Read the existing UI-SPEC.md, resolve ONLY the listed issues, re-write the file.
 Do NOT re-ask the user questions that are already answered.
 </revision>
 ```
 
-- After researcher returns → re-spawn checker (step 7)
+- **If the researcher returns `## REVISION_CONFLICT`:** do NOT increment `revision_count` and do
+  NOT re-spawn the checker — a conflict is not resolvable by re-running the same loop. Present the
+  conflict and its alternatives to the user and ask which to take: adopt a named alternative /
+  override the named constraint and apply the hint / amend the constraint itself. Every option
+  resolves the conflict — accepting the spec with the BLOCK still open is NOT offered here, because
+  the blocking `required_property` still fails; that choice belongs to the cap escalation below.
+  Re-spawn the researcher with the chosen resolution and return to this step.
+
+  **Bounded:** a conflict naming the SAME `required_property` twice in a row (no successful revision in between) is a stall, and so is
+  the THIRD conflict return of this loop whatever property it names — alternating property names
+  would otherwise never trip the repeat rule. Stop re-spawning and route it to the same cap
+  escalation below, so declining to spend an iteration cannot make this path unbounded.
+- **On any other return:** increment `revision_count`, then re-spawn checker (step 7)
 
 **If `revision_count` >= 2:**
 ```
@@ -287,6 +313,27 @@ spec-phase Step 5.5's edge probe, retargeted to the UI element/state axis. Refer
 section (re-run), the write-back is idempotent (it REPLACES that section, never appends). If the
 runtime is non-Claude and the probe engine cannot be resolved, the shim FAILS LOUD (below) — it
 never silently no-ops (a silent skip would drop the whole state-coverage axis).
+
+**Non-English projects — `text_en` carries the classifier-facing translation; the UI-SPEC is
+not.** The element cues the classifier matches are **English** word-boundary patterns, so
+element prose written in another language matches nothing, classifies to zero kinds, and lands
+every element in `unclassified` (#1110) — the taxonomy contributes nothing and `--auto` leaves
+it all `unresolved`. When this project has `response_language` set, add an optional `text_en`
+key to each `$ELEMENTS_JSON` entry: a faithful **English** translation of that element's
+`text`. `text_en` is **engine input, never user-facing output**, so the `response_language`
+rule at the top of this workflow does not govern it — but `text` itself is NOT translated:
+write it as the element's own wording, exactly as it appears in the UI-SPEC. The UI-SPEC keeps
+the original language — only `text_en` is translated, and element `id`s are never translated
+or renumbered (coverage rows join back on `id`). Populate `text_en` for **every** element, not
+only the ones that look UI-relevant: the zero-applicable guard below fires when `$APPLICABLE`
+is `0` and again on the all-unclassified case (`$UNCLASSIFIED = $APPLICABLE`, #4656), so a
+partly-classified surface slips through both arms with no signal at all. When
+`response_language` is unset (an English-language project), omit `text_en` —
+`text` is already English and the engine falls back to it automatically (`text_en ?? text`).
+If an element still classifies to zero kinds with `text_en` populated, it carries no cue in
+any language (the recorded recall gap — ADR-857 §98 / ADR-550 D7b, not a translation failure);
+author an explicit `elements` array on that element instead of relying on the prose classifier.
+(#4657)
 
 **Runtime coverage compute — resolve and invoke ui-consideration-probe.cjs:**
 
@@ -328,8 +375,9 @@ fi
 
 # Element extraction (MANUAL BY DESIGN — not an oversight): the agent reads the researcher-authored
 # UI-SPEC prose (the described surfaces — the Design System / Copywriting rows and any element the
-# researcher named) and writes ONE object per UI element/surface: {"id","text"} where text is the
-# prose describing it. This mirrors spec-phase Step 5.5's edge-probe REQS_JSON step VERBATIM — a
+# researcher named) and writes ONE object per UI element/surface: {"id","text","text_en"?} where
+# text is the prose describing it. This mirrors spec-phase Step 5.5's edge-probe REQS_JSON step
+# VERBATIM — a
 # hand-populated heredoc guarded by the fail-loud <replace:> check below — the established, shipped
 # pattern for feeding a probe from a prose spec. It is NOT mechanized on purpose: a UI-SPEC has no
 # single machine-parseable "elements" column — surfaces are distributed across design-token tables
@@ -338,7 +386,10 @@ fi
 # element). The agent-authored heredoc + fail-loud guard is the conservative choice, identical to the
 # requirement-side edge-probe path (RR-04). If a future UI-SPEC gains a canonical element table,
 # revisit to parse it. Populate the heredoc from the UI-SPEC; the guard below fails loud on a
-# forgotten substitution (never a no-op).
+# forgotten substitution (never a no-op). When `response_language` is set, ALSO add `text_en` — a
+# faithful ENGLISH translation of `text` (see the Non-English projects note above); the element
+# cues are English-only, so original-language `text` alone classifies to zero kinds. `text` itself
+# stays the UI-SPEC's own wording and is never translated.
 ELEMENTS_JSON=$(mktemp "${TMPDIR:-/tmp}/ui-probe-elements-XXXXXX") && mv "$ELEMENTS_JSON" "${ELEMENTS_JSON}.json" && ELEMENTS_JSON="${ELEMENTS_JSON}.json" || exit 1
 cat > "$ELEMENTS_JSON" <<'JSON'
 [
@@ -368,12 +419,14 @@ fi
 # Zero-applicable guard: a report where NO category applied across ANY element is far more likely a
 # classification miss (or malformed elements) than a genuinely state-free UI. Surface it loudly.
 APPLICABLE=$(printf '%s' "$COVERAGE" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let n=0;try{n=JSON.parse(s).coverage.applicable}catch{n=0}process.stdout.write(String(n))})')
-if [ "$APPLICABLE" = "0" ]; then
+UNCLASSIFIED=$(printf '%s' "$COVERAGE" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let n=0;try{n=JSON.parse(s).coverage.unclassified}catch{n=0}process.stdout.write(String(n))})')
+# #4656: all-unclassified reads as a non-zero applicable — widen the guard to fire there too.
+if [ "$APPLICABLE" = "0" ] || [ "$UNCLASSIFIED" = "$APPLICABLE" ]; then
   echo "WARNING: ui-consideration-probe proposed ZERO applicable categories across all elements — likely a classification miss or malformed elements, not a genuinely state-free UI. Do NOT silently write an empty UI Considerations section." >&2
 fi
 ```
 
-If `$APPLICABLE` is `0`, do NOT proceed silently: ask via AskUserQuestion ("The UI probe found no
+If the guard above fired (`$APPLICABLE` is `0`, or every element is unclassified — `$UNCLASSIFIED = $APPLICABLE`, #4656), do NOT proceed silently: ask via AskUserQuestion ("The UI probe found no
 applicable state considerations — is this genuinely a state-free surface, or should we revisit the
 element descriptions?"). Only write an empty section after explicit confirmation.
 
@@ -423,16 +476,14 @@ STATE coverage and REFERENCES those rows rather than restating the copy (de-dup)
 
 Display:
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- GSD ► UI-SPEC READY ✓
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+### GSD ► UI-SPEC READY ✓
 
 **Phase {N}: {Name}** — UI design contract approved
 
-Dimensions: 6/6 passed
+Dimensions: 7/7 passed
 {If any FLAGs: "Recommendations: {N} (non-blocking)"}
 
-───────────────────────────────────────────────────────────────
+---
 
 ## ▶ Next Up — [${PROJECT_CODE}] ${PROJECT_TITLE}
 
@@ -448,7 +499,7 @@ Dimensions: 6/6 passed
 
 (or `/gsd:plan-phase {N}` to skip discussion)
 
-───────────────────────────────────────────────────────────────
+---
 ```
 
 ## 11. Commit (if configured)
@@ -475,7 +526,7 @@ gsd_run query state.record-session \
 - [ ] gsd-ui-researcher spawned with correct context and file paths
 - [ ] UI-SPEC.md created in correct location
 - [ ] gsd-ui-checker spawned with UI-SPEC.md
-- [ ] All 6 dimensions evaluated
+- [ ] All 7 dimensions evaluated
 - [ ] Revision loop if BLOCKED (max 2 iterations)
 - [ ] Final status displayed with next steps
 - [ ] UI-SPEC.md committed (if commit_docs enabled)

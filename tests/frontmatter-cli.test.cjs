@@ -667,12 +667,20 @@ describe('#1778: thread workflow uses the 1.6 named-flag frontmatter.set form', 
       'named-flag form must write status: resolved into the file',
     );
 
-    // Pre-1.6 positional form — must fail with the documented message and NOT mutate.
+    // Pre-1.6 positional form — must fail and NOT mutate.
+    //
+    // #3884 (ADR-3473 §8.4): the strict parser now rejects the stray
+    // positional tokens ("status", "resolved") BEFORE cmdFrontmatterSet's own
+    // "file, field, and value required" guard ever runs, so the error text
+    // changed. The behavioral contract this test guards — fails, and does
+    // NOT mutate the file — is unchanged and, if anything, strengthened (the
+    // rejection now happens earlier, at argv-parsing time, not deep inside
+    // the command).
     const badFile = writeTempFile('---\nstatus: open\nupdated: "2025-01-01"\n---\n\n# thread body\n');
     const bad = runGsdTools(['frontmatter', 'set', badFile, 'status', 'resolved']);
     assert.ok(!bad.success, 'positional form must fail (it is the bug being guarded against)');
     assert.ok(
-      (bad.error + bad.output).includes('file, field, and value required'),
+      (bad.error + bad.output).includes('unexpected positional argument'),
       `positional form must error with the documented message; got:\n${bad.error}${bad.output}`,
     );
     assert.strictEqual(
@@ -773,5 +781,35 @@ describe('frontmatter get — truncated vs absent frontmatter (#1882)', () => {
     assert.strictEqual(r.status, 0);
     assert.deepStrictEqual(JSON.parse(r.stdout), {});
     assert.strictEqual(r.stderr, '', 'a horizontal rule is valid Markdown, not a truncated file');
+  });
+});
+
+// ─── #4806: unparseable frontmatter is a distinct error, not "Field not found" ──
+
+describe('#4806 frontmatter get — unparseable frontmatter', () => {
+  test('reports a parse error naming the field, not "Field not found"', () => {
+    // An invalid backslash escape inside a double-quoted value is a YAML
+    // SYNTAX error: the file HAS a status key but its frontmatter cannot be
+    // read. Reporting "Field not found" tells the caller the key is absent —
+    // indistinguishable from a file that genuinely lacks it.
+    const file = writeTempFile('---\nstatus: "passed\n---\n\n# Verification Report\n');
+    const result = runGsdTools(['frontmatter', 'get', file, '--field', 'status']);
+    // The verb answers exit-0 JSON with an `error` FIELD (its documented
+    // error shape) — the assertion is on the error text, not the exit code.
+    assert.strictEqual(result.success, true, `command failed: ${result.error}`);
+    const parsed = JSON.parse(result.output);
+    assert.ok(
+      (parsed.error || '').includes('not parseable YAML'),
+      `must report a parse error, got: ${JSON.stringify(parsed)}`,
+    );
+    assert.ok(!parsed.error.includes('Field not found'), 'parse failure must not read as Field not found');
+  });
+
+  test('a well-formed file still returns the field', () => {
+    const file = writeTempFile('---\nstatus: passed\n---\n\n# V\n');
+    const result = runGsdTools(['frontmatter', 'get', file, '--field', 'status']);
+    assert.ok(result.success, `command failed: ${result.error}`);
+    const parsed = JSON.parse(result.output);
+    assert.strictEqual(parsed.status, 'passed');
   });
 });

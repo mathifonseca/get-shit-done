@@ -49,7 +49,7 @@
  * Cleanup is via `t.after()` (never `try/finally` in the test body).
  */
 
-const { test } = require('node:test');
+const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -58,9 +58,16 @@ const { spawnSync } = require('node:child_process');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { gitOrThrow } = require('./helpers/git-fixture.cjs');
 
-const { cleanup, readFileNormalized } = require('./helpers.cjs');
+const { cleanup, createTempDir, readFileNormalized } = require('./helpers.cjs');
 const { RUNTIME_META, installerEnv } = require('./helpers/install-shared.cjs');
-const { buildOverlayRepo, REPO_ROOT } = require('./helpers/overlay-repo.cjs');
+const { INSTALL_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+const {
+  buildOverlayRepo,
+  REPO_ROOT,
+  placeVanishableLeaf,
+  linkOrCopyFile,
+  isMissingPath,
+} = require('./helpers/overlay-repo.cjs');
 // Read each generator's own typed reason enum (never invent/regex a reason
 // string) — rows 7 and 12 assert the REAL code below. gen-registry.cjs,
 // gen-adr-index.cjs, gen-capability-matrix.cjs, gen-inventory-manifest.cjs
@@ -193,6 +200,37 @@ const ORIGINAL_WORKFLOW_CONTENT = readFileNormalized(PILOT_WORKFLOW_PATH);
 
 const FRAGMENT_SENTINEL = 'GSD-2933-FRAGMENT-EDIT-SENTINEL-4c1a9f';
 
+/**
+ * Bounds `runOverlayCheck`/`runOverlayGenerate` — a single overlay
+ * `scripts/gen-*.cjs` generator invocation (never the installer proper).
+ * The digits coincide with `INSTALL_TIMEOUT_MS` (also 120000ms), but this
+ * is a different operation class kept as its own local constant —
+ * coincidence, not collision.
+ */
+const GENERATOR_SCRIPT_TIMEOUT_MS = 120000;
+
+/**
+ * Bounds `trackedFileSet`'s `git ls-files` over the FULL overlay tree.
+ * Deliberately NOT the shared `GIT_TIMEOUT_MS` (15000ms, `helpers/timeouts.cjs`),
+ * which describes small-fixture-repo git plumbing — a much lighter shape
+ * than scanning this file's overlay tree.
+ */
+const TRACKED_FILE_SET_TIMEOUT_MS = 120000;
+
+/**
+ * Bounds the real `npm run regen:derived` spawn (row 21) — a full build
+ * plus eight generators, the single heaviest subprocess in this suite.
+ * 300000 (5min) was observed to be killed (status: null) near the very end
+ * of a genuinely completed run on a loaded bench (linux-node22), not from a
+ * real hang. 900000 (15min) is deliberately generous so this can never
+ * again flake on load while still catching a true hang.
+ * allow-spawn-timeout-ceiling: regen:derived is a full build plus eight
+ * generators; 300000 was observed killing a genuinely-completed run near
+ * the end on a loaded bench, not a real hang, so 900000 is deliberately
+ * above the 600000 ceiling to never repeat that flake.
+ */
+const REGEN_DERIVED_TIMEOUT_MS = 900000;
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /**
@@ -220,7 +258,7 @@ function installOverlay(overlayRoot, runtime, extraArgs = []) {
   const result = runNode(args, {
     cwd: root,
     env: installerEnv({ HOME: root, USERPROFILE: root }),
-    timeoutMs: 120000,
+    timeoutMs: INSTALL_TIMEOUT_MS,
   });
   result.status = result.exitCode;
   assert.equal(
@@ -256,7 +294,7 @@ function installOverlayExpectingFailure(overlayRoot, runtime, extraArgs = []) {
   const result = runNode(args, {
     cwd: root,
     env: installerEnv({ HOME: root, USERPROFILE: root }),
-    timeoutMs: 120000,
+    timeoutMs: INSTALL_TIMEOUT_MS,
   });
   result.status = result.exitCode;
   return { configDir: root, root, result };
@@ -275,7 +313,7 @@ function runOverlayCheck(overlayRoot, scriptRelPath, extraArgs = []) {
   const result = runNode([scriptPath, '--check', ...extraArgs], {
     cwd: overlayRoot,
     env: installerEnv(),
-    timeoutMs: 120000,
+    timeoutMs: GENERATOR_SCRIPT_TIMEOUT_MS,
   });
   result.status = result.exitCode;
   return result;
@@ -293,7 +331,7 @@ function runOverlayGenerate(overlayRoot, scriptRelPath) {
   const result = runNode([scriptPath], {
     cwd: overlayRoot,
     env: installerEnv(),
-    timeoutMs: 120000,
+    timeoutMs: GENERATOR_SCRIPT_TIMEOUT_MS,
   });
   result.status = result.exitCode;
   return result;
@@ -321,7 +359,7 @@ function runOverlayGenerate(overlayRoot, scriptRelPath) {
 function trackedFileSet(repoRoot) {
   const stdout = gitOrThrow(['-c', 'safe.directory=*', 'ls-files'], {
     cwd: repoRoot,
-    timeoutMs: 120000,
+    timeoutMs: TRACKED_FILE_SET_TIMEOUT_MS,
   });
   return stdout.split('\n').map((line) => line.trim()).filter(Boolean);
 }
@@ -1192,17 +1230,9 @@ test('regenDerivedPropagatesSingleFragmentEditWithNoSecondSourceSurface', {
     cwd: overlay,
     encoding: 'utf8',
     env: installerEnv(),
-    // `regen:derived` chains a full `npm run build` plus eight generators —
-    // the single heaviest subprocess in this suite. 300_000 (5min) was
-    // observed to be killed (status: null) near the very end of a genuinely
-    // completed run on a loaded bench (linux-node22), not from a real hang.
-    // 900_000 (15min) is deliberately generous so this can never again flake
-    // on load while still catching a true hang.
-    // allow-spawn-timeout-ceiling: regen:derived is a full build plus eight
-    // generators; 300_000 was observed killing a genuinely-completed run
-    // near the end on a loaded bench, not a real hang, so 900_000 is
-    // deliberately above the 600000 ceiling to never repeat that flake.
-    timeout: 900000,
+    // See REGEN_DERIVED_TIMEOUT_MS's own doc comment (top of file) for the
+    // full rationale, including the allow-spawn-timeout-ceiling annotation.
+    timeout: REGEN_DERIVED_TIMEOUT_MS,
     maxBuffer: 64 * 1024 * 1024,
   });
   assert.equal(
@@ -1288,4 +1318,102 @@ test('regenDerivedPropagatesSingleFragmentEditWithNoSecondSourceSurface', {
     // safety net (idempotent on an already-removed path).
     cleanup(install.root);
   }
+});
+
+describe('#3271: an overlay source that vanishes mid-walk', () => {
+  test('a leaf whose source is GONE is skipped, not fatal', () => {
+    const dir = createTempDir('gsd-3271-vanish-');
+    try {
+      const missing = path.join(dir, 'never-existed.js');
+      let attempts = 0;
+      const placed = placeVanishableLeaf(missing, () => {
+        attempts += 1;
+        const err = new Error(`ENOENT: no such file or directory, link '${missing}'`);
+        err.code = 'ENOENT';
+        throw err;
+      });
+      assert.equal(placed, false, 'a source that left the tree is not part of the snapshot');
+      assert.equal(attempts, 1, 'no retry when the path is genuinely gone');
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('a leaf mid-atomic-replace is retried once and placed', () => {
+    // The real shape: scripts/build-hooks.js unlinks and renames, so the name is
+    // briefly absent and then live again. The first attempt sees ENOENT; by the
+    // time we re-examine, the successor is in place.
+    const dir = createTempDir('gsd-3271-replace-');
+    try {
+      const src = path.join(dir, 'gsd-config-reload.js');
+      fs.writeFileSync(src, 'module.exports = 1;\n');
+      let attempts = 0;
+      const placed = placeVanishableLeaf(src, () => {
+        attempts += 1;
+        if (attempts === 1) {
+          const err = new Error('ENOENT: no such file or directory, link');
+          err.code = 'ENOENT';
+          throw err;
+        }
+      });
+      assert.equal(placed, true);
+      assert.equal(attempts, 2, 'exactly one retry — no spin, no sleep');
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('a non-ENOENT failure still propagates', () => {
+    const dir = createTempDir('gsd-3271-eacces-');
+    try {
+      assert.throws(
+        () => placeVanishableLeaf(dir, () => {
+          const err = new Error('EACCES: permission denied');
+          err.code = 'EACCES';
+          throw err;
+        }),
+        /EACCES/,
+        'only a vanished source is tolerable; every other error is a real defect',
+      );
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('linkOrCopyFile survives a real ENOENT from linkSync when the source is live', () => {
+    // Monkeypatch fs.linkSync to fail ENOENT exactly once, then restore in a
+    // finally. Mode-bit tricks are not used on purpose: root bypasses 0o000, so
+    // such a test passes with zero coverage under root Docker/CI.
+    const dir = createTempDir('gsd-3271-link-');
+    const realLinkSync = fs.linkSync;
+    try {
+      const src = path.join(dir, 'src.js');
+      const dest = path.join(dir, 'dest.js');
+      fs.writeFileSync(src, 'contents\n');
+      let calls = 0;
+      fs.linkSync = (...args) => {
+        calls += 1;
+        if (calls === 1) {
+          const err = new Error('ENOENT: no such file or directory, link');
+          err.code = 'ENOENT';
+          throw err;
+        }
+        return realLinkSync(...args);
+      };
+      assert.equal(linkOrCopyFile(src, dest), true);
+      assert.equal(calls, 2);
+      assert.equal(fs.readFileSync(dest, 'utf8'), 'contents\n');
+    } finally {
+      fs.linkSync = realLinkSync;
+      cleanup(dir);
+    }
+  });
+
+  test('isMissingPath accepts only ENOENT', () => {
+    assert.equal(isMissingPath(Object.assign(new Error('x'), { code: 'ENOENT' })), true);
+    assert.equal(isMissingPath(Object.assign(new Error('x'), { code: 'EACCES' })), false);
+    assert.equal(isMissingPath(Object.assign(new Error('x'), { code: 'EXDEV' })), false);
+    assert.equal(isMissingPath(new Error('plain')), false);
+    assert.equal(isMissingPath(null), false);
+  });
 });

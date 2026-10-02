@@ -21,6 +21,21 @@ const { execFileSync } = require('node:child_process');
 
 const REPO_ROOT = path.join(__dirname, '..');
 
+const { extractRequires } = require('./helpers/copy-script-fixture.cjs');
+
+/**
+ * package.json's `prepack`/`prepare` runs a full `npm run build:lib` (tsc)
+ * before `npm pack` computes the file list — a bounded but non-trivial
+ * subprocess (~2s in isolation). Under the full parallel 28,000+-test CI
+ * matrix this has been observed to take 60.6s and trip a 60_000ms bound
+ * (#2931 gsd-test run d52d2ee4, linux-node24, duration_ms 60637.56),
+ * aborting this file's `before()` hook and cascading every sibling test to
+ * "cancelled". 120s keeps the bound finite (never unbounded, per the
+ * subprocess-timeout convention) while giving real headroom for a
+ * contended CI box.
+ */
+const NPM_PACK_TIMEOUT_MS = 120_000;
+
 /**
  * Resolve the tarball file list via `npm pack --dry-run --json`.
  * This is the ACTUAL set of files that ship — not a hardcoded list — so adding
@@ -32,40 +47,40 @@ function resolveTarballFiles() {
     encoding: 'utf-8',
     shell: true, // Windows: npm is npm.cmd and needs a shell
     stdio: ['pipe', 'pipe', 'pipe'],
-    // package.json's `prepack`/`prepare` runs a full `npm run build:lib`
-    // (tsc) before `npm pack` computes the file list — a bounded but
-    // non-trivial subprocess (~2s in isolation). Under the full parallel
-    // 28,000+-test CI matrix this has been observed to take 60.6s and trip
-    // a 60_000ms bound (#2931 gsd-test run d52d2ee4, linux-node24,
-    // duration_ms 60637.56), aborting this file's `before()` hook and
-    // cascading every sibling test to "cancelled". 120s keeps the bound
-    // finite (never unbounded, per the subprocess-timeout convention) while
-    // giving real headroom for a contended CI box.
-    timeout: 120_000,
+    timeout: NPM_PACK_TIMEOUT_MS,
   });
   const parsed = JSON.parse(raw);
-  return new Set(parsed[0].files.map((f) => f.path.replace(/\\/g, '/')));
+  return packListToPathSet(parsed);
 }
 
 /**
- * Extract all require('...') string-literal calls from a .cjs source.
- * Only static string-literal requires are checked — dynamic require(variable)
- * is out of scope (and would itself be a red flag in a shipped script).
+ * Pure projection from `npm pack --json` output to the tarball path set —
+ * extracted so the SHAPE contract is unit-testable without running npm.
  */
-function extractRequires(source) {
-  const requires = [];
-  // Strip block comments (/* ... */) and inline line comments (// ...) before
-  // matching, so a require() appearing in a doc comment or fenced code block
-  // inside a /* */ does not produce a false positive.
-  const stripped = source
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/\/\/.*$/gm, '');
-  const requireRe = /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
-  let m;
-  while ((m = requireRe.exec(stripped)) !== null) {
-    requires.push(m[1]);
+function packListToPathSet(parsed) {
+  // #3902: npm <=11 emits an ARRAY of pack results; npm 12 (bundled with
+  // Node 26) emits an OBJECT keyed by package name. parsed[0] is undefined on
+  // the object shape — which threw in this file's before() hook and silently
+  // disabled the whole packaging guard, including both `does NOT ship`
+  // assertions. Resolve either shape; anything else fails loud.
+  // Single-package assumption: this repo has no workspaces, so npm 12 emits
+  // exactly ONE key. If workspaces are ever adopted, first-key would silently
+  // validate only one package — recreate the silent-disarm this fix kills —
+  // so a multi-key object fails loud instead.
+  let entry;
+  if (Array.isArray(parsed)) {
+    entry = parsed[0];
+  } else {
+    const keys = Object.keys(parsed);
+    if (keys.length !== 1) {
+      throw new Error(`npm pack --json emitted ${keys.length} package keys; expected exactly 1 for this single-package repo`);
+    }
+    entry = parsed[keys[0]];
   }
-  return requires;
+  if (!entry || !Array.isArray(entry.files)) {
+    throw new Error(`npm pack --json returned an unrecognized shape: ${Object.prototype.toString.call(parsed)}`);
+  }
+  return new Set(entry.files.map((f) => f.path.replace(/\\/g, '/')));
 }
 
 /**
@@ -135,6 +150,27 @@ describe('#2858 — shipped scripts require only shipped paths', () => {
       .sort();
   });
 
+  test('#2665: the test-instrumentation chain does not ship', () => {
+    // These four are one closed require chain of test instrumentation
+    // (run-tests -> live-config-guard, affected-tests-lib -> run-tests,
+    // run-affected-tests -> affected-tests-lib). Excluding a strict subset
+    // re-trips the shipped-requires-only-shipped gate above on whichever links
+    // still ship, so the exclusion set and this assertion cover the chain.
+    const TEST_INSTRUMENTATION = [
+      'scripts/live-config-guard.cjs',
+      'scripts/run-tests.cjs',
+      'scripts/affected-tests-lib.cjs',
+      'scripts/run-affected-tests.cjs',
+    ];
+    for (const f of TEST_INSTRUMENTATION) {
+      assert.ok(
+        !shippedFiles.has(f),
+        `${f} is test instrumentation and must not ship — restore its ` +
+          "package.json files[] '!'-exclusion (and keep the whole chain excluded)",
+      );
+    }
+  });
+
   test('every shipped scripts/*.{cjs,js} is require-able from a shipped-only tree', () => {
     assert.ok(shippedScripts.length > 0, 'expected at least one shipped script');
 
@@ -177,6 +213,15 @@ describe('#2858 — shipped scripts require only shipped paths', () => {
     );
   });
 
+  test('lint-no-adhoc-regex-escape.cjs does NOT ship (repo-only CI tooling)', () => {
+    // This script requires ../eslint-rules/ which does not ship. It is
+    // repo-only CI tooling. It must be excluded from the npm tarball (#3412).
+    assert.ok(
+      !shippedFiles.has('scripts/lint-no-adhoc-regex-escape.cjs'),
+      'scripts/lint-no-adhoc-regex-escape.cjs must NOT ship — it requires ../eslint-rules/ which does not ship (#3412)',
+    );
+  });
+
   test('a script requiring a sibling in the same shipped dir resolves as shipped (positive case)', () => {
     // Sanity: scripts/lib/cli-exit.cjs ships and is required by shipped scripts.
     // This confirms the guard's positive path works — a valid intra-shipped require
@@ -185,5 +230,38 @@ describe('#2858 — shipped scripts require only shipped paths', () => {
     const classification = classifyRequire('./lib/cli-exit.cjs', 'scripts/gen-adr-index.cjs', shippedFiles);
     assert.strictEqual(classification, 'shipped',
       `a sibling require within scripts/ must classify as 'shipped'; got '${classification}'`);
+  });
+});
+
+
+// ─── #3902: npm 12's pack --json shape must resolve like npm <=11's ──────────
+
+describe('#3902 packListToPathSet resolves both npm pack --json shapes', () => {
+  const FILES = [{ path: 'gsd-core/bin/gsd-tools.cjs' }, { path: 'lib/Backslash\\Case.cjs' }];
+
+  test('npm <=11 array shape', () => {
+    const set = packListToPathSet([{ files: FILES }]);
+    assert.ok(set.has('gsd-core/bin/gsd-tools.cjs'));
+    assert.ok(set.has('lib/Backslash/Case.cjs'), 'windows separators normalized');
+  });
+
+  test('npm 12 (Node 26) object-keyed shape', () => {
+    // npm 12 emits { "<pkg-name>": { files: [...] } } — parsed[0] is undefined
+    // there, which used to throw in the before() hook and silently disable
+    // the whole packaging guard, including both `does NOT ship` assertions.
+    const set = packListToPathSet({ '@opengsd/gsd-core': { files: FILES } });
+    assert.ok(set.has('gsd-core/bin/gsd-tools.cjs'));
+    assert.ok(set.has('lib/Backslash/Case.cjs'));
+  });
+
+  test('an unrecognized shape fails loud, never silently-empty', () => {
+    assert.throws(() => packListToPathSet({ weird: true }));
+  });
+
+  test('a multi-key object (workspaces) fails loud — first-key would silently validate one package', () => {
+    assert.throws(() => packListToPathSet({
+      'pkg-a': { files: FILES },
+      'pkg-b': { files: FILES },
+    }), /exactly 1/);
   });
 });

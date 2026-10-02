@@ -43,6 +43,10 @@
  * Zero external dependencies. Pure functions. Never throws on bad input.
  */
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- file-overlap-partitioner.cjs is an export= CommonJS module
+import fileOverlapPartitionerMod = require('./file-overlap-partitioner.cjs');
+const { partitionByFileOverlap } = fileOverlapPartitionerMod;
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /**
@@ -299,6 +303,13 @@ interface EmitOk {
   summary: {
     waves: number;
     plans: number;
+    /**
+     * #3302 — the number of record-agent entries the orchestrator must end up
+     * with in WAVE_WORKTREE_MANIFEST after the run (plans with `use_worktree`
+     * not `false`). The loud count check: fewer entries than this after the
+     * Workflow run means metadata capture failed and the wave must HALT.
+     */
+    worktreePlans: number;
     stagesByWave: string[][][]; // wave → stage → planId[]
     resumeRunId: string;
     budgetTokens: number | null;
@@ -323,29 +334,15 @@ interface EmitErr {
  *
  * This is the same overlap rule execute-phase applies inline — the only difference
  * is the execution vehicle (Workflow `parallel()` vs one-agent-per-message).
+ *
+ * #3674: the algorithm itself now lives in the generic, dependency-free
+ * `file-overlap-partitioner.cts` module (`partitionByFileOverlap`) — this is a
+ * thin adapter mapping this module's own `Plan[]` shape onto that module's
+ * generic `{ id, files }[]` input and back. Behavior-preserving extraction:
+ * same greedy first-fit algorithm, same output, only the implementation moved.
  */
 function partitionStages(plans: Plan[]): string[][] {
-  const stages: { plans: Plan[]; files: Set<string> }[] = [];
-  for (const plan of plans) {
-    const fileSet = new Set(plan.files_modified);
-    let placed = false;
-    for (const stage of stages) {
-      let overlap = false;
-      for (const f of fileSet) {
-        if (stage.files.has(f)) { overlap = true; break; }
-      }
-      if (!overlap) {
-        stage.plans.push(plan);
-        for (const f of fileSet) stage.files.add(f);
-        placed = true;
-        break;
-      }
-    }
-    if (!placed) {
-      stages.push({ plans: [plan], files: new Set(fileSet) });
-    }
-  }
-  return stages.map((s) => s.plans.map((p) => p.id));
+  return partitionByFileOverlap(plans.map((p) => ({ id: p.id, files: p.files_modified })));
 }
 
 /**
@@ -564,14 +561,44 @@ function emitWorkflowScript(input: EmitInput | null | undefined): EmitOk | EmitE
   }
   lines.push('');
 
+  // #3302: the generated script must hand the per-agent executor results back
+  // to the orchestrator so it can feed the wave merge chain. Emitted right
+  // after the header comments (meta stays the first statement): a helper that
+  // extracts the executor's <worktree_metadata> JSON (agents/gsd-executor.md
+  // <worktree_metadata_capture>) from one agent() result, plus the outcomes
+  // accumulator the stage barriers below push into. `metadata` is null when
+  // the result carried no parseable block — the LOUD-failure input the
+  // orchestrator halts on for expects_worktree plans (never a silent skip).
+  lines.push('// #3302: extract the executor-returned <worktree_metadata> JSON so the');
+  lines.push('// orchestrator can record it into WAVE_WORKTREE_MANIFEST after the run');
+  lines.push('// (worktree.record-agent -> worktree.cleanup-wave, the same manifest-scoped');
+  lines.push('// merge chain inline dispatch feeds). null = absent/unparseable/interrupted.');
+  lines.push('function gsdWorktreeMetadata(agentResult) {');
+  lines.push('  if (typeof agentResult !== \'string\') return null;');
+  lines.push('  const m = agentResult.match(/<worktree_metadata>([\\s\\S]*?)<\\/worktree_metadata>/);');
+  lines.push('  if (m === null) return null;');
+  lines.push('  try {');
+  lines.push('    const parsed = JSON.parse(m[1]);');
+  lines.push('    return (parsed !== null && typeof parsed === \'object\') ? parsed : null;');
+  lines.push('  } catch (e) {');
+  lines.push('    return null;');
+  lines.push('  }');
+  lines.push('}');
+  lines.push('const gsdAgentOutcomes = [];');
+  lines.push('');
+
   const stagesByWave: string[][][] = [];
   let totalPlans = 0;
+  let worktreePlans = 0;
 
   for (let wi = 0; wi < waves.length; wi++) {
     const wave = waves[wi];
     const stages = partitionStages(wave.plans);
     stagesByWave.push(stages);
     totalPlans += wave.plans.length;
+    for (const p of wave.plans) {
+      if (p.use_worktree !== false) worktreePlans += 1;
+    }
 
     lines.push('// Wave ' + wave.id);
     // Title must match this wave's meta.phases entry EXACTLY.
@@ -587,17 +614,37 @@ function emitWorkflowScript(input: EmitInput | null | undefined): EmitOk | EmitE
       // threw "parallel() expects an array of functions" (#2590). Passing
       // agent() results directly would also start every agent eagerly, before
       // parallel() could bound concurrency.
-      lines.push('await parallel([');
+      // #3302: capture the barrier's resolved results (one per thunk, in thunk
+      // order — the documented parallel() contract) so each plan's outcome can
+      // be tagged and returned below. Discarding them stranded every
+      // worktree-wf_* branch: the merge chain had no input (#3302).
+      lines.push('const gsdStage_' + wi + '_' + si + ' = await parallel([');
       for (const p of stagePlans) {
         lines.push('  () => agent(' + quoteString(p.brief) + ', ' + agentOptions(p, executorModel) + '),');
       }
       lines.push('])');
+      // Positional tagging is decided at EMIT time from the validated manifest,
+      // so attribution survives out-of-order completion and needs no runtime
+      // introspection. expects_worktree mirrors agentOptions' own per-plan
+      // decision (use_worktree !== false).
+      lines.push('gsdAgentOutcomes.push(');
+      for (let pi = 0; pi < stagePlans.length; pi++) {
+        const p = stagePlans[pi];
+        const tail = pi < stagePlans.length - 1 ? ',' : '';
+        lines.push('  { plan: ' + quoteString(p.id) + ', expects_worktree: ' + (p.use_worktree !== false) + ', metadata: gsdWorktreeMetadata(gsdStage_' + wi + '_' + si + '[' + pi + ']) }' + tail);
+      }
+      lines.push(')');
     }
     if (wi < waves.length - 1) lines.push('');
   }
 
-  lines.push('// Each agent writes SUMMARY.md on its worktree branch; commits land there');
-  lines.push('// and are merged by the orchestrator exactly as in inline wave dispatch.');
+  // #3302: the script's top-level return value is what the Workflow tool hands
+  // back to the orchestrator. One { plan, expects_worktree, metadata } entry
+  // per dispatched plan; the orchestrator records every worktree entry via
+  // `gsd_run query worktree.record-agent` and HALTS on a null metadata entry
+  // for an expects_worktree plan (see the execute:wave:pre fragment) — a
+  // silently-empty manifest is the exact #3302 failure mode.
+  lines.push('return gsdAgentOutcomes');
 
   const script = lines.join('\n');
 
@@ -607,6 +654,9 @@ function emitWorkflowScript(input: EmitInput | null | undefined): EmitOk | EmitE
     summary: {
       waves: waves.length,
       plans: totalPlans,
+      // #3302: the number of record-agent entries the orchestrator must end up
+      // with in WAVE_WORKTREE_MANIFEST after the run — the loud count check.
+      worktreePlans,
       stagesByWave,
       resumeRunId: runId,
       budgetTokens,

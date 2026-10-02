@@ -1,6 +1,6 @@
-// allow-test-rule: source-text-is-the-product
 // Reads .md/.json/.yml product files whose deployed text IS what the
-// runtime loads — testing text content tests the deployed contract.
+// runtime loads — testing text content tests the deployed contract. (No
+// .cjs/.js/.ts source-grep remains in this file — see #3466.)
 
 /**
  * Installer Module — Sections 1–5.
@@ -34,10 +34,22 @@ const { runNode } = require('./helpers/process-seam.cjs');
 const pkg = require('../package.json');
 
 // #3145: class-norm timeout, not a per-suite value — see helpers/timeouts.cjs.
-const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+const { PROBE_TIMEOUT_MS, QUICK_SPAWN_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+
+// Fixture-JSON value (seconds, not ms) simulating the PRE-migration legacy
+// settings.json hook-entry timeout under test (#3981-style migration test).
+// Deliberately a different value than the shared FIXTURE_HOOK_TIMEOUT_SECONDS
+// constant (5) since this site tests the old value specifically (batch #4515,
+// epic #4445).
+const FIXTURE_LEGACY_HOOK_TIMEOUT_SECONDS = 10;
+
+// Bounds an `install.js --dry-run` run (no file writes) — a lighter shape than
+// the shared full-write INSTALL_TIMEOUT_MS class (120000ms), kept separate
+// rather than raised. Shared by both dry-run sites in this file (batch #4515,
+// epic #4445).
+const DRY_RUN_INSTALL_TIMEOUT_MS = 30_000;
 
 const {
-  getDirName,
   getConfigDirFromHome,
   install,
   uninstall,
@@ -48,10 +60,28 @@ const {
   resolveKiloConfigPath,
   configureKiloPermissions,
   selectRuntimesFromArgs,
-  normalizeNodePath,
+  GSD_CHANGESET_FILES,
+  GSD_SCRIPTS_LIB_FILES,
 } = require('../bin/install.js');
 
+const { getDirName } = require('../gsd-core/bin/lib/runtime-name-policy.cjs');
+const { normalizeNodePath } = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
+const { installRuntimeArtifacts } = require('../gsd-core/bin/lib/install-engine.cjs');
+
 const { getGlobalConfigDir } = require('../gsd-core/bin/lib/runtime-homes.cjs');
+const { findTableWithColumns } = require('../gsd-core/bin/lib/markdown-table.cjs');
+// #2874 AC3 exemplar (see the qwen install/uninstall group below): resolves
+// the SAME 'full' profile install(false, <runtime>) resolves by default
+// (bin/install.js's _activeProfileName falls back to 'full' when no
+// --profile/marker is present), so a direct installRuntimeArtifacts() call
+// against an already-installed targetDir reproduces the same executed-plan
+// shape the production install() call just wrote, without re-deriving
+// install()'s own profile-resolution logic in this test file.
+const { loadSkillsManifest, resolveProfile } = require('../gsd-core/bin/lib/install-profiles.cjs');
+const RESOLVED_FULL = resolveProfile({
+  modes: ['full'],
+  manifest: loadSkillsManifest(path.join(__dirname, '..', 'commands', 'gsd')),
+});
 
 const {
   RUNTIME_META,
@@ -458,12 +488,47 @@ describe('install/uninstall — qwen (nested skills/gsd-<router>/skills/<stem>/ 
     assert.strictEqual(result.runtime, 'qwen');
     assert.strictEqual(result.configDir, fs.realpathSync(targetDir));
 
-    // qwen nests: skills/gsd-<router>/skills/<stem>/SKILL.md
+    // #2874 AC3 exemplar: install(false, 'qwen') above already wrote the
+    // skills/ and agents/ dirs, but its own internal installRuntimeArtifacts
+    // call (bin/install.js) discards the executed plan it returns. Calling
+    // installRuntimeArtifacts directly here — same runtime/targetDir/scope,
+    // same 'full' profile install() resolved by default — is an idempotent
+    // re-run over the already-installed tree (prune + rewrite converges to
+    // the same on-disk result) that surfaces the SAME plan value production
+    // discarded. What replaces fs.existsSync probing below is this ONE
+    // deepStrictEqual against that plan: previously each destination
+    // directory's existence was checked with a separate fs.existsSync() call
+    // (a probe of a SIDE EFFECT); now both are read off the single typed
+    // value the call contractually returns (40-design.md: "returns a plan
+    // naming every kind with its sourceDir, destDir", never undefined).
+    const plan = installRuntimeArtifacts('qwen', targetDir, 'global', RESOLVED_FULL);
+    const kindsByName = new Map(plan.kinds.map((k) => [k.kind, k]));
+    assert.deepStrictEqual(
+      {
+        skillsDestDir: kindsByName.get('skills') && kindsByName.get('skills').destDir,
+        agentsDestDir: kindsByName.get('agents') && kindsByName.get('agents').destDir,
+      },
+      {
+        skillsDestDir: path.join(targetDir, 'skills'),
+        agentsDestDir: path.join(targetDir, 'agents'),
+      },
+      'qwen executed plan must record a skills-kind write to skills/ and an agents-kind write to agents/',
+    );
+
+    // qwen nests: skills/gsd-<router>/skills/<stem>/SKILL.md. The plan above
+    // proves the skills-kind DESTINATION ROOT; which concrete stem (e.g.
+    // "help") landed under it is finer-grained than the plan's per-kind
+    // contract (one destDir per kind, not a file list), so that specific
+    // fact still needs an fs probe — nothing here is a regression from the
+    // pre-migration test, only the destDir-existence checks moved to the
+    // plan value above.
     const qwenHelpPath = nestedSkillPath(path.join(targetDir, 'skills'), 'gsd-', 'help');
     assert.ok(fs.existsSync(qwenHelpPath),
       `help SKILL.md must exist at nested path: ${path.relative(targetDir, qwenHelpPath)}`);
+    // gsd-core/VERSION is written by install()'s own gsd-core copy step, not
+    // by installRuntimeArtifacts (outside the executed-plan contract) — stays
+    // an fs probe.
     assert.ok(fs.existsSync(path.join(targetDir, 'gsd-core', 'VERSION')));
-    assert.ok(fs.existsSync(path.join(targetDir, 'agents')));
 
     const manifest = writeManifest(targetDir, 'qwen');
     assert.ok(
@@ -497,13 +562,16 @@ describe('install/uninstall — trae (nested skills/gsd-<router>/skills/<stem>/ 
     const result = install(false, 'trae');
     const targetDir = path.join(tmpDir, '.trae');
 
-    assert.deepStrictEqual(result, {
+    assert.equal(typeof result.rollbackInstallerMigrations, 'function');
+    const { rollbackInstallerMigrations: _rollbackInstallerMigrations, ...resultWithoutRollback } = result;
+    assert.deepStrictEqual(resultWithoutRollback, {
       settingsPath: null,
       settings: null,
       statuslineCommand: null,
       updateBannerCommand: null,
       runtime: 'trae',
       configDir: fs.realpathSync(targetDir),
+      configuredEntrypoints: [],
     });
 
     // trae nests: skills/gsd-<router>/skills/<stem>/SKILL.md
@@ -734,15 +802,16 @@ describe('configureKiloPermissions', () => {
 });
 
 describe('Kilo integration — install/uninstall behaviour', () => {
-  // Product-text reads for test 6 only — update.md and update-context.cjs
-  // are deployed artifacts whose text IS the runtime contract (allow-test-rule).
+  // update.md IS the deployed workflow contract — its literal command lines are
+  // what the runtime loads, and there is no runtime seam that executes update.md
+  // here, so this .md read stays a text assertion (does not trigger no-source-grep).
   const updateWorkflowSrc = fs.readFileSync(
     path.join(__dirname, '..', 'gsd-core', 'workflows', 'update.md'), 'utf8');
   // #498: update.md's runtime/scope/config-dir resolution moved into the tested
-  // projection gsd-core/bin/lib/update-context.cjs. Custom-config-dir
-  // detection (kilo.jsonc, KILO_CONFIG) is now asserted there.
-  const updateContextSrc = fs.readFileSync(
-    path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'update-context.cjs'), 'utf8');
+  // projection gsd-core/bin/lib/update-context.cjs. Custom-config-dir detection
+  // (kilo.jsonc, KILO_CONFIG) is asserted behaviorally below via
+  // inferPreferredRuntime() itself, not via a source grep on update-context.cjs.
+  const { inferPreferredRuntime } = require('../gsd-core/bin/lib/update-context.cjs');
 
   let tmpDir;
   let previousCwd;
@@ -880,10 +949,35 @@ describe('Kilo integration — install/uninstall behaviour', () => {
   test('update workflow checks preferred custom config dirs', () => {
     // update.md still derives the preferred config dir from execution_context…
     assert.ok(updateWorkflowSrc.includes('PREFERRED_CONFIG_DIR'));
-    // …and the custom-dir detection (kilo.jsonc config marker, KILO_CONFIG env)
-    // now lives in the tested update-context projection (#498).
-    assert.ok(updateContextSrc.includes('kilo.jsonc'));
-    assert.ok(updateContextSrc.includes('KILO_CONFIG'));
+  });
+
+  test('inferPreferredRuntime infers "kilo" from a kilo.jsonc marker in preferredConfigDir', () => {
+    // Behavioural replacement for the update-context.cjs source grep (#3466):
+    // the custom-dir detection (kilo.jsonc config marker) lives in this exact
+    // projection (#498) — calling it directly, with an injected fs seam, proves
+    // the kilo branch actually resolves rather than merely that the string
+    // "kilo.jsonc" appears in the file.
+    const fakeFs = {
+      exists: (p) => String(p).endsWith('kilo.jsonc'),
+    };
+    const runtime = inferPreferredRuntime({
+      fs: fakeFs,
+      env: {},
+      preferredConfigDir: '/fake/kilo-config-dir',
+    });
+    assert.strictEqual(runtime, 'kilo');
+  });
+
+  test('inferPreferredRuntime infers "kilo" from KILO_CONFIG_DIR / KILO_CONFIG env when no config-dir marker is present', () => {
+    const fakeFs = { exists: () => false };
+    assert.strictEqual(
+      inferPreferredRuntime({ fs: fakeFs, env: { KILO_CONFIG_DIR: '/custom/kilo' }, preferredConfigDir: '' }),
+      'kilo',
+    );
+    assert.strictEqual(
+      inferPreferredRuntime({ fs: fakeFs, env: { KILO_CONFIG: '/custom/kilo/kilo.jsonc' }, preferredConfigDir: '' }),
+      'kilo',
+    );
   });
 });
 
@@ -1049,7 +1143,7 @@ describe('install — fix-slash-commands.cjs lands at scripts/fix-slash-commands
     const result = spawnSync(
       process.execPath,
       [gsdToolsPath, 'query', 'init.new-project'],
-      { encoding: 'utf8', timeout: 15000 },
+      { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS },
     );
     assert.ok(
       !result.stderr.includes('MODULE_NOT_FOUND'),
@@ -1137,7 +1231,7 @@ describe('readCmdNames() — tolerates missing commands/gsd directory (#1223)', 
 
       const spawnResult = spawnSync(process.execPath, ['-e', script], {
         encoding: 'utf8',
-        timeout: 10000,
+        timeout: QUICK_SPAWN_TIMEOUT_MS,
         env: { ...process.env, GSD_TEST_MODE: '1' },
       });
       assert.ok(
@@ -1154,7 +1248,6 @@ describe('readCmdNames() — tolerates missing commands/gsd directory (#1223)', 
 });
 
 // ─── Section N: Antigravity .agents canonical workspace dir (#791) ─────────────
-// allow-test-rule: source-text-is-the-product
 // Reads deployed agent .md files whose text IS the product surface the
 // Antigravity runtime loads at startup (path references, command names).
 
@@ -1241,7 +1334,7 @@ describe('antigravity local install writes to .agents/ canonical dir (#791)', ()
       '.agent/ must not be created by a fresh install (new installs use .agents/)');
   });
 
-  test('global antigravity install still writes to ~/.gemini/antigravity (unchanged)', () => {
+  test('global antigravity install writes skills/agents to ~/.gemini/config, runtime files to the configHome (#3738)', () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-ag-global-'));
     const savedHome = process.env.HOME;
     const savedUserProfile = process.env.USERPROFILE;
@@ -1256,13 +1349,39 @@ describe('antigravity local install writes to .agents/ canonical dir (#791)', ()
         result.configDir.startsWith(homeDir),
         `global antigravity install must go under HOME, got: ${result.configDir}`,
       );
+      // #3738: Antigravity scans ~/.gemini/config for machine-local discovery,
+      // so skills and agents install under the global layout's home override…
+      const configRoot = path.join(homeDir, '.gemini', 'config');
       assert.ok(
-        fs.existsSync(path.join(result.configDir, 'skills')),
-        'global antigravity install must create skills/ under ~/.gemini/antigravity',
+        fs.existsSync(path.join(configRoot, 'skills', 'gsd-help', 'SKILL.md')),
+        'global antigravity install must create gsd-* skills under ~/.gemini/config/skills',
+      );
+      assert.ok(
+        fs.existsSync(path.join(configRoot, 'agents')),
+        'global antigravity install must create agents/ under ~/.gemini/config',
+      );
+      assert.ok(
+        !fs.existsSync(path.join(result.configDir, 'skills')),
+        'no skills/ may be created under the configHome (~/.gemini/antigravity) — AGY does not scan it (#3738)',
+      );
+      assert.ok(
+        !fs.existsSync(path.join(result.configDir, 'agents')),
+        'no agents/ may be created under the configHome (~/.gemini/antigravity) (#3738)',
       );
       assert.ok(
         !fs.existsSync(path.join(homeDir, '.agents')),
-        '.agents/ must NOT be created by a global install (global path is ~/.gemini/antigravity)',
+        '.agents/ must NOT be created by a global install (global skills path is ~/.gemini/config)',
+      );
+      // #3738 review finding 1: the manifest must record the agents surface at
+      // its ACTUAL install root — writeManifest resolves the agents-kind home
+      // override, so drift detection sees the files AGY reads.
+      const manifestPath = path.join(result.configDir, 'gsd-file-manifest.json');
+      assert.ok(fs.existsSync(manifestPath), 'global install must write the manifest');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      const agentKeys = Object.keys(manifest.files).filter((k) => k.startsWith('agents/'));
+      assert.ok(
+        agentKeys.length > 0,
+        `manifest must track agents/ at the home-override root, got keys: ${Object.keys(manifest.files).slice(0, 5).join(', ')}`,
       );
     } finally {
       if (savedHome === undefined) delete process.env.HOME;
@@ -1290,7 +1409,6 @@ describe('install — --devin-desktop CLI flag routes to windsurf runtime (#792)
   });
 });
 // ─── Section N: Windsurf workflow slash-command install (#1615) ─────────────
-// allow-test-rule: source-text-is-the-product
 // Reads deployed workflow .md files whose text IS the product surface the
 // Windsurf runtime loads at startup (path references, command names).
 
@@ -1778,11 +1896,12 @@ describe('#767 Parity: docs/AGENTS.md "Disallowed Tools" rows match READONLY_AGE
       const sectionEnd = nextSectionIdx === -1 ? agentsDoc.length : nextSectionIdx;
       const section = agentsDoc.slice(agentHeaderIdx, sectionEnd);
 
-      const disallowedMatch = section.match(/\|\s*\*\*Disallowed Tools\*\*\s*\|\s*([^|]+)\|/);
-      assert.ok(disallowedMatch,
+      const table = findTableWithColumns(section, ['Property', 'Value']);
+      const row = table && table.rows.find((r) => r.Property === '**Disallowed Tools**');
+      assert.ok(row,
         `docs/AGENTS.md section for ${agent} must have a "Disallowed Tools" table row`);
 
-      const docTools = disallowedMatch[1].trim();
+      const docTools = row.Value.trim();
       assert.equal(docTools, expectedTools,
         `docs/AGENTS.md "Disallowed Tools" for ${agent} must be "${expectedTools}" but got "${docTools}"`);
     });
@@ -1846,6 +1965,167 @@ describe('normalizeNodePath — mise versioned path → sibling shim (#1619)', (
     assert.equal(
       normalizeNodePath('/opt/homebrew/bin/node', { existsSync: () => true }),
       '/opt/homebrew/bin/node');
+  });
+});
+
+// ─── normalizeNodePath — fnm versioned path → alias (#3704) ──────────────────
+//
+// Bug #3704: the POSIX half of #977. fnm's branch matched only the SHIM
+// (`<multishell>/node`), but on macOS/Linux `process.execPath` is never that —
+// Node realpaths through `fnm_multishells` to
+// `<FNM_DIR>/node-versions/<ver>/installation/bin/node`. Two independent reasons
+// the old pattern missed: the realpath above, and the `bin/` segment (fnm's POSIX
+// shim is `<multishell>/bin/node`, the pattern required `<multishell>/node`).
+//
+// Consequence: the raw versioned path was baked into every managed hook, so
+// `fnm uninstall <ver>` — or fnm's own pruning — 404s all of them. That is the
+// ephemeral-path failure #977 exists to prevent, already fixed for mise (#1619),
+// Homebrew (#2185) and volta (#2335) by matching the VERSIONED path.
+//
+// NOTE ON THE STUBS: each test grants existence to exactly ONE candidate, the one
+// its platform would really have. A stub that grants both `aliases/default/node.exe`
+// and `aliases/default/bin/node` does not test candidate ORDER, it hides it — no
+// real machine has both.
+describe('normalizeNodePath — fnm versioned path → alias (#3704)', () => {
+  const FNM = '/Users/u/.local/share/fnm';
+  const FNM_POSIX_PINNED = `${FNM}/node-versions/v22.22.0/installation/bin/node`;
+  const FNM_POSIX_ALIAS = `${FNM}/aliases/default/bin/node`;
+  const FNM_POSIX_SHIM = '/Users/u/.local/state/fnm_multishells/55303_1787205798690/bin/node';
+
+  const FNM_WIN = 'C:/Users/u/AppData/Roaming/fnm';
+  const FNM_WIN_PINNED = `${FNM_WIN}/node-versions/v22.22.0/installation/node.exe`;
+  const FNM_WIN_ALIAS = `${FNM_WIN}/aliases/default/node.exe`;
+  const FNM_WIN_SHIM = 'C:/Users/u/AppData/Local/fnm_multishells/1234_5678/node.exe';
+
+  test('POSIX versioned install path + alias exists → alias (the reported bug)', () => {
+    assert.equal(
+      normalizeNodePath(FNM_POSIX_PINNED, { env: {}, existsSync: p => p === FNM_POSIX_ALIAS }),
+      FNM_POSIX_ALIAS);
+  });
+
+  test('Windows versioned install path → aliases/default/node.exe (.exe preserved)', () => {
+    assert.equal(
+      normalizeNodePath(FNM_WIN_PINNED, { env: {}, existsSync: p => p === FNM_WIN_ALIAS }),
+      FNM_WIN_ALIAS);
+  });
+
+  test('backslash Windows path normalizes the same as forward-slash', () => {
+    assert.equal(
+      normalizeNodePath(FNM_WIN_PINNED.replace(/\//g, '\\'),
+        { env: {}, existsSync: p => p === FNM_WIN_ALIAS }),
+      FNM_WIN_ALIAS);
+  });
+
+  test('POSIX shim carries a bin/ segment and is now matched too', () => {
+    // Reason 2. This path never arrives as process.execPath on POSIX, but #3662's
+    // `execPath` option exists so a caller can normalize a path from another
+    // environment — and it could not match before.
+    assert.equal(
+      normalizeNodePath(FNM_POSIX_SHIM, { env: { FNM_DIR: FNM }, existsSync: p => p === FNM_POSIX_ALIAS }),
+      FNM_POSIX_ALIAS);
+  });
+
+  test('no regression (#977): the Windows shim still resolves through FNM_DIR', () => {
+    // The one fnm shape that already worked, and the one that is genuinely
+    // process.execPath on Windows — Windows does not realpath the shim away.
+    assert.equal(
+      normalizeNodePath(FNM_WIN_SHIM, { env: { FNM_DIR: FNM_WIN }, existsSync: p => p === FNM_WIN_ALIAS }),
+      FNM_WIN_ALIAS);
+  });
+
+  test('FNM_DIR unset → root derived from execPath (#2185 rule)', () => {
+    assert.equal(
+      normalizeNodePath(FNM_POSIX_PINNED, { env: {}, existsSync: p => p === FNM_POSIX_ALIAS }),
+      FNM_POSIX_ALIAS);
+  });
+
+  test('FNM_DIR pointing at a different install → the path-derived root wins', () => {
+    const other = '/opt/other-fnm';
+    assert.equal(
+      normalizeNodePath(FNM_POSIX_PINNED, {
+        env: { FNM_DIR: other },
+        // BOTH aliases exist; the one belonging to the path must be chosen.
+        existsSync: p => p === FNM_POSIX_ALIAS || p === `${other}/aliases/default/bin/node`,
+      }),
+      FNM_POSIX_ALIAS);
+  });
+
+  test('no regression: alias absent → falls back to raw execPath unchanged', () => {
+    // Rewriting to an alias that is not there would turn a stale-but-working pin
+    // into an immediately broken one — worse than the bug.
+    assert.equal(
+      normalizeNodePath(FNM_POSIX_PINNED, { env: {}, existsSync: () => false }),
+      FNM_POSIX_PINNED);
+    assert.equal(
+      normalizeNodePath(FNM_POSIX_SHIM, { env: { FNM_DIR: FNM }, existsSync: () => false }),
+      FNM_POSIX_SHIM);
+  });
+
+  test('a non-fnm path containing node-versions is left unchanged', () => {
+    for (const foreign of [
+      '/opt/custom/node-versions/v1/bin/node',
+      '/srv/node-versions/v22/installation-notes/bin/node', // `installation` must be a whole segment
+    ]) {
+      assert.equal(
+        normalizeNodePath(foreign, { env: {}, existsSync: () => true }),
+        foreign,
+        `${foreign} is not an fnm layout`);
+    }
+  });
+
+  test('sibling managers are untouched by the fnm branch', () => {
+    const cases = [
+      ['/Users/u/.local/share/mise/installs/node/22.1.0/bin/node', '/Users/u/.local/share/mise/shims/node'],
+      ['/Users/u/.volta/tools/image/node/22.1.0/bin/node', '/Users/u/.volta/bin/node'],
+      ['/opt/homebrew/Cellar/node/26.7.0/bin/node', '/opt/homebrew/bin/node'],
+    ];
+    for (const [input, expected] of cases) {
+      assert.equal(
+        normalizeNodePath(input, { env: { FNM_DIR: FNM }, existsSync: p => p === expected }),
+        expected,
+        `${input} must still resolve through its own manager's branch`);
+    }
+  });
+
+  test('the rewrite is always an absolute path, never a bare node (#3022/#3002)', () => {
+    const out = normalizeNodePath(FNM_POSIX_PINNED, { env: {}, existsSync: () => true });
+    assert.ok(out.includes('/'), `expected an absolute path, got ${out}`);
+    assert.notEqual(out, 'node');
+  });
+
+  test('a trailing slash on FNM_DIR does not bake a doubled separator', () => {
+    // Review finding (minor). Cosmetic only — existsSync resolves `//` and shells
+    // collapse it — but the value is written into a user's settings.json.
+    const alias = `${FNM}/aliases/default/bin/node`;
+    assert.equal(
+      normalizeNodePath(FNM_POSIX_SHIM, {
+        env: { FNM_DIR: `${FNM}/` },
+        // Exact match, deliberately: a stub that collapses a doubled separator
+      // before comparing would pass whether or not the trim happened.
+      existsSync: p => p === alias,
+      }),
+      alias);
+  });
+
+  test('a trailing slash is trimmed on every fnm root, not just one branch', () => {
+    // One shared normalizeRootDir, three call sites — the versioned branch, the
+    // shim branch's FNM_DIR, and its APPDATA fallback.
+    const aliasBin = `${FNM}/aliases/default/bin/node`;
+    assert.equal(
+      normalizeNodePath('/nowhere/node-versions/v1/installation/bin/node',
+        { env: { FNM_DIR: `${FNM}//` }, existsSync: p => p === aliasBin }),
+      aliasBin,
+      'versioned branch');
+    const winAlias = 'C:/Users/u/AppData/Roaming/fnm/aliases/default/node.exe';
+    assert.equal(
+      normalizeNodePath('C:/x/fnm_multishells/1_2/node.exe',
+        { env: { APPDATA: 'C:/Users/u/AppData/Roaming/' }, existsSync: p => p === winAlias }),
+      winAlias,
+      'APPDATA fallback');
+  });
+
+  test('empty execPath is returned unchanged without throwing', () => {
+    assert.equal(normalizeNodePath('', { env: {}, existsSync: () => true }), '');
   });
 });
 
@@ -1956,11 +2236,11 @@ const path = require('path');
 const isWindows = process.platform === 'win32';
 
 const {
-  readGsdEffectiveModelOverrides,
   generateCodexAgentToml,
   convertClaudeToOpencodeFrontmatter,
   getCodexSkillAdapterHeader,
 } = require('../bin/install.js');
+const { readGsdEffectiveModelOverrides } = require('../gsd-core/bin/lib/install-model-override-resolver.cjs');
 
 const { createTempDir, cleanup } = require('./helpers.cjs');
 const makeTmp = (prefix) => createTempDir(`gsd-2256-${prefix}-`);
@@ -2083,13 +2363,28 @@ describe('bug #2256 — OpenCode adapter embeds per-project override', () => {
 });
 
 describe('bug #2256 — Codex skill adapter header documents transport', () => {
-  test('Task(model=...) line no longer says "omit" without explanation', () => {
+  test('documents static model_overrides as a fallback transport', () => {
     const header = getCodexSkillAdapterHeader('gsd-plan-phase');
-    // Header must mention that per-agent model_overrides are embedded in agent
-    // TOML so spawn_agent picks them up automatically — the old text said
-    // "Codex uses per-role config, not inline model selection" which left
-    // users thinking their model_overrides were silently ignored.
     assert.match(header, /model_overrides/);
+  });
+});
+
+describe('bug #4270 — Codex adapter forwards resolved spawn routing', () => {
+  test('forwards model and reasoning_effort when spawn_agent advertises each field', () => {
+    const header = getCodexSkillAdapterHeader('gsd-plan-phase');
+
+    assert.match(header, /Task\(model="\{resolved_model\}"\).*pass `model="\{resolved_model\}"`/s);
+    assert.match(header, /This is how `model_profile`.*including `adaptive`.*reaches the child agent/s);
+    assert.match(header, /query resolve-model <subagent_type> --pick effort/);
+    assert.match(header, /unified `effort`.*spawn argument\s+`reasoning_effort`/s);
+  });
+
+  test('keeps inheritance fallback for absent fields and sentinel values', () => {
+    const header = getCodexSkillAdapterHeader('gsd-plan-phase');
+
+    assert.match(header, /Omit `model` only when.*does not advertise `model`.*empty.*`"inherit"`/s);
+    assert.match(header, /Detect optional fields independently/s);
+    assert.doesNotMatch(header, /spawn_agent` has no inline `model` parameter/);
   });
 });
   });
@@ -2128,8 +2423,8 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-const INSTALL = require(path.join(__dirname, '..', 'bin', 'install.js'));
-const { normalizeNodePath, resolveNodeRunner, rewriteLegacyManagedNodeHookCommands } = INSTALL;
+const HOOKS_SURFACE = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'runtime-hooks-surface.cjs'));
+const { normalizeNodePath, resolveNodeRunner, rewriteLegacyManagedNodeHookCommands } = HOOKS_SURFACE;
 
 // ─── normalizeNodePath ────────────────────────────────────────────────────────
 
@@ -2141,39 +2436,46 @@ describe('Bug #3181: normalizeNodePath — exported as a function', () => {
 
 describe('Bug #3181: normalizeNodePath — Intel Homebrew Cellar paths → /usr/local/bin/node', () => {
   test('simple versioned Intel Cellar path', () => {
-    const result = normalizeNodePath('/usr/local/Cellar/node/25.8.1/bin/node');
+    const result = normalizeNodePath('/usr/local/Cellar/node/25.8.1/bin/node',
+      { existsSync: p => p === '/usr/local/bin/node' });
     assert.equal(result, '/usr/local/bin/node');
   });
 
   test('Intel Cellar path with long semver', () => {
-    const result = normalizeNodePath('/usr/local/Cellar/node/20.11.0/bin/node');
+    const result = normalizeNodePath('/usr/local/Cellar/node/20.11.0/bin/node',
+      { existsSync: p => p === '/usr/local/bin/node' });
     assert.equal(result, '/usr/local/bin/node');
   });
 
   test('Intel Cellar path with prerelease version segment', () => {
-    const result = normalizeNodePath('/usr/local/Cellar/node/22.0.0-rc.1/bin/node');
+    const result = normalizeNodePath('/usr/local/Cellar/node/22.0.0-rc.1/bin/node',
+      { existsSync: p => p === '/usr/local/bin/node' });
     assert.equal(result, '/usr/local/bin/node');
   });
 
   test('Intel versioned formula Cellar path (node@20) maps to stable symlink', () => {
-    const result = normalizeNodePath('/usr/local/Cellar/node@20/20.11.0/bin/node');
+    const result = normalizeNodePath('/usr/local/Cellar/node@20/20.11.0/bin/node',
+      { existsSync: p => p === '/usr/local/bin/node' });
     assert.equal(result, '/usr/local/bin/node');
   });
 });
 
 describe('Bug #3181: normalizeNodePath — Apple Silicon Homebrew Cellar paths → /opt/homebrew/bin/node', () => {
   test('simple versioned Apple Silicon Cellar path', () => {
-    const result = normalizeNodePath('/opt/homebrew/Cellar/node/25.8.1/bin/node');
+    const result = normalizeNodePath('/opt/homebrew/Cellar/node/25.8.1/bin/node',
+      { existsSync: p => p === '/opt/homebrew/bin/node' });
     assert.equal(result, '/opt/homebrew/bin/node');
   });
 
   test('Apple Silicon Cellar path with another version', () => {
-    const result = normalizeNodePath('/opt/homebrew/Cellar/node/18.20.4/bin/node');
+    const result = normalizeNodePath('/opt/homebrew/Cellar/node/18.20.4/bin/node',
+      { existsSync: p => p === '/opt/homebrew/bin/node' });
     assert.equal(result, '/opt/homebrew/bin/node');
   });
 
   test('Apple Silicon versioned formula Cellar path (node@18) maps to stable symlink', () => {
-    const result = normalizeNodePath('/opt/homebrew/Cellar/node@18/18.20.4/bin/node');
+    const result = normalizeNodePath('/opt/homebrew/Cellar/node@18/18.20.4/bin/node',
+      { existsSync: p => p === '/opt/homebrew/bin/node' });
     assert.equal(result, '/opt/homebrew/bin/node');
   });
 });
@@ -2182,23 +2484,131 @@ describe('Bug #3181: normalizeNodePath — Apple Silicon Homebrew Cellar paths �
 // from the path itself, so one branch covers every Homebrew layout.
 describe('Bug #2185: normalizeNodePath — Linuxbrew + custom-prefix Cellar paths → <prefix>/bin/node', () => {
   test('Linuxbrew Cellar path maps to the stable linuxbrew symlink', () => {
-    const result = normalizeNodePath('/home/linuxbrew/.linuxbrew/Cellar/node/26.0.0/bin/node');
+    const result = normalizeNodePath('/home/linuxbrew/.linuxbrew/Cellar/node/26.0.0/bin/node',
+      { existsSync: p => p === '/home/linuxbrew/.linuxbrew/bin/node' });
     assert.equal(result, '/home/linuxbrew/.linuxbrew/bin/node');
   });
 
   test('Linuxbrew Cellar path after a version bump (26.5.0) maps to stable symlink', () => {
-    const result = normalizeNodePath('/home/linuxbrew/.linuxbrew/Cellar/node/26.5.0/bin/node');
+    const result = normalizeNodePath('/home/linuxbrew/.linuxbrew/Cellar/node/26.5.0/bin/node',
+      { existsSync: p => p === '/home/linuxbrew/.linuxbrew/bin/node' });
     assert.equal(result, '/home/linuxbrew/.linuxbrew/bin/node');
   });
 
   test('Linuxbrew versioned formula Cellar path (node@22) maps to stable symlink', () => {
-    const result = normalizeNodePath('/home/linuxbrew/.linuxbrew/Cellar/node@22/22.11.0/bin/node');
+    const result = normalizeNodePath('/home/linuxbrew/.linuxbrew/Cellar/node@22/22.11.0/bin/node',
+      { existsSync: p => p === '/home/linuxbrew/.linuxbrew/bin/node' });
     assert.equal(result, '/home/linuxbrew/.linuxbrew/bin/node');
   });
 
   test('custom HOMEBREW_PREFIX Cellar path maps to its stable symlink', () => {
-    const result = normalizeNodePath('/custom/brew/Cellar/node/25.8.1/bin/node');
+    const result = normalizeNodePath('/custom/brew/Cellar/node/25.8.1/bin/node',
+      { existsSync: p => p === '/custom/brew/bin/node' });
     assert.equal(result, '/custom/brew/bin/node');
+  });
+});
+
+// ─── normalizeNodePath — Homebrew keg-only Cellar path keeps execPath (#4137) ──
+//
+// Bug #4137: every other runtime branch in normalizeNodePath (fnm shim, fnm
+// versioned, mise, volta) probes its rewrite candidate with the injected
+// existsSync and falls back to the raw execPath on a miss. The Homebrew branch
+// alone returned `<prefix>/bin/node` unconditionally — a path that does not
+// exist when the formula is keg-only/versioned and not `brew link`ed (e.g.
+// `node@24` resolving through `<prefix>/opt/node@24/bin/node`). Every managed
+// hook command then failed at invocation with exit 127,
+// `/bin/sh: <prefix>/bin/node: No such file or directory`.
+//
+// Fix: existsSync-guard the Homebrew rewrite exactly as mise and volta do; on a
+// miss fall through to the unmodified execPath. A rewrite must never convert a
+// working path into a broken one.
+//
+// Hermetic: every case injects existsSync and grants existence to exactly ONE
+// candidate — the one its layout would really have (the fnm #3704 stub rule).
+describe('Bug #4137: normalizeNodePath — keg-only Homebrew Cellar path falls back to raw execPath', () => {
+  const ARM_KEG = '/opt/homebrew/Cellar/node@24/24.11.0/bin/node';
+  const INTEL_KEG = '/usr/local/Cellar/node@20/20.11.0/bin/node';
+  const LINUXBREW_KEG = '/home/linuxbrew/.linuxbrew/Cellar/node@22/22.11.0/bin/node';
+  const CUSTOM_KEG = '/custom/brew/Cellar/node@18/18.20.4/bin/node';
+
+  test('keg-only versioned Cellar path (the reported bug) → raw execPath unchanged', () => {
+    // Apple Silicon, node@24 keg-only: <prefix>/bin/node is absent.
+    assert.equal(normalizeNodePath(ARM_KEG, { existsSync: () => false }), ARM_KEG);
+  });
+
+  test('Intel versioned keg-only Cellar path → raw execPath unchanged', () => {
+    assert.equal(normalizeNodePath(INTEL_KEG, { existsSync: () => false }), INTEL_KEG);
+  });
+
+  test('Linuxbrew versioned keg-only Cellar path → raw execPath unchanged', () => {
+    assert.equal(normalizeNodePath(LINUXBREW_KEG, { existsSync: () => false }), LINUXBREW_KEG);
+  });
+
+  test('unversioned keg-only Cellar path (brew unlink node) → raw execPath unchanged', () => {
+    const keg = '/opt/homebrew/Cellar/node/24.11.0/bin/node';
+    assert.equal(normalizeNodePath(keg, { existsSync: () => false }), keg);
+  });
+
+  test('custom HOMEBREW_PREFIX keg-only Cellar path → raw execPath unchanged', () => {
+    assert.equal(normalizeNodePath(CUSTOM_KEG, { existsSync: () => false }), CUSTOM_KEG);
+  });
+
+  test('Windows-spelled keg-only Cellar path → raw execPath unchanged, .exe intact', () => {
+    const keg = 'C:/Program Files/brew/Cellar/node@24/24.11.0/bin/node.exe';
+    assert.equal(normalizeNodePath(keg, { existsSync: () => false }), keg);
+  });
+
+  test('guard miss must not leak into the mise/volta branches', () => {
+    // The decoy shim belongs to a sibling branch's candidate space; a Cellar
+    // path can never claim it, and the fallback must be the raw execPath.
+    const decoyShim = '/opt/homebrew/shims/node';
+    assert.equal(
+      normalizeNodePath(ARM_KEG, { existsSync: p => p === decoyShim }),
+      ARM_KEG);
+  });
+});
+
+// Negative space: the guard must be a no-op when <prefix>/bin/node DOES exist
+// (linked formula) — the #2185/#3181 rewrite survives exactly as before.
+describe('Bug #4137: normalizeNodePath — linked Homebrew Cellar path still rewrites (guard is a no-op)', () => {
+  test('linked versioned formula keg + stable symlink present → stable symlink', () => {
+    assert.equal(
+      normalizeNodePath('/opt/homebrew/Cellar/node@24/24.11.0/bin/node',
+        { existsSync: p => p === '/opt/homebrew/bin/node' }),
+      '/opt/homebrew/bin/node');
+  });
+
+  test('linked unversioned formula keg + stable symlink present → stable symlink', () => {
+    assert.equal(
+      normalizeNodePath('/usr/local/Cellar/node/25.8.1/bin/node',
+        { existsSync: p => p === '/usr/local/bin/node' }),
+      '/usr/local/bin/node');
+  });
+
+  test('Linuxbrew linked keg + stable symlink present → stable symlink', () => {
+    assert.equal(
+      normalizeNodePath('/home/linuxbrew/.linuxbrew/Cellar/node@22/22.11.0/bin/node',
+        { existsSync: p => p === '/home/linuxbrew/.linuxbrew/bin/node' }),
+      '/home/linuxbrew/.linuxbrew/bin/node');
+  });
+});
+
+// The seam callers bake into hook commands — the reported breakage surface.
+describe('Bug #4137: resolveNodeRunner — keg-only Cellar execPath stays raw when symlink absent', () => {
+  test('resolveNodeRunner keeps the keg path (quoted token) instead of the broken symlink', () => {
+    const keg = '/opt/homebrew/Cellar/node@24/24.11.0/bin/node';
+    assert.equal(
+      resolveNodeRunner({ execPath: keg, existsSync: () => false }),
+      JSON.stringify(keg));
+  });
+
+  test('resolveNodeRunner still maps a linked Cellar execPath to the stable symlink', () => {
+    assert.equal(
+      resolveNodeRunner({
+        execPath: '/opt/homebrew/Cellar/node@24/24.11.0/bin/node',
+        existsSync: p => p === '/opt/homebrew/bin/node',
+      }),
+      '"/opt/homebrew/bin/node"');
   });
 });
 
@@ -2244,7 +2654,7 @@ describe('Bug #3181: resolveNodeRunner — maps Cellar execPath to stable symlin
         value: '/usr/local/Cellar/node/25.8.1/bin/node',
         configurable: true,
       });
-      const runner = resolveNodeRunner();
+      const runner = resolveNodeRunner({ existsSync: p => p === '/usr/local/bin/node' });
       assert.equal(runner, '"/usr/local/bin/node"',
         `expected stable Intel symlink, got: ${runner}`);
     } finally {
@@ -2259,7 +2669,7 @@ describe('Bug #3181: resolveNodeRunner — maps Cellar execPath to stable symlin
         value: '/opt/homebrew/Cellar/node/25.8.1/bin/node',
         configurable: true,
       });
-      const runner = resolveNodeRunner();
+      const runner = resolveNodeRunner({ existsSync: p => p === '/opt/homebrew/bin/node' });
       assert.equal(runner, '"/opt/homebrew/bin/node"',
         `expected stable Apple Silicon symlink, got: ${runner}`);
     } finally {
@@ -2424,8 +2834,7 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-const INSTALL = require(path.join(__dirname, '..', 'bin', 'install.js'));
-const { normalizeNodePath, resolveNodeRunner } = INSTALL;
+const { normalizeNodePath, resolveNodeRunner } = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'runtime-hooks-surface.cjs'));
 
 // ─── Synthetic paths used across tests ───────────────────────────────────────
 
@@ -2510,14 +2919,16 @@ describe('Bug #977: normalizeNodePath — non-fnm paths are unaffected (no regre
 
   test('Intel Homebrew Cellar path still maps to stable symlink', () => {
     assert.equal(
-      normalizeNodePath('/usr/local/Cellar/node/25.8.1/bin/node'),
+      normalizeNodePath('/usr/local/Cellar/node/25.8.1/bin/node',
+        { existsSync: p => p === '/usr/local/bin/node' }),
       '/usr/local/bin/node',
     );
   });
 
   test('Apple Silicon Homebrew Cellar path still maps to stable symlink', () => {
     assert.equal(
-      normalizeNodePath('/opt/homebrew/Cellar/node/25.8.1/bin/node'),
+      normalizeNodePath('/opt/homebrew/Cellar/node/25.8.1/bin/node',
+        { existsSync: p => p === '/opt/homebrew/bin/node' }),
       '/opt/homebrew/bin/node',
     );
   });
@@ -2634,8 +3045,7 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-const INSTALL = require(path.join(__dirname, '..', 'bin', 'install.js'));
-const { buildHookCommand, resolveNodeRunner } = INSTALL;
+const { buildHookCommand, resolveNodeRunner, rewriteLegacyManagedNodeHookCommands } = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'runtime-hooks-surface.cjs'));
 
 /**
  * Parse a hook command string into { runner, hookPath } structured
@@ -2800,8 +3210,6 @@ describe('Bug #2979: buildHookCommand for .sh hooks still uses bare "bash" (POSI
 });
 
 // ─── #3002 CR follow-up: legacy-bare-node migration ─────────────────────────
-
-const { rewriteLegacyManagedNodeHookCommands } = INSTALL;
 
 describe('Bug #2979 (#3002 CR): rewriteLegacyManagedNodeHookCommands rewrites bare-node managed hooks on reinstall', () => {
   test('exported as a function', () => {
@@ -3071,7 +3479,7 @@ describe('Bug #2979 (#3002 CR): resolveNodeRunner returns null when execPath una
 
 // ─── #3002 CR follow-up #2: null-command guards in settings.json ──────────
 
-const { validateHookFields } = INSTALL;
+const { validateHookFields } = require('../bin/install.js');
 
 describe('Bug #2979 (#3002 CR follow-up): no command:null hook entries survive serialization', () => {
   // CR feedback: assert structurally on the resulting settings object, not by
@@ -3103,6 +3511,7 @@ describe('Bug #2979 (#3002 CR follow-up): no command:null hook entries survive s
     { event: 'PreToolUse',    matcher: 'Write|Edit',                                    label: 'gsd-read-guard.js' },
     { event: 'PostToolUse',   matcher: 'Read',                                          label: 'gsd-read-injection-scanner.js' },
     { event: 'PreToolUse',    matcher: 'Bash|Edit|Write|MultiEdit',                     label: 'gsd-workflow-guard.js' },
+    { event: 'PreToolUse',    matcher: 'Read|Grep|Bash',                                label: 'gsd-secret-read-guard.js' },
   ];
 
   for (const { event, matcher, label } of MANAGED_JS_HOOKS) {
@@ -3294,13 +3703,12 @@ before(() => {
   conversion = require('../gsd-core/bin/lib/runtime-artifact-conversion.cjs');
 });
 
-describe('bin/install.js compatibility export audit (#1559)', () => {
-  test('retains audited compatibility relays for shared rewrite helpers', () => {
-    assert.strictEqual(installer.processAttribution, conversion.processAttribution);
-    assert.strictEqual(
-      installer.applyRuntimeContentRewritesForCommandsInPlace,
-      conversion.applyRuntimeContentRewritesForCommandsInPlace,
-    );
+describe('bin/install.js compatibility export audit (#1559, retired by #2876)', () => {
+  test('the two previously-audited compatibility relays are retired — test consumers now import runtime-artifact-conversion.cjs directly', () => {
+    assert.equal(typeof conversion.processAttribution, 'function', 'processAttribution remains available from the conversion module');
+    assert.equal(installer.processAttribution, undefined, 'processAttribution is no longer re-exported by bin/install.js (#2876)');
+    assert.equal(typeof conversion.applyRuntimeContentRewritesForCommandsInPlace, 'function', 'applyRuntimeContentRewritesForCommandsInPlace remains available from the conversion module');
+    assert.equal(installer.applyRuntimeContentRewritesForCommandsInPlace, undefined, 'applyRuntimeContentRewritesForCommandsInPlace is no longer re-exported by bin/install.js (#2876)');
   });
 
   test('does not leak unaudited conversion-module helpers through the installer', () => {
@@ -3312,8 +3720,8 @@ describe('bin/install.js compatibility export audit (#1559)', () => {
       'convertClaudeToCursorMarkdown',
       'convertClaudeToCodexMarkdown',
       'transformContentToHyphen',
-      'claudeToGeminiTools',
-      'convertGeminiToolName',
+      'claudeToAntigravityTools',
+      'convertAntigravityToolName',
       'rewriteStagedSkillBodies',
       'rewriteStagedCommandBodies',
       '_computePathPrefix',
@@ -3483,16 +3891,17 @@ describe('uninstall — manifest cleanup (#1908)', () => {
  * Regression tests for bug #2771: USER-PROFILE.md tracked in install manifest
  *
  * USER-PROFILE.md is a user-owned artifact created/refreshed by /gsd-profile-user.
- * preserveUserArtifacts() correctly preserves it across reinstalls. But writeManifest()
- * also records it under "gsd-core/USER-PROFILE.md" with a SHA-256 of whatever was
- * on disk at install time. On the next install, saveLocalPatches() compares the on-disk
- * (refreshed) hash to the manifest hash, finds them different, and emits the spurious
- * "Found N locally modified GSD file(s) — backed up to gsd-local-patches/" warning.
+ * The user-artifact-staging.cts durable staging path (#2875) correctly preserves it
+ * across reinstalls. But writeManifest() also records it under
+ * "gsd-core/USER-PROFILE.md" with a SHA-256 of whatever was on disk at install time.
+ * On the next install, saveLocalPatches() compares the on-disk (refreshed) hash to
+ * the manifest hash, finds them different, and emits the spurious "Found N locally
+ * modified GSD file(s) — backed up to gsd-local-patches/" warning.
  *
  * Invariant: a file is either distribution (manifest-tracked, diff'd against manifest)
  * or user artifact (preserved across installs, never diff'd). It cannot be both. The
  * shared truth source must be a single USER_OWNED_ARTIFACTS list referenced by both
- * preserveUserArtifacts callers and writeManifest.
+ * the staging call sites and writeManifest.
  *
  * Closes: #2771
  */
@@ -3564,7 +3973,7 @@ describe('#2771: USER-PROFILE.md is excluded from gsd-file-manifest.json', () =>
   });
 });
 
-// ─── Test 2: preserveUserArtifacts still preserves USER-PROFILE.md ────────────
+// ─── Test 2: USER-PROFILE.md is still preserved (via durable staging, #2875) ──
 
 describe('#2771: USER-PROFILE.md is still preserved across reinstall', () => {
   let tmpDir;
@@ -3683,25 +4092,29 @@ describe('#2771: legacy manifest entries for USER_OWNED_ARTIFACTS are normalized
 // ─── Test 4: shared constant exists and is used by both call sites ────────────
 
 describe('#2771: USER_OWNED_ARTIFACTS is a single source of truth', () => {
-  test('install.js exports USER_OWNED_ARTIFACTS containing USER-PROFILE.md', () => {
+  test('install-engine.cjs exports USER_OWNED_ARTIFACTS containing USER-PROFILE.md; bin/install.js no longer re-exports it (#2876)', () => {
     const origMode = process.env.GSD_TEST_MODE;
     process.env.GSD_TEST_MODE = '1';
     let mod;
+    let engine;
     try {
       delete require.cache[require.resolve(INSTALL_SCRIPT)];
       mod = require(INSTALL_SCRIPT);
+      engine = require('../gsd-core/bin/lib/install-engine.cjs');
     } finally {
       if (origMode === undefined) delete process.env.GSD_TEST_MODE;
       else process.env.GSD_TEST_MODE = origMode;
     }
 
+    assert.strictEqual(mod.USER_OWNED_ARTIFACTS, undefined, 'bin/install.js must no longer export USER_OWNED_ARTIFACTS (#2876)');
+
     assert.ok(
-      Array.isArray(mod.USER_OWNED_ARTIFACTS) || mod.USER_OWNED_ARTIFACTS instanceof Set,
-      'install.js must export USER_OWNED_ARTIFACTS as a single source of truth'
+      Array.isArray(engine.USER_OWNED_ARTIFACTS) || engine.USER_OWNED_ARTIFACTS instanceof Set,
+      'install-engine.cjs must export USER_OWNED_ARTIFACTS as a single source of truth'
     );
-    const list = Array.isArray(mod.USER_OWNED_ARTIFACTS)
-      ? mod.USER_OWNED_ARTIFACTS
-      : Array.from(mod.USER_OWNED_ARTIFACTS);
+    const list = Array.isArray(engine.USER_OWNED_ARTIFACTS)
+      ? engine.USER_OWNED_ARTIFACTS
+      : Array.from(engine.USER_OWNED_ARTIFACTS);
     assert.ok(
       list.includes('USER-PROFILE.md'),
       'USER_OWNED_ARTIFACTS must include USER-PROFILE.md'
@@ -3825,7 +4238,7 @@ const SHARED_DIR = path.join(REPO_ROOT, 'gsd-core', 'bin', 'shared');
 
 const { install } = require('../bin/install.js');
 
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, scrubConfigLocationEnv } = require('./helpers.cjs');
 const makeTmpDir = () => createTempDir('gsd-3571-');
 
 function silenceConsole(fn) {
@@ -3851,6 +4264,7 @@ describe('bug #3571: configuration generated manifests resolve in install layout
   let savedHome;
   let savedUserProfile;
   let savedExplicitConfigDir;
+  let restoreConfigLocationEnv;
 
   beforeEach(() => {
     tmpRoot = makeTmpDir();
@@ -3859,6 +4273,12 @@ describe('bug #3571: configuration generated manifests resolve in install layout
     savedUserProfile = process.env.USERPROFILE;
     savedExplicitConfigDir = process.env.GSD_EXPLICIT_CONFIG_DIR;
     delete process.env.GSD_EXPLICIT_CONFIG_DIR;
+    // #2665: this block calls the real installer IN-PROCESS with only HOME
+    // sandboxed. getGlobalConfigDir is env-FIRST, so an ambient CLAUDE_CONFIG_DIR
+    // (or CODEX_HOME, or any other runtime's config-location var) overrides that
+    // sandbox and a complete global install lands in the developer's live config
+    // dir. TEST_ENV_BASE cannot reach this — it only scrubs CHILD process env.
+    restoreConfigLocationEnv = scrubConfigLocationEnv();
   });
 
   afterEach(() => {
@@ -3870,6 +4290,7 @@ describe('bug #3571: configuration generated manifests resolve in install layout
     } else {
       process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
     }
+    restoreConfigLocationEnv();
     cleanup(tmpRoot);
   });
 
@@ -3982,7 +4403,7 @@ const { install } = require('../bin/install.js');
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, scrubConfigLocationEnv } = require('./helpers.cjs');
 const makeTmpDir = createTempDir;
 
 const rmTmpDir = cleanup;
@@ -4024,6 +4445,7 @@ describe('bug #3288: model-catalog.cjs install-layout resolution', () => {
   let savedHome;
   let savedUserProfile;
   let savedExplicitConfigDir;
+  let restoreConfigLocationEnv;
 
   beforeEach(() => {
     tmpRoot = makeTmpDir('gsd-3288-');
@@ -4038,6 +4460,12 @@ describe('bug #3288: model-catalog.cjs install-layout resolution', () => {
     // and target a different directory than tmpRoot (CR finding, PR #3293).
     savedExplicitConfigDir = process.env.GSD_EXPLICIT_CONFIG_DIR;
     delete process.env.GSD_EXPLICIT_CONFIG_DIR;
+    // #2665: this block calls the real installer IN-PROCESS with only HOME
+    // sandboxed. getGlobalConfigDir is env-FIRST, so an ambient CLAUDE_CONFIG_DIR
+    // (or CODEX_HOME, or any other runtime's config-location var) overrides that
+    // sandbox and a complete global install lands in the developer's live config
+    // dir. TEST_ENV_BASE cannot reach this — it only scrubs CHILD process env.
+    restoreConfigLocationEnv = scrubConfigLocationEnv();
   });
 
   afterEach(() => {
@@ -4049,6 +4477,7 @@ describe('bug #3288: model-catalog.cjs install-layout resolution', () => {
     } else {
       process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
     }
+    restoreConfigLocationEnv();
     rmTmpDir(tmpRoot);
   });
 
@@ -5040,6 +5469,36 @@ describe('#338 case 1: fresh local Claude install writes to settings.local.json'
       `install() must return settingsPath ending in settings.local.json for local Claude installs; got: ${result.settingsPath}`
     );
   });
+
+  // #4249 (agy adversarial review, round 8): every early-return branch of
+  // install() must still return the configuredEntrypoints/rollbackInstallerMigrations
+  // shape — rollbackFinalizedInstallerMigrations reads the latter unconditionally,
+  // so an omission here silently drops this runtime's rollback on a later
+  // finalize-stage failure.
+  test('malformed settings.local.json still returns configuredEntrypoints and a working rollbackInstallerMigrations', (t) => {
+    const origCwd = process.cwd();
+    t.after(() => { process.chdir(origCwd); });
+    process.chdir(tmpDir);
+
+    fs.mkdirSync(path.join(tmpDir, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, '.claude', 'settings.local.json'), '{ not valid json', 'utf-8');
+
+    const result = install(false, 'claude');
+    assert.deepStrictEqual(
+      result.configuredEntrypoints,
+      [],
+      'unparseable settings.local.json must still return configuredEntrypoints: []'
+    );
+    assert.strictEqual(
+      typeof result.rollbackInstallerMigrations,
+      'function',
+      'unparseable settings.local.json must still return a callable rollbackInstallerMigrations'
+    );
+    assert.doesNotThrow(
+      () => result.rollbackInstallerMigrations(),
+      'rollbackInstallerMigrations() must not throw when called on this early-return path'
+    );
+  });
 });
 
 // ─── Case 2: global Claude install (regression guard) ────────────────────────
@@ -5155,7 +5614,7 @@ describe('#338 case 3: migration of prior local install GSD entries from setting
               {
                 type: 'command',
                 command: `${process.execPath} ${path.join(claudeDir, 'hooks', 'gsd-context-monitor.js')}`,
-                timeout: 10,
+                timeout: FIXTURE_LEGACY_HOOK_TIMEOUT_SECONDS,
               }
             ]
           }
@@ -5484,31 +5943,15 @@ const path = require('node:path');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { throwIfFailed } = require('./helpers/git-fixture.cjs');
 const { cleanup } = require('./helpers.cjs');
+const { ensureHooksDist, HOOKS_DIST_DIR } = require('./helpers/hooks-dist.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const INSTALL_PATH = path.join(REPO_ROOT, 'bin', 'install.js');
-const HOOKS_DIST_DIR = path.join(REPO_ROOT, 'hooks', 'dist');
-const BUILD_HOOKS_SCRIPT = path.join(REPO_ROOT, 'scripts', 'build-hooks.js');
 
 // #3145: class-norm timeouts, not per-suite values — see helpers/timeouts.cjs.
 const {
-  BUILD_TIMEOUT_MS: BUILD_HOOKS_TIMEOUT_MS,
   INSTALL_TIMEOUT_MS,
 } = require('./helpers/timeouts.cjs');
-
-/**
- * Ensure hooks/dist is populated before any suite that reads it.
- * hooks/dist/ is gitignored and only produced by `npm run build:hooks`.
- * In CI the scoped/windows test jobs do NOT run build:hooks before running
- * tests, so the first test that needs hooks/dist would fail. This mirrors
- * the pattern used in bug-3357-codex-legacy-hooks-json-migration.test.cjs.
- */
-function ensureHooksDist() {
-  if (!fs.existsSync(HOOKS_DIST_DIR) || fs.readdirSync(HOOKS_DIST_DIR).filter(f => f.endsWith('.js')).length === 0) {
-    const r = runNode([BUILD_HOOKS_SCRIPT], { timeoutMs: BUILD_HOOKS_TIMEOUT_MS });
-    throwIfFailed(r, `node ${BUILD_HOOKS_SCRIPT}`);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -5519,7 +5962,10 @@ function ensureHooksDist() {
  * GSD_TEST_MODE is cleared so the install() main block executes.
  */
 function runInstall(cwd, args) {
-  const env = { ...process.env };
+  // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+  // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const env = installSpawnEnv();
   delete env.GSD_TEST_MODE;
   // 120s, not 60s. A full install copies and converts the whole shipped
   // payload (117 workflows, 100 references, 34 agents, ~71 skills) and
@@ -5922,4010 +6368,67 @@ const manifestPath = path.join(
 );
 const manifest = require(manifestPath);
 
-// Load install.js exported values (executes the module, not text inspection)
+// Load install-effort-resolver.cjs's catalog (executes the module, not text
+// inspection). #2876 (epic #2866 Phase 7) retired bin/install.js's
+// `_GSD_EFFORT_MANIFEST_TIER_DEFAULTS` / `_GSD_EFFORT_MANIFEST_DEFAULT`
+// getter re-exports — install-effort-resolver.cjs's `_getGsdEffortCatalog()`
+// was always the single source; bin/install.js's getters merely relayed it.
 const installPath = path.join(__dirname, '..', 'bin', 'install.js');
-const {
-  _GSD_EFFORT_MANIFEST_TIER_DEFAULTS,
-  _GSD_EFFORT_MANIFEST_DEFAULT,
-} = require(installPath);
+const { _getGsdEffortCatalog } = require(
+  path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'install-effort-resolver.cjs')
+);
+const _GSD_EFFORT_MANIFEST_TIER_DEFAULTS = _getGsdEffortCatalog().EFFORT_MANIFEST_TIER_DEFAULTS;
+const _GSD_EFFORT_MANIFEST_DEFAULT = _getGsdEffortCatalog().EFFORT_MANIFEST_DEFAULT;
 
-test('install.js _GSD_EFFORT_MANIFEST_TIER_DEFAULTS.light matches manifest effort.routing_tier_defaults.light', () => {
+test('bin/install.js no longer re-exports _GSD_EFFORT_MANIFEST_TIER_DEFAULTS / _GSD_EFFORT_MANIFEST_DEFAULT (#2876)', () => {
+  const installExports = require(installPath);
+  assert.strictEqual(installExports._GSD_EFFORT_MANIFEST_TIER_DEFAULTS, undefined);
+  assert.strictEqual(installExports._GSD_EFFORT_MANIFEST_DEFAULT, undefined);
+});
+
+test('install-effort-resolver.cjs _GSD_EFFORT_MANIFEST_TIER_DEFAULTS.light matches manifest effort.routing_tier_defaults.light', () => {
   assert.strictEqual(
     _GSD_EFFORT_MANIFEST_TIER_DEFAULTS.light,
     manifest.effort.routing_tier_defaults.light,
-    `install.js tier default for "light" (${_GSD_EFFORT_MANIFEST_TIER_DEFAULTS.light}) differs from manifest (${manifest.effort.routing_tier_defaults.light})`
+    `install-effort-resolver.cjs tier default for "light" (${_GSD_EFFORT_MANIFEST_TIER_DEFAULTS.light}) differs from manifest (${manifest.effort.routing_tier_defaults.light})`
   );
 });
 
-test('install.js _GSD_EFFORT_MANIFEST_TIER_DEFAULTS.standard matches manifest effort.routing_tier_defaults.standard', () => {
+test('install-effort-resolver.cjs _GSD_EFFORT_MANIFEST_TIER_DEFAULTS.standard matches manifest effort.routing_tier_defaults.standard', () => {
   assert.strictEqual(
     _GSD_EFFORT_MANIFEST_TIER_DEFAULTS.standard,
     manifest.effort.routing_tier_defaults.standard,
-    `install.js tier default for "standard" (${_GSD_EFFORT_MANIFEST_TIER_DEFAULTS.standard}) differs from manifest (${manifest.effort.routing_tier_defaults.standard})`
+    `install-effort-resolver.cjs tier default for "standard" (${_GSD_EFFORT_MANIFEST_TIER_DEFAULTS.standard}) differs from manifest (${manifest.effort.routing_tier_defaults.standard})`
   );
 });
 
-test('install.js _GSD_EFFORT_MANIFEST_TIER_DEFAULTS.heavy matches manifest effort.routing_tier_defaults.heavy', () => {
+test('install-effort-resolver.cjs _GSD_EFFORT_MANIFEST_TIER_DEFAULTS.heavy matches manifest effort.routing_tier_defaults.heavy', () => {
   assert.strictEqual(
     _GSD_EFFORT_MANIFEST_TIER_DEFAULTS.heavy,
     manifest.effort.routing_tier_defaults.heavy,
-    `install.js tier default for "heavy" (${_GSD_EFFORT_MANIFEST_TIER_DEFAULTS.heavy}) differs from manifest (${manifest.effort.routing_tier_defaults.heavy})`
+    `install-effort-resolver.cjs tier default for "heavy" (${_GSD_EFFORT_MANIFEST_TIER_DEFAULTS.heavy}) differs from manifest (${manifest.effort.routing_tier_defaults.heavy})`
   );
 });
 
-test('install.js _GSD_EFFORT_MANIFEST_DEFAULT matches manifest effort.default', () => {
+test('install-effort-resolver.cjs _GSD_EFFORT_MANIFEST_DEFAULT matches manifest effort.default', () => {
   assert.strictEqual(
     _GSD_EFFORT_MANIFEST_DEFAULT,
     manifest.effort.default,
-    `install.js effort default (${_GSD_EFFORT_MANIFEST_DEFAULT}) differs from manifest (${manifest.effort.default})`
+    `install-effort-resolver.cjs effort default (${_GSD_EFFORT_MANIFEST_DEFAULT}) differs from manifest (${manifest.effort.default})`
   );
 });
 
-test('install.js tier-defaults object has exactly the same keys as manifest effort.routing_tier_defaults', () => {
+test('install-effort-resolver.cjs tier-defaults object has exactly the same keys as manifest effort.routing_tier_defaults', () => {
   const installKeys = Object.keys(_GSD_EFFORT_MANIFEST_TIER_DEFAULTS).sort();
   const manifestKeys = Object.keys(manifest.effort.routing_tier_defaults).sort();
   assert.deepStrictEqual(
     installKeys,
     manifestKeys,
-    `Key mismatch — install.js: [${installKeys.join(', ')}], manifest: [${manifestKeys.join(', ')}]`
+    `Key mismatch — install-effort-resolver.cjs: [${installKeys.join(', ')}], manifest: [${manifestKeys.join(', ')}]`
   );
 });
   });
 }
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-2256-model-overrides-transport.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-2256-model-overrides-transport (consolidation epic #1969 B1 #1970)", () => {
-/**
- * Regression tests for issue #2256 — per-agent model_overrides transport
- * for Codex and OpenCode runtimes.
- *
- * The bug: model_overrides set in per-project `.planning/config.json` were
- * never read by the Codex / OpenCode install paths, which only probed
- * `~/.gsd/defaults.json`. As a result, the configured per-agent model was
- * dropped and child agents inherited the runtime's default model.
- *
- * These tests lock in the fix: per-project overrides must be honored, and
- * per-project keys must win over global when both are present.
- */
-
-process.env.GSD_TEST_MODE = '1';
-
-const { test, describe, beforeEach, afterEach } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
-
-const isWindows = process.platform === 'win32';
-
-const {
-  readGsdEffectiveModelOverrides,
-  generateCodexAgentToml,
-  convertClaudeToOpencodeFrontmatter,
-  getCodexSkillAdapterHeader,
-} = require('../bin/install.js');
-
-const { createTempDir, cleanup } = require('./helpers.cjs');
-const makeTmp = (prefix) => createTempDir(`gsd-2256-${prefix}-`);
-
-function writeJson(p, obj) {
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(obj, null, 2));
-}
-
-describe('bug #2256 — readGsdEffectiveModelOverrides', () => {
-  let projectDir;
-  let homeDir;
-  let origHome;
-  let origUserProfile;
-
-  beforeEach(() => {
-    projectDir = makeTmp('proj');
-    homeDir = makeTmp('home');
-    origHome = process.env.HOME;
-    // On Windows, os.homedir() reads USERPROFILE (not HOME). Tests that
-    // need to redirect ~ must override both — otherwise the SUT reads
-    // the real user's home and the fixture is invisible.
-    origUserProfile = process.env.USERPROFILE;
-    process.env.HOME = homeDir;
-    if (isWindows) process.env.USERPROFILE = homeDir;
-  });
-
-  afterEach(() => {
-    if (origHome === undefined) delete process.env.HOME;
-    else process.env.HOME = origHome;
-    if (isWindows) {
-      if (origUserProfile === undefined) delete process.env.USERPROFILE;
-      else process.env.USERPROFILE = origUserProfile;
-    }
-    cleanup(projectDir);
-    cleanup(homeDir);
-  });
-
-  test('returns null when neither source defines model_overrides', () => {
-    const result = readGsdEffectiveModelOverrides(projectDir);
-    assert.strictEqual(result, null);
-  });
-
-  test('reads overrides from ~/.gsd/defaults.json (global only)', () => {
-    writeJson(path.join(homeDir, '.gsd', 'defaults.json'), {
-      model_overrides: { 'gsd-codebase-mapper': 'gpt-5-mini' },
-    });
-    const result = readGsdEffectiveModelOverrides(projectDir);
-    assert.deepStrictEqual(result, { 'gsd-codebase-mapper': 'gpt-5-mini' });
-  });
-
-  test('reads overrides from per-project .planning/config.json', () => {
-    writeJson(path.join(projectDir, '.planning', 'config.json'), {
-      model_overrides: { 'gsd-codebase-mapper': 'claude-haiku-4-5' },
-    });
-    const result = readGsdEffectiveModelOverrides(projectDir);
-    assert.deepStrictEqual(result, { 'gsd-codebase-mapper': 'claude-haiku-4-5' });
-  });
-
-  test('per-project overrides win over global on conflict', () => {
-    writeJson(path.join(homeDir, '.gsd', 'defaults.json'), {
-      model_overrides: { 'gsd-codebase-mapper': 'global-model', 'gsd-planner': 'opus' },
-    });
-    writeJson(path.join(projectDir, '.planning', 'config.json'), {
-      model_overrides: { 'gsd-codebase-mapper': 'project-model' },
-    });
-    const result = readGsdEffectiveModelOverrides(projectDir);
-    // Per-project wins on conflict; non-conflicting global keys are preserved.
-    assert.deepStrictEqual(result, {
-      'gsd-codebase-mapper': 'project-model',
-      'gsd-planner': 'opus',
-    });
-  });
-
-  test('walks up from nested targetDir to find .planning/', () => {
-    writeJson(path.join(projectDir, '.planning', 'config.json'), {
-      model_overrides: { 'gsd-planner': 'project-opus' },
-    });
-    const nested = path.join(projectDir, '.codex');
-    fs.mkdirSync(nested, { recursive: true });
-    const result = readGsdEffectiveModelOverrides(nested);
-    assert.deepStrictEqual(result, { 'gsd-planner': 'project-opus' });
-  });
-});
-
-describe('bug #2256 — Codex adapter embeds per-project override', () => {
-  const agentContent = `---\nname: gsd-codebase-mapper\ndescription: Maps codebase\n---\n\nbody\n`;
-
-  test('generateCodexAgentToml embeds model when override provided', () => {
-    const toml = generateCodexAgentToml(
-      'gsd-codebase-mapper',
-      agentContent,
-      { 'gsd-codebase-mapper': 'gpt-5-mini' },
-    );
-    assert.match(toml, /^model = "gpt-5-mini"$/m);
-  });
-
-  test('generateCodexAgentToml omits model when no override', () => {
-    const toml = generateCodexAgentToml('gsd-codebase-mapper', agentContent, null);
-    assert.doesNotMatch(toml, /^model\s*=/m);
-  });
-});
-
-describe('bug #2256 — OpenCode adapter embeds per-project override', () => {
-  test('convertClaudeToOpencodeFrontmatter embeds model on agent frontmatter', () => {
-    const input = `---\nname: gsd-codebase-mapper\ndescription: Maps codebase\n---\n\nbody\n`;
-    const out = convertClaudeToOpencodeFrontmatter(input, {
-      isAgent: true,
-      modelOverride: 'claude-haiku-4-5',
-    });
-    assert.match(out, /^model: claude-haiku-4-5$/m);
-    assert.match(out, /^mode: subagent$/m);
-  });
-
-  test('convertClaudeToOpencodeFrontmatter omits model when override absent', () => {
-    const input = `---\nname: gsd-codebase-mapper\ndescription: Maps codebase\n---\n\nbody\n`;
-    const out = convertClaudeToOpencodeFrontmatter(input, { isAgent: true, modelOverride: null });
-    assert.doesNotMatch(out, /^model:/m);
-  });
-});
-
-describe('bug #2256 — Codex skill adapter header documents transport', () => {
-  test('Task(model=...) line no longer says "omit" without explanation', () => {
-    const header = getCodexSkillAdapterHeader('gsd-plan-phase');
-    // Header must mention that per-agent model_overrides are embedded in agent
-    // TOML so spawn_agent picks them up automatically — the old text said
-    // "Codex uses per-role config, not inline model selection" which left
-    // users thinking their model_overrides were silently ignored.
-    assert.match(header, /model_overrides/);
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-3181-node-cellar-path.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-3181-node-cellar-path (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-/**
- * Bug #3181: `resolveNodeRunner()` bakes versioned Homebrew Cellar paths
- * (e.g. `/usr/local/Cellar/node/25.8.1/bin/node`) into hook commands in
- * `~/.claude/settings.json`. After `brew upgrade node` the Cellar binary
- * fails with `dyld: Library not loaded` because shared libraries have
- * changed SOVERSION.
- *
- * Fix: prefer the stable Homebrew symlinks (`/usr/local/bin/node` for Intel
- * Macs, `/opt/homebrew/bin/node` for Apple Silicon) when a Cellar path is
- * detected. Non-Homebrew paths (NVM, system node, Windows, etc.) are
- * returned unchanged.
- *
- * Also: `rewriteLegacyManagedNodeHookCommands()` must normalize Cellar paths
- * baked into existing hook commands so reinstall doesn't re-bake them.
- *
- * All assertions go against exported function return values — no source-grep.
- */
-
-const { test, describe } = require('node:test');
-const assert = require('node:assert/strict');
-const path = require('node:path');
-
-const INSTALL = require(path.join(__dirname, '..', 'bin', 'install.js'));
-const { normalizeNodePath, resolveNodeRunner, rewriteLegacyManagedNodeHookCommands } = INSTALL;
-
-// ─── normalizeNodePath ────────────────────────────────────────────────────────
-
-describe('Bug #3181: normalizeNodePath — exported as a function', () => {
-  test('normalizeNodePath is exported', () => {
-    assert.equal(typeof normalizeNodePath, 'function');
-  });
-});
-
-describe('Bug #3181: normalizeNodePath — Intel Homebrew Cellar paths → /usr/local/bin/node', () => {
-  test('simple versioned Intel Cellar path', () => {
-    const result = normalizeNodePath('/usr/local/Cellar/node/25.8.1/bin/node');
-    assert.equal(result, '/usr/local/bin/node');
-  });
-
-  test('Intel Cellar path with long semver', () => {
-    const result = normalizeNodePath('/usr/local/Cellar/node/20.11.0/bin/node');
-    assert.equal(result, '/usr/local/bin/node');
-  });
-
-  test('Intel Cellar path with prerelease version segment', () => {
-    const result = normalizeNodePath('/usr/local/Cellar/node/22.0.0-rc.1/bin/node');
-    assert.equal(result, '/usr/local/bin/node');
-  });
-
-  test('Intel versioned formula Cellar path (node@20) maps to stable symlink', () => {
-    const result = normalizeNodePath('/usr/local/Cellar/node@20/20.11.0/bin/node');
-    assert.equal(result, '/usr/local/bin/node');
-  });
-});
-
-describe('Bug #3181: normalizeNodePath — Apple Silicon Homebrew Cellar paths → /opt/homebrew/bin/node', () => {
-  test('simple versioned Apple Silicon Cellar path', () => {
-    const result = normalizeNodePath('/opt/homebrew/Cellar/node/25.8.1/bin/node');
-    assert.equal(result, '/opt/homebrew/bin/node');
-  });
-
-  test('Apple Silicon Cellar path with another version', () => {
-    const result = normalizeNodePath('/opt/homebrew/Cellar/node/18.20.4/bin/node');
-    assert.equal(result, '/opt/homebrew/bin/node');
-  });
-
-  test('Apple Silicon versioned formula Cellar path (node@18) maps to stable symlink', () => {
-    const result = normalizeNodePath('/opt/homebrew/Cellar/node@18/18.20.4/bin/node');
-    assert.equal(result, '/opt/homebrew/bin/node');
-  });
-});
-
-// #2185: Linuxbrew + any custom HOMEBREW_PREFIX — the Cellar prefix is derived
-// from the path itself, so one branch covers every Homebrew layout.
-describe('Bug #2185: normalizeNodePath — Linuxbrew + custom-prefix Cellar paths → <prefix>/bin/node', () => {
-  test('Linuxbrew Cellar path maps to the stable linuxbrew symlink', () => {
-    const result = normalizeNodePath('/home/linuxbrew/.linuxbrew/Cellar/node/26.0.0/bin/node');
-    assert.equal(result, '/home/linuxbrew/.linuxbrew/bin/node');
-  });
-
-  test('Linuxbrew Cellar path after a version bump (26.5.0) maps to stable symlink', () => {
-    const result = normalizeNodePath('/home/linuxbrew/.linuxbrew/Cellar/node/26.5.0/bin/node');
-    assert.equal(result, '/home/linuxbrew/.linuxbrew/bin/node');
-  });
-
-  test('Linuxbrew versioned formula Cellar path (node@22) maps to stable symlink', () => {
-    const result = normalizeNodePath('/home/linuxbrew/.linuxbrew/Cellar/node@22/22.11.0/bin/node');
-    assert.equal(result, '/home/linuxbrew/.linuxbrew/bin/node');
-  });
-
-  test('custom HOMEBREW_PREFIX Cellar path maps to its stable symlink', () => {
-    const result = normalizeNodePath('/custom/brew/Cellar/node/25.8.1/bin/node');
-    assert.equal(result, '/custom/brew/bin/node');
-  });
-});
-
-describe('Bug #3181: normalizeNodePath — non-Homebrew paths are returned unchanged', () => {
-  test('NVM path is unchanged', () => {
-    const nvm = '/Users/dev/.nvm/versions/node/v20.11.0/bin/node';
-    assert.equal(normalizeNodePath(nvm), nvm);
-  });
-
-  test('already-stable Intel Homebrew symlink is unchanged', () => {
-    assert.equal(normalizeNodePath('/usr/local/bin/node'), '/usr/local/bin/node');
-  });
-
-  test('already-stable Apple Silicon Homebrew symlink is unchanged', () => {
-    assert.equal(normalizeNodePath('/opt/homebrew/bin/node'), '/opt/homebrew/bin/node');
-  });
-
-  test('system node (/usr/bin/node) is unchanged', () => {
-    assert.equal(normalizeNodePath('/usr/bin/node'), '/usr/bin/node');
-  });
-
-  test('Windows path is unchanged', () => {
-    const win = 'C:\\Program Files\\nodejs\\node.exe';
-    assert.equal(normalizeNodePath(win), win);
-  });
-
-  test('empty string is returned as-is', () => {
-    assert.equal(normalizeNodePath(''), '');
-  });
-
-  test('null is returned as-is', () => {
-    assert.equal(normalizeNodePath(null), null);
-  });
-});
-
-// ─── resolveNodeRunner ────────────────────────────────────────────────────────
-
-describe('Bug #3181: resolveNodeRunner — maps Cellar execPath to stable symlink', () => {
-  test('Intel Cellar execPath → stable symlink quoted token', () => {
-    const orig = process.execPath;
-    try {
-      Object.defineProperty(process, 'execPath', {
-        value: '/usr/local/Cellar/node/25.8.1/bin/node',
-        configurable: true,
-      });
-      const runner = resolveNodeRunner();
-      assert.equal(runner, '"/usr/local/bin/node"',
-        `expected stable Intel symlink, got: ${runner}`);
-    } finally {
-      Object.defineProperty(process, 'execPath', { value: orig, configurable: true });
-    }
-  });
-
-  test('Apple Silicon Cellar execPath → stable symlink quoted token', () => {
-    const orig = process.execPath;
-    try {
-      Object.defineProperty(process, 'execPath', {
-        value: '/opt/homebrew/Cellar/node/25.8.1/bin/node',
-        configurable: true,
-      });
-      const runner = resolveNodeRunner();
-      assert.equal(runner, '"/opt/homebrew/bin/node"',
-        `expected stable Apple Silicon symlink, got: ${runner}`);
-    } finally {
-      Object.defineProperty(process, 'execPath', { value: orig, configurable: true });
-    }
-  });
-
-  test('non-Homebrew execPath is returned as a quoted absolute path unchanged', () => {
-    const orig = process.execPath;
-    const nvmPath = '/Users/dev/.nvm/versions/node/v20.11.0/bin/node';
-    try {
-      Object.defineProperty(process, 'execPath', { value: nvmPath, configurable: true });
-      const runner = resolveNodeRunner();
-      assert.equal(runner, JSON.stringify(nvmPath));
-    } finally {
-      Object.defineProperty(process, 'execPath', { value: orig, configurable: true });
-    }
-  });
-
-  test('returns null when execPath is empty (existing null-guard is preserved)', () => {
-    const orig = process.execPath;
-    try {
-      Object.defineProperty(process, 'execPath', { value: '', configurable: true });
-      assert.equal(resolveNodeRunner(), null);
-    } finally {
-      Object.defineProperty(process, 'execPath', { value: orig, configurable: true });
-    }
-  });
-});
-
-// ─── rewriteLegacyManagedNodeHookCommands — Cellar runner rewrite ─────────────
-
-describe('Bug #3181: rewriteLegacyManagedNodeHookCommands — rewrites baked Cellar runner to stable symlink', () => {
-  test('Intel Cellar runner in a managed hook is rewritten to the stable symlink', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{
-            type: 'command',
-            command: '"/usr/local/Cellar/node/25.8.1/bin/node" "/Users/x/.gemini/hooks/gsd-check-update.js"',
-          }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner);
-    assert.equal(changed, true, 'expected rewrite to occur');
-    assert.equal(
-      settings.hooks.SessionStart[0].hooks[0].command,
-      '"/usr/local/bin/node" "/Users/x/.gemini/hooks/gsd-check-update.js"',
-    );
-  });
-
-  test('Apple Silicon Cellar runner in a managed hook is rewritten to the stable symlink', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{
-            type: 'command',
-            command: '"/opt/homebrew/Cellar/node/25.8.1/bin/node" "/Users/x/.gemini/hooks/gsd-check-update.js"',
-          }],
-        }],
-      },
-    };
-    const runner = '"/opt/homebrew/bin/node"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner);
-    assert.equal(changed, true, 'expected rewrite to occur');
-    assert.equal(
-      settings.hooks.SessionStart[0].hooks[0].command,
-      '"/opt/homebrew/bin/node" "/Users/x/.gemini/hooks/gsd-check-update.js"',
-    );
-  });
-
-  test('a hook already using the stable runner is NOT rewritten (no churn)', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{
-            type: 'command',
-            command: '"/usr/local/bin/node" "/Users/x/.gemini/hooks/gsd-check-update.js"',
-          }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const before = settings.hooks.SessionStart[0].hooks[0].command;
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner);
-    assert.equal(changed, false, 'already-stable entry must not be touched');
-    assert.equal(settings.hooks.SessionStart[0].hooks[0].command, before);
-  });
-
-  test('a user hook using a Cellar runner but an unmanaged filename is NOT rewritten', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{
-            type: 'command',
-            command: '"/usr/local/Cellar/node/25.8.1/bin/node" "/Users/x/my-custom-hook.js"',
-          }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const before = settings.hooks.SessionStart[0].hooks[0].command;
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner);
-    assert.equal(changed, false, 'unmanaged hooks with Cellar runner must not be touched');
-    assert.equal(settings.hooks.SessionStart[0].hooks[0].command, before);
-  });
-
-  // Existing bare-node rewrite still works alongside the new Cellar rewrite
-  test('bare `node` managed hook is still rewritten (existing #2979 behaviour preserved)', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{
-            type: 'command',
-            command: 'node "/Users/x/.gemini/hooks/gsd-check-update.js"',
-          }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner);
-    assert.equal(changed, true);
-    assert.equal(
-      settings.hooks.SessionStart[0].hooks[0].command,
-      '"/usr/local/bin/node" "/Users/x/.gemini/hooks/gsd-check-update.js"',
-    );
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-977-fnm-multishell-path.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-977-fnm-multishell-path (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-/**
- * Bug #977: `resolveNodeRunner()` bakes an ephemeral fnm multishell shim path
- * (e.g. `C:/Users/u/AppData/Local/fnm_multishells/<pid>_<ts>/node.exe`) into
- * managed `.js` hook commands. fnm cleans up these per-shell-session directories
- * when the shell exits, so the captured path later points at nothing — every
- * managed hook fails to spawn until reinstall.
- *
- * Fix: when `normalizeNodePath` detects a path matching the fnm multishell
- * directory pattern (`fnm_multishells/<id>/node(\.exe)?$`), it probes a stable
- * alias path derived from `FNM_DIR` or `APPDATA` env vars (with injected
- * `existsSync` for testability) and returns the first that exists. Falls back to
- * the raw execPath if no stable alias is found.
- *
- * All assertions go against exported function return values — no source-grep.
- */
-
-const { test, describe } = require('node:test');
-const assert = require('node:assert/strict');
-const path = require('node:path');
-
-const INSTALL = require(path.join(__dirname, '..', 'bin', 'install.js'));
-const { normalizeNodePath, resolveNodeRunner } = INSTALL;
-
-// ─── Synthetic paths used across tests ───────────────────────────────────────
-
-const EPHEMERAL_FNM_WIN = 'C:/Users/u/AppData/Local/fnm_multishells/15600_1781041703752/node.exe';
-const EPHEMERAL_FNM_WIN_BACKSLASH = 'C:\\Users\\u\\AppData\\Local\\fnm_multishells\\15600_1781041703752\\node.exe';
-const FNM_DIR_WIN = 'C:/Users/u/AppData/Roaming/fnm';
-const APPDATA_WIN = 'C:/Users/u/AppData/Roaming';
-const STABLE_FNM_DIR_NODE = `${FNM_DIR_WIN}/aliases/default/node.exe`;
-const STABLE_APPDATA_NODE = `${APPDATA_WIN}/fnm/aliases/default/node.exe`;
-
-// ─── normalizeNodePath — fnm multishell ephemeral path → stable alias ────────
-
-describe('Bug #977: normalizeNodePath — fnm multishell path with FNM_DIR → stable alias', () => {
-  test('forward-slash Windows ephemeral path + FNM_DIR set + alias exists → stable FNM_DIR alias', () => {
-    const result = normalizeNodePath(EPHEMERAL_FNM_WIN, {
-      env: { FNM_DIR: FNM_DIR_WIN },
-      existsSync: p => p === STABLE_FNM_DIR_NODE,
-    });
-    assert.equal(
-      result,
-      STABLE_FNM_DIR_NODE,
-      `expected stable FNM_DIR alias, got: ${result}`,
-    );
-  });
-
-  test('backslash Windows ephemeral path + FNM_DIR set + alias exists → stable FNM_DIR alias', () => {
-    const result = normalizeNodePath(EPHEMERAL_FNM_WIN_BACKSLASH, {
-      env: { FNM_DIR: FNM_DIR_WIN },
-      existsSync: p => p === STABLE_FNM_DIR_NODE,
-    });
-    assert.equal(
-      result,
-      STABLE_FNM_DIR_NODE,
-      `expected stable FNM_DIR alias, got: ${result}`,
-    );
-  });
-
-  test('FNM_DIR alias does not exist → falls through to APPDATA alias → returns APPDATA alias', () => {
-    const result = normalizeNodePath(EPHEMERAL_FNM_WIN, {
-      env: { FNM_DIR: FNM_DIR_WIN, APPDATA: APPDATA_WIN },
-      existsSync: p => p === STABLE_APPDATA_NODE, // FNM_DIR alias absent, APPDATA alias present
-    });
-    assert.equal(
-      result,
-      STABLE_APPDATA_NODE,
-      `expected stable APPDATA alias, got: ${result}`,
-    );
-  });
-
-  test('no alias exists → returns raw execPath unchanged (graceful fallback)', () => {
-    const result = normalizeNodePath(EPHEMERAL_FNM_WIN, {
-      env: { FNM_DIR: FNM_DIR_WIN, APPDATA: APPDATA_WIN },
-      existsSync: () => false, // nothing exists
-    });
-    assert.equal(
-      result,
-      EPHEMERAL_FNM_WIN,
-      `expected raw execPath fallback, got: ${result}`,
-    );
-  });
-
-  test('no FNM_DIR or APPDATA in env → returns raw execPath unchanged', () => {
-    const result = normalizeNodePath(EPHEMERAL_FNM_WIN, {
-      env: {},
-      existsSync: () => false,
-    });
-    assert.equal(
-      result,
-      EPHEMERAL_FNM_WIN,
-      `expected raw execPath fallback, got: ${result}`,
-    );
-  });
-});
-
-// ─── normalizeNodePath — non-fnm paths are NOT affected by the new branch ────
-
-describe('Bug #977: normalizeNodePath — non-fnm paths are unaffected (no regression to existing behavior)', () => {
-  test('NVM path is unchanged', () => {
-    const nvm = '/Users/dev/.nvm/versions/node/v20.11.0/bin/node';
-    assert.equal(normalizeNodePath(nvm), nvm);
-  });
-
-  test('Intel Homebrew Cellar path still maps to stable symlink', () => {
-    assert.equal(
-      normalizeNodePath('/usr/local/Cellar/node/25.8.1/bin/node'),
-      '/usr/local/bin/node',
-    );
-  });
-
-  test('Apple Silicon Homebrew Cellar path still maps to stable symlink', () => {
-    assert.equal(
-      normalizeNodePath('/opt/homebrew/Cellar/node/25.8.1/bin/node'),
-      '/opt/homebrew/bin/node',
-    );
-  });
-
-  test('regular Windows nodejs path is unchanged', () => {
-    const win = 'C:\\Program Files\\nodejs\\node.exe';
-    assert.equal(normalizeNodePath(win), win);
-  });
-
-  test('empty string is returned as-is', () => {
-    assert.equal(normalizeNodePath(''), '');
-  });
-
-  test('null is returned as-is', () => {
-    assert.equal(normalizeNodePath(null), null);
-  });
-});
-
-// ─── normalizeNodePath — already-stable fnm alias path is not re-processed ───
-
-describe('Bug #977: normalizeNodePath — already-stable fnm alias path passes through unchanged', () => {
-  test('stable FNM_DIR alias path is returned as-is', () => {
-    assert.equal(
-      normalizeNodePath(STABLE_FNM_DIR_NODE),
-      STABLE_FNM_DIR_NODE,
-    );
-  });
-});
-
-// ─── normalizeNodePath — false-positive guard: non-numeric id must NOT remap ──
-
-describe('Bug #977: normalizeNodePath — non-ephemeral fnm_multishells path is not remapped', () => {
-  test('non-numeric id segment (e.g. custom-dir) returns raw execPath unchanged even when alias exists', () => {
-    const nonEphemeral = 'C:/Users/u/AppData/Local/fnm_multishells/custom-dir/node.exe';
-    const stableAlias = 'C:/Users/u/AppData/Roaming/fnm/aliases/default/node.exe';
-    const result = normalizeNodePath(nonEphemeral, {
-      env: { FNM_DIR: 'C:/Users/u/AppData/Roaming/fnm' },
-      // existsSync returns true for the alias to prove the regex — not the existsSync — is the guard
-      existsSync: p => p === stableAlias,
-    });
-    assert.equal(
-      result,
-      nonEphemeral,
-      `expected raw execPath (non-ephemeral id must not be remapped), got: ${result}`,
-    );
-  });
-});
-
-// ─── resolveNodeRunner — opts pass-through ────────────────────────────────────
-
-describe('Bug #977: resolveNodeRunner — passes opts through to normalizeNodePath', () => {
-  test('fnm multishell execPath is resolved to stable alias via injected opts', () => {
-    const orig = process.execPath;
-    try {
-      Object.defineProperty(process, 'execPath', {
-        value: EPHEMERAL_FNM_WIN,
-        configurable: true,
-      });
-      const runner = resolveNodeRunner({
-        env: { FNM_DIR: FNM_DIR_WIN },
-        existsSync: p => p === STABLE_FNM_DIR_NODE,
-      });
-      assert.equal(
-        runner,
-        JSON.stringify(STABLE_FNM_DIR_NODE),
-        `expected stable FNM_DIR alias quoted, got: ${runner}`,
-      );
-    } finally {
-      Object.defineProperty(process, 'execPath', { value: orig, configurable: true });
-    }
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-2979-hook-absolute-node.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-2979-hook-absolute-node (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-/**
- * Bug #2979: Managed JS hooks fail in GUI/minimal-PATH runtimes because
- * the installer emits bare `node`.
- *
- * Reporter evidence: in a stripped PATH like /usr/bin:/bin:/usr/sbin:/sbin
- * (the default for Finder-launched/Antigravity-spawned processes on macOS),
- * `node` is not resolvable. Hook commands like
- *   `node "<HOME>/.gemini/hooks/gsd-check-update.js"`
- * fail with `/bin/sh: node: command not found` (exit 127).
- *
- * Fix: emit the absolute node path (`process.execPath`, the binary
- * running the installer itself) as the runner. Forward-slash-normalized
- * and double-quoted so it works on POSIX and Windows.
- *
- * This test exercises the public buildHookCommand surface plus the
- * resolveNodeRunner helper, asserting on structured records:
- *  - the runner field is an absolute path (not bare 'node')
- *  - it ends with /node or \\node (or .exe on Windows simulation)
- *  - .sh hooks still use bare 'bash' (PATH-resolved; portable across
- *    distros that don't ship /bin/bash, like NixOS)
- *
- * No source-grep on install.js content — assertions go against the
- * value returned by the exported function and the parsed structure of
- * the emitted hook command (split into runner + args).
- */
-
-const { test, describe } = require('node:test');
-const assert = require('node:assert/strict');
-const path = require('node:path');
-
-const INSTALL = require(path.join(__dirname, '..', 'bin', 'install.js'));
-const { buildHookCommand, resolveNodeRunner } = INSTALL;
-
-/**
- * Parse a hook command string into { runner, hookPath } structured
- * record. The shape is `<runner> "<hookPath>"` where <runner> may itself
- * be a quoted absolute path (containing spaces), so we split on the
- * trailing quoted-path token rather than the first space.
- */
-function parseHookCommand(cmd) {
-  // Trailing token: a double-quoted string ending the command.
-  const m = cmd.match(/^(.+?)\s+"([^"]+)"\s*$/);
-  if (!m) {
-    return { runner: null, hookPath: null, raw: cmd };
-  }
-  return { runner: m[1], hookPath: m[2], raw: cmd };
-}
-
-describe('Bug #2979: resolveNodeRunner returns absolute, quoted, forward-slash node path', () => {
-  test('exported as a function', () => {
-    assert.equal(typeof resolveNodeRunner, 'function');
-  });
-
-  test('returns a double-quoted absolute path', () => {
-    const runner = resolveNodeRunner();
-    assert.ok(runner.startsWith('"'), `expected leading double-quote, got: ${runner}`);
-    assert.ok(runner.endsWith('"'), `expected trailing double-quote, got: ${runner}`);
-    const inner = runner.slice(1, -1);
-    assert.ok(path.isAbsolute(inner.replace(/\//g, path.sep)), `expected absolute path, got: ${inner}`);
-  });
-
-  test('uses forward slashes (Windows-safe, matches buildHookCommand convention)', () => {
-    const runner = resolveNodeRunner();
-    assert.ok(!runner.includes('\\'), `expected forward slashes, got: ${runner}`);
-  });
-
-  test('points at a node binary (basename starts with "node")', () => {
-    const runner = resolveNodeRunner();
-    const inner = runner.slice(1, -1);
-    const base = path.posix.basename(inner);
-    assert.ok(/^node(\.exe)?$/i.test(base), `expected basename node or node.exe, got: ${base}`);
-  });
-});
-
-describe('Bug #2979: buildHookCommand for .js hooks emits absolute node runner', () => {
-  test('global install: .js hook uses absolute node path, not bare "node"', () => {
-    const cmd = buildHookCommand('/tmp/.claude', 'gsd-check-update.js');
-    const parsed = parseHookCommand(cmd);
-    assert.notEqual(parsed.runner, null, `failed to parse: ${cmd}`);
-    assert.notEqual(parsed.runner, 'node', `must not emit bare node (#2979): ${cmd}`);
-    // The runner should be a quoted absolute path.
-    assert.ok(parsed.runner.startsWith('"') && parsed.runner.endsWith('"'),
-      `runner must be quoted absolute path, got: ${parsed.runner}`);
-  });
-
-  test('global install: .js hook command parses with hookPath at expected location', () => {
-    const cmd = buildHookCommand('/tmp/.gemini', 'gsd-statusline.js');
-    const parsed = parseHookCommand(cmd);
-    assert.equal(parsed.hookPath, '/tmp/.gemini/hooks/gsd-statusline.js');
-  });
-
-  test('portableHooks global install: .js hook still uses absolute node (only the path is $HOME-relative)', () => {
-    const home = require('node:os').homedir().replace(/\\/g, '/');
-    const configDir = home + '/.gemini';
-    const cmd = buildHookCommand(configDir, 'gsd-check-update.js', { portableHooks: true });
-    const parsed = parseHookCommand(cmd);
-    assert.notEqual(parsed.runner, 'node', `portableHooks must also use absolute node (#2979): ${cmd}`);
-    assert.equal(parsed.hookPath, '$HOME/.gemini/hooks/gsd-check-update.js');
-  });
-});
-
-describe('Bug #3362 / #3413: Windows hook commands are runtime-aware', () => {
-  // #1928: gemini runtime removed — the PowerShell call-operator seam is now
-  // inert for every runtime. Antigravity (the Gemini-backend successor) never
-  // needed the call operator either; lock the inert contract explicitly.
-  test('Antigravity global install: .js hook command stays shell-neutral on Windows (seam inert after gemini removal)', () => {
-    const cmd = buildHookCommand('C:/Users/me/.gemini/antigravity', 'gsd-check-update.js', {
-      platform: 'win32',
-      runtime: 'antigravity',
-    });
-    assert.ok(!cmd.startsWith('& '), `Antigravity hook command must not use PowerShell call operator: ${cmd}`);
-    assert.ok(cmd.includes('"C:/Users/me/.gemini/antigravity/hooks/gsd-check-update.js"'));
-  });
-
-  test('Antigravity portable install: .js hook command also stays shell-neutral on Windows (seam inert after gemini removal)', () => {
-    const home = require('node:os').homedir().replace(/\\/g, '/');
-    const cmd = buildHookCommand(`${home}/.gemini/antigravity`, 'gsd-check-update.js', {
-      portableHooks: true,
-      platform: 'win32',
-      runtime: 'antigravity',
-    });
-    assert.ok(!cmd.startsWith('& '), `Antigravity hook command must not use PowerShell call operator: ${cmd}`);
-    assert.equal(parseHookCommand(cmd).hookPath, '$HOME/.gemini/antigravity/hooks/gsd-check-update.js');
-  });
-
-  test('Claude global install: .js hook command stays shell-neutral on Windows Git Bash', () => {
-    const cmd = buildHookCommand('C:/Users/me/.claude', 'gsd-check-update.js', {
-      platform: 'win32',
-      runtime: 'claude',
-    });
-    assert.ok(!cmd.startsWith('& '), `Claude hook command must not use PowerShell call operator: ${cmd}`);
-    assert.equal(parseHookCommand(cmd).hookPath, 'C:/Users/me/.claude/hooks/gsd-check-update.js');
-  });
-
-  test('Windows .js hook with no runtime stays shell-neutral', () => {
-    const cmd = buildHookCommand('C:/Users/me/.claude', 'gsd-check-update.js', {
-      platform: 'win32',
-    });
-    assert.ok(!cmd.startsWith('& '), `Missing runtime must not imply PowerShell syntax: ${cmd}`);
-    assert.equal(parseHookCommand(cmd).hookPath, 'C:/Users/me/.claude/hooks/gsd-check-update.js');
-  });
-
-  test('Antigravity runtime on non-Windows platform does not get PowerShell syntax', () => {
-    const cmd = buildHookCommand('/home/me/.claude', 'gsd-check-update.js', {
-      platform: 'linux',
-      runtime: 'antigravity',
-    });
-    assert.ok(!cmd.startsWith('& '), `Non-Windows Antigravity hook must stay shell-neutral: ${cmd}`);
-    assert.equal(parseHookCommand(cmd).hookPath, '/home/me/.claude/hooks/gsd-check-update.js');
-  });
-});
-
-describe('Bug #2979: buildHookCommand for .sh hooks still uses bare "bash" (POSIX std PATH always has /bin)', () => {
-  test('.sh hook runner is exactly "bash" — bash is in /usr/bin:/bin and resolves under minimal PATH', () => {
-    const cmd = buildHookCommand('/tmp/.claude', 'gsd-session-state.sh', { platform: 'linux' });
-    const parsed = parseHookCommand(cmd);
-    assert.equal(parsed.runner, 'bash');
-  });
-
-  test('Windows .sh hook uses resolved Git Bash path instead of bare bash (#3393)', () => {
-    const cmd = buildHookCommand('C:/Users/me/.codex', 'gsd-validate-commit.sh', {
-      platform: 'win32',
-      env: { ProgramFiles: 'C:\\Program Files' },
-      existsSync: (candidate) => candidate === 'C:\\Program Files\\Git\\bin\\bash.exe',
-    });
-    assert.equal(
-      cmd,
-      '"C:/Program Files/Git/bin/bash.exe" "C:/Users/me/.codex/hooks/gsd-validate-commit.sh"',
-    );
-  });
-
-  test('Windows .sh hook returns null when no supported Bash runner is found (#3393)', () => {
-    const cmd = buildHookCommand('C:/Users/me/.codex', 'gsd-phase-boundary.sh', {
-      platform: 'win32',
-      env: {},
-      existsSync: () => false,
-    });
-    assert.equal(cmd, null);
-  });
-
-  test('Windows Claude .sh hook omits explicit bash.exe wrapper (#166)', () => {
-    const cmd = buildHookCommand('C:/Users/me/.claude', 'gsd-session-state.sh', {
-      platform: 'win32',
-      runtime: 'claude',
-      env: { ProgramFiles: 'C:\\Program Files' },
-      existsSync: (candidate) => candidate === 'C:\\Program Files\\Git\\bin\\bash.exe',
-    });
-    assert.equal(
-      cmd,
-      '"C:/Users/me/.claude/hooks/gsd-session-state.sh"',
-      'Claude win32 .sh hooks should serialize as script-only commands'
-    );
-  });
-});
-
-// ─── #3002 CR follow-up: legacy-bare-node migration ─────────────────────────
-
-const { rewriteLegacyManagedNodeHookCommands } = INSTALL;
-
-describe('Bug #2979 (#3002 CR): rewriteLegacyManagedNodeHookCommands rewrites bare-node managed hooks on reinstall', () => {
-  test('exported as a function', () => {
-    assert.equal(typeof rewriteLegacyManagedNodeHookCommands, 'function');
-  });
-
-  test('rewrites a managed hook entry that uses bare `node ` to the absolute runner', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [
-            { type: 'command', command: 'node "/Users/x/.gemini/hooks/gsd-check-update.js"' },
-          ],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner);
-    assert.equal(changed, true);
-    assert.equal(
-      settings.hooks.SessionStart[0].hooks[0].command,
-      '"/usr/local/bin/node" "/Users/x/.gemini/hooks/gsd-check-update.js"',
-    );
-  });
-
-  test('does NOT touch entries that already use a quoted absolute runner', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{ type: 'command', command: '"/usr/local/bin/node" "/x/hooks/gsd-statusline.js"' }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const before = settings.hooks.SessionStart[0].hooks[0].command;
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner);
-    assert.equal(changed, false);
-    assert.equal(settings.hooks.SessionStart[0].hooks[0].command, before);
-  });
-
-  // #1928: gemini runtime removed — the PowerShell call-operator seam is now
-  // inert for every runtime (including antigravity, the Gemini-backend
-  // successor). An already-correct absolute-runner command needs no rewrite.
-  test('Antigravity on Windows leaves an already-correct quoted managed hook untouched (seam inert after gemini removal)', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{ type: 'command', command: '"/usr/local/bin/node" "C:/Program Files/Antigravity/.gemini/antigravity/hooks/gsd-check-update.js"' }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const before = settings.hooks.SessionStart[0].hooks[0].command;
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner, { platform: 'win32', runtime: 'antigravity' });
-    assert.equal(changed, false);
-    assert.equal(settings.hooks.SessionStart[0].hooks[0].command, before);
-  });
-
-  test('Antigravity on Windows strips a stale PowerShell call operator from managed hooks on reinstall (seam inert after gemini removal)', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{ type: 'command', command: '& "/usr/local/bin/node" "C:/Program Files/Antigravity/.gemini/antigravity/hooks/gsd-check-update.js"' }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner, { platform: 'win32', runtime: 'antigravity' });
-    assert.equal(changed, true);
-    assert.equal(
-      settings.hooks.SessionStart[0].hooks[0].command,
-      '"/usr/local/bin/node" "C:/Program Files/Antigravity/.gemini/antigravity/hooks/gsd-check-update.js"',
-    );
-  });
-
-  test('Antigravity on Windows rewrites PowerShell bare-node managed hooks to absolute runner and drops the stale & (seam inert after gemini removal)', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{ type: 'command', command: '& node "C:/Users/me/.gemini/antigravity/hooks/gsd-check-update.js"' }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner, { platform: 'win32', runtime: 'antigravity' });
-    assert.equal(changed, true);
-    assert.equal(
-      settings.hooks.SessionStart[0].hooks[0].command,
-      '"/usr/local/bin/node" "C:/Users/me/.gemini/antigravity/hooks/gsd-check-update.js"',
-    );
-  });
-
-  test('Claude on Windows strips stale PowerShell prefix from managed hooks on reinstall (#3413)', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{ type: 'command', command: '& "/usr/local/bin/node" "C:/Users/me/.claude/hooks/gsd-check-update.js"' }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner, { platform: 'win32', runtime: 'claude' });
-    assert.equal(changed, true);
-    assert.equal(
-      settings.hooks.SessionStart[0].hooks[0].command,
-      '"/usr/local/bin/node" "C:/Users/me/.claude/hooks/gsd-check-update.js"',
-    );
-  });
-
-  test('does NOT touch user-authored bare-node hooks (filename not in managed allowlist)', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{ type: 'command', command: 'node /home/me/my-custom-hook.js' }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const before = settings.hooks.SessionStart[0].hooks[0].command;
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner);
-    assert.equal(changed, false);
-    assert.equal(settings.hooks.SessionStart[0].hooks[0].command, before);
-  });
-
-  test('does NOT touch .sh hooks (they correctly use bare bash)', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{ type: 'command', command: 'bash "/x/hooks/gsd-session-state.sh"' }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner);
-    assert.equal(changed, false);
-  });
-
-  test('is a no-op when absoluteRunner is null (resolveNodeRunner failed)', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{ type: 'command', command: 'node "/x/hooks/gsd-check-update.js"' }],
-        }],
-      },
-    };
-    const before = settings.hooks.SessionStart[0].hooks[0].command;
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, null);
-    assert.equal(changed, false);
-    assert.equal(settings.hooks.SessionStart[0].hooks[0].command, before);
-  });
-
-  // #3002 CR: substring containment was a false-positive vector.
-  // User-authored hooks whose path happened to CONTAIN a managed filename
-  // as a substring would get unconditionally rewritten with the GSD runner.
-  // The fix matches by basename equality.
-  test('does NOT rewrite a user hook whose path contains a managed filename as a substring', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{
-            type: 'command',
-            // Path contains gsd-check-update.js as substring of a longer
-            // filename, but is NOT actually that file.
-            command: 'node /home/me/scripts/wraps-gsd-check-update.js-helper.js',
-          }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const before = settings.hooks.SessionStart[0].hooks[0].command;
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner);
-    assert.equal(changed, false, 'must not rewrite user hooks with managed-filename-as-substring paths');
-    assert.equal(settings.hooks.SessionStart[0].hooks[0].command, before);
-  });
-
-  test('rewrites a managed entry whose path is quoted with single quotes', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{ type: 'command', command: "node '/x/hooks/gsd-statusline.js'" }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner, { platform: 'linux' });
-    assert.equal(changed, true);
-    assert.equal(
-      settings.hooks.SessionStart[0].hooks[0].command,
-      `"/usr/local/bin/node" '/x/hooks/gsd-statusline.js'`,
-    );
-  });
-
-  test('rewrites a managed entry with no path quoting (bareword)', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{ type: 'command', command: 'node /x/hooks/gsd-context-monitor.js' }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner, { platform: 'linux' });
-    assert.equal(changed, true);
-    assert.equal(
-      settings.hooks.SessionStart[0].hooks[0].command,
-      '"/usr/local/bin/node" /x/hooks/gsd-context-monitor.js',
-    );
-  });
-
-  test('handles Windows-style backslash path separators when extracting basename', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [{ type: 'command', command: 'node "C:\\\\Users\\\\me\\\\.claude\\\\hooks\\\\gsd-prompt-guard.js"' }],
-        }],
-      },
-    };
-    const runner = '"/usr/local/bin/node"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner);
-    assert.equal(changed, true);
-  });
-
-  test('Antigravity on Windows normalizes single-quoted managed hook paths to double-quoted forward-slash paths without adding & (#3392; seam inert after gemini removal)', () => {
-    const settings = {
-      hooks: {
-        PreToolUse: [{
-          hooks: [{
-            type: 'command',
-            command: "node 'C:\\Users\\me\\.gemini\\hooks\\gsd-prompt-guard.js'",
-          }],
-        }],
-      },
-    };
-    const runner = '"C:/nvm4w/nodejs/node.exe"';
-    const changed = rewriteLegacyManagedNodeHookCommands(settings, runner, { platform: 'win32', runtime: 'antigravity' });
-    assert.equal(changed, true);
-    assert.equal(
-      settings.hooks.PreToolUse[0].hooks[0].command,
-      '"C:/nvm4w/nodejs/node.exe" "C:/Users/me/.gemini/hooks/gsd-prompt-guard.js"',
-    );
-  });
-});
-
-describe('Bug #2979 (#3002 CR): resolveNodeRunner returns null when execPath unavailable', () => {
-  test('returns null instead of bare "node" when process.execPath is empty', () => {
-    const orig = process.execPath;
-    try {
-      Object.defineProperty(process, 'execPath', { value: '', configurable: true });
-      const r = resolveNodeRunner();
-      assert.equal(r, null, 'expected null, not bare "node"');
-    } finally {
-      Object.defineProperty(process, 'execPath', { value: orig, configurable: true });
-    }
-  });
-
-  test('buildHookCommand returns null when execPath is unavailable (caller skips registration)', () => {
-    const orig = process.execPath;
-    try {
-      Object.defineProperty(process, 'execPath', { value: '', configurable: true });
-      const cmd = buildHookCommand('/tmp/.claude', 'gsd-statusline.js');
-      assert.equal(cmd, null);
-    } finally {
-      Object.defineProperty(process, 'execPath', { value: orig, configurable: true });
-    }
-  });
-});
-
-// ─── #3002 CR follow-up #2: null-command guards in settings.json ──────────
-
-const { validateHookFields } = INSTALL;
-
-describe('Bug #2979 (#3002 CR follow-up): no command:null hook entries survive serialization', () => {
-  // CR feedback: assert structurally on the resulting settings object, not by
-  // grepping bin/install.js source. The push-site guards (each `if` clause's
-  // `&& <command>` token) skip null-command pushes at the source. As a
-  // backstop, install.js now runs validateHookFields(settings) right before
-  // writeSettings; this test exercises that backstop directly.
-  //
-  // Construct a settings object that contains exactly the kind of null-command
-  // entries that the registration code would have written if my push-site
-  // guards regressed. Run validateHookFields on it. Assert the null entries
-  // are gone and the well-formed entries survive.
-
-  function nullCommandEntry(matcher) {
-    const entry = { hooks: [{ type: 'command', command: null }] };
-    if (matcher) entry.matcher = matcher;
-    return entry;
-  }
-  function realCommandEntry(matcher, command) {
-    const entry = { hooks: [{ type: 'command', command }] };
-    if (matcher) entry.matcher = matcher;
-    return entry;
-  }
-
-  const MANAGED_JS_HOOKS = [
-    { event: 'SessionStart',  matcher: undefined,                                       label: 'gsd-check-update.js' },
-    { event: 'PostToolUse',   matcher: 'Bash|Edit|Write|MultiEdit|Agent|Task',          label: 'gsd-context-monitor.js' },
-    { event: 'PreToolUse',    matcher: 'Write|Edit',                                    label: 'gsd-prompt-guard.js' },
-    { event: 'PreToolUse',    matcher: 'Write|Edit',                                    label: 'gsd-read-guard.js' },
-    { event: 'PostToolUse',   matcher: 'Read',                                          label: 'gsd-read-injection-scanner.js' },
-    { event: 'PreToolUse',    matcher: 'Bash|Edit|Write|MultiEdit',                     label: 'gsd-workflow-guard.js' },
-  ];
-
-  for (const { event, matcher, label } of MANAGED_JS_HOOKS) {
-    test(`validateHookFields strips a null-command ${label} entry from settings.hooks.${event}`, () => {
-      const settings = {
-        hooks: {
-          [event]: [
-            nullCommandEntry(matcher),
-            realCommandEntry(matcher, '"/usr/local/bin/node" "/x/hooks/other.js"'),
-          ],
-        },
-      };
-      const out = validateHookFields(settings);
-      const survivors = out.hooks[event] || [];
-      // The well-formed entry must remain.
-      assert.equal(survivors.length, 1, `expected the real-command entry to survive`);
-      // No survivor entry contains a hook with command === null.
-      for (const e of survivors) {
-        for (const h of e.hooks || []) {
-          assert.notEqual(h.command, null, 'no surviving hook should have command:null');
-        }
-      }
-    });
-  }
-
-  test('validateHookFields drops the entry entirely when all its hooks have null commands', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [nullCommandEntry()],
-      },
-    };
-    const out = validateHookFields(settings);
-    // Empty event arrays should be cleaned up (the entire SessionStart key
-    // gets removed when nothing valid remains).
-    assert.ok(
-      !out.hooks.SessionStart || out.hooks.SessionStart.length === 0,
-      'expected SessionStart to be empty/removed after the only entry was dropped',
-    );
-  });
-
-  test('validateHookFields preserves agent-type hooks while stripping command:null sibling hooks', () => {
-    const settings = {
-      hooks: {
-        SessionStart: [{
-          hooks: [
-            { type: 'command', command: null },
-            { type: 'agent', prompt: 'analyze the session' },
-            { type: 'command', command: '"/usr/local/bin/node" "/x/hooks/y.js"' },
-          ],
-        }],
-      },
-    };
-    const out = validateHookFields(settings);
-    const survivors = out.hooks.SessionStart[0].hooks;
-    assert.equal(survivors.length, 2, 'expected 2 of 3 hooks to survive (the null-command one is stripped)');
-    assert.equal(survivors.find(h => h.command === null), undefined, 'no surviving hook should have command:null');
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-442-config-dir-equals-in-path.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-442-config-dir-equals-in-path (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-const { test, describe } = require('node:test');
-const assert = require('node:assert/strict');
-
-// parseConfigDirArg is not exported directly from bin/install.js (it closes
-// over the module-level `args` array).  We expose a pure seam here:
-// parseConfigDirFromArgs(args) that mirrors the function's logic so we can
-// test the equals-form parsing without spawning a child process.
-//
-// The implementation under test is inlined below (RED: before the fix it will
-// reproduce the truncation bug).  Once the fix lands, we swap in the real
-// implementation via require.
-
-/**
- * Pure seam that replicates the equals-form parse logic from bin/install.js.
- * We import it via a thin wrapper so that the function can be tested without
- * executing the entire install script.
- *
- * During RED the bug is: `split('=')[1]` drops everything after the second `=`.
- */
-const { parseConfigDirFromArgs } = require('../bin/install.js');
-
-describe('bug-442: --config-dir= equals-form path parsing', () => {
-  // ── Happy-path: single = in path ─────────────────────────────────────────
-  test('--config-dir=<path> with one = in value returns full value', () => {
-    const result = parseConfigDirFromArgs(['--config-dir=/tmp/gsd=a']);
-    assert.equal(result, '/tmp/gsd=a');
-  });
-
-  // ── Happy-path: multiple = in path ───────────────────────────────────────
-  test('--config-dir=<path> with multiple = in value returns full value', () => {
-    const result = parseConfigDirFromArgs(['--config-dir=/tmp/a=b=c']);
-    assert.equal(result, '/tmp/a=b=c');
-  });
-
-  // ── Short form -c= ────────────────────────────────────────────────────────
-  test('-c=<path> with = in value returns full value', () => {
-    const result = parseConfigDirFromArgs(['-c=/tmp/gsd=a']);
-    assert.equal(result, '/tmp/gsd=a');
-  });
-
-  test('-c=<path> with multiple = in value returns full value', () => {
-    const result = parseConfigDirFromArgs(['-c=/tmp/a=b=c']);
-    assert.equal(result, '/tmp/a=b=c');
-  });
-
-  // ── Contract: empty value ─────────────────────────────────────────────────
-  // --config-dir= (no value after the =) → returns empty string ''.
-  // The caller (parseConfigDirArg) treats '' as missing and errors; the seam
-  // itself should faithfully return '' rather than null/undefined so the
-  // caller can make the error decision.
-  test('--config-dir= with no value returns empty string', () => {
-    const result = parseConfigDirFromArgs(['--config-dir=']);
-    assert.equal(result, '');
-  });
-
-  test('-c= with no value returns empty string', () => {
-    const result = parseConfigDirFromArgs(['-c=']);
-    assert.equal(result, '');
-  });
-
-  // ── Space-separated form is unaffected (regression guard) ─────────────────
-  test('--config-dir <path> space-separated still returns the path', () => {
-    const result = parseConfigDirFromArgs(['--config-dir', '/tmp/gsd=a']);
-    assert.equal(result, '/tmp/gsd=a');
-  });
-
-  test('-c <path> space-separated still returns the path', () => {
-    const result = parseConfigDirFromArgs(['-c', '/tmp/gsd=a']);
-    assert.equal(result, '/tmp/gsd=a');
-  });
-
-  // ── No config-dir flag → null ─────────────────────────────────────────────
-  test('returns null when no --config-dir flag is present', () => {
-    const result = parseConfigDirFromArgs(['--global', '--claude']);
-    assert.equal(result, null);
-  });
-
-  // ── Negative matrix (CLI edge cases) ─────────────────────────────────────
-  // Flag-looking value after space form: next arg starts with - → null (no
-  // valid value; the real function would process.exit but the seam returns null
-  // so tests stay in-process).
-  test('space form with next arg being a flag returns null (flag-looking value)', () => {
-    const result = parseConfigDirFromArgs(['--config-dir', '--other-flag']);
-    assert.equal(result, null);
-  });
-
-  // Equals form where value is a path with no = (plain path, no regression)
-  test('--config-dir=<plain-path> without any = in path still works', () => {
-    const result = parseConfigDirFromArgs(['--config-dir=/tmp/plain']);
-    assert.equal(result, '/tmp/plain');
-  });
-
-  // Flag appears after other args (positional ordering should not matter)
-  test('--config-dir= flag after other args is parsed correctly', () => {
-    const result = parseConfigDirFromArgs(['--global', '--config-dir=/tmp/a=b', '--claude']);
-    assert.equal(result, '/tmp/a=b');
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/enh-1559-installer-export-audit.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:enh-1559-installer-export-audit (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-const { describe, test, before } = require('node:test');
-const assert = require('node:assert/strict');
-
-let installer;
-let conversion;
-
-before(() => {
-  process.env['GSD_TEST_MODE'] = '1';
-  installer = require('../bin/install.js');
-  conversion = require('../gsd-core/bin/lib/runtime-artifact-conversion.cjs');
-});
-
-describe('bin/install.js compatibility export audit (#1559)', () => {
-  test('retains audited compatibility relays for shared rewrite helpers', () => {
-    assert.strictEqual(installer.processAttribution, conversion.processAttribution);
-    assert.strictEqual(
-      installer.applyRuntimeContentRewritesForCommandsInPlace,
-      conversion.applyRuntimeContentRewritesForCommandsInPlace,
-    );
-  });
-
-  test('does not leak unaudited conversion-module helpers through the installer', () => {
-    for (const name of [
-      'yamlQuote',
-      'toSingleLine',
-      'extractFrontmatterAndBody',
-      'extractFrontmatterField',
-      'convertClaudeToCursorMarkdown',
-      'convertClaudeToCodexMarkdown',
-      'transformContentToHyphen',
-      'claudeToGeminiTools',
-      'convertGeminiToolName',
-      'rewriteStagedSkillBodies',
-      'rewriteStagedCommandBodies',
-      '_computePathPrefix',
-      '_stampNonClaudeRuntimeDefaults',
-      'NON_CLAUDE_RUNTIMES',
-    ]) {
-      assert.ok(name in conversion, `${name} remains available from the conversion module`);
-      assert.equal(installer[name], undefined, `${name} is not an installer compatibility export`);
-    }
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-1908-uninstall-manifest.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-1908-uninstall-manifest (consolidation epic #1969 B1 #1970)", () => {
-/**
- * Regression test for bug #1908
- *
- * `--uninstall` did not remove `gsd-file-manifest.json` from the target
- * directory, leaving a stale metadata file after uninstall.
- *
- * Fix: `uninstall()` must call
- *   fs.rmSync(path.join(targetDir, MANIFEST_NAME), { force: true })
- * after cleaning up the rest of the GSD artefacts.
- */
-
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-const { describe, test, beforeEach, afterEach } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-
-const { uninstall } = require('../bin/install.js');
-
-const MANIFEST_NAME = 'gsd-file-manifest.json';
-
-// ─── helpers ──────────────────────────────────────────────────────────────────
-
-function createFakeInstall(prefix = 'gsd-uninstall-test-') {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-
-  // Simulate the minimum directory/file layout produced by the installer:
-  // gsd-core/ directory, agents/ directory, and the manifest file.
-  fs.mkdirSync(path.join(dir, 'gsd-core', 'workflows'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'gsd-core', 'workflows', 'execute-phase.md'), '# stub');
-
-  fs.mkdirSync(path.join(dir, 'agents'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'agents', 'gsd-executor.md'), '# stub');
-
-  const manifest = {
-    version: '1.34.0',
-    timestamp: new Date().toISOString(),
-    files: {
-      'gsd-core/workflows/execute-phase.md': 'abc123',
-      'agents/gsd-executor.md': 'def456',
-    },
-  };
-  fs.writeFileSync(path.join(dir, MANIFEST_NAME), JSON.stringify(manifest, null, 2));
-
-  return dir;
-}
-
-function cleanup(dir) {
-  // eslint-disable-next-line local/no-raw-rmsync-in-tests -- local teardown helper predates helpers.cjs; renaming would collide with the imported cleanup
-  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-}
-
-// ─── tests ────────────────────────────────────────────────────────────────────
-
-describe('uninstall — manifest cleanup (#1908)', () => {
-  let tmpDir;
-
-  beforeEach(() => {
-    tmpDir = createFakeInstall();
-  });
-
-  afterEach(() => {
-    cleanup(tmpDir);
-  });
-
-  test('gsd-file-manifest.json is removed after global uninstall', () => {
-    const manifestPath = path.join(tmpDir, MANIFEST_NAME);
-
-    // Pre-condition: manifest exists before uninstall
-    assert.ok(
-      fs.existsSync(manifestPath),
-      'Test setup failure: manifest file should exist before uninstall'
-    );
-
-    // Run uninstall against tmpDir (pass it via CLAUDE_CONFIG_DIR so getGlobalDir()
-    // resolves to our temp directory; pass isGlobal=true)
-    const savedEnv = process.env.CLAUDE_CONFIG_DIR;
-    process.env.CLAUDE_CONFIG_DIR = tmpDir;
-    try {
-      uninstall(true, 'claude');
-    } finally {
-      if (savedEnv === undefined) {
-        delete process.env.CLAUDE_CONFIG_DIR;
-      } else {
-        process.env.CLAUDE_CONFIG_DIR = savedEnv;
-      }
-    }
-
-    assert.ok(
-      !fs.existsSync(manifestPath),
-      [
-        `${MANIFEST_NAME} must be removed by uninstall() but still exists at`,
-        manifestPath,
-      ].join(' ')
-    );
-  });
-
-  test('gsd-file-manifest.json is removed after local uninstall', () => {
-    const manifestPath = path.join(tmpDir, MANIFEST_NAME);
-
-    assert.ok(
-      fs.existsSync(manifestPath),
-      'Test setup failure: manifest file should exist before uninstall'
-    );
-
-    // For a local install, getGlobalDir is not called — targetDir = cwd + dirName.
-    // Simulate by creating .claude/ inside tmpDir and placing artefacts there.
-    const localDir = path.join(tmpDir, '.claude');
-    fs.mkdirSync(path.join(localDir, 'gsd-core', 'workflows'), { recursive: true });
-    fs.writeFileSync(path.join(localDir, 'gsd-core', 'workflows', 'execute-phase.md'), '# stub');
-    const localManifestPath = path.join(localDir, MANIFEST_NAME);
-    fs.writeFileSync(localManifestPath, JSON.stringify({ version: '1.34.0', files: {} }, null, 2));
-
-    const savedCwd = process.cwd();
-    process.chdir(tmpDir);
-    try {
-      uninstall(false, 'claude');
-    } finally {
-      process.chdir(savedCwd);
-    }
-
-    assert.ok(
-      !fs.existsSync(localManifestPath),
-      [
-        `${MANIFEST_NAME} must be removed by uninstall() (local) but still exists at`,
-        localManifestPath,
-      ].join(' ')
-    );
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-2771-user-profile-manifest.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-2771-user-profile-manifest (consolidation epic #1969 B1 #1970)", () => {
-/**
- * Regression tests for bug #2771: USER-PROFILE.md tracked in install manifest
- *
- * USER-PROFILE.md is a user-owned artifact created/refreshed by /gsd-profile-user.
- * preserveUserArtifacts() correctly preserves it across reinstalls. But writeManifest()
- * also records it under "gsd-core/USER-PROFILE.md" with a SHA-256 of whatever was
- * on disk at install time. On the next install, saveLocalPatches() compares the on-disk
- * (refreshed) hash to the manifest hash, finds them different, and emits the spurious
- * "Found N locally modified GSD file(s) — backed up to gsd-local-patches/" warning.
- *
- * Invariant: a file is either distribution (manifest-tracked, diff'd against manifest)
- * or user artifact (preserved across installs, never diff'd). It cannot be both. The
- * shared truth source must be a single USER_OWNED_ARTIFACTS list referenced by both
- * preserveUserArtifacts callers and writeManifest.
- *
- * Closes: #2771
- */
-
-'use strict';
-
-const { describe, test, beforeEach, afterEach, before } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const { runNode } = require('./helpers/process-seam.cjs');
-const { throwIfFailed } = require('./helpers/git-fixture.cjs');
-const { createTempDir, cleanup } = require('./helpers.cjs');
-
-const INSTALL_SCRIPT = path.join(__dirname, '..', 'bin', 'install.js');
-const BUILD_SCRIPT = path.join(__dirname, '..', 'scripts', 'build-hooks.js');
-const MANIFEST_NAME = 'gsd-file-manifest.json';
-const PATCHES_DIR_NAME = 'gsd-local-patches';
-
-// #3145: class-norm timeouts, not per-suite values — see helpers/timeouts.cjs.
-const {
-  BUILD_TIMEOUT_MS: BUILD_HOOKS_TIMEOUT_MS,
-  INSTALL_TIMEOUT_MS,
-} = require('./helpers/timeouts.cjs');
-
-before(() => {
-  const r = runNode([BUILD_SCRIPT], { timeoutMs: BUILD_HOOKS_TIMEOUT_MS });
-  throwIfFailed(r, `node ${BUILD_SCRIPT}`);
-});
-
-function runInstaller(configDir) {
-  const env = { ...process.env, CLAUDE_CONFIG_DIR: configDir };
-  delete env.GSD_TEST_MODE;
-  const r = runNode(
-    [INSTALL_SCRIPT, '--claude', '--global', '--yes', '--no-sdk'],
-    { env, timeoutMs: INSTALL_TIMEOUT_MS }
-  );
-  throwIfFailed(r, `node ${INSTALL_SCRIPT} --claude --global --yes --no-sdk`);
-  return r.stdout;
-}
-
-// ─── Test 1: writeManifest must NOT record USER-PROFILE.md ────────────────────
-
-describe('#2771: USER-PROFILE.md is excluded from gsd-file-manifest.json', () => {
-  let tmpDir;
-
-  beforeEach(() => { tmpDir = createTempDir('gsd-2771-manifest-'); });
-  afterEach(() => { cleanup(tmpDir); });
-
-  test('writeManifest excludes gsd-core/USER-PROFILE.md even when present on disk', () => {
-    runInstaller(tmpDir);
-
-    // Simulate /gsd-profile-user creating USER-PROFILE.md
-    const profilePath = path.join(tmpDir, 'gsd-core', 'USER-PROFILE.md');
-    fs.writeFileSync(profilePath, '# My Profile\n\nFirst version.\n');
-
-    // Re-install: writeManifest runs again with USER-PROFILE.md present on disk
-    runInstaller(tmpDir);
-
-    const manifestPath = path.join(tmpDir, MANIFEST_NAME);
-    assert.ok(fs.existsSync(manifestPath), 'manifest must be written');
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-
-    assert.ok(
-      !Object.prototype.hasOwnProperty.call(manifest.files, 'gsd-core/USER-PROFILE.md'),
-      'manifest.files must NOT contain gsd-core/USER-PROFILE.md — it is a user artifact, not distribution'
-    );
-  });
-});
-
-// ─── Test 2: preserveUserArtifacts still preserves USER-PROFILE.md ────────────
-
-describe('#2771: USER-PROFILE.md is still preserved across reinstall', () => {
-  let tmpDir;
-
-  beforeEach(() => { tmpDir = createTempDir('gsd-2771-preserve-'); });
-  afterEach(() => { cleanup(tmpDir); });
-
-  test('USER-PROFILE.md content survives reinstall (preservation regression guard)', () => {
-    runInstaller(tmpDir);
-
-    const profilePath = path.join(tmpDir, 'gsd-core', 'USER-PROFILE.md');
-    const content = '# Profile\n\nUser content from /gsd-profile-user.\n';
-    fs.writeFileSync(profilePath, content);
-
-    runInstaller(tmpDir);
-
-    assert.ok(fs.existsSync(profilePath), 'USER-PROFILE.md must survive reinstall');
-    assert.strictEqual(fs.readFileSync(profilePath, 'utf8'), content);
-  });
-});
-
-// ─── Test 3: no spurious "local patches" hit for USER-PROFILE.md refresh ──────
-
-describe('#2771: refreshed USER-PROFILE.md does not trigger local-patches warning', () => {
-  let tmpDir;
-
-  beforeEach(() => { tmpDir = createTempDir('gsd-2771-patches-'); });
-  afterEach(() => { cleanup(tmpDir); });
-
-  test('saveLocalPatches does not classify a refreshed USER-PROFILE.md as a local patch', () => {
-    // Initial install
-    runInstaller(tmpDir);
-
-    // /gsd-profile-user creates USER-PROFILE.md (v1)
-    const profilePath = path.join(tmpDir, 'gsd-core', 'USER-PROFILE.md');
-    fs.writeFileSync(profilePath, '# Profile v1\n');
-
-    // Reinstall — manifest written with v1 contents (under buggy code) or excluded (under fix)
-    runInstaller(tmpDir);
-
-    // /gsd-profile-user --refresh rewrites USER-PROFILE.md (v2 != v1)
-    fs.writeFileSync(profilePath, '# Profile v2 — refreshed\n');
-
-    // Reinstall — saveLocalPatches scans manifest. Under bug, v2 hash != v1 manifest
-    // hash → patch detected. Under fix, file is not in manifest → no patch.
-    const output = runInstaller(tmpDir);
-
-    const patchesDir = path.join(tmpDir, PATCHES_DIR_NAME);
-    const patchFile = path.join(patchesDir, 'gsd-core', 'USER-PROFILE.md');
-    assert.ok(
-      !fs.existsSync(patchFile),
-      'USER-PROFILE.md must NOT appear in gsd-local-patches/ — it is a user artifact, not a modified distribution file'
-    );
-
-    const offendingLine = output
-      .split('\n')
-      .find((line) => /locally modified GSD file/.test(line) && /USER-PROFILE/.test(line));
-    assert.strictEqual(
-      offendingLine,
-      undefined,
-      'installer output must not report USER-PROFILE.md as a locally modified GSD file on any single line. Output was:\n' + output
-    );
-  });
-});
-
-// ─── Test 5: legacy manifest with USER-PROFILE.md entry is normalized ─────────
-
-describe('#2771: legacy manifest entries for USER_OWNED_ARTIFACTS are normalized', () => {
-  let tmpDir;
-
-  beforeEach(() => { tmpDir = createTempDir('gsd-2771-legacy-'); });
-  afterEach(() => { cleanup(tmpDir); });
-
-  test('pre-existing manifest entry for USER-PROFILE.md does not trigger patches warning', () => {
-    // Initial install
-    runInstaller(tmpDir);
-
-    const profilePath = path.join(tmpDir, 'gsd-core', 'USER-PROFILE.md');
-    fs.writeFileSync(profilePath, '# Profile v1\n');
-
-    // Reinstall to populate manifest under the (now-fixed) writer
-    runInstaller(tmpDir);
-
-    // Inject a stale manifest entry simulating a pre-#2771 install: a hash for
-    // USER-PROFILE.md that does NOT match current content.
-    const manifestPath = path.join(tmpDir, MANIFEST_NAME);
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    manifest.files = manifest.files || {};
-    manifest.files['gsd-core/USER-PROFILE.md'] = 'deadbeef'.repeat(8); // stale hash
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-
-    // /gsd-profile-user --refresh rewrites USER-PROFILE.md
-    fs.writeFileSync(profilePath, '# Profile v2 — refreshed\n');
-
-    // Reinstall — saveLocalPatches must strip the legacy entry before scanning
-    const output = runInstaller(tmpDir);
-
-    const patchesDir = path.join(tmpDir, PATCHES_DIR_NAME);
-    const patchFile = path.join(patchesDir, 'gsd-core', 'USER-PROFILE.md');
-    assert.ok(
-      !fs.existsSync(patchFile),
-      'legacy USER-PROFILE.md manifest entry must be normalized away — not backed up as a patch'
-    );
-
-    const offendingLine = output
-      .split('\n')
-      .find((line) => /locally modified GSD file/.test(line) && /USER-PROFILE/.test(line));
-    assert.strictEqual(
-      offendingLine,
-      undefined,
-      'legacy manifest entry must not surface a USER-PROFILE.md patches warning. Output was:\n' + output
-    );
-  });
-});
-
-// ─── Test 4: shared constant exists and is used by both call sites ────────────
-
-describe('#2771: USER_OWNED_ARTIFACTS is a single source of truth', () => {
-  test('install.js exports USER_OWNED_ARTIFACTS containing USER-PROFILE.md', () => {
-    const origMode = process.env.GSD_TEST_MODE;
-    process.env.GSD_TEST_MODE = '1';
-    let mod;
-    try {
-      delete require.cache[require.resolve(INSTALL_SCRIPT)];
-      mod = require(INSTALL_SCRIPT);
-    } finally {
-      if (origMode === undefined) delete process.env.GSD_TEST_MODE;
-      else process.env.GSD_TEST_MODE = origMode;
-    }
-
-    assert.ok(
-      Array.isArray(mod.USER_OWNED_ARTIFACTS) || mod.USER_OWNED_ARTIFACTS instanceof Set,
-      'install.js must export USER_OWNED_ARTIFACTS as a single source of truth'
-    );
-    const list = Array.isArray(mod.USER_OWNED_ARTIFACTS)
-      ? mod.USER_OWNED_ARTIFACTS
-      : Array.from(mod.USER_OWNED_ARTIFACTS);
-    assert.ok(
-      list.includes('USER-PROFILE.md'),
-      'USER_OWNED_ARTIFACTS must include USER-PROFILE.md'
-    );
-  });
-});
-
-describe('manifest path safety', () => {
-  let tmpDir;
-  let outside;
-
-  beforeEach(() => {
-    tmpDir = createTempDir('gsd-manifest-path-safety-');
-    outside = path.join(tmpDir, '..', `outside-managed-file-${path.basename(tmpDir)}.txt`);
-  });
-  afterEach(() => {
-    cleanup(outside);
-    cleanup(tmpDir);
-  });
-
-  test('saveLocalPatches ignores manifest entries that escape the install root', () => {
-    const origMode = process.env.GSD_TEST_MODE;
-    process.env.GSD_TEST_MODE = '1';
-    let mod;
-    try {
-      delete require.cache[require.resolve(INSTALL_SCRIPT)];
-      mod = require(INSTALL_SCRIPT);
-    } finally {
-      if (origMode === undefined) delete process.env.GSD_TEST_MODE;
-      else process.env.GSD_TEST_MODE = origMode;
-    }
-
-    fs.writeFileSync(outside, 'outside user data\n', 'utf8');
-    fs.writeFileSync(
-      path.join(tmpDir, MANIFEST_NAME),
-      JSON.stringify({
-        version: 'legacy',
-        timestamp: '2026-05-11T00:00:00.000Z',
-        files: {
-          '../outside-managed-file.txt': 'deadbeef',
-        },
-      }, null, 2),
-      'utf8'
-    );
-
-    const modified = mod.saveLocalPatches(tmpDir);
-
-    assert.deepEqual(modified, []);
-    assert.equal(fs.readFileSync(outside, 'utf8'), 'outside user data\n');
-    assert.equal(fs.existsSync(path.join(tmpDir, PATCHES_DIR_NAME, '..', path.basename(outside))), false);
-  });
-
-  test('saveLocalPatches does not follow symlinked patch directories outside the install root', () => {
-    const origMode = process.env.GSD_TEST_MODE;
-    process.env.GSD_TEST_MODE = '1';
-    let mod;
-    try {
-      delete require.cache[require.resolve(INSTALL_SCRIPT)];
-      mod = require(INSTALL_SCRIPT);
-    } finally {
-      if (origMode === undefined) delete process.env.GSD_TEST_MODE;
-      else process.env.GSD_TEST_MODE = origMode;
-    }
-
-    const hookPath = path.join(tmpDir, 'hooks', 'managed.js');
-    fs.mkdirSync(path.dirname(hookPath), { recursive: true });
-    fs.writeFileSync(hookPath, 'user edited hook\n', 'utf8');
-    fs.writeFileSync(
-      path.join(tmpDir, MANIFEST_NAME),
-      JSON.stringify({
-        version: 'legacy',
-        timestamp: '2026-05-11T00:00:00.000Z',
-        files: {
-          'hooks/managed.js': crypto.createHash('sha256').update('managed hook\n').digest('hex'),
-        },
-      }, null, 2),
-      'utf8'
-    );
-
-    fs.mkdirSync(outside, { recursive: true });
-    try {
-      fs.symlinkSync(outside, path.join(tmpDir, PATCHES_DIR_NAME), 'dir');
-    } catch {
-      return;
-    }
-
-    const modified = mod.saveLocalPatches(tmpDir);
-
-    assert.deepEqual(modified, []);
-    assert.equal(fs.existsSync(path.join(outside, 'hooks', 'managed.js')), false);
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-3571-configuration-manifest-install-path.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-3571-configuration-manifest-install-path (consolidation epic #1969 B1 #1970)", () => {
-/**
- * Regression test for #3571: configuration.cjs used the source
- * checkout sdk/shared path only, which breaks installed gsd-tools.cjs because
- * runtime installs copy gsd-core/ but not sdk/.
- */
-
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-const { describe, test, beforeEach, afterEach } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-
-const REPO_ROOT = path.join(__dirname, '..');
-const CONFIGURATION_CJS = path.join(REPO_ROOT, 'gsd-core', 'bin', 'lib', 'configuration.cjs');
-const SHARED_DIR = path.join(REPO_ROOT, 'gsd-core', 'bin', 'shared');
-
-const { install } = require('../bin/install.js');
-
-const { createTempDir, cleanup } = require('./helpers.cjs');
-const makeTmpDir = () => createTempDir('gsd-3571-');
-
-function silenceConsole(fn) {
-  const original = {
-    log: console.log,
-    warn: console.warn,
-    error: console.error,
-  };
-  console.log = () => {};
-  console.warn = () => {};
-  console.error = () => {};
-  try {
-    return fn();
-  } finally {
-    console.log = original.log;
-    console.warn = original.warn;
-    console.error = original.error;
-  }
-}
-
-describe('bug #3571: configuration generated manifests resolve in install layout', () => {
-  let tmpRoot;
-  let savedHome;
-  let savedUserProfile;
-  let savedExplicitConfigDir;
-
-  beforeEach(() => {
-    tmpRoot = makeTmpDir();
-    savedHome = process.env.HOME;
-    // On Windows, os.homedir() reads USERPROFILE; install() resolves via it.
-    savedUserProfile = process.env.USERPROFILE;
-    savedExplicitConfigDir = process.env.GSD_EXPLICIT_CONFIG_DIR;
-    delete process.env.GSD_EXPLICIT_CONFIG_DIR;
-  });
-
-  afterEach(() => {
-    process.env.HOME = savedHome;
-    if (savedUserProfile === undefined) delete process.env.USERPROFILE;
-    else process.env.USERPROFILE = savedUserProfile;
-    if (savedExplicitConfigDir === undefined) {
-      delete process.env.GSD_EXPLICIT_CONFIG_DIR;
-    } else {
-      process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
-    }
-    cleanup(tmpRoot);
-  });
-
-  test('co-located bin/shared manifests let configuration.cjs load without sdk/shared', () => {
-    const gsdBinDir = path.join(tmpRoot, '.codex', 'gsd-core', 'bin');
-    const gsdLibDir = path.join(gsdBinDir, 'lib');
-    const gsdSharedDir = path.join(gsdBinDir, 'shared');
-    fs.mkdirSync(gsdLibDir, { recursive: true });
-    fs.mkdirSync(gsdSharedDir, { recursive: true });
-
-    const installedCjs = path.join(gsdLibDir, 'configuration.cjs');
-    fs.copyFileSync(CONFIGURATION_CJS, installedCjs);
-    fs.copyFileSync(
-      path.join(SHARED_DIR, 'config-defaults.manifest.json'),
-      path.join(gsdSharedDir, 'config-defaults.manifest.json')
-    );
-    fs.copyFileSync(
-      path.join(SHARED_DIR, 'config-schema.manifest.json'),
-      path.join(gsdSharedDir, 'config-schema.manifest.json')
-    );
-
-    delete require.cache[installedCjs];
-    let mod;
-    assert.doesNotThrow(() => {
-      mod = require(installedCjs);
-    }, 'installed configuration.cjs must not require ~/.codex/sdk/shared');
-
-    assert.ok(mod.VALID_CONFIG_KEYS.has('workflow.plan_review_convergence'));
-  });
-
-  test('post-install: install() copies configuration manifests to co-located bin/shared', () => {
-    process.env.HOME = tmpRoot;
-    process.env.USERPROFILE = tmpRoot;
-
-    silenceConsole(() => {
-      install(true, 'codex');
-    });
-
-    const sharedDir = path.join(tmpRoot, '.codex', 'gsd-core', 'bin', 'shared');
-    for (const fileName of ['config-defaults.manifest.json', 'config-schema.manifest.json']) {
-      const installedManifest = path.join(sharedDir, fileName);
-      assert.ok(fs.existsSync(installedManifest), `${fileName} must be copied to ${sharedDir}`);
-      assert.doesNotThrow(() => {
-        JSON.parse(fs.readFileSync(installedManifest, 'utf8'));
-      }, `${fileName} must be valid JSON`);
-    }
-
-    const installedCjs = path.join(
-      tmpRoot,
-      '.codex',
-      'gsd-core',
-      'bin',
-      'lib',
-      'configuration.cjs'
-    );
-
-    delete require.cache[installedCjs];
-    assert.doesNotThrow(() => {
-      require(installedCjs);
-    }, 'post-install configuration.cjs must load from co-located manifests');
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-3288-model-catalog-install-path.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-3288-model-catalog-install-path (consolidation epic #1969 B1 #1970)", () => {
-/**
- * Regression test for #3288: model-catalog.cjs uses brittle relative path
- * that breaks after install.
- *
- * Repro:
- *   After `node bin/install.js --global --claude`, the installed
- *   `~/.claude/gsd-core/bin/lib/model-catalog.cjs` tries:
- *     require(path.join(__dirname, '..', '..', '..', 'sdk', 'shared', 'model-catalog.json'))
- *   which resolves to `~/.claude/sdk/shared/model-catalog.json`.
- *   The installer copies `gsd-core/` but never copies `sdk/shared/`,
- *   so the require throws MODULE_NOT_FOUND.
- *
- * Fix contract:
- *   1. model-catalog.cjs must use a resolve-chain that checks a co-located
- *      path first (bin/shared/model-catalog.json) before the legacy
- *      source-repo path.
- *   2. bin/install.js must copy shared model-catalog.json into
- *      gsd-core/bin/shared/model-catalog.json (co-located inside the
- *      gsd-core/ payload).
- *
- * Both halves must be true for the install layout to work.
- */
-
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-const { describe, test, beforeEach, afterEach } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-
-const REPO_ROOT = path.join(__dirname, '..');
-const MODEL_CATALOG_CJS = path.join(REPO_ROOT, 'gsd-core', 'bin', 'lib', 'model-catalog.cjs');
-const MODEL_CATALOG_JSON = path.join(REPO_ROOT, 'gsd-core', 'bin', 'shared', 'model-catalog.json');
-
-const { install } = require('../bin/install.js');
-
-// ─── helpers ─────────────────────────────────────────────────────────────────
-
-const { createTempDir, cleanup } = require('./helpers.cjs');
-const makeTmpDir = createTempDir;
-
-const rmTmpDir = cleanup;
-
-/**
- * Silence console output during install to avoid noise in test output.
- */
-function silenceConsole(fn) {
-  const orig = {
-    log: console.log,
-    warn: console.warn,
-    error: console.error,
-  };
-  console.log = () => {};
-  console.warn = () => {};
-  console.error = () => {};
-  try {
-    return fn();
-  } finally {
-    console.log = orig.log;
-    console.warn = orig.warn;
-    console.error = orig.error;
-  }
-}
-
-// ─── test 1: fake-install layout reproduces MODULE_NOT_FOUND ────────────────
-//
-// Build a fake post-install layout that mirrors what the OLD install did:
-//   <tmp>/.claude/gsd-core/bin/lib/model-catalog.cjs  (copy of real file)
-//   <tmp>/.claude/sdk/shared/model-catalog.json            ABSENT
-//
-// Then attempt to require model-catalog.cjs from that layout.
-// Under the old path scheme (3 levels up → sdk/shared/) this should throw.
-// After the fix, if we DON'T also copy the json, it should still throw — this
-// confirms the co-located path IS required.
-
-describe('bug #3288: model-catalog.cjs install-layout resolution', () => {
-  let tmpRoot;
-  let savedHome;
-  let savedUserProfile;
-  let savedExplicitConfigDir;
-
-  beforeEach(() => {
-    tmpRoot = makeTmpDir('gsd-3288-');
-    savedHome = process.env.HOME;
-    // On Windows, os.homedir() reads USERPROFILE (and HOMEDRIVE+HOMEPATH), NOT
-    // HOME. install() resolves the install destination via os.homedir(), so the
-    // tests must also redirect USERPROFILE → tmpRoot on win32 to keep the
-    // installer writing inside the fixture.
-    savedUserProfile = process.env.USERPROFILE;
-    // Stash and clear explicitConfigDir via env so install() picks up our tmp dir.
-    // Must delete (not just save) so any CI-set value doesn't leak into install()
-    // and target a different directory than tmpRoot (CR finding, PR #3293).
-    savedExplicitConfigDir = process.env.GSD_EXPLICIT_CONFIG_DIR;
-    delete process.env.GSD_EXPLICIT_CONFIG_DIR;
-  });
-
-  afterEach(() => {
-    process.env.HOME = savedHome;
-    if (savedUserProfile === undefined) delete process.env.USERPROFILE;
-    else process.env.USERPROFILE = savedUserProfile;
-    if (savedExplicitConfigDir === undefined) {
-      delete process.env.GSD_EXPLICIT_CONFIG_DIR;
-    } else {
-      process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
-    }
-    rmTmpDir(tmpRoot);
-  });
-
-  // ── test A ──────────────────────────────────────────────────────────────────
-  test('OLD layout (3-level __dirname, no co-located json) fails to require', () => {
-    // Build the old install layout manually:
-    //   <tmpRoot>/.claude/gsd-core/bin/lib/model-catalog.cjs  (copy of the real CJS)
-    //   sdk/shared/model-catalog.json                              ABSENT
-    const gsdLibDir = path.join(tmpRoot, '.claude', 'gsd-core', 'bin', 'lib');
-    fs.mkdirSync(gsdLibDir, { recursive: true });
-
-    // Write a minimal model-catalog.cjs that uses ONLY the 3-level path (the old/broken path).
-    const oldCjsContent = `'use strict';
-const path = require('node:path');
-// This is the BRITTLE path: 3 levels up from bin/lib → sdk/shared/
-const catalog = require(path.join(__dirname, '..', '..', '..', 'sdk', 'shared', 'model-catalog.json'));
-module.exports = { catalog };
-`;
-    const catalogCjsPath = path.join(gsdLibDir, 'model-catalog.cjs');
-    fs.writeFileSync(catalogCjsPath, oldCjsContent);
-
-    // Deliberately do NOT create sdk/shared/model-catalog.json (simulates missing file post-install).
-
-    // Require must fail with MODULE_NOT_FOUND.
-    assert.throws(
-      () => {
-        // Delete from require cache to force a fresh load.
-        delete require.cache[catalogCjsPath];
-        require(catalogCjsPath);
-      },
-      (err) => {
-        assert.ok(
-          err.code === 'MODULE_NOT_FOUND' || err.message.includes('model-catalog.json'),
-          `Expected MODULE_NOT_FOUND or model-catalog.json error, got: ${err.message}`,
-        );
-        return true;
-      },
-      'OLD 3-level path must fail when sdk/shared/model-catalog.json is not present (install layout)',
-    );
-  });
-
-  // ── test B ──────────────────────────────────────────────────────────────────
-  test('NEW layout (co-located bin/shared/model-catalog.json) resolves correctly', () => {
-    // Build the new install layout:
-    //   <tmpRoot>/.claude/gsd-core/bin/lib/model-catalog.cjs (copy of real CJS)
-    //   <tmpRoot>/.claude/gsd-core/bin/shared/model-catalog.json (co-located copy)
-    const gsdBinDir = path.join(tmpRoot, '.claude', 'gsd-core', 'bin');
-    const gsdLibDir = path.join(gsdBinDir, 'lib');
-    const gsdSharedDir = path.join(gsdBinDir, 'shared');
-    fs.mkdirSync(gsdLibDir, { recursive: true });
-    fs.mkdirSync(gsdSharedDir, { recursive: true });
-
-    // Copy the real model-catalog.cjs into the fake install.
-    const catalogCjsPath = path.join(gsdLibDir, 'model-catalog.cjs');
-    fs.copyFileSync(MODEL_CATALOG_CJS, catalogCjsPath);
-
-    // Copy the real model-catalog.json to the co-located path.
-    fs.copyFileSync(MODEL_CATALOG_JSON, path.join(gsdSharedDir, 'model-catalog.json'));
-
-    // Require must succeed and expose catalog with expected shape.
-    delete require.cache[catalogCjsPath];
-    let mod;
-    assert.doesNotThrow(() => {
-      mod = require(catalogCjsPath);
-    }, 'NEW co-located layout must not throw MODULE_NOT_FOUND');
-
-    assert.ok(mod.catalog, 'module must export catalog');
-    assert.ok(Array.isArray(mod.VALID_PROFILES), 'module must export VALID_PROFILES');
-    assert.ok(mod.VALID_PROFILES.length > 0, 'VALID_PROFILES must not be empty');
-  });
-
-  // ── test C ──────────────────────────────────────────────────────────────────
-  test('post-install: install() copies model-catalog.json to co-located path', () => {
-    // Run the real installer against a tmp target dir, then assert the co-located
-    // json is present and parseable.
-    const claudeDir = path.join(tmpRoot, '.claude');
-    fs.mkdirSync(claudeDir, { recursive: true });
-    process.env.HOME = tmpRoot;
-    process.env.USERPROFILE = tmpRoot;
-
-    // Capture process.exit to prevent the test from being killed.
-    const origExit = process.exit;
-    let exitCalled = false;
-    process.exit = (code) => {
-      exitCalled = true;
-      throw new Error(`process.exit(${code}) during install — should not happen`);
-    };
-
-    try {
-      silenceConsole(() => {
-        install(true /* isGlobal */, 'claude');
-      });
-    } catch (e) {
-      if (exitCalled) {
-        assert.fail(`install() called process.exit — unexpected: ${e.message}`);
-      }
-      throw e;
-    } finally {
-      process.exit = origExit;
-    }
-
-    // The co-located json must be present after install.
-    const colocatedJson = path.join(
-      claudeDir,
-      'gsd-core',
-      'bin',
-      'shared',
-      'model-catalog.json',
-    );
-    assert.ok(
-      fs.existsSync(colocatedJson),
-      `model-catalog.json must be present at co-located path post-install: ${colocatedJson}`,
-    );
-
-    // The json must be valid and have expected shape.
-    let parsed;
-    assert.doesNotThrow(() => {
-      parsed = JSON.parse(fs.readFileSync(colocatedJson, 'utf8'));
-    }, 'co-located model-catalog.json must be valid JSON');
-
-    assert.ok(Array.isArray(parsed.profiles), 'catalog.profiles must be an array');
-    assert.ok(parsed.profiles.length > 0, 'catalog.profiles must not be empty');
-
-    // And the installed model-catalog.cjs must be requireable from its install location.
-    const installedCjs = path.join(
-      claudeDir,
-      'gsd-core',
-      'bin',
-      'lib',
-      'model-catalog.cjs',
-    );
-    assert.ok(fs.existsSync(installedCjs), `model-catalog.cjs must be installed at: ${installedCjs}`);
-
-    delete require.cache[installedCjs];
-    let installedMod;
-    assert.doesNotThrow(() => {
-      installedMod = require(installedCjs);
-    }, 'installed model-catalog.cjs must not throw MODULE_NOT_FOUND after install');
-
-    assert.ok(installedMod.catalog, 'installed module must export catalog');
-    assert.ok(installedMod.VALID_PROFILES.length > 0, 'installed module must have valid profiles');
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-130-finishinstall-opencode-testmode.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-130-finishinstall-opencode-testmode (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-/**
- * Bug #130: finishInstall calls configureOpencodePermissions unconditionally,
- * violating the GSD_TEST_MODE side-effect-free contract.
- *
- * configureOpencodePermissions does fs.mkdirSync + fs.writeFileSync, which
- * must NOT run under GSD_TEST_MODE='1'. This test asserts that the opencode
- * config file (opencode.json) is NOT created when GSD_TEST_MODE is set.
- */
-
-const { test, describe } = require('node:test');
-const assert = require('node:assert/strict');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
-
-const ROOT = path.join(__dirname, '..');
-
-// Point HOME at a temp dir so configureOpencodePermissions can't write to
-// the real ~/.config/opencode/ even if the guard is missing.
-const FAKE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-130-test-'));
-// Consolidation #1969: scope the HOME/USERPROFILE mutation to before/after so it
-// does not leak into sibling folded suites (was process-isolated when standalone).
-const { before: __foldBefore, after: __foldAfter } = require('node:test');
-const __savedHome = process.env.HOME;
-const __savedUserProfile = process.env.USERPROFILE;
-__foldBefore(() => {
-  process.env.HOME = FAKE_HOME;
-  process.env.USERPROFILE = FAKE_HOME;
-});
-__foldAfter(() => {
-  if (__savedHome === undefined) delete process.env.HOME;
-  else process.env.HOME = __savedHome;
-  if (__savedUserProfile === undefined) delete process.env.USERPROFILE;
-  else process.env.USERPROFILE = __savedUserProfile;
-});
-
-// The opencode config dir that configureOpencodePermissions would use for a
-// global install when configDir=null: <HOME>/.config/opencode/
-// The file it writes is opencode.json (or opencode.jsonc if pre-existing).
-const OPENCODE_CONFIG_DIR = path.join(FAKE_HOME, '.config', 'opencode');
-const OPENCODE_CONFIG_FILE = path.join(OPENCODE_CONFIG_DIR, 'opencode.json');
-
-// configDir is passed explicitly so the function targets our FAKE_HOME dir
-// regardless of how getGlobalDir resolves.
-const installModule = require(path.join(ROOT, 'bin', 'install.js'));
-
-const SETTINGS_PATH = path.join(FAKE_HOME, `gsd-test-settings-${process.pid}.json`);
-
-function callFinishInstall() {
-  const original = console.log;
-  console.log = () => {};
-  try {
-    installModule.finishInstall(
-      SETTINGS_PATH,
-      {},
-      null,
-      false,
-      'opencode',
-      true,
-      OPENCODE_CONFIG_DIR, // pass explicit configDir pointing at our temp dir
-    );
-  } finally {
-    console.log = original;
-  }
-}
-
-describe('Bug #130: finishInstall opencode + GSD_TEST_MODE side-effect guard', () => {
-  test('configureOpencodePermissions does NOT write opencode.json under GSD_TEST_MODE', () => {
-    // Confirm the file does not exist before the call
-    assert.equal(
-      fs.existsSync(OPENCODE_CONFIG_FILE),
-      false,
-      'opencode.json should not exist before finishInstall call',
-    );
-
-    callFinishInstall();
-
-    // Assert the file was NOT created — the side-effect must be suppressed
-    assert.equal(
-      fs.existsSync(OPENCODE_CONFIG_FILE),
-      false,
-      `opencode.json must NOT be created under GSD_TEST_MODE; found at ${OPENCODE_CONFIG_FILE}`,
-    );
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-410-install-defaults-test-mode-guard.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-410-install-defaults-test-mode-guard (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-/**
- * Bug #410: finishInstall writes ~/.gsd/defaults.json for non-Claude runtimes
- * without a GSD_TEST_MODE guard, polluting the real developer home directory
- * during test runs.
- *
- * The opencode permission-config write a few lines above already carries the
- * GSD_TEST_MODE guard (added for #130) — this test covers the un-fixed sibling
- * (the resolve_model_ids: "omit" write).
- */
-
-const { test, describe } = require('node:test');
-const { cleanup } = require('./helpers.cjs');
-const assert = require('node:assert/strict');
-const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
-
-const ROOT = path.join(__dirname, '..');
-
-// Point HOME at a temp dir so the defaults.json write can't reach the real
-// ~/.gsd/ even if the guard is missing.
-// On Windows, os.homedir() reads USERPROFILE (not HOME). Set both so
-// finishInstall's path.join(os.homedir(), '.gsd') resolves into FAKE_HOME
-// on every platform. Node docs: https://nodejs.org/docs/latest-v22.x/api/os.html#oshomedir
-const FAKE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-410-test-'));
-// Consolidation #1969: scope the HOME/USERPROFILE mutation to before/after so it
-// does not leak into sibling folded suites (was process-isolated when standalone).
-const { before: __foldBefore, after: __foldAfter } = require('node:test');
-const __savedHome = process.env.HOME;
-const __savedUserProfile = process.env.USERPROFILE;
-__foldBefore(() => {
-  process.env.HOME = FAKE_HOME;
-  process.env.USERPROFILE = FAKE_HOME;
-});
-__foldAfter(() => {
-  if (__savedHome === undefined) delete process.env.HOME;
-  else process.env.HOME = __savedHome;
-  if (__savedUserProfile === undefined) delete process.env.USERPROFILE;
-  else process.env.USERPROFILE = __savedUserProfile;
-});
-
-// The path that finishInstall would write to for a non-Claude runtime.
-const GSD_DIR = path.join(FAKE_HOME, '.gsd');
-const DEFAULTS_PATH = path.join(GSD_DIR, 'defaults.json');
-
-// Set GSD_TEST_MODE before requiring install.js so any module-level guards
-// also see the flag.
-process.env.GSD_TEST_MODE = '1';
-
-const installModule = require(path.join(ROOT, 'bin', 'install.js'));
-
-// A synthetic settingsPath that won't exist — finishInstall should cope.
-const SETTINGS_PATH = path.join(FAKE_HOME, `gsd-test-settings-${process.pid}.json`);
-
-function callFinishInstallForRuntime(runtime) {
-  const original = console.log;
-  console.log = () => {};
-  try {
-    installModule.finishInstall(
-      SETTINGS_PATH,
-      {},       // empty settings
-      null,     // statuslineCommand
-      false,    // shouldInstallStatusline
-      runtime,
-      true,     // isGlobal
-      null,     // configDir
-    );
-  } finally {
-    console.log = original;
-  }
-}
-
-describe('Bug #410: finishInstall non-Claude runtime + GSD_TEST_MODE side-effect guard', () => {
-  test('defaults.json is NOT written for opencode runtime under GSD_TEST_MODE', () => {
-    assert.equal(
-      fs.existsSync(DEFAULTS_PATH),
-      false,
-      'defaults.json should not exist before finishInstall call',
-    );
-
-    callFinishInstallForRuntime('opencode');
-
-    assert.equal(
-      fs.existsSync(DEFAULTS_PATH),
-      false,
-      `defaults.json must NOT be created under GSD_TEST_MODE; found at ${DEFAULTS_PATH}`,
-    );
-  });
-
-  test('defaults.json is NOT written for antigravity runtime under GSD_TEST_MODE', () => {
-    // Reset in case previous test left artifacts (it shouldn't).
-    assert.equal(
-      fs.existsSync(DEFAULTS_PATH),
-      false,
-      'defaults.json should not exist before antigravity test',
-    );
-
-    callFinishInstallForRuntime('antigravity');
-
-    assert.equal(
-      fs.existsSync(DEFAULTS_PATH),
-      false,
-      `defaults.json must NOT be created under GSD_TEST_MODE for antigravity; found at ${DEFAULTS_PATH}`,
-    );
-  });
-
-  test('defaults.json IS written for opencode runtime when GSD_TEST_MODE is unset', () => {
-    // Temporarily unset GSD_TEST_MODE to verify the user-facing path still works.
-    const saved = process.env.GSD_TEST_MODE;
-    delete process.env.GSD_TEST_MODE;
-    try {
-      callFinishInstallForRuntime('opencode');
-      assert.equal(
-        fs.existsSync(DEFAULTS_PATH),
-        true,
-        `defaults.json must be written for non-Claude runtime when GSD_TEST_MODE is unset`,
-      );
-      // Verify the written content is correct.
-      const contents = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8'));
-      assert.equal(contents.resolve_model_ids, 'omit', 'resolve_model_ids must be "omit"');
-    } finally {
-      // Restore GSD_TEST_MODE and clean up the written file.
-      process.env.GSD_TEST_MODE = saved;
-      cleanup(DEFAULTS_PATH);
-      try { fs.rmdirSync(GSD_DIR); } catch { /* not empty or already gone */ }
-    }
-  });
-});
-
-// Bug #1569 folded here (sibling on the SAME finishInstall resolve_model_ids block):
-// the #1156 default-to-"omit" step keyed its write on `!== "omit"`, so an explicit
-// `resolve_model_ids: true` opt-in (resolveModelInternal returns full materialized
-// model IDs) was silently clobbered across all 14 non-Claude runtimes. The fix
-// preserves `true` and only defaults absent/falsy → "omit". Reuses the #410 harness.
-
-describe('Bug #1569: non-Claude finishInstall preserves explicit resolve_model_ids:true', () => {
-  function seedDefaults(obj) {
-    fs.mkdirSync(GSD_DIR, { recursive: true });
-    fs.writeFileSync(DEFAULTS_PATH, JSON.stringify(obj, null, 2) + '\n', 'utf8');
-  }
-
-  function withUserPath(fn) {
-    const saved = process.env.GSD_TEST_MODE;
-    delete process.env.GSD_TEST_MODE;
-    try {
-      return fn();
-    } finally {
-      process.env.GSD_TEST_MODE = saved;
-    }
-  }
-
-  test('explicit resolve_model_ids:true survives a codex global install (the reported case)', () => {
-    withUserPath(() => {
-      seedDefaults({ runtime: 'codex', model_profile: 'balanced', resolve_model_ids: true });
-      callFinishInstallForRuntime('codex');
-      const after = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8'));
-      assert.equal(
-        after.resolve_model_ids,
-        true,
-        'explicit resolve_model_ids:true must be preserved across a codex install, not clobbered to "omit"',
-      );
-    });
-  });
-
-  // The clobber guard is runtime-agnostic (`runtime !== 'claude'`); parameterize
-  // across a representative slice of non-Claude runtimes.
-  for (const runtime of ['codex', 'opencode', 'antigravity']) {
-    test(`explicit resolve_model_ids:true survives a ${runtime} global install`, () => {
-      withUserPath(() => {
-        seedDefaults({ runtime, resolve_model_ids: true });
-        callFinishInstallForRuntime(runtime);
-        const after = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8'));
-        assert.equal(
-          after.resolve_model_ids,
-          true,
-          `explicit resolve_model_ids:true must be preserved for ${runtime}`,
-        );
-      });
-    });
-  }
-
-  test('absent resolve_model_ids still defaults to "omit" (preserves #1156 intent)', () => {
-    withUserPath(() => {
-      seedDefaults({ runtime: 'codex' });
-      callFinishInstallForRuntime('codex');
-      const after = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8'));
-      assert.equal(
-        after.resolve_model_ids,
-        'omit',
-        'absent resolve_model_ids must still default to "omit" for non-Claude runtimes',
-      );
-    });
-  });
-
-  test('explicit resolve_model_ids:false still defaults to "omit"', () => {
-    withUserPath(() => {
-      seedDefaults({ runtime: 'codex', resolve_model_ids: false });
-      callFinishInstallForRuntime('codex');
-      const after = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8'));
-      assert.equal(after.resolve_model_ids, 'omit', 'false must still be normalized to "omit"');
-    });
-  });
-
-  test('non-canonical resolve_model_ids values (0, "", "yes", {}) default to "omit" — no Claude alias leak (#1569 codex review)', () => {
-    // The domain is true/false/"omit"/absent. Any OTHER value is malformed; the safe
-    // non-Claude default is "omit" (don't leak Claude aliases the runtime can't resolve).
-    withUserPath(() => {
-      for (const bad of [0, '', 'yes', {}]) {
-        seedDefaults({ runtime: 'codex', resolve_model_ids: bad });
-        callFinishInstallForRuntime('codex');
-        const after = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8'));
-        assert.equal(
-          after.resolve_model_ids,
-          'omit',
-          `non-canonical resolve_model_ids:${JSON.stringify(bad)} must default to "omit", not pass through`,
-        );
-      }
-    });
-  });
-
-  test('already-"omit" is left unchanged (idempotent, no rewrite churn)', () => {
-    withUserPath(() => {
-      seedDefaults({ runtime: 'codex', resolve_model_ids: 'omit' });
-      const beforeMtime = fs.statSync(DEFAULTS_PATH).mtimeMs;
-      // fs mtime resolution can be coarse; wait briefly so an accidental rewrite is detectable.
-      const start = Date.now();
-      while (Date.now() - start < 20) { /* spin briefly */ }
-      callFinishInstallForRuntime('codex');
-      const after = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8'));
-      const afterMtime = fs.statSync(DEFAULTS_PATH).mtimeMs;
-      assert.equal(after.resolve_model_ids, 'omit');
-      assert.equal(
-        afterMtime,
-        beforeMtime,
-        'defaults.json must not be rewritten when resolve_model_ids is already "omit" (idempotent)',
-      );
-    });
-  });
-
-  test('claude runtime never touches resolve_model_ids (cross-runtime parity)', () => {
-    withUserPath(() => {
-      seedDefaults({ runtime: 'claude', resolve_model_ids: true });
-      callFinishInstallForRuntime('claude');
-      const after = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8'));
-      assert.equal(
-        after.resolve_model_ids,
-        true,
-        'claude install must never rewrite resolve_model_ids',
-      );
-    });
-  });
-
-  test('malformed defaults.json does not crash — still defaults to "omit"', () => {
-    withUserPath(() => {
-      fs.mkdirSync(GSD_DIR, { recursive: true });
-      fs.writeFileSync(DEFAULTS_PATH, '{ not valid json }', 'utf8');
-      // Must not throw.
-      callFinishInstallForRuntime('codex');
-      const after = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8'));
-      assert.equal(
-        after.resolve_model_ids,
-        'omit',
-        'malformed defaults.json must be recovered to a valid state with resolve_model_ids:omit',
-      );
-    });
-  });
-});
-
-// Bug #1657 — finishInstall reads ~/.gsd/defaults.json with JSON.parse but did not
-// validate the result is a plain object. A valid-JSON-but-non-object value (null, [],
-// 42, "str") bypassed the catch and flowed through, leaving the malformed file on disk
-// unrecovered (and, for null, throwing a TypeError swallowed by the outer try/catch).
-// Folded into the owning install-defaults test (no new top-level bug-NNNN file).
-describe('Bug #1657: finishInstall recovers a malformed (non-object) defaults.json', () => {
-  function seedDefaultsRaw(raw) {
-    fs.mkdirSync(GSD_DIR, { recursive: true });
-    fs.writeFileSync(DEFAULTS_PATH, raw, 'utf8');
-  }
-  function runAndRead(runtime) {
-    const saved = process.env.GSD_TEST_MODE;
-    delete process.env.GSD_TEST_MODE;
-    const log = console.log; console.log = () => {};
-    let threw = null;
-    try {
-      installModule.finishInstall(SETTINGS_PATH, {}, null, false, runtime, true, null);
-    } catch (e) { threw = e.message; } finally { console.log = log; process.env.GSD_TEST_MODE = saved; }
-    let after = null;
-    try { after = JSON.parse(fs.readFileSync(DEFAULTS_PATH, 'utf8')); } catch (e) { after = 'UNPARSEABLE: ' + e.message; }
-    return { threw, after };
-  }
-
-  for (const [label, raw] of [['null', 'null'], ['array', '[]'], ['number', '42'], ['string', '"oops"']]) {
-    test(`seed ${label} (${raw}) recovers to a valid object with resolve_model_ids:omit`, () => {
-      seedDefaultsRaw(raw);
-      const { threw, after } = runAndRead('codex');
-      assert.equal(threw, null, `must not throw for seed ${label} (got: ${threw})`);
-      assert.equal(
-        after !== null && typeof after === 'object' && !Array.isArray(after) && after.resolve_model_ids === 'omit',
-        true,
-        `seed ${label} must recover to { resolve_model_ids: 'omit' }, got: ${JSON.stringify(after)}`,
-      );
-    });
-  }
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-1736-local-install-commands.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-1736-local-install-commands (consolidation epic #1969 B1 #1970)", () => {
-/**
- * Regression test for #1736: local Claude install missing commands/gsd/
- *
- * After a fresh local install (`--claude --local`), all /gsd-* commands
- * except /gsd-help return "Unknown skill: gsd-quick" because
- * .claude/commands/gsd/ was not populated. Claude Code reads local project
- * commands from .claude/commands/ (one level up) using the file stem as the
- * command name.
- *
- * #1367 follow-up: the fix changed the layout from the old commands/gsd/<cmd>.md
- * (which caused /gsd:<cmd> colon namespace) to flat commands/gsd-<cmd>.md
- * (which produces /gsd-<cmd> hyphen form). This test has been updated to assert
- * the new flat layout while preserving the core invariant from #1736: commands
- * must be present and usable after a local install.
- */
-
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-const { describe, test, before, beforeEach, afterEach } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { runNode } = require('./helpers/process-seam.cjs');
-const { throwIfFailed } = require('./helpers/git-fixture.cjs');
-
-const INSTALL_SRC = path.join(__dirname, '..', 'bin', 'install.js');
-const BUILD_SCRIPT = path.join(__dirname, '..', 'scripts', 'build-hooks.js');
-const { install } = require(INSTALL_SRC);
-const { cleanup } = require('./helpers.cjs');
-
-// #3145: class-norm timeout, not a per-suite value — see helpers/timeouts.cjs.
-const { BUILD_TIMEOUT_MS: BUILD_HOOKS_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-
-// ─── Ensure hooks/dist/ is populated before install tests ────────────────────
-// With --test-concurrency=4, other install tests (bug-1834, bug-1924) run
-// build-hooks.js concurrently. That script creates hooks/dist/ empty first,
-// then copies files — creating a window where this test sees an empty dir and
-// install() fails with "directory is empty" → process.exit(1).
-
-before(() => {
-  const r = runNode([BUILD_SCRIPT], { timeoutMs: BUILD_HOOKS_TIMEOUT_MS });
-  throwIfFailed(r, `node ${BUILD_SCRIPT}`);
-});
-
-// ─── #1736 + #1367: local install deploys commands in flat gsd-<cmd>.md layout ───
-
-describe('#1736: local Claude install deploys slash commands (flat gsd-<cmd>.md layout, #1367)', () => {
-  let tmpDir;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-local-install-1736-'));
-  });
-
-  afterEach(() => {
-    // Use the shared helper which has a 5s Windows-EBUSY retry budget
-    // (20×250ms). The inline 1s budget here was insufficient on cold runners.
-    cleanup(tmpDir);
-  });
-
-  test('local install creates .claude/commands/ directory with flat gsd-*.md files (#1367)', (t) => {
-    // #1736 invariant: commands must be deployed.
-    // #1367 fix: commands land as flat gsd-<cmd>.md at commands/ (not commands/gsd/<cmd>.md).
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-    process.chdir(tmpDir);
-    install(false, 'claude');
-
-    const commandsDir = path.join(tmpDir, '.claude', 'commands');
-    assert.ok(
-      fs.existsSync(commandsDir),
-      '.claude/commands/ directory must exist after local install'
-    );
-    const flatFiles = fs.readdirSync(commandsDir).filter(f => f.startsWith('gsd-') && f.endsWith('.md'));
-    assert.ok(
-      flatFiles.length > 0,
-      `.claude/commands/ must have flat gsd-*.md files (e.g. gsd-help.md). Found: ${JSON.stringify(flatFiles)}`
-    );
-    // The old commands/gsd/ subdirectory must NOT exist (#1367)
-    const oldSubdir = path.join(commandsDir, 'gsd');
-    assert.ok(
-      !fs.existsSync(oldSubdir),
-      '.claude/commands/gsd/ subdir must NOT exist — flat gsd-<cmd>.md layout required (#1367)'
-    );
-  });
-
-  test('local install deploys at least one .md command file to .claude/commands/ (#1736 invariant)', (t) => {
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-    process.chdir(tmpDir);
-    install(false, 'claude');
-
-    const commandsDir = path.join(tmpDir, '.claude', 'commands');
-    assert.ok(
-      fs.existsSync(commandsDir),
-      '.claude/commands/ must exist'
-    );
-
-    const files = fs.readdirSync(commandsDir).filter(f => f.startsWith('gsd-') && f.endsWith('.md'));
-    assert.ok(
-      files.length > 0,
-      `.claude/commands/ must contain at least one gsd-*.md file, found: ${JSON.stringify(files)}`
-    );
-  });
-
-  test('local install deploys gsd-quick.md to .claude/commands/ (#1367: flat hyphen form)', (t) => {
-    // Was: .claude/commands/gsd/quick.md (caused /gsd:quick colon form).
-    // Now: .claude/commands/gsd-quick.md (produces /gsd-quick hyphen form).
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-    process.chdir(tmpDir);
-    install(false, 'claude');
-
-    const quickCmd = path.join(tmpDir, '.claude', 'commands', 'gsd-quick.md');
-    assert.ok(
-      fs.existsSync(quickCmd),
-      '.claude/commands/gsd-quick.md must exist after local install (#1367 flat layout)'
-    );
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-2248-local-install-statusline.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-2248-local-install-statusline (consolidation epic #1969 B1 #1970)", () => {
-/**
- * Regression test for #2248: local Claude install clobbers profile-level statusLine
- *
- * When installing with `--claude --local`, the repo-level `.claude/settings.json`
- * takes precedence over the user's profile-level `~/.claude/settings.json` in
- * Claude Code. Writing `statusLine` to repo settings during a local install
- * silently overrides any profile-level statusLine the user configured.
- *
- * Fix: local installs skip writing `statusLine` to settings.json unless
- * `--force-statusline` is passed.
- *
- * Note: `install()` only copies files. `finishInstall()` writes settings.json.
- * The production code calls both from `installAllRuntimes()`. Tests must mirror
- * that two-phase pattern.
- */
-
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-const { describe, test, before, beforeEach, afterEach } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { runNode } = require('./helpers/process-seam.cjs');
-const { throwIfFailed } = require('./helpers/git-fixture.cjs');
-
-const INSTALL_SRC = path.join(__dirname, '..', 'bin', 'install.js');
-const BUILD_SCRIPT = path.join(__dirname, '..', 'scripts', 'build-hooks.js');
-const { install, finishInstall } = require(INSTALL_SRC);
-const { cleanup, captureConsole } = require('./helpers.cjs');
-
-// #3145: class-norm timeout, not a per-suite value — see helpers/timeouts.cjs.
-const { BUILD_TIMEOUT_MS: BUILD_HOOKS_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-
-// ─── Ensure hooks/dist/ is populated before install tests ────────────────────
-before(() => {
-  const r = runNode([BUILD_SCRIPT], { timeoutMs: BUILD_HOOKS_TIMEOUT_MS });
-  throwIfFailed(r, `node ${BUILD_SCRIPT}`);
-});
-
-// ─── #2248: local install must NOT write statusLine to repo settings.json ────
-
-describe('#2248: local Claude install does not clobber profile-level statusLine', () => {
-  let tmpDir;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-local-install-2248-'));
-  });
-
-  afterEach(() => {
-    // Use the shared 5s Windows-EBUSY retry budget instead of inline 1s.
-    cleanup(tmpDir);
-  });
-
-  test('local install writes hooks to .claude/settings.local.json and does not write statusLine', (t) => {
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-    process.chdir(tmpDir);
-
-    // Phase 1: copy files (mirrors installAllRuntimes)
-    const result = install(false, 'claude');
-
-    // Phase 2: configure settings.local.json (mirrors installAllRuntimes → finalize)
-    // #338: local Claude installs now write to settings.local.json, not settings.json.
-    // shouldInstallStatusline=true mirrors what handleStatusline picks for a fresh install
-    const { stdout } = captureConsole(() => {
-      finishInstall(
-        result.settingsPath,
-        result.settings,
-        result.statuslineCommand,
-        true,   // shouldInstallStatusline
-        'claude',
-        false   // isGlobal=false -> local install
-      );
-    });
-    assert.match(
-      stdout,
-      /Skipping statusLine for local install/,
-      'Local install must explain that it skipped statusLine unless --force-statusline is passed'
-    );
-
-    // #338: local installs write to settings.local.json, not settings.json
-    const localSettingsPath = path.join(tmpDir, '.claude', 'settings.local.json');
-    assert.ok(
-      fs.existsSync(localSettingsPath),
-      '.claude/settings.local.json must exist after local Claude install (#338)'
-    );
-
-    const settings = JSON.parse(fs.readFileSync(localSettingsPath, 'utf-8'));
-    assert.strictEqual(
-      settings.statusLine,
-      undefined,
-      'Local install must not write statusLine to settings.local.json — it would clobber profile-level settings (#2248)'
-    );
-
-    // settings.json must not be touched by a fresh local install
-    const sharedSettingsPath = path.join(tmpDir, '.claude', 'settings.json');
-    assert.strictEqual(
-      fs.existsSync(sharedSettingsPath),
-      false,
-      '.claude/settings.json must NOT be created by a fresh local Claude install (#338)'
-    );
-  });
-
-  test('global install still writes statusLine to settings.json', (t) => {
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-
-    // Global install writes to CLAUDE_CONFIG_DIR; point it at our tmpDir
-    const configDir = path.join(tmpDir, '.claude');
-    fs.mkdirSync(configDir, { recursive: true });
-    const origEnv = process.env.CLAUDE_CONFIG_DIR;
-    process.env.CLAUDE_CONFIG_DIR = configDir;
-    t.after(() => {
-      if (origEnv === undefined) {
-        delete process.env.CLAUDE_CONFIG_DIR;
-      } else {
-        process.env.CLAUDE_CONFIG_DIR = origEnv;
-      }
-    });
-
-    // Phase 1: copy files
-    const result = install(true, 'claude');
-
-    // Phase 2: configure settings.json
-    finishInstall(
-      result.settingsPath,
-      result.settings,
-      result.statuslineCommand,
-      true,  // shouldInstallStatusline
-      'claude',
-      true   // isGlobal=true
-    );
-
-    const settingsPath = path.join(configDir, 'settings.json');
-    assert.ok(
-      fs.existsSync(settingsPath),
-      '~/.claude/settings.json must exist after global install'
-    );
-
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-    assert.ok(
-      settings.statusLine !== undefined,
-      'Global install should write statusLine to settings.json'
-    );
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-338-local-install-settings-local-json.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-338-local-install-settings-local-json (consolidation epic #1969 B1 #1970)", () => {
-/**
- * Regression tests for #338: Claude --local installs must write hook wiring to
- * `.claude/settings.local.json` (Claude Code's per-user gitignored slot) instead
- * of the repo-shared `.claude/settings.json`.
- *
- * Three cases:
- *  1. Fresh local install: settings.local.json is created with hook block;
- *     settings.json is not touched.
- *  2. Global install (regression guard): continues to write to settings.json.
- *  3. Migration: if a prior local install wrote GSD entries to settings.json,
- *     re-running local install moves them to settings.local.json and removes
- *     them from settings.json in the same run.
- *
- * Note: `install()` only copies files. `finishInstall()` writes settings.
- * The production code calls both from `installAllRuntimes()`. Tests mirror
- * that two-phase pattern.
- */
-
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-const { describe, test, before, beforeEach, afterEach } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { runNode } = require('./helpers/process-seam.cjs');
-const { throwIfFailed } = require('./helpers/git-fixture.cjs');
-
-const INSTALL_SRC = path.join(__dirname, '..', 'bin', 'install.js');
-const BUILD_SCRIPT = path.join(__dirname, '..', 'scripts', 'build-hooks.js');
-const { install, finishInstall } = require(INSTALL_SRC);
-const { cleanup } = require('./helpers.cjs');
-
-// #3145: class-norm timeout, not a per-suite value — see helpers/timeouts.cjs.
-const { BUILD_TIMEOUT_MS: BUILD_HOOKS_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-
-// ─── Ensure hooks/dist/ is populated before install tests ────────────────────
-before(() => {
-  const r = runNode([BUILD_SCRIPT], { timeoutMs: BUILD_HOOKS_TIMEOUT_MS });
-  throwIfFailed(r, `node ${BUILD_SCRIPT}`);
-});
-
-// ─── Helper: run both install phases ─────────────────────────────────────────
-
-/**
- * Run install + finishInstall (mirrors installAllRuntimes two-phase pattern).
- * @param {boolean} isGlobal
- * @param {object} [opts]
- * @param {boolean} [opts.shouldInstallStatusline]
- * @returns {{ result: object }}
- */
-function runInstall(isGlobal, opts = {}) {
-  const { shouldInstallStatusline = false } = opts;
-  const result = install(isGlobal, 'claude');
-  finishInstall(
-    result.settingsPath,
-    result.settings,
-    result.statuslineCommand,
-    shouldInstallStatusline,
-    'claude',
-    isGlobal
-  );
-  return { result };
-}
-
-// ─── Case 1: fresh local install → settings.local.json, not settings.json ───
-
-describe('#338 case 1: fresh local Claude install writes to settings.local.json', () => {
-  let tmpDir;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-338-local-'));
-  });
-
-  afterEach(() => {
-    cleanup(tmpDir);
-  });
-
-  test('settings.local.json is created with hook block', (t) => {
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-    process.chdir(tmpDir);
-
-    runInstall(false);
-
-    const localSettingsPath = path.join(tmpDir, '.claude', 'settings.local.json');
-    assert.ok(
-      fs.existsSync(localSettingsPath),
-      '.claude/settings.local.json must exist after local Claude install (#338)'
-    );
-
-    const settings = JSON.parse(fs.readFileSync(localSettingsPath, 'utf-8'));
-    assert.ok(
-      settings && typeof settings === 'object',
-      'settings.local.json must be a valid JSON object'
-    );
-    // Hook block must be present (hooks key or at minimum the file was written)
-    assert.ok(
-      settings.hooks !== undefined || Object.keys(settings).length >= 0,
-      'settings.local.json must contain the hook block'
-    );
-  });
-
-  test('settings.json is NOT created by a fresh local install', (t) => {
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-    process.chdir(tmpDir);
-
-    runInstall(false);
-
-    const sharedSettingsPath = path.join(tmpDir, '.claude', 'settings.json');
-    assert.strictEqual(
-      fs.existsSync(sharedSettingsPath),
-      false,
-      '.claude/settings.json must NOT be created by a fresh local Claude install (#338) — ' +
-      'engineer-specific absolute paths must not leak into the repo-shared file'
-    );
-  });
-
-  test('install() returns settingsPath pointing to settings.local.json', (t) => {
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-    process.chdir(tmpDir);
-
-    const result = install(false, 'claude');
-    assert.ok(
-      result.settingsPath.endsWith('settings.local.json'),
-      `install() must return settingsPath ending in settings.local.json for local Claude installs; got: ${result.settingsPath}`
-    );
-  });
-});
-
-// ─── Case 2: global Claude install (regression guard) ────────────────────────
-
-describe('#338 case 2: global Claude install continues to write to settings.json', () => {
-  let tmpDir;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-338-global-'));
-  });
-
-  afterEach(() => {
-    cleanup(tmpDir);
-  });
-
-  test('global install writes hook block to settings.json', (t) => {
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-
-    // Point CLAUDE_CONFIG_DIR at a subdir of tmpDir to avoid polluting ~/.claude
-    const configDir = path.join(tmpDir, '.claude');
-    fs.mkdirSync(configDir, { recursive: true });
-    const origEnv = process.env.CLAUDE_CONFIG_DIR;
-    process.env.CLAUDE_CONFIG_DIR = configDir;
-    t.after(() => {
-      if (origEnv === undefined) {
-        delete process.env.CLAUDE_CONFIG_DIR;
-      } else {
-        process.env.CLAUDE_CONFIG_DIR = origEnv;
-      }
-    });
-
-    runInstall(true);
-
-    const settingsPath = path.join(configDir, 'settings.json');
-    assert.ok(
-      fs.existsSync(settingsPath),
-      '~/.claude/settings.json must exist after global Claude install (regression guard for #338)'
-    );
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-    assert.ok(
-      settings && typeof settings === 'object',
-      'settings.json must be a valid JSON object after global install'
-    );
-  });
-
-  test('global install does NOT create settings.local.json', (t) => {
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-
-    const configDir = path.join(tmpDir, '.claude');
-    fs.mkdirSync(configDir, { recursive: true });
-    const origEnv = process.env.CLAUDE_CONFIG_DIR;
-    process.env.CLAUDE_CONFIG_DIR = configDir;
-    t.after(() => {
-      if (origEnv === undefined) {
-        delete process.env.CLAUDE_CONFIG_DIR;
-      } else {
-        process.env.CLAUDE_CONFIG_DIR = origEnv;
-      }
-    });
-
-    runInstall(true);
-
-    const localSettingsPath = path.join(configDir, 'settings.local.json');
-    assert.strictEqual(
-      fs.existsSync(localSettingsPath),
-      false,
-      '~/.claude/settings.local.json must NOT be created by a global Claude install'
-    );
-  });
-});
-
-// ─── Case 3: migration — prior local install wrote GSD entries to settings.json ─
-
-describe('#338 case 3: migration of prior local install GSD entries from settings.json to settings.local.json', () => {
-  let tmpDir;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-338-migrate-'));
-  });
-
-  afterEach(() => {
-    cleanup(tmpDir);
-  });
-
-  test('GSD hook entries are moved from settings.json to settings.local.json', (t) => {
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-    process.chdir(tmpDir);
-
-    // Pre-populate .claude/settings.json with a GSD-shaped hook block (simulating
-    // a prior local install that wrote to the wrong file).
-    const claudeDir = path.join(tmpDir, '.claude');
-    fs.mkdirSync(claudeDir, { recursive: true });
-    const sharedSettingsPath = path.join(claudeDir, 'settings.json');
-    const priorSettings = {
-      hooks: {
-        SessionStart: [
-          {
-            hooks: [
-              {
-                type: 'command',
-                command: `${process.execPath} ${path.join(claudeDir, 'hooks', 'gsd-check-update.js')}`,
-              }
-            ]
-          }
-        ],
-        PostToolUse: [
-          {
-            matcher: 'Bash|Edit|Write|MultiEdit|Agent|Task',
-            hooks: [
-              {
-                type: 'command',
-                command: `${process.execPath} ${path.join(claudeDir, 'hooks', 'gsd-context-monitor.js')}`,
-                timeout: 10,
-              }
-            ]
-          }
-        ]
-      }
-    };
-    fs.writeFileSync(sharedSettingsPath, JSON.stringify(priorSettings, null, 2) + '\n');
-
-    // Run a fresh local install — this should trigger migration
-    runInstall(false);
-
-    // Verify GSD entries are now in settings.local.json
-    const localSettingsPath = path.join(claudeDir, 'settings.local.json');
-    assert.ok(
-      fs.existsSync(localSettingsPath),
-      '.claude/settings.local.json must exist after migration run'
-    );
-    const localSettings = JSON.parse(fs.readFileSync(localSettingsPath, 'utf-8'));
-    const sessionStartHooks = (localSettings.hooks && localSettings.hooks.SessionStart) || [];
-    const hasGsdUpdateHook = sessionStartHooks.some(
-      entry => entry && entry.hooks && Array.isArray(entry.hooks) &&
-        entry.hooks.some(h => h && h.command && h.command.includes('gsd-check-update'))
-    );
-    assert.ok(
-      hasGsdUpdateHook,
-      'settings.local.json must contain the migrated gsd-check-update hook after migration'
-    );
-  });
-
-  test('GSD hook entries are removed from settings.json after migration', (t) => {
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-    process.chdir(tmpDir);
-
-    const claudeDir = path.join(tmpDir, '.claude');
-    fs.mkdirSync(claudeDir, { recursive: true });
-    const sharedSettingsPath = path.join(claudeDir, 'settings.json');
-    const priorSettings = {
-      // Include a non-GSD key to verify user content is preserved
-      myCustomKey: 'keep-me',
-      hooks: {
-        SessionStart: [
-          {
-            hooks: [
-              {
-                type: 'command',
-                command: `${process.execPath} ${path.join(claudeDir, 'hooks', 'gsd-check-update.js')}`,
-              }
-            ]
-          }
-        ]
-      }
-    };
-    fs.writeFileSync(sharedSettingsPath, JSON.stringify(priorSettings, null, 2) + '\n');
-
-    runInstall(false);
-
-    // settings.json must exist (we don't delete it — user may have other content)
-    assert.ok(
-      fs.existsSync(sharedSettingsPath),
-      '.claude/settings.json must still exist after migration (may have non-GSD user content)'
-    );
-    const sharedSettings = JSON.parse(fs.readFileSync(sharedSettingsPath, 'utf-8'));
-
-    // GSD hooks must be gone from settings.json
-    const sessionStartHooks = (sharedSettings.hooks && sharedSettings.hooks.SessionStart) || [];
-    const hasGsdHook = sessionStartHooks.some(
-      entry => entry && entry.hooks && Array.isArray(entry.hooks) &&
-        entry.hooks.some(h => h && h.command && h.command.includes('gsd-check-update'))
-    );
-    assert.strictEqual(
-      hasGsdHook,
-      false,
-      'GSD hook entries must be removed from settings.json after migration to settings.local.json'
-    );
-
-    // Non-GSD user content must be preserved
-    assert.strictEqual(
-      sharedSettings.myCustomKey,
-      'keep-me',
-      'Non-GSD user content in settings.json must be preserved during migration'
-    );
-  });
-
-  test('settings.json with no GSD entries is left unchanged', (t) => {
-    const origCwd = process.cwd();
-    t.after(() => { process.chdir(origCwd); });
-    process.chdir(tmpDir);
-
-    const claudeDir = path.join(tmpDir, '.claude');
-    fs.mkdirSync(claudeDir, { recursive: true });
-    const sharedSettingsPath = path.join(claudeDir, 'settings.json');
-    const userOnlySettings = {
-      userKey: 'user-value',
-      hooks: {
-        SessionStart: [
-          {
-            hooks: [
-              {
-                type: 'command',
-                command: '/usr/local/bin/my-own-hook.sh',
-              }
-            ]
-          }
-        ]
-      }
-    };
-    const originalContent = JSON.stringify(userOnlySettings, null, 2) + '\n';
-    fs.writeFileSync(sharedSettingsPath, originalContent);
-
-    runInstall(false);
-
-    // settings.json must be unchanged (no GSD entries to migrate)
-    const afterContent = fs.readFileSync(sharedSettingsPath, 'utf-8');
-    const afterSettings = JSON.parse(afterContent);
-    assert.strictEqual(
-      afterSettings.userKey,
-      'user-value',
-      'Non-GSD settings.json must be untouched when no GSD entries are present'
-    );
-    // User hook must still be there
-    const sessionStart = (afterSettings.hooks && afterSettings.hooks.SessionStart) || [];
-    const hasUserHook = sessionStart.some(
-      entry => entry && entry.hooks && entry.hooks.some(h => h && h.command === '/usr/local/bin/my-own-hook.sh')
-    );
-    assert.ok(
-      hasUserHook,
-      'User hook in settings.json must be preserved when no migration occurs'
-    );
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-2957-claude-global-postinstall-message.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-2957-claude-global-postinstall-message (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-/**
- * Bug #2957: post-install message for `--claude --global` must instruct
- * users to restart Claude Code and offer the skill-name fallback, since
- * the skills-only install layout (CC 2.1.88+) leaves nothing in
- * commands/gsd/ for the slash menu to read on older configurations.
- *
- * Captures the call to finishInstall(runtime='claude', isGlobal=true) and
- * asserts the printed message contains both invocation paths.
- */
-
-const { test, describe } = require('node:test');
-const assert = require('node:assert/strict');
-const path = require('node:path');
-const os = require('node:os');
-
-const ROOT = path.join(__dirname, '..');
-const SETTINGS_PATH = path.join(os.tmpdir(), `gsd-test-settings-${process.pid}.json`);
-const installModule = require(path.join(ROOT, 'bin', 'install.js'));
-
-function captureFinishInstallOutput(runtime, isGlobal) {
-  const original = console.log;
-  const lines = [];
-  console.log = (...args) => { lines.push(args.join(' ')); };
-  try {
-    installModule.finishInstall(
-      SETTINGS_PATH,
-      {},
-      null,
-      false,
-      runtime,
-      isGlobal,
-      null,
-    );
-  } finally {
-    console.log = original;
-  }
-  // Strip ANSI color escapes so message-content assertions don't couple to colors.
-  // eslint-disable-next-line no-control-regex -- \x1b (ESC) is the required leading byte of ANSI SGR color sequences; matching it is the purpose of stripping ANSI codes from captured CLI/console output
-  return lines.join('\n').replace(/\x1B\[[0-9;]*m/g, '');
-}
-
-describe('Bug #2957: claude+global post-install message', () => {
-  test('claude+global message tells the user to restart and offers skill-name fallback', () => {
-    const output = captureFinishInstallOutput('claude', true);
-
-    assert.match(output, /restart claude code/i, 'should mention restart');
-    assert.match(output, /\/gsd-new-project/, 'should still mention /gsd-new-project');
-    assert.match(output, /gsd-new-project skill/i, 'should mention the skill name fallback');
-    assert.doesNotMatch(
-      output,
-      /open a blank directory/i,
-      'global claude install should replace, not extend, the legacy generic instruction',
-    );
-  });
-
-  test('claude+local message keeps the original /gsd-new-project instruction', () => {
-    const output = captureFinishInstallOutput('claude', false);
-
-    assert.match(output, /\/gsd-new-project/, 'should still mention /gsd-new-project');
-    assert.doesNotMatch(output, /restart claude code/i, 'local install does not require the skills restart note');
-  });
-
-  test('non-claude runtimes keep their original message format', () => {
-    const output = captureFinishInstallOutput('opencode', true);
-
-    assert.match(output, /Open a blank directory/, 'opencode message should be unchanged');
-    assert.doesNotMatch(output, /restart/i, 'opencode message should not have the claude-specific restart note');
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-505-remove-dead-sdk-verification.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-505-remove-dead-sdk-verification (consolidation epic #1969 B1 #1970)", () => {
-/**
- * Regression guard for #505: dead SDK-shim verification subsystem removed.
- *
- * Post-ADR-0174 the `@opengsd/gsd-sdk` package was retired; `sdk/` no longer
- * ships. `installSdkIfNeeded` and all functions it transitively called are
- * dead code with no live callers. This test asserts:
- *
- *   1. All removed symbols are NO LONGER exported from bin/install.js.
- *   2. The two live stale-standalone-SDK helpers (detectStaleStandaloneSdk,
- *      formatStaleStandaloneSdkWarning) are STILL exported as functions — they
- *      handle a real user-facing condition (#3406) and MUST NOT be removed.
- */
-
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-const { describe, test } = require('node:test');
-const assert = require('node:assert/strict');
-
-const inst = require('../bin/install.js');
-
-describe('bug #505: dead SDK verification subsystem removed from bin/install.js', () => {
-  // ----------------------------------------------------------------
-  // Dead symbols — must NOT be exported after removal
-  // ----------------------------------------------------------------
-  const deadSymbols = [
-    'installSdkIfNeeded',
-    'classifySdkInstall',
-    'buildSdkFailFastReport',
-    'renderSdkFailFastReport',
-    'buildGsdSdkVersionMismatchReport',
-    'renderGsdSdkVersionMismatchReport',
-    'readGsdSdkVersion',
-    'parseGsdSdkVersion',
-    'findGsdSdkOnPath',
-    'isGsdSdkOnPath',
-    'isLegacyGsdSdkShim',
-    'trySelfLinkGsdSdk',
-    'trySelfLinkGsdSdkWindows',
-    'filterNpxFromPath',
-    'getUserShellPath',
-    'getUserShellWindowsPersistentPath',
-  ];
-
-  for (const sym of deadSymbols) {
-    test(`dead symbol '${sym}' is not exported`, () => {
-      assert.equal(
-        typeof inst[sym],
-        'undefined',
-        `'${sym}' should have been removed (post #505 dead-code removal) but is still exported as ${typeof inst[sym]}`,
-      );
-    });
-  }
-
-  // ----------------------------------------------------------------
-  // The stale-standalone-SDK helpers (detectStaleStandaloneSdk,
-  // formatStaleStandaloneSdkWarning) and the gsd-sdk shim contract surface
-  // (buildWindowsShimTriple, formatSdkPathDiagnostic) that #505 kept were
-  // removed when the gsd-sdk shim itself was retired (#191). Their absence is
-  // covered by the dead-symbol assertions above.
-  // ----------------------------------------------------------------
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-376-claude-js-hook-gsd-rewriter.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-376-claude-js-hook-gsd-rewriter (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-/**
- * Regression for bug #376 — Claude-installed hook JS files ship with raw
- * /gsd:<cmd> command literals because the hook-copy loop in install.js had
- * no /gsd: → /gsd- rewrite for the claude runtime.
- *
- * Fix: the `.js` branch of the hook-copy loop now applies
- * `content.replace(/gsd:/gi, 'gsd-')` when
- * `shouldNormalizeHyphenNamespaceInAgentBody(runtime)` is true (covers
- * claude, qwen, hermes).
- *
- * Test plan:
- *   1. Claude install to tmp prefix — installed .js hook files must contain
- *      no user-facing /gsd: literals (// comment occurrences exempted).
- *   2. Cursor install regression — still rewrites correctly (pre-existing
- *      branch must remain intact).
- *   3. Source files in hooks/ must be byte-identical before and after both
- *      installs (install-time rewrite only, no in-tree mutation).
- */
-
-process.env.GSD_TEST_MODE = '1';
-
-const { describe, test, before, after } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const { runNode } = require('./helpers/process-seam.cjs');
-const { throwIfFailed } = require('./helpers/git-fixture.cjs');
-const { cleanup } = require('./helpers.cjs');
-
-const REPO_ROOT = path.resolve(__dirname, '..');
-const INSTALL_PATH = path.join(REPO_ROOT, 'bin', 'install.js');
-const HOOKS_DIST_DIR = path.join(REPO_ROOT, 'hooks', 'dist');
-const BUILD_HOOKS_SCRIPT = path.join(REPO_ROOT, 'scripts', 'build-hooks.js');
-
-// #3145: class-norm timeouts, not per-suite values — see helpers/timeouts.cjs.
-const {
-  BUILD_TIMEOUT_MS: BUILD_HOOKS_TIMEOUT_MS,
-  INSTALL_TIMEOUT_MS,
-} = require('./helpers/timeouts.cjs');
-
-/**
- * Ensure hooks/dist is populated before any suite that reads it.
- * hooks/dist/ is gitignored and only produced by `npm run build:hooks`.
- * In CI the scoped/windows test jobs do NOT run build:hooks before running
- * tests, so the first test that needs hooks/dist would fail. This mirrors
- * the pattern used in bug-3357-codex-legacy-hooks-json-migration.test.cjs.
- */
-function ensureHooksDist() {
-  if (!fs.existsSync(HOOKS_DIST_DIR) || fs.readdirSync(HOOKS_DIST_DIR).filter(f => f.endsWith('.js')).length === 0) {
-    const r = runNode([BUILD_HOOKS_SCRIPT], { timeoutMs: BUILD_HOOKS_TIMEOUT_MS });
-    throwIfFailed(r, `node ${BUILD_HOOKS_SCRIPT}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Run `node install.js <...args>` from cwd.
- * GSD_TEST_MODE is cleared so the install() main block executes.
- */
-function runInstall(cwd, args) {
-  const env = { ...process.env };
-  delete env.GSD_TEST_MODE;
-  // 120s, not 60s. A full install copies and converts the whole shipped
-  // payload (117 workflows, 100 references, 34 agents, ~71 skills) and
-  // measures 13-30s on an idle runner — under 2x headroom at the old cap.
-  // On a loaded bench that margin is not enough: the Cursor suite's before
-  // hook died with `spawnSync ETIMEDOUT` on the node24 lane while the node22
-  // lane passed the SAME commit in 12.7s, cancelling three child tests as
-  // collateral. The cap also shrinks in real terms every time a file joins
-  // the payload. Matches the 120s already used for the heavy install case
-  // below. Aligned with the other runInstall helper in this file.
-  const r = runNode([INSTALL_PATH, ...args], {
-    cwd,
-    env,
-    timeoutMs: INSTALL_TIMEOUT_MS,
-  });
-  throwIfFailed(r, `node ${INSTALL_PATH} ${args.join(' ')}`);
-}
-
-/**
- * Return an array of { rel, path } for all .js files under dir.
- */
-function findJsFiles(dir) {
-  const results = [];
-  function walk(d) {
-    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-      const full = path.join(d, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (entry.name.endsWith('.js') || entry.name.endsWith('.cjs')) {
-        results.push({ rel: path.relative(dir, full), full });
-      }
-    }
-  }
-  walk(dir);
-  return results;
-}
-
-/**
- * Split a JS file's lines into comment and non-comment buckets.
- * A line is treated as a comment if it starts with optional whitespace
- * followed by // (single-line comment). Block comments are not checked
- * since none of the hook files use them for command refs.
- */
-function nonCommentLines(content) {
-  return content.split('\n').filter(line => !/^\s*\/\//.test(line));
-}
-
-/**
- * Return lines (from nonCommentLines) that contain a user-facing /gsd: ref.
- */
-function colonRefs(content) {
-  return nonCommentLines(content).filter(line => /\/gsd:/.test(line));
-}
-
-// ---------------------------------------------------------------------------
-// Prerequisite: hooks/dist must exist (built by `npm run build:hooks`)
-// ---------------------------------------------------------------------------
-describe('bug #376 — prerequisite: hooks/dist is present', () => {
-  before(() => {
-    // hooks/dist is gitignored; build it on demand so this test is
-    // deterministic in CI scoped/windows jobs that don't pre-run build:hooks.
-    ensureHooksDist();
-  });
-
-  test('hooks/dist directory exists (run npm run build:hooks if missing)', () => {
-    assert.ok(
-      fs.existsSync(HOOKS_DIST_DIR),
-      `hooks/dist not found at ${HOOKS_DIST_DIR}. Run: npm run build:hooks`,
-    );
-  });
-
-  test('hooks/dist contains at least one .js hook file with a /gsd: literal', () => {
-    const jsFiles = findJsFiles(HOOKS_DIST_DIR);
-    assert.ok(jsFiles.length > 0, 'hooks/dist must contain .js files');
-
-    const withColonRef = jsFiles.filter(({ full }) => {
-      const content = fs.readFileSync(full, 'utf-8');
-      return colonRefs(content).length > 0;
-    });
-
-    assert.ok(
-      withColonRef.length > 0,
-      'Expected at least one hooks/dist .js file with a non-comment /gsd: literal ' +
-      '— this confirms the test is guarding a real regression surface. ' +
-      `Files checked: ${jsFiles.map(f => f.rel).join(', ')}`,
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Suite 1 — Claude install: no /gsd: colon refs in installed .js hook files
-// ---------------------------------------------------------------------------
-describe('bug #376 — Suite 1: Claude install rewrites /gsd: → /gsd- in hook .js files', () => {
-  let tmpDir;
-
-  before(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-376-claude-'));
-    runInstall(tmpDir, ['--claude', '--local', '--no-sdk']);
-  });
-
-  after(() => {
-    cleanup(tmpDir);
-  });
-
-  test('1a: hooks/ directory is created by the Claude local install', () => {
-    const hooksDir = path.join(tmpDir, '.claude', 'hooks');
-    assert.ok(
-      fs.existsSync(hooksDir),
-      `hooks/ must be created at ${hooksDir} by Claude local install`,
-    );
-  });
-
-  test('1b: installed .js hook files contain no user-facing /gsd: colon refs', () => {
-    const hooksDir = path.join(tmpDir, '.claude', 'hooks');
-    if (!fs.existsSync(hooksDir)) {
-      // If hooks/ wasn't created (hooks/dist missing at install time), skip gracefully
-      return;
-    }
-
-    const jsFiles = findJsFiles(hooksDir);
-    assert.ok(jsFiles.length > 0, 'At least one .js hook file must be installed');
-
-    const offenders = [];
-    for (const { rel, full } of jsFiles) {
-      const content = fs.readFileSync(full, 'utf-8');
-      const badLines = colonRefs(content);
-      if (badLines.length > 0) {
-        offenders.push({ rel, lines: badLines });
-      }
-    }
-
-    assert.deepEqual(
-      offenders,
-      [],
-      'Installed Claude hook .js files must not contain /gsd:<cmd> colon refs ' +
-      '(non-comment occurrences). The install-time rewriter must replace these with /gsd-<cmd>. ' +
-      'Offenders: ' + JSON.stringify(offenders, null, 2),
-    );
-  });
-
-  test('1c: installed .js hook files DO contain the hyphen form /gsd- (rewrite happened)', () => {
-    const hooksDir = path.join(tmpDir, '.claude', 'hooks');
-    if (!fs.existsSync(hooksDir)) return;
-
-    const jsFiles = findJsFiles(hooksDir);
-    const withHyphen = jsFiles.filter(({ full }) => {
-      const content = fs.readFileSync(full, 'utf-8');
-      return /\/gsd-/.test(content);
-    });
-
-    assert.ok(
-      withHyphen.length > 0,
-      'At least one installed .js hook file must contain /gsd- (confirming rewrite ran). ' +
-      `Files checked: ${jsFiles.map(f => f.rel).join(', ')}`,
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Suite 2 — Cursor install regression: /gsd: → /gsd- still works (pre-existing)
-//
-// Note: Cursor installs its own hooks (gsd-cursor-session-start.js and
-// gsd-cursor-post-tool.js) via the cursor-hooks-json installSurface (issue #777).
-// It does NOT install the bundled Claude-style hooks/dist files (no gsd-session-state.sh
-// etc.). The Cursor /gsd: rewrite applies in `copyWithPathReplacement` to JS files
-// under the agent/skill tree (.cursor/gsd-core/*.js etc). We verify that Cursor's
-// installed .js files under .cursor/ have no /gsd: colon refs, and that the hooks/
-// directory contains only the Cursor-specific managed hooks.
-// ---------------------------------------------------------------------------
-describe('bug #376 — Suite 2: Cursor install still rewrites /gsd: → /gsd- (regression)', () => {
-  let tmpDir;
-
-  before(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-376-cursor-'));
-    runInstall(tmpDir, ['--cursor', '--local', '--no-sdk']);
-  });
-
-  after(() => {
-    cleanup(tmpDir);
-  });
-
-  test('2a: .cursor/ directory is created by the Cursor local install', () => {
-    const cursorDir = path.join(tmpDir, '.cursor');
-    assert.ok(
-      fs.existsSync(cursorDir),
-      `Cursor install must create .cursor/ directory at ${cursorDir}`,
-    );
-  });
-
-  test('2b: Cursor-installed .js files contain no user-facing /gsd: colon refs', () => {
-    const cursorDir = path.join(tmpDir, '.cursor');
-    if (!fs.existsSync(cursorDir)) return;
-
-    // Infrastructure files whose /gsd: occurrences are intentional implementation
-    // details — NOT user-facing command references that Cursor would invoke.
-    //
-    // scripts/fix-slash-commands.cjs is the slash-command rewriter engine, required
-    // by gsd-core/bin/lib/command-roster.cjs on ALL runtimes (including Cursor).
-    // It must be installed verbatim and must NOT be content-rewritten: it needs to
-    // emit `/gsd:${cmd}` for non-Cursor runtimes, and its /gsd: strings are internal
-    // implementation/docs (transform patterns, regex literals, template literals),
-    // not commands a Cursor user would type. Rewriting it would corrupt the transformer.
-    const INFRA_BASENAMES = new Set(['fix-slash-commands.cjs']);
-
-    const jsFiles = findJsFiles(cursorDir);
-    // Cursor may not install any .js files depending on what agent/skill content exists;
-    // if none, skip gracefully.
-    if (jsFiles.length === 0) return;
-
-    const offenders = [];
-    for (const { rel, full } of jsFiles) {
-      // Skip infrastructure files whose /gsd: strings are intentional (see above).
-      if (INFRA_BASENAMES.has(path.basename(full))) continue;
-      const content = fs.readFileSync(full, 'utf-8');
-      const badLines = colonRefs(content);
-      if (badLines.length > 0) {
-        offenders.push({ rel, lines: badLines });
-      }
-    }
-
-    assert.deepEqual(
-      offenders,
-      [],
-      'Cursor-installed .js files must not contain /gsd:<cmd> colon refs. ' +
-      'The existing Cursor branch in copyWithPathReplacement must still apply /gsd:/gi → gsd- rewrite. ' +
-      'Offenders: ' + JSON.stringify(offenders, null, 2),
-    );
-  });
-
-  test('2c: Cursor install creates a hooks/ directory with only Cursor-specific managed hooks', () => {
-    // Since issue #777, Cursor installs gsd-cursor-session-start.js and
-    // gsd-cursor-post-tool.js into <configDir>/hooks/. These are Cursor-native
-    // hooks — NOT the bundled Claude-style hooks (no gsd-session-state.sh etc.).
-    // Verify: hooks/ exists AND does NOT contain any Claude-bundled hooks.
-    const hooksDir = path.join(tmpDir, '.cursor', 'hooks');
-    assert.ok(
-      fs.existsSync(hooksDir),
-      'Cursor install must create a hooks/ directory for its managed hook scripts (#777)',
-    );
-    const CLAUDE_BUNDLED_HOOKS = ['gsd-session-state.sh', 'gsd-context-monitor.js', 'gsd-statusline.js'];
-    for (const hook of CLAUDE_BUNDLED_HOOKS) {
-      assert.strictEqual(
-        fs.existsSync(path.join(hooksDir, hook)),
-        false,
-        `Cursor hooks/ must NOT contain Claude-bundled hook ${hook} — only Cursor-native hooks are installed`,
-      );
-    }
-    // The two Cursor-specific managed hooks must be present.
-    assert.ok(
-      fs.existsSync(path.join(hooksDir, 'gsd-cursor-session-start.js')),
-      'gsd-cursor-session-start.js must be installed in .cursor/hooks/ (#777)',
-    );
-    assert.ok(
-      fs.existsSync(path.join(hooksDir, 'gsd-cursor-post-tool.js')),
-      'gsd-cursor-post-tool.js must be installed in .cursor/hooks/ (#777)',
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Suite 3 — Source files in hooks/ are untouched
-// ---------------------------------------------------------------------------
-describe('bug #376 — Suite 3: hooks/ source files are unchanged by install', () => {
-  let snapshotBefore;
-
-  before(() => {
-    // Ensure hooks/dist is built before snapshotting; it may be absent in CI
-    // scoped/windows jobs that don't pre-run build:hooks (#777 fix).
-    ensureHooksDist();
-    // Snapshot hooks/dist JS files before any install in this suite
-    snapshotBefore = {};
-    if (fs.existsSync(HOOKS_DIST_DIR)) {
-      for (const { rel, full } of findJsFiles(HOOKS_DIST_DIR)) {
-        snapshotBefore[rel] = fs.readFileSync(full, 'utf-8');
-      }
-    }
-  });
-
-  test('3a: hooks/dist .js source files still contain /gsd: literals (not mutated)', () => {
-    // The source must remain in colon form — the rewrite is install-time only
-    const jsFiles = findJsFiles(HOOKS_DIST_DIR);
-    const withColonRef = jsFiles.filter(({ full }) => {
-      const content = fs.readFileSync(full, 'utf-8');
-      return colonRefs(content).length > 0;
-    });
-
-    // We know from the prerequisite suite that at least one file had a colon ref;
-    // if the source was mutated by install, this would now be zero.
-    assert.ok(
-      withColonRef.length > 0,
-      'hooks/dist .js files must still contain /gsd: literals after install — ' +
-      'the install-time rewrite must NOT modify the source tree. ' +
-      `Files that still have colon refs: ${withColonRef.map(f => f.rel).join(', ')}`,
-    );
-  });
-
-  test('3b: hooks/dist .js source file contents match pre-test snapshot (byte-identical)', () => {
-    if (Object.keys(snapshotBefore).length === 0) {
-      // hooks/dist was absent before; skip
-      return;
-    }
-
-    for (const [rel, before] of Object.entries(snapshotBefore)) {
-      const full = path.join(HOOKS_DIST_DIR, rel);
-      const after = fs.readFileSync(full, 'utf-8');
-      assert.strictEqual(
-        after,
-        before,
-        `hooks/dist/${rel} was mutated by install — install must only rewrite the installed copy, not the source`,
-      );
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Suite 4 — Pure-function: shouldNormalizeHyphenNamespaceInAgentBody covers claude
-// ---------------------------------------------------------------------------
-describe('bug #376 — Suite 4: shouldNormalizeHyphenNamespaceInAgentBody covers claude', () => {
-  const install = require(INSTALL_PATH);
-
-  test('4a: shouldNormalizeHyphenNamespaceInAgentBody is exported', () => {
-    assert.strictEqual(
-      typeof install.shouldNormalizeHyphenNamespaceInAgentBody,
-      'function',
-      'install.js must export shouldNormalizeHyphenNamespaceInAgentBody',
-    );
-  });
-
-  test('4b: claude is in the hyphen-namespace set', () => {
-    assert.strictEqual(
-      install.shouldNormalizeHyphenNamespaceInAgentBody('claude'),
-      true,
-      'claude must be a hyphen-namespace runtime',
-    );
-  });
-
-  test('4c: qwen is in the hyphen-namespace set', () => {
-    assert.strictEqual(
-      install.shouldNormalizeHyphenNamespaceInAgentBody('qwen'),
-      true,
-    );
-  });
-
-  test('4d: hermes is in the hyphen-namespace set', () => {
-    assert.strictEqual(
-      install.shouldNormalizeHyphenNamespaceInAgentBody('hermes'),
-      true,
-    );
-  });
-
-  test('4e: gemini is NOT in the hyphen-namespace set', () => {
-    assert.strictEqual(
-      install.shouldNormalizeHyphenNamespaceInAgentBody('gemini'),
-      false,
-      'gemini intentionally keeps colon namespace and must not be in the hyphen set',
-    );
-  });
-});
-  });
-}
-
 
 // ────────────────────────────────────────────────────────────────────────
 // Folded from tests/bug-1367-claude-local-flat-command-layout.test.cjs — consolidation epic #1969 (B6 #1975)
@@ -9933,7 +6436,6 @@ describe('bug #376 — Suite 4: shouldNormalizeHyphenNamespaceInAgentBody covers
 {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-1367-claude-local-flat-command-layout (consolidation epic #1969 B6 #1975)", () => {
-// allow-test-rule: source-text-is-the-product #1367
 // Installed command `.md` files — their on-disk path determines the slash-command
 // namespace registered by Claude Code. Asserting the layout (flat vs. subdirectory)
 // IS a behavioral test of the deploy contract, not source-grep theater.
@@ -9990,7 +6492,10 @@ const {
  * GSD_TEST_MODE must be cleared so the install() main block executes.
  */
 function runClaudeLocalInstall(cwd) {
-  const env = { ...process.env };
+  // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+  // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const env = installSpawnEnv();
   delete env.GSD_TEST_MODE;
   const r = runNode([INSTALL_PATH, '--claude', '--local', '--no-sdk'], {
     cwd,
@@ -10134,8 +6639,7 @@ describe('bug #1367 — Claude local install uses flat gsd-<cmd>.md command layo
   __gtmAfter(() => { if (__savedGsdTestMode === undefined) delete process.env.GSD_TEST_MODE; else process.env.GSD_TEST_MODE = __savedGsdTestMode; });
 'use strict';
 
-// allow-test-rule: source-text-is-the-product (see #2380)
-// Reads .md/.json/.yml product files whose deployed text IS what the
+// (see #2380) Reads .md/.json/.yml product files whose deployed text IS what the
 // runtime loads — testing text content tests the deployed contract.
 
 /**
@@ -10154,6 +6658,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { runNode, OUTCOME } = require('./helpers/process-seam.cjs');
 const os = require('node:os');
+const { scanFencedBlocks } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
 
 // A single short CLI query (install.js --skills-root <runtime>) — no full
 // install or build involved.
@@ -10175,6 +6680,10 @@ describe('install.js --skills-root', () => {
     // #2088 (ADR-1239 upgrade 3): Codex skills resolve to the canonical
     // $HOME/.agents/skills root (skills-kind home override), not $CODEX_HOME/skills.
     { runtime: 'codex', expected: path.join(os.homedir(), '.agents', 'skills') },
+    // #3738: Antigravity global discovery scans ~/.gemini/config/ — skills resolve
+    // to the skills-kind home override, not the configHome (~/.gemini/antigravity)
+    // that still holds settings.json and the gsd-core runtime files.
+    { runtime: 'antigravity', expected: path.join(os.homedir(), '.gemini', 'config', 'skills') },
     { runtime: 'copilot', expected: path.join(os.homedir(), '.copilot', 'skills') },
     { runtime: 'cursor', expected: path.join(os.homedir(), '.cursor', 'skills') },
     { runtime: 'trae', expected: path.join(os.homedir(), '.trae', 'skills') },
@@ -10217,6 +6726,8 @@ describe('#3024: gsd-tools query skills-root', () => {
   const CASES = [
     { runtime: 'claude', expected: path.join(os.homedir(), '.claude', 'skills') },
     { runtime: 'codex', expected: path.join(os.homedir(), '.agents', 'skills') },
+    // #3738: the query surface must agree with install.js --skills-root above.
+    { runtime: 'antigravity', expected: path.join(os.homedir(), '.gemini', 'config', 'skills') },
     { runtime: 'cursor', expected: path.join(os.homedir(), '.cursor', 'skills') },
   ];
 
@@ -10405,8 +6916,13 @@ describe('#3024: gsd-tools query skills-root', () => {
   // dedicated branch (making it grok's true peer), this second assertion
   // would fail and force a conscious decision, instead of someone
   // reflexively adding it to LEGACY_NON_REGISTRY_RUNTIME_IDS.
-  test("gemini: rejected — because its bare resolution is claude's fallback, not because it is merely unregistered", () => {
-    const claudeSkillsRoot = path.join(os.homedir(), '.claude', 'skills');
+  // #4709 AC#1 inverted the second half of this test: gemini's bare
+  // resolution used to silently fall through to claude's skills root (the
+  // wrong-runtime bug this test used to pin); getGlobalSkillsBase now goes
+  // through getGlobalConfigDir's retired-runtime guard and refuses outright.
+  // The CLI-level rejection (isRegisteredRuntimeId) is unchanged and still
+  // asserted as before.
+  test("gemini: rejected by the CLI gate, and its underlying resolution now refuses too (not merely unregistered, and no longer claude's fallback)", () => {
     const result = runNode([TOOLS_PATH, 'query', 'skills-root', 'gemini', '--raw'], {
       env: { ...process.env, GSD_TEST_MODE: '1' },
     });
@@ -10414,13 +6930,15 @@ describe('#3024: gsd-tools query skills-root', () => {
     assert.notStrictEqual(result.exitCode, 0, 'gemini must be rejected by isRegisteredRuntimeId');
     assert.strictEqual(result.stdout.trim(), '', `stdout must not emit a path for rejected gemini; got: ${result.stdout}`);
 
-    // Prove the reason: gemini's underlying (ungated) resolution IS claude's
-    // wrong-runtime fallback — unlike grok's, which resolves to a real,
-    // distinct path (see the sibling grok test above).
+    // Prove the reason: gemini's underlying (ungated) resolution now refuses via
+    // RetiredRuntimeError — unlike grok's, which resolves to a real, distinct path
+    // (see the sibling grok test above), and unlike its own pre-#4709 behavior of
+    // silently falling through to claude's skills root.
     const { getGlobalSkillsBase } = require('../gsd-core/bin/lib/runtime-homes.cjs');
-    assert.strictEqual(
-      getGlobalSkillsBase('gemini'), claudeSkillsRoot,
-      "gemini's bare resolution must be claude's fallback path — this is the wrong-runtime bug that justifies keeping gemini rejected"
+    assert.throws(
+      () => getGlobalSkillsBase('gemini'),
+      /retired by #1928/,
+      "gemini's bare resolution must now refuse — it no longer silently resolves to claude's fallback path",
     );
   });
 });
@@ -10738,7 +7256,10 @@ describe('sync-skills.md — required behavioral specs', () => {
   // elsewhere is held to the same rule.
   test('every $DEST_ROOT read is preceded by a DEST_ROOT= assignment in the same bash block', () => {
     content = content || readWorkflow();
-    const bashBlocks = [...content.matchAll(/```bash\r?\n([\s\S]*?)```/g)].map((m) => m[1]);
+    const __destRootLines = content.split(/\r?\n/);
+    const bashBlocks = scanFencedBlocks(__destRootLines)
+      .filter((b) => b.closeLineIdx !== -1 && (b.infoString || '').trim() === 'bash')
+      .map((b) => __destRootLines.slice(b.openLineIdx + 1, b.closeLineIdx).join('\n'));
     assert.ok(
       bashBlocks.length > 0,
       'extractor matched no fenced ```bash blocks at all — the workflow must contain some'
@@ -10870,7 +7391,17 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { cleanup } = require('./helpers.cjs');
+const { cleanup, installSpawnEnv } = require('./helpers.cjs');
+// #2652 round-7: new subprocesses go through the process seam, never a
+// hand-rolled spawnSync (CONTRIBUTING). The pre-existing `installAndRead`
+// spawn below is byte-identical to the base and left alone as out of scope.
+const { runNode: seamRunNode, runHook: seamRunHook } = require('./helpers/process-seam.cjs');
+// Class-norm timeouts, not local literals (CONTRIBUTING: they live in
+// tests/helpers/timeouts.cjs). The install is the INSTALL class; the emitted
+// gate below is a bash FAN-OUT (the gate script's `gsd_run` shells out to
+// `node` multiple times), not a single CLI probe, so it takes
+// HOOK_FANOUT_TIMEOUT_MS rather than PROBE_TIMEOUT_MS.
+const { INSTALL_TIMEOUT_MS, HOOK_FANOUT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const INSTALL = path.join(__dirname, '..', 'bin', 'install.js');
 
@@ -10890,7 +7421,7 @@ function installAndRead(runtime) {
   const res = spawnSync(
     process.execPath,
     [INSTALL, `--${runtime}`, '--global', '--config-dir', dir],
-    { encoding: 'utf8', timeout: 120000, env: { ...process.env, HOME: dir, USERPROFILE: dir } },
+    { encoding: 'utf8', timeout: INSTALL_TIMEOUT_MS, env: { ...process.env, HOME: dir, USERPROFILE: dir } },
   );
   assert.strictEqual(res.status, 0, `install --${runtime} failed: ${res.stderr || res.stdout}`);
   const wf = path.join(dir, 'gsd-core', 'workflows', 'execute-phase.md');
@@ -10904,19 +7435,52 @@ function installAndRead(runtime) {
 // RED tests: these MUST FAIL before the copyWithPathReplacement wiring is added
 // ---------------------------------------------------------------------------
 
-test('real install: codex-emitted execute-phase.md resolves runtime=codex and defaults worktrees off (#1521)', () => {
+test('real install: codex-emitted execute-phase.md resolves runtime=codex and leaves worktrees to the isolation negotiation (#1521, #2652)', () => {
+  // End-to-end counterpart of the unit coverage in
+  // tests/runtime-converters.test.cjs. #1521 asserted `--default false` here
+  // because worktree isolation *was* Claude Code's isolation="worktree" spawn
+  // parameter and no other host honored it. #2584 replaced that premise with
+  // the negotiated `dispatch.isolation` capability, and codex declares
+  // `orchestrator-worktree` — GSD creates the worktree and spawns
+  // `codex exec --cd <worktree>`. Keeping the stamp would resolve
+  // USE_WORKTREES=false before `gsd_run query dispatch-isolation` was ever
+  // consulted, re-deciding isolation by runtime name (#2652's Blocker).
+  //
+  // The runtime-identity stamp is unaffected and still asserted below — only
+  // the use_worktrees half moved.
   const c = installAndRead('codex');
   assert.ok(
     c.includes('config-get runtime --default codex --raw'),
     'codex runtime default not stamped in real install',
   );
   assert.ok(
-    c.includes('config-get workflow.use_worktrees --default false --raw'),
-    'codex use_worktrees not defaulted false in real install',
+    !c.includes('config-get workflow.use_worktrees --default false --raw'),
+    'codex install stamped use_worktrees=false, which pre-empts the dispatch.isolation negotiation for a host that declares orchestrator-worktree (#2652)',
+  );
+  assert.ok(
+    c.includes('config-get workflow.use_worktrees --raw 2>/dev/null || echo "true"'),
+    'codex install lost the unstamped use_worktrees read — the isolation gate has nothing left to negotiate',
   );
   assert.ok(
     !c.includes('config-get runtime --default claude --raw'),
     'residual claude default in codex install',
+  );
+});
+
+test('real install: an isolation-none runtime still gets use_worktrees stamped false (#1521 preserved, #2652 scoped)', () => {
+  // The other arm: #2652 narrowed the stamp, it did not remove it. windsurf
+  // declares `dispatch.isolation: none`, so the false default it writes is the
+  // outcome the resolver reaches anyway, and #1521's protection stays intact
+  // for every host that genuinely cannot isolate. Without this arm the change
+  // above could silently become "never stamp" and nothing would notice.
+  const c = installAndRead('windsurf');
+  assert.ok(
+    c.includes('config-get workflow.use_worktrees --default false --raw'),
+    'windsurf declares isolation=none and must still receive the #1521 false stamp',
+  );
+  assert.ok(
+    c.includes('config-get runtime --default windsurf --raw'),
+    'windsurf runtime default not stamped in real install',
   );
 });
 
@@ -10930,6 +7494,216 @@ test('real install: cursor-emitted execute-phase.md resolves runtime=cursor (#15
     !c.includes('config-get runtime --default claude --raw'),
     'residual claude default in cursor install',
   );
+});
+
+// ---------------------------------------------------------------------------
+// #2652 review round-5/6 Major 2 — Cursor end-to-end, not by reasoning.
+//
+// Cursor is the runtime this PR newly enables: it declares
+// `dispatch.isolation: harness-worktree` with `harnessIsolationFlag: "--worktree"`,
+// and narrowing the #1521 `use_worktrees=false` stamp is what lets its
+// negotiation be reached at all. The resolver agreeing with itself is not
+// evidence that `--worktree` — rather than Claude Code's own
+// `isolation="worktree"` literal, or nothing at all — is what ends up in the
+// `{harnessFlag}` slot of the `Agent()` call.
+//
+// So: run a REAL cursor install, then execute the gate blocks THAT INSTALL
+// EMITTED against the gsd-tools.cjs THAT INSTALL EMITTED, and read the two
+// shell variables the dispatch sites substitute. Nothing here is a fixture.
+// ---------------------------------------------------------------------------
+
+// Skipped on Windows, where there is no bash. Checked by platform rather than
+// by shelling out to `which`, which is itself non-portable.
+const NO_BASH = process.platform === 'win32';
+
+test('real install: cursor negotiates --worktree through its own emitted gate and it lands in the emitted Agent() slot (#2652)', { skip: NO_BASH }, (t) => {
+  const { readFileNormalized } = require('./helpers.cjs');
+  const { scanFencedBlocks } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-inst-cursor-gate-'));
+  t.after(() => cleanup(dir));
+    // Through the process seam and the install isolation seam, never a
+    // hand-rolled spawnSync from raw process.env (CONTRIBUTING "Spawning a
+    // subprocess: use the process seam"): ambient GSD_HOME / runtime-location
+    // vars otherwise leak in and make capability discovery host-dependent.
+    const res = seamRunNode(
+      [INSTALL, '--cursor', '--global', '--config-dir', dir],
+      { env: installSpawnEnv({ HOME: dir, USERPROFILE: dir }), timeoutMs: INSTALL_TIMEOUT_MS },
+    );
+    assert.strictEqual(res.outcome, 'exited', `install --cursor did not complete: ${res.outcome}`);
+    assert.strictEqual(res.exitCode, 0, `install --cursor failed: ${res.stderr || res.stdout}`);
+
+    const tools = path.join(dir, 'gsd-core', 'bin', 'gsd-tools.cjs');
+    const gate = path.join(dir, 'gsd-core', 'references', 'dispatch-isolation-gate.md');
+    assert.ok(fs.existsSync(tools), `cursor install emitted no gsd-tools.cjs at ${tools}`);
+    assert.ok(fs.existsSync(gate), `cursor install emitted no dispatch-isolation-gate.md at ${gate}`);
+
+    // Precondition, stated as an assertion rather than assumed: the emitted
+    // quick.md must still carry the UNSTAMPED use_worktrees read. If #1521's
+    // `--default false` stamp came back for cursor, USE_WORKTREES resolves
+    // false and the gate below degrades to none before negotiating anything —
+    // the harness flag would then be empty for a reason unrelated to the flag.
+    const quick = readFileNormalized(path.join(dir, 'gsd-core', 'workflows', 'quick.md'));
+    assert.ok(
+      quick.includes('config-get workflow.use_worktrees --raw 2>/dev/null || echo "true"'),
+      'cursor-emitted quick.md lost the unstamped use_worktrees read — the isolation negotiation is pre-empted at install time (#2652)',
+    );
+
+    // Pull the gate's OWN blocks — the ones a dispatch site is told to run —
+    // out of the emitted reference. readFileNormalized strips CRLF first
+    // (DEFECT.TEST-SHELL-PIPELINE-NONPORTABLE).
+    // Anchor on the gate's own HEADINGS, not on an assignment literal inside a
+    // block. The workflows tell a dispatch site to run the `Resolve ISOLATION`
+    // and `Resolve the harness flag` blocks BY NAME, so the heading is the
+    // contract and the block body is free to change under it. Keying off the
+    // body instead is what broke here: when the resolver grew its
+    // `_ISOLATION_RAW`/`ISOLATION_RESOLVED` split — so a shim failure stops
+    // masquerading as a declared `none` — the old `ISOLATION=$(gsd_run query
+    // dispatch-isolation --raw` finder stopped matching, and a test whose
+    // subject is "does the emitted gate resolve cursor correctly" failed as
+    // "there is no such block".
+    const gateText = readFileNormalized(gate);
+    const gateLines = gateText.split('\n');
+    const gateBashBlocks = scanFencedBlocks(gateLines)
+      .filter((b) => b.closeLineIdx !== -1 && (b.infoString || '').trim() === 'bash');
+    const blockUnder = (heading) => {
+      const headingLineIdx = gateLines.findIndex((l) => l.includes(`## ${heading}`));
+      if (headingLineIdx === -1) return undefined;
+      const block = gateBashBlocks.find((b) => b.openLineIdx > headingLineIdx);
+      if (!block) return undefined;
+      return gateLines.slice(block.openLineIdx + 1, block.closeLineIdx).join('\n');
+    };
+    const resolveBlock = blockUnder('Resolve ISOLATION');
+    const flagBlock = blockUnder('Resolve the harness flag');
+    assert.ok(resolveBlock, 'emitted dispatch-isolation-gate.md has no `## Resolve ISOLATION` heading with a bash block under it');
+    assert.ok(flagBlock, 'emitted dispatch-isolation-gate.md has no `## Resolve the harness flag` heading with a bash block under it');
+
+    // A disposable project dir: `query dispatch-isolation` writes the #3045
+    // sentinel into its cwd as an unconditional side effect.
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cursor-gate-proj-'));
+    t.after(() => cleanup(proj));
+      // Declare the runtime the way a real Cursor project does — through
+      // `.planning/config.json`, which is the tier `resolveRuntime` actually
+      // reads (GSD_RUNTIME > .planning/config.json > 'claude'). Injecting
+      // GSD_RUNTIME=cursor instead would prove the resolver works when handed
+      // the answer, not that a Cursor install reaches it on its own. (The
+      // install's ~/.gsd/defaults.json `runtime` is NOT a resolveRuntime tier.)
+      fs.mkdirSync(path.join(proj, '.planning'), { recursive: true });
+      fs.writeFileSync(path.join(proj, '.planning', 'config.json'), JSON.stringify({ runtime: 'cursor' }));
+
+      const script = [
+        'set -u',
+        `gsd_run() { node ${JSON.stringify(tools)} "$@"; }`,
+        'USE_WORKTREES=$(gsd_run query config-get workflow.use_worktrees --raw 2>/dev/null || echo "true")',
+        'RUNTIME=$(gsd_run query config-get runtime --default cursor --raw 2>/dev/null || echo "cursor")',
+        resolveBlock,
+        flagBlock,
+        'printf "ISOLATION=%s\\nHARNESS_FLAG=%s\\n" "$ISOLATION" "$HARNESS_FLAG"',
+      ].join('\n');
+
+      // Bounded (DEFECT.UNBOUNDED-SUBPROCESS): a handful of local gsd-tools
+      // invocations, no network and no git beyond repo introspection.
+      // GSD_RUNTIME outranks the config tier in resolveRuntime, so an ambient
+      // one in the developer's shell would satisfy this test without the
+      // install's own config ever being read. Blank it explicitly.
+      const hermeticEnv = { ...process.env, HOME: dir, USERPROFILE: dir };
+      delete hermeticEnv.GSD_RUNTIME;
+
+      // Seam again — `runHook` documents `interpreter: 'bash'` for a shell
+      // script, so the gate is written to a file rather than passed as `-c`.
+      // This is a bash FAN-OUT: `gsd_run` shells out to `node` multiple times
+      // under one `bash` interpreter, the wrong class for `PROBE_TIMEOUT_MS`
+      // (a single short CLI probe). Same class as the observed CI failures in
+      // tests/quick-branching.test.cjs (PR #3787 run 32668773524) and
+      // tests/worktree-safety.test.cjs (`next` run 32608945654). See
+      // HOOK_FANOUT_TIMEOUT_MS in ./helpers/timeouts.cjs for the class
+      // rationale.
+      const gateScript = path.join(proj, 'run-gate.sh');
+      fs.writeFileSync(gateScript, script);
+      const run = seamRunHook(gateScript, [], {
+        interpreter: 'bash',
+        cwd: proj,
+        env: hermeticEnv,
+        timeoutMs: HOOK_FANOUT_TIMEOUT_MS,
+      });
+      assert.strictEqual(
+        run.outcome, 'exited',
+        `emitted cursor gate did not complete: outcome=${run.outcome} ${run.stderr || ''}`,
+      );
+      assert.strictEqual(run.exitCode, 0, `emitted cursor gate exited ${run.exitCode}: ${run.stderr}`);
+
+      assert.match(
+        run.stdout,
+        /^ISOLATION=harness-worktree$/m,
+        `cursor declares dispatch.isolation=harness-worktree but its own emitted gate resolved otherwise:\n${run.stdout}\n${run.stderr}`,
+      );
+      const flagLine = run.stdout.match(/^HARNESS_FLAG=(.*)$/m);
+      assert.ok(flagLine, `the gate printed no HARNESS_FLAG line:\n${run.stdout}\n${run.stderr}`);
+      const harnessFlag = flagLine[1];
+      assert.strictEqual(
+        harnessFlag,
+        '--worktree',
+        `cursor resolved "${harnessFlag}" instead of its declared --worktree. Claude Code's own isolation="worktree" literal reaching a Cursor dispatch is the #2652 defect inverted.`,
+      );
+      // The reviewer framed this as argv-injection-shaped: the value is spliced
+      // into an argument list. Pin that it stays a single bare token.
+      assert.ok(
+        /^[-\w=".]+$/.test(harnessFlag),
+        `the harness flag carries shell/argv-significant characters and is spliced into an argument slot: ${JSON.stringify(harnessFlag)}`,
+      );
+
+      // ── The slot itself ──────────────────────────────────────────────────
+      // Resolving the value is only half of it. Perform the substitution the
+      // emitted workflows document ("{harnessFlag}" → "$HARNESS_FLAG" plus a
+      // comma when ISOLATION = harness-worktree) against the Agent() call THIS
+      // INSTALL EMITTED, and assert on the rendered dispatch. Without this,
+      // deleting the placeholder from the emitted Agent() — the exact way the
+      // flag would stop reaching the dispatch — leaves the test green.
+      // Name the dispatch each site's isolated agent actually goes through, so
+      // "some Agent() call in the file has the placeholder" cannot stand in for
+      // "the EXECUTOR/DEBUGGER dispatch has it". Both files contain other
+      // Agent() calls (quick.md dispatches a reviewer too); the placeholder
+      // drifting onto one of those is a real defect that a `.find()` alone
+      // would report as a pass.
+      for (const { wf, agent } of [
+        { wf: 'quick.md', agent: 'gsd-executor' },
+        { wf: 'diagnose-issues.md', agent: 'gsd-debugger' },
+      ]) {
+        const text = readFileNormalized(path.join(dir, 'gsd-core', 'workflows', wf));
+        const calls = text.match(/Agent\(\n(?:[^\n]*\n)*?\)/g) || [];
+        const withSlot = calls.filter(b => b.includes('{harnessFlag}'));
+        assert.strictEqual(
+          withSlot.length,
+          1,
+          `${wf}: expected exactly one emitted Agent() call carrying {harnessFlag}, found ${withSlot.length}. ` +
+            'Zero means the negotiated flag has no slot to reach; more than one means the isolated ' +
+            `dispatch is ambiguous.\n${withSlot.join('\n---\n')}`,
+        );
+        const call = withSlot[0];
+        assert.ok(
+          call.includes(`subagent_type="${agent}"`),
+          `${wf}: the {harnessFlag} slot is not on the ${agent} dispatch — it drifted onto a different Agent() call, so the isolated agent would be spawned without it:\n${call}`,
+        );
+        assert.strictEqual(
+          (call.match(/\{harnessFlag\}/g) || []).length,
+          1,
+          `${wf}: expected exactly one {harnessFlag} slot in the dispatch call, got:\n${call}`,
+        );
+
+        const rendered = call.replace('{harnessFlag}', `${harnessFlag},`);
+        assert.match(
+          rendered,
+          /^\s*--worktree,$/m,
+          `${wf}: rendering the emitted Agent() call for cursor did not put --worktree in its argument list:\n${rendered}`,
+        );
+        assert.ok(
+          !rendered.includes('{harnessFlag}'),
+          `${wf}: an unsubstituted {harnessFlag} survives into the dispatch:\n${rendered}`,
+        );
+        assert.ok(
+          !rendered.includes('isolation="worktree"'),
+          `${wf}: the rendered cursor dispatch carries Claude Code's own harness literal — the flag is descriptor data, never hardcoded:\n${rendered}`,
+        );
+      }
 });
 
 test('real install: claude-emitted execute-phase.md keeps claude default + worktrees on (#1521)', () => {
@@ -11088,7 +7862,7 @@ describe('#3026: installer --help documents every accepted runtime flag', () => 
 
   test('every accepted runtime flag appears in --help output', () => {
     // Derive accepted flags behaviorally from the installer's argument parser.
-    const r = spawnSync(process.execPath, [INSTALL_PATH, '--help'], { encoding: 'utf-8', timeout: 10000 });
+    const r = spawnSync(process.execPath, [INSTALL_PATH, '--help'], { encoding: 'utf-8', timeout: QUICK_SPAWN_TIMEOUT_MS });
     const helpText = r.stdout;
 
     // The installer's getRuntimeArgs defines which --<runtime> flags it accepts.
@@ -11105,5 +7879,581 @@ describe('#3026: installer --help documents every accepted runtime flag', () => 
     );
     assert.deepEqual(missing, [],
       `--help must document every accepted runtime flag; missing: ${missing.join(', ')}`);
+  });
+});
+
+// ─── #3184: scripts/lib/ and scripts/changeset/ install/uninstall parity ────
+//
+// install() copies both source directories WHOLESALE (every file present —
+// see bin/install.js's "and any future lib helpers" comment), but uninstall()
+// removes files via an EXPLICIT hardcoded enumeration (GSD_SCRIPTS_LIB_FILES /
+// GSD_CHANGESET_FILES). Nothing keeps the two in sync: a file added to either
+// source directory ships to every install and then orphans on uninstall (it
+// survives removal, keeps the target dir non-empty, and blocks its rmdir).
+// This guard fails the moment the real directory outgrows the enumeration.
+
+/**
+ * Pure comparison: every file actually present in a source dir must be named
+ * in the corresponding uninstall enumeration. Decoupled from fs so it can be
+ * exercised directly with doctored input (see the probe in the PR report).
+ */
+function findUnenumeratedFiles(actualFiles, enumeratedFiles) {
+  const enumerated = new Set(enumeratedFiles);
+  return actualFiles.filter(f => !enumerated.has(f));
+}
+
+describe('#3184: scripts/lib/ and scripts/changeset/ install/uninstall parity', () => {
+  const REPO_ROOT = path.join(__dirname, '..');
+
+  function realFilesIn(relativeDir) {
+    const dir = path.join(REPO_ROOT, relativeDir);
+    return fs.readdirSync(dir).filter(entry => fs.statSync(path.join(dir, entry)).isFile());
+  }
+
+  test('every file in scripts/lib/ is enumerated in GSD_SCRIPTS_LIB_FILES (bin/install.js)', () => {
+    const unenumerated = findUnenumeratedFiles(realFilesIn(path.join('scripts', 'lib')), GSD_SCRIPTS_LIB_FILES);
+    assert.deepEqual(unenumerated, [],
+      `scripts/lib/${unenumerated.join(', scripts/lib/')} exist on disk but are missing from ` +
+      `GSD_SCRIPTS_LIB_FILES in bin/install.js — add ${unenumerated.length === 1 ? 'it' : 'them'} to that ` +
+      'array so uninstall() removes it (otherwise it ships to every install and orphans on uninstall).');
+  });
+
+  test('every file in scripts/changeset/ is enumerated in GSD_CHANGESET_FILES (bin/install.js)', () => {
+    const unenumerated = findUnenumeratedFiles(realFilesIn(path.join('scripts', 'changeset')), GSD_CHANGESET_FILES);
+    assert.deepEqual(unenumerated, [],
+      `scripts/changeset/${unenumerated.join(', scripts/changeset/')} exist on disk but are missing from ` +
+      `GSD_CHANGESET_FILES in bin/install.js — add ${unenumerated.length === 1 ? 'it' : 'them'} to that ` +
+      'array so uninstall() removes it (otherwise it ships to every install and orphans on uninstall).');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/issue-607-installer-dry-run.install.test.cjs — test-hygiene
+// sweep (H3 Wave 4, #3336)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:issue-607-installer-dry-run (test-hygiene sweep #3336 H3 Wave 4)", () => {
+// (#607) Test-created temp dirs are the only filesystem reads here — not repo source files.
+// This is an integration test that seeds fixture files in OS temp dirs and
+// asserts that the installer correctly handles --dry-run and the
+// cleanupLegacyGsdCc exported helper.
+
+/**
+ * #607 — --dry-run flag and cleanupLegacyGsdCc wiring.
+ *
+ * Covers:
+ *   1. Spawning `node bin/install.js --claude --global --dry-run` with an
+ *      isolated HOME that contains a seeded legacy artifact. Asserts exit 0,
+ *      stdout names the artifact and contains "dry" (case-insensitive), and
+ *      no files are mutated (artifact still present; no .claude install).
+ *      Also asserts the per-package cache path appears AT MOST ONCE (no
+ *      double-print regression).
+ *   2. Spawning `node bin/install.js --claude --dry-run --uninstall` asserts
+ *      the "does not preview --uninstall" warning prints and exits 0 without
+ *      uninstalling anything.
+ *   3. Direct unit call to the exported cleanupLegacyGsdCc helper:
+ *      - dryRun:true → plan lists the artifact, removes nothing.
+ *      - dryRun:false → seeded leftover removed, dev-preferences.md preserved.
+ */
+
+'use strict';
+
+process.env.GSD_TEST_MODE = '1';
+
+const { describe, test, beforeEach, afterEach } = require('node:test');
+const assert = require('node:assert/strict');
+const fs     = require('node:fs');
+const path   = require('node:path');
+const os     = require('node:os');
+const { spawnSync } = require('node:child_process');
+
+const REPO_ROOT = path.resolve(__dirname, '..');
+const INSTALL_BIN = path.join(REPO_ROOT, 'bin', 'install.js');
+const { cleanup } = require('./helpers.cjs');
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+function mkTmp(prefix) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function writeFile(filePath, content) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content, 'utf8');
+}
+
+// The assembled signal string used as file content to trigger
+// content-references-old-package detection.
+const LEGACY_PKG_SIGNAL = 'gsd-core' + '-cc';
+
+// ─── Suite 1: spawn --dry-run, assert no mutations ───────────────────────────
+
+describe('#607 --dry-run flag: spawned installer exits 0 and mutates nothing', () => {
+  let tmpHome;
+
+  beforeEach(() => {
+    tmpHome = mkTmp('gsd-607-dryhome-');
+  });
+
+  afterEach(() => {
+    cleanup(tmpHome);
+  });
+
+  test('exits 0; stdout names artifact and contains "dry"; no install; artifact preserved; no double-print', () => {
+    // Seed a legacy artifact: a .cjs hook file under HOME/.gemini/hooks/ whose
+    // content contains the old package name (content-signal, not orphan-by-name).
+    // This exercises the content-references-old-package reason exclusively.
+    const legacyHook = path.join(tmpHome, '.gemini', 'hooks', 'gsd-old-update-worker.cjs');
+    writeFile(legacyHook, `// installed via ${LEGACY_PKG_SIGNAL}\nconsole.log("old worker");`);
+
+    // Seed the legacy shared cache file
+    const legacyCache = path.join(tmpHome, '.cache', 'gsd', 'gsd-update-check.json');
+    writeFile(legacyCache, JSON.stringify({ legacy: true }));
+
+    // Spawn the installer with --dry-run
+    const result = spawnSync(
+      process.execPath,
+      [INSTALL_BIN, '--claude', '--global', '--dry-run'],
+      {
+        env: {
+          ...process.env,
+          HOME: tmpHome,
+          USERPROFILE: tmpHome,
+          // Redirect Claude config dir into isolated tmp home
+          CLAUDE_CONFIG_DIR: path.join(tmpHome, '.claude'),
+          // Suppress slow stale-SDK npm check
+          GSD_SKIP_STALE_SDK_CHECK: '1',
+          // Do NOT set GSD_TEST_MODE — we want the main() block to run
+          GSD_TEST_MODE: undefined,
+        },
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: DRY_RUN_INSTALL_TIMEOUT_MS,
+      }
+    );
+
+    // Exit code must be 0
+    assert.equal(
+      result.status,
+      0,
+      `Expected exit 0 but got ${result.status}.\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+    );
+
+    const stdout = result.stdout + result.stderr;
+
+    // stdout must contain the word "dry" (case-insensitive)
+    assert.match(
+      stdout,
+      /dry/i,
+      `Expected stdout to contain "dry". Got:\n${stdout}`
+    );
+
+    // stdout must mention the seeded legacy artifact path
+    assert.ok(
+      stdout.includes(legacyHook),
+      `Expected stdout to mention ${legacyHook}.\nGot:\n${stdout}`
+    );
+
+    // The seeded artifact must STILL EXIST (no mutations)
+    assert.ok(
+      fs.existsSync(legacyHook),
+      `Legacy hook must still exist after --dry-run: ${legacyHook}`
+    );
+
+    // The legacy cache must STILL EXIST
+    assert.ok(
+      fs.existsSync(legacyCache),
+      `Legacy cache must still exist after --dry-run: ${legacyCache}`
+    );
+
+    // No actual install happened — .claude/gsd-core must not exist
+    const installDir = path.join(tmpHome, '.claude', 'gsd-core');
+    assert.equal(
+      fs.existsSync(installDir),
+      false,
+      `No install should happen during --dry-run; found: ${installDir}`
+    );
+
+    // Regression: the per-package cache path must appear AT MOST ONCE
+    // (guard against the duplicate-print bug where it was printed both inside
+    // cleanupLegacyGsdCc and again in the outer --dry-run block).
+    const updateCacheFileName = require(
+      path.join(REPO_ROOT, 'gsd-core', 'bin', 'lib', 'package-identity.cjs')
+    ).updateCacheFileName;
+    const perPkgCacheFile = path.join(tmpHome, '.cache', 'gsd', updateCacheFileName);
+    const occurrences = stdout.split(perPkgCacheFile).length - 1;
+    assert.ok(
+      occurrences <= 1,
+      `Per-package cache path must appear at most once in stdout; found ${occurrences} times.\nstdout:\n${stdout}`
+    );
+  });
+
+  test('--uninstall --dry-run prints "does not preview --uninstall" warning and exits 0', () => {
+    const result = spawnSync(
+      process.execPath,
+      [INSTALL_BIN, '--claude', '--uninstall', '--dry-run'],
+      {
+        env: {
+          ...process.env,
+          HOME: tmpHome,
+          USERPROFILE: tmpHome,
+          CLAUDE_CONFIG_DIR: path.join(tmpHome, '.claude'),
+          GSD_SKIP_STALE_SDK_CHECK: '1',
+          GSD_TEST_MODE: undefined,
+        },
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: DRY_RUN_INSTALL_TIMEOUT_MS,
+      }
+    );
+
+    assert.equal(
+      result.status,
+      0,
+      `Expected exit 0 but got ${result.status}.\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+    );
+
+    const stdout = result.stdout + result.stderr;
+
+    // Must print the warning about --uninstall not being previewed
+    assert.ok(
+      stdout.includes('does not preview --uninstall'),
+      `Expected "does not preview --uninstall" warning.\nGot:\n${stdout}`
+    );
+
+    // No uninstall occurred — .claude/gsd-core must not have been removed
+    // (it never existed, but we confirm the installer didn't blow up)
+    assert.equal(
+      result.status,
+      0,
+      'Process must exit 0'
+    );
+  });
+});
+
+// ─── Suite 2: direct helper unit tests ───────────────────────────────────────
+
+describe('#607 cleanupLegacyGsdCc: exported helper unit tests', () => {
+  // GSD_TEST_MODE is already set at the top so requiring install.js is safe.
+  const { cleanupLegacyGsdCc } = require(INSTALL_BIN);
+
+  let tmpRoot;
+  let homeDir;
+
+  beforeEach(() => {
+    tmpRoot = mkTmp('gsd-607-unit-');
+    homeDir = path.join(tmpRoot, 'home');
+    fs.mkdirSync(homeDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    cleanup(tmpRoot);
+  });
+
+  test('dryRun:true — plan lists seeded artifact; nothing removed', () => {
+    // Seed a content-signal code file under homeDir/.gemini/hooks/
+    const legacyHook = path.join(homeDir, '.gemini', 'hooks', 'gsd-old-update-worker.cjs');
+    writeFile(legacyHook, `// installed via ${LEGACY_PKG_SIGNAL}\nconsole.log("old worker");`);
+
+    const logMessages = [];
+    const mockLogger = { log: (msg) => logMessages.push(msg) };
+
+    const { plan, result } = cleanupLegacyGsdCc({
+      homeDir,
+      dryRun: true,
+      logger: mockLogger,
+    });
+
+    // Plan must include the seeded artifact
+    const planEntry = plan.find((p) => p.path === legacyHook);
+    assert.ok(planEntry, `Plan must list seeded artifact: ${legacyHook}\nActual plan: ${JSON.stringify(plan)}`);
+
+    // dryRun result must flag it as skipped, not removed
+    assert.equal(result.dryRun, true);
+    assert.equal(result.removed.length, 0, 'dryRun must remove nothing');
+
+    // The artifact must still exist
+    assert.ok(
+      fs.existsSync(legacyHook),
+      `Artifact must survive dry-run: ${legacyHook}`
+    );
+
+    // Logger should have been called at least once
+    assert.ok(logMessages.length > 0, 'Logger should have been called');
+  });
+
+  test('dryRun:false — seeded leftover removed; dev-preferences.md preserved', () => {
+    // Seed a content-signal code file
+    const legacyHook = path.join(homeDir, '.gemini', 'hooks', 'gsd-old-update-worker.cjs');
+    writeFile(legacyHook, `// installed via ${LEGACY_PKG_SIGNAL}\nconsole.log("old worker");`);
+
+    // Seed a dev-preferences.md that must NOT be removed
+    const devPrefs = path.join(homeDir, '.gemini', 'gsd-core', 'dev-preferences.md');
+    writeFile(devPrefs, '# My prefs\n\nSome user content — must not be touched.');
+
+    const { plan, result } = cleanupLegacyGsdCc({
+      homeDir,
+      dryRun: false,
+    });
+
+    // The legacy hook must be in the plan
+    const planEntry = plan.find((p) => p.path === legacyHook);
+    assert.ok(planEntry, `Legacy hook must appear in plan: ${legacyHook}\nActual plan: ${JSON.stringify(plan)}`);
+
+    // The legacy hook must have been removed
+    assert.equal(
+      fs.existsSync(legacyHook),
+      false,
+      `Legacy hook must be removed: ${legacyHook}`
+    );
+
+    // The removed list must include the legacy hook
+    assert.ok(
+      result.removed.includes(legacyHook),
+      `removed[] must include legacy hook\nActual removed: ${JSON.stringify(result.removed)}`
+    );
+
+    // dev-preferences.md must NOT be in the plan and must still exist
+    const devPrefsInPlan = plan.find((p) => p.path === devPrefs);
+    assert.equal(devPrefsInPlan, undefined, 'dev-preferences.md must never appear in plan');
+    assert.ok(
+      fs.existsSync(devPrefs),
+      `dev-preferences.md must be preserved: ${devPrefs}`
+    );
+  });
+
+  test('dryRun:true — returns plan and result without error (no files present)', () => {
+    // homeDir exists but no legacy artifacts seeded
+    const { plan, result } = cleanupLegacyGsdCc({
+      homeDir,
+      dryRun: true,
+    });
+
+    assert.ok(Array.isArray(plan), 'plan must be an array');
+    assert.equal(result.dryRun, true);
+    assert.equal(result.removed.length, 0, 'nothing to remove');
+  });
+});
+  });
+}
+
+// ---------------------------------------------------------------------------
+// #4377 — --relative-includes: a local install must not bake the checkout path
+// ---------------------------------------------------------------------------
+//
+// The unit arms in tests/install-runtime-artifacts.test.cjs pin
+// _computePathPrefix itself. This is the end-to-end proof: the prefix has to
+// travel from the CLI flag, through the install engine, through the rewrite
+// pass, and land in the bytes on disk. A pure-function test alone would pass
+// happily while any one of those six seams kept computing the absolute form.
+describe('#4377: --relative-includes emits project-relative @ includes for a local install', () => {
+  // `before`/`after` are not in this file's tail scope (the earlier folds each
+  // bring their own); pull them from node:test directly rather than relying on
+  // whatever binding happens to be visible here.
+  const { before: beforeAll, after: afterAll } = require('node:test');
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const { throwIfFailed } = require('./helpers/git-fixture.cjs');
+  const { INSTALL_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+  const installPath = path.join(__dirname, '..', 'bin', 'install.js');
+
+  // Two independent reasons the raw temp root does not appear in emitted
+  // content, both of which would make the negative arms pass VACUOUSLY —
+  // "nothing references the checkout" is trivially true when the string being
+  // searched for cannot occur:
+  //
+  //   1. The emitted prefix is POSIX-normalized by design, because it is
+  //      substituted into markdown @-references, which use forward slashes
+  //      universally; a backslash there would leak into shipped content
+  //      (#1615). On Windows the roots arrive as `D:\a\...`.
+  //   2. On macOS `os.tmpdir()` yields `/var/folders/...`, but `/var` is a
+  //      symlink to `/private/var`, and the installer resolves it — so the
+  //      emitted content carries `/private/var/folders/...` while
+  //      `fs.mkdtempSync` handed us the unresolved spelling.
+  //
+  // Every comparison therefore goes through both spellings.
+  const toPosix = (p2) => p2.replace(/\\/g, '/');
+  //
+  // LONGEST FIRST, and that ordering is load-bearing. `/var/folders/…/X` is a
+  // SUBSTRING of `/private/var/folders/…/X`, so stripping the short spelling
+  // first matches inside the long one and leaves the `/private` prefix glued
+  // to what followed it: `@/private/var/…/X/.claude/gsd-core/…` normalizes to
+  // `@/private.claude/gsd-core/…`, a string that appears in neither install.
+  // Removing the long form first consumes the whole occurrence, and the short
+  // form then has nothing left to match.
+  const rootSpellings = (root) => {
+    const forms = new Set([toPosix(root)]);
+    try { forms.add(toPosix(fs.realpathSync(root))); } catch { /* root already gone */ }
+    return [...forms].sort((a, b) => b.length - a.length);
+  };
+  const mentionsRoot = (content, root) => rootSpellings(root).some((r) => content.includes(r));
+
+  // Self-contained runner: the file's other runInstall helpers live inside
+  // folded blocks and are not in scope here. #3156's sandboxed HOME still
+  // applies — the installer writes <home>/.gsd/defaults.json via os.homedir()
+  // directly, which no env scrub reaches.
+  const install = (cwd, args) => {
+    const env = installSpawnEnv();
+    delete env.GSD_TEST_MODE;
+    // The relative-includes opt-in is dual-sourced (flag OR env), so an
+    // ambient GSD_RELATIVE_INCLUDES would silently opt the CONTROL arm in and
+    // make this suite prove nothing. Scrub it and let the flag speak.
+    delete env.GSD_RELATIVE_INCLUDES;
+    const r = runNode([installPath, ...args], {
+      cwd, env, timeoutMs: INSTALL_TIMEOUT_MS,
+    });
+    throwIfFailed(r, `node ${installPath} ${args.join(' ')}`);
+  };
+
+  let absDir;
+  let relDir;
+
+  beforeAll(() => {
+    absDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4377-abs-'));
+    relDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4377-rel-'));
+    install(absDir, ['--claude', '--local', '--no-sdk']);
+    install(relDir, ['--claude', '--local', '--no-sdk', '--relative-includes']);
+  });
+
+  afterAll(() => {
+    cleanup(absDir);
+    cleanup(relDir);
+  });
+
+  // Walk the WHOLE installed tree, not just commands/. The issue measured 145
+  // affected files across commands, workflows and references on a real repo —
+  // a commands-only assertion would have called this fixed while 124 workflow
+  // and reference files still carried the baked path.
+  const allBodies = (root, base = path.join(root, '.claude')) => {
+    const out = [];
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) { walk(full); continue; }
+        if (!entry.isFile()) continue;
+        out.push({ rel: path.relative(base, full), content: fs.readFileSync(full, 'utf-8') });
+      }
+    };
+    if (fs.existsSync(base)) walk(base);
+    return out;
+  };
+
+  test('the default install still bakes the absolute checkout path (unchanged behavior)', () => {
+    // The control. Without it, a change that broke the absolute form entirely
+    // would satisfy every assertion below and look like a fix.
+    const carriers = allBodies(absDir).filter((f) => mentionsRoot(f.content, absDir));
+    assert.ok(
+      carriers.length > 0,
+      '#4377 is opt-in: the default local install must keep emitting absolute includes',
+    );
+  });
+
+  test('with the flag, NOTHING in the installed tree references the checkout it came from', () => {
+    const offenders = allBodies(relDir).filter((f) => mentionsRoot(f.content, relDir)).map((f) => f.rel);
+    assert.deepEqual(offenders, [], 'no installed file may reference the checkout it was installed from');
+  });
+
+  test('with the flag, the includes are project-relative and still resolve to gsd-core', () => {
+    // Not merely "absent" — an implementation that stripped the prefix would
+    // pass the arm above while shipping includes that point nowhere.
+    const withRelative = allBodies(relDir).filter((f) => f.content.includes('@.claude/gsd-core/'));
+    assert.ok(withRelative.length > 0, 'expected @.claude/gsd-core/ includes in the relative install');
+  });
+
+  test('the local install manifest persists the relative style for a later surface apply', () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(relDir, '.claude', 'gsd-file-manifest.json'), 'utf8'));
+    assert.equal(manifest.relativeIncludePrefix, '.claude/');
+  });
+
+  test('a project-root runtime falls back to absolute includes instead of inventing its descriptor directory', (t) => {
+    // Cline declares localTargetIsProjectRoot: local agents live in `agents/`,
+    // not `.cline/agents/`.  A relative `.cline/` prefix would therefore point
+    // at a directory the install never creates.  This crosses the real install
+    // plan and agent-rewrite seam; testing _localIncludeDirName alone would not
+    // prove every production consumer uses the guard.
+    const clineDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4377-cline-'));
+    t.after(() => cleanup(clineDir));
+    install(clineDir, ['--cline', '--local', '--no-sdk', '--relative-includes']);
+
+    const agents = allBodies(clineDir, path.join(clineDir, 'agents'));
+    assert.ok(agents.length > 0, 'the local Cline install must emit agents at the project root');
+    const descriptorRelative = agents.filter((f) => f.content.includes('@.cline/gsd-core/')).map((f) => f.rel);
+    assert.deepEqual(descriptorRelative, [], 'Cline has no .cline/ local target, so its includes must not use one');
+    const absoluteFallback = agents.filter((f) => rootSpellings(clineDir)
+      .some((root) => f.content.includes(`@${root}/gsd-core/`)));
+    assert.ok(absoluteFallback.length > 0, 'an unrepresentable project-relative target must retain the safe absolute prefix');
+  });
+
+  test('the launcher shim keeps ABSOLUTE shell defaults even with the flag', () => {
+    // The one place a relative prefix would make things worse. The runtime
+    // launcher probes gsd-tools through `${CLAUDE_CONFIG_DIR:-$HOME/.claude}`;
+    // that is a shell word expansion, not an @ include, and a bare `.claude`
+    // there resolves against the shell's cwd rather than the project. Trading
+    // an include that points at the wrong checkout for a path that points at
+    // nothing would not be a fix.
+    const carriers = allBodies(relDir).filter((f) => f.content.includes('CLAUDE_CONFIG_DIR:-'));
+    assert.ok(carriers.length > 0, 'expected the launcher snippet in the installed tree');
+    const offenders = carriers
+      .filter((f) => !/CLAUDE_CONFIG_DIR:-\$HOME\/\.claude\}/.test(f.content))
+      .map((f) => f.rel);
+    assert.deepEqual(offenders, [], 'the launcher fallback must stay $HOME-absolute');
+  });
+
+  test('no masking sentinel survives into the installed tree', () => {
+    // The shell-default guard masks with a literal token before rewriting and
+    // restores after. A restore that missed would ship that token as content.
+    // gsd-core/bin/lib/ carries the implementation itself, so exclude it.
+    const leaked = allBodies(relDir)
+      .filter((f) => !f.rel.startsWith(path.join('gsd-core', 'bin', 'lib')))
+      .filter((f) => f.content.includes('@@GSD4377:'))
+      .map((f) => f.rel);
+    assert.deepEqual(leaked, [], 'the shell-default mask must be fully restored');
+  });
+
+  test('the two installs differ ONLY where the flag is meant to change things', () => {
+    // The strongest arm. Normalize the absolute install into what the relative
+    // one should be — undo the two deliberate differences — and the trees must
+    // then be byte-identical. Anything ELSE the flag touched surfaces here
+    // instead of going unnoticed.
+    const abs = allBodies(absDir);
+    const rel = new Map(allBodies(relDir).map((f) => [f.rel, f.content]));
+    assert.ok(abs.length > 0, 'the control install must produce files');
+    const mismatched = [];
+    for (const { rel: name, content } of abs) {
+      if (!rel.has(name)) { mismatched.push(`${name} (missing from relative install)`); continue; }
+      // Both manifests record per-file absolute paths, which legitimately
+      // differ between two different install roots.
+      if (name === 'gsd-file-manifest.json' || name === 'gsd-install-state.json') continue;
+      let normalized = content;
+      for (const absRoot of rootSpellings(absDir)) {
+        normalized = normalized
+          // (1) shell defaults: the absolute install rewrote them to its own
+          //     root; the relative install left them at $HOME.
+          .split(`:-${absRoot}/.claude}`).join(':-$HOME/.claude}')
+          // (2) the include prefix itself, both the slash form and the bare
+          //     trailing form the word-boundary passes emit.
+          .split(`${absRoot}/.claude/`).join('.claude/')
+          .split(`${absRoot}/.claude`).join('.claude');
+      }
+      if (normalized !== rel.get(name)) mismatched.push({ name, normalized, actual: rel.get(name) });
+    }
+    // Report the FIRST divergence as text, not just a list of filenames. A
+    // bare file list says a difference exists somewhere in 236 files and
+    // leaves the reader to guess which bytes — and on a platform I cannot
+    // reproduce locally, guessing is what turns one CI round-trip into four.
+    const detail = mismatched.length === 0 ? '' : (() => {
+      const { name, normalized, actual } = mismatched[0];
+      let at = 0;
+      while (at < normalized.length && at < actual.length && normalized[at] === actual[at]) at += 1;
+      const from = Math.max(0, at - 60);
+      return `\nfirst divergence in ${name} at offset ${at}:\n`
+        + `  absolute(normalized): ${JSON.stringify(normalized.slice(from, at + 120))}\n`
+        + `  relative(actual):     ${JSON.stringify(actual.slice(from, at + 120))}\n`
+        + `(${mismatched.length} file(s) differ: ${mismatched.slice(0, 8).map((m) => m.name).join(', ')}${mismatched.length > 8 ? ', …' : ''})`;
+    })();
+    assert.deepEqual(
+      mismatched.map((m) => m.name), [],
+      `the flag must change the include prefix, and nothing beyond it${detail}`,
+    );
   });
 });

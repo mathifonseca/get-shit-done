@@ -22,6 +22,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { tryWithinRootLexical } from './security.cjs';
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const sourceMod = require('./capability-source.cjs') as {
@@ -202,6 +203,31 @@ interface LifecycleOptions {
 /** Stamp written onto every capability-owned shared-config entry, for surgical removal. */
 const CAP_MARKER = '_gsdCapability';
 
+/**
+ * #3514 (epic #1900 F21c): what KIND of pin (if any) the source content was pinned with — shared
+ * by the install and upgrade verdicts so the two cannot drift. Reaching the verdict with a
+ * supplied `--integrity` pin means the pin VERIFIED (the resolver throws on mismatch). A git
+ * `#sha:<40-hex-commit>` ref is the git analog of a hash pin — a commit checkout, verified by
+ * spelling: `/^sha:[0-9a-f]{7,40}$/i` accepts only a hex commit id, so a mutable ref
+ * (`#sha:main`, `#sha:v1`) is NOT counted as a pin (isolated review finding — a moving ref must
+ * never render as pinned). Everything else stages with no pin and must say so in the consent
+ * prompt.
+ */
+type IntegrityPin = 'sha512' | 'git-commit' | 'none';
+
+const GIT_SHA_PIN_RE = /^sha:[0-9a-f]{7,40}$/i;
+
+function resolveIntegrityPin(
+  integrity: unknown,
+  parsed: { kind?: string; ref?: unknown },
+): IntegrityPin {
+  if (typeof integrity === 'string' && integrity.length > 0) return 'sha512';
+  if (parsed.kind === 'git' && typeof parsed.ref === 'string' && GIT_SHA_PIN_RE.test(parsed.ref)) {
+    return 'git-commit';
+  }
+  return 'none';
+}
+
 /** Keys that must never be used as object indices (prototype-pollution guard). */
 function isUnsafeKey(k: string): boolean {
   return k === '__proto__' || k === 'constructor' || k === 'prototype';
@@ -346,7 +372,10 @@ function safeRmUnder(runtimeDir: string, rel: string): boolean {
   const target = path.resolve(realRoot, rel);
   let realParent: string;
   try { realParent = fs.realpathSync(path.dirname(target)); } catch { return false; }
-  if (realParent !== realRoot && !realParent.startsWith(realRoot + path.sep)) return false;
+  // Containment decision is the canonical LEXICAL predicate (ADR-4650 decision 6); lexical because
+  // both operands are already realpath-resolved here and the final component is deliberately
+  // handled as a link (see above).
+  if (tryWithinRootLexical(realParent, realRoot) === null) return false;
   const realTarget = path.join(realParent, path.basename(target));
   let st: fs.Stats;
   try { st = fs.lstatSync(realTarget); } catch { return true; /* already gone — idempotent */ }
@@ -380,10 +409,10 @@ function confinedSharedFile(runtimeDir: string, relFile: unknown): string | null
   } catch {
     // Parent does not exist yet (created inside the scope on write): a non-existent path cannot be a
     // symlink escaping the root, so a lexical containment check is sufficient.
-    if (parentDir !== realRoot && !parentDir.startsWith(realRoot + path.sep)) return null;
+    if (tryWithinRootLexical(parentDir, realRoot) === null) return null;
     return target;
   }
-  if (realParent !== realRoot && !realParent.startsWith(realRoot + path.sep)) return null;
+  if (tryWithinRootLexical(realParent, realRoot) === null) return null;
   return path.join(realParent, path.basename(target));
 }
 
@@ -391,6 +420,28 @@ function confinedSharedFile(runtimeDir: string, relFile: unknown): string | null
 // isSafeHookScriptPath; see confinedBundleScript for why). Only [A-Za-z0-9._/-], no leading
 // `-` segment, no `..`, not absolute.
 const SAFE_HOOK_SCRIPT_RE = /^[A-Za-z0-9._/-]+$/;
+// #3631 (defense-in-depth, mirrors capability-validator.cjs — KEEP BOTH IN SYNC): a declared script
+// path must not point into the space bundleContentHash (capability-consent.cts) excludes from the
+// consent-binding digest. A file whose basename ends `.pyc`/`.pyo` can contain perfectly valid
+// JavaScript and would be executed by `node` regardless of extension, and a `__pycache__`/
+// `.pytest_cache` segment marks a directory whose digest marker is suppressed — so a MANIFEST-DECLARED
+// executable surface must never be able to reach either, or the exclusion becomes reachable from a
+// path an attacker fully controls at declare-time rather than only via post-consent tamper.
+// Regex asymmetry is DELIBERATE, KEEP BOTH RULES IN SYNC WITH capability-validator.cjs (byte-identical
+// text, verified by the isSafeHookScriptPath parity test in tests/capability-registry.test.cjs):
+//   (i)   PYCACHE_SUFFIX_RE is case-INSENSITIVE (`/i`) on purpose — a validator should be STRICTER than
+//         the digest it defends, so it rejects `x.PYC` too even though bundleContentHash's own suffix
+//         match (hasPycacheFileSuffix, capability-consent.cts) is byte-exact and would still hash it.
+//   (ii)  The __pycache__/.pytest_cache SEGMENT match is case-SENSITIVE to match the digest's own
+//         byte-exact, case-sensitive directory-basename comparison (CPython always writes a lowercase
+//         `__pycache__`) — a validator segment match looser than the digest here would reject paths the
+//         digest would still hash, which is over-strict in the wrong direction for a defense-in-depth
+//         check layered on top of an already-correct digest.
+//   (iii) The `[/\\]` backslash alternations in both regexes are defensive/UNREACHABLE in practice:
+//         SAFE_HOOK_SCRIPT_RE (above) already rejects any backslash character outright, so a script
+//         string containing `\` never reaches either PYCACHE_*_RE check.
+const PYCACHE_SEGMENT_RE = /(?:^|[/\\])(__pycache__|\.pytest_cache)(?:[/\\]|$)/;
+const PYCACHE_SUFFIX_RE = /\.(pyc|pyo)$/i;
 function isSafeHookScriptPath(script: string): boolean {
   if (typeof script !== 'string' || script.length === 0) return false;
   if (!SAFE_HOOK_SCRIPT_RE.test(script)) return false;
@@ -400,6 +451,8 @@ function isSafeHookScriptPath(script: string): boolean {
   for (const seg of segments) {
     if (seg.startsWith('-')) return false;
   }
+  if (PYCACHE_SEGMENT_RE.test(script)) return false;
+  if (PYCACHE_SUFFIX_RE.test(path.basename(script))) return false;
   return true;
 }
 
@@ -463,7 +516,7 @@ function confinedBundleScript(capDirPath: string, script: string): string | null
     // disk): a non-existent root cannot be a symlink escaping itself, so confine lexically.
     realCapRoot = path.resolve(capDirPath);
     const targetLex = path.resolve(realCapRoot, script);
-    if (targetLex !== realCapRoot && !targetLex.startsWith(realCapRoot + path.sep)) return null;
+    if (tryWithinRootLexical(targetLex, realCapRoot) === null) return null;
     return targetLex;
   }
 
@@ -475,12 +528,12 @@ function confinedBundleScript(capDirPath: string, script: string): string | null
   } catch {
     // Parent does not exist yet (created inside the bundle): lexical containment is sufficient
     // because a non-existent path cannot be a symlink escaping the root.
-    if (parentDir !== realCapRoot && !parentDir.startsWith(realCapRoot + path.sep)) return null;
+    if (tryWithinRootLexical(parentDir, realCapRoot) === null) return null;
     return target;
   }
   // The realpath'd parent chain must remain inside the bundle — an ancestor symlink escaping the
   // bundle is refused here (the symlink is followed by realpathSync, so its real location is checked).
-  if (realParent !== realCapRoot && !realParent.startsWith(realCapRoot + path.sep)) return null;
+  if (tryWithinRootLexical(realParent, realCapRoot) === null) return null;
   return path.join(realParent, path.basename(target));
 }
 
@@ -655,6 +708,14 @@ function applyCapabilitySharedEdits(args: {
     }
 
     if (mcpEntries.length > 0) {
+      // #3515 (epic #1900 F20): the MCP config below is written VERBATIM — command/args/env/cwd
+      // are NOT confined to the bundle the way hook scripts are (confinedBundleScript, D5 rule 5).
+      // This asymmetry is INTENTIONAL: most real MCP servers legitimately resolve command/args/cwd
+      // to global or npx installs outside the capability bundle, so confinement would break them.
+      // The compensating controls are disclosure + re-consent: the consent prompt renders an
+      // explicit "not confined to the bundle" notice for every spawned server (summarizeDisclosure,
+      // capability-trust.cts), and disclosureSignature folds command/args/env/cwd + the FULL
+      // rawConfig as stable-sorted JSON (#1459 finding 5), so ANY config change forces re-consent.
       const mcpObj = (typeof settings['mcpServers'] === 'object' && settings['mcpServers'] !== null && !Array.isArray(settings['mcpServers']))
         ? (settings['mcpServers'] as Record<string, unknown>)
         : {};
@@ -1015,6 +1076,7 @@ async function installCapability(spec: string, opts: LifecycleOptions): Promise<
       stagedDir,
       strictKnownRegistries,
       hostVersion,
+      integrityPin: resolveIntegrityPin(opts.integrity, parsedPre),
     });
 
     if (!verdict.allowed) {
@@ -1217,6 +1279,7 @@ async function upgradeCapability(spec: string, opts: LifecycleOptions): Promise<
       stagedDir,
       strictKnownRegistries,
       hostVersion,
+      integrityPin: resolveIntegrityPin(opts.integrity, parsedPre),
     });
     if (!verdict.allowed) {
       return { status: 'blocked', disclosure: verdict.disclosure, blockReasons: verdict.blockReasons };

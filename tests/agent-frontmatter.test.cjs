@@ -106,6 +106,14 @@ describe('HOOK: hooks frontmatter pattern', () => {
 // ─── Spawn Type Consistency ──────────────────────────────────────────────────
 
 describe('SPAWN: spawn type consistency', () => {
+  // #1689: `subagent_type="{TOKEN}"` is a workflow-bound placeholder for
+  // parameterized executor dispatch (resolved at runtime via `gsd-tools
+  // resolve-agent`, defaulting to gsd-executor), not a concrete agent name.
+  // The static spawn-type checks below skip these — the effective value is
+  // validated at dispatch time, and execute-phase.md still documents the
+  // built-in roster (incl. gsd-executor) in <available_agent_types>.
+  const PARAMETERIZED_SPAWN_TYPE = /^\{[^}]+\}$/;
+
   test('no "First, read agent .md" workaround pattern remains', () => {
     const dirs = [WORKFLOWS_DIR, COMMANDS_DIR];
     for (const dir of dirs) {
@@ -134,9 +142,11 @@ describe('SPAWN: spawn type consistency', () => {
       const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
       for (const file of files) {
         const content = fs.readFileSync(path.join(dir, file), 'utf-8');
+        // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored workflow/command markdown, bounded prose, not adversarial input
         const matches = content.matchAll(/subagent_type="([^"]+)"/g);
         for (const match of matches) {
           const agentType = match[1];
+          if (PARAMETERIZED_SPAWN_TYPE.test(agentType)) continue;
           assert.ok(
             validAgentTypes.has(agentType),
             `${file} references unknown agent type: ${agentType}`
@@ -168,11 +178,14 @@ describe('SPAWN: spawn type consistency', () => {
       const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
       for (const file of files) {
         const content = fs.readFileSync(path.join(dir, file), 'utf-8');
-        // Find all named subagent_type references (excluding general-purpose)
+        // Find all named subagent_type references (excluding general-purpose
+        // and #1689 runtime placeholders)
+        // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored workflow/command markdown, bounded prose, not adversarial input
         const matches = [...content.matchAll(/subagent_type="([^"]+)"/g)];
         const namedAgents = matches
           .map(m => m[1])
-          .filter(t => t !== 'general-purpose');
+          .filter(t => t !== 'general-purpose')
+          .filter(t => !PARAMETERIZED_SPAWN_TYPE.test(t));
 
         if (namedAgents.length === 0) continue;
 
@@ -187,6 +200,7 @@ describe('SPAWN: spawn type consistency', () => {
         // Every spawned agent type must appear in the listing
         for (const agent of new Set(namedAgents)) {
           const agentTypesMatch = content.match(
+            // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own workflow .md content, fixed-size author-controlled content
             /<available_agent_types>([\s\S]*?)<\/available_agent_types>/
           );
           assert.ok(
@@ -232,6 +246,38 @@ describe('AGENT: required frontmatter fields', () => {
   }
 });
 
+// ─── Model resolution uniformity (#3895) ─────────────────────────────────────
+
+describe('MODEL: no agent hardcodes a model frontmatter pin', () => {
+  // Exactly one shipped agent (gsd-mempalace-curator) carried `model: sonnet`
+  // while the other 33 resolved through the model-profile system. The pin
+  // intercepted #2517's deliberate inherit case — the ship:post dispatch OMITS
+  // model= on inherit so the agent inherits the orchestrator's model, but the
+  // frontmatter pin silently forced sonnet there. The catalog entry
+  // (model-catalog.json: golden/balanced sonnet) preserves default-profile
+  // behavior; operators regain model_overrides + inherit authority.
+  test('no shipped agent frontmatter contains a model: pin', () => {
+    const offenders = [];
+    for (const agent of ALL_AGENTS) {
+      const content = fs.readFileSync(path.join(AGENTS_DIR, agent + '.md'), 'utf-8');
+      const frontmatter = content.split('---')[1] || '';
+      if (/^model:/m.test(frontmatter)) offenders.push(agent);
+    }
+    assert.deepEqual(
+      offenders, [],
+      `agents must resolve models via the model-profile system, not a frontmatter pin (#3895): ${offenders.join(', ')}`
+    );
+  });
+
+  test('the curator keeps its catalog entry (deleting the pin must not orphan the agent)', () => {
+    const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'gsd-core', 'bin', 'shared', 'model-catalog.json'), 'utf-8'));
+    const entry = catalog.agents && catalog.agents['gsd-mempalace-curator'];
+    assert.ok(entry, 'catalog entry for gsd-mempalace-curator must exist');
+    assert.equal(entry.golden, 'sonnet', 'golden profile preserves the pinned behavior');
+    assert.equal(entry.balanced, 'sonnet', 'balanced profile preserves the pinned behavior');
+  });
+});
+
 // ─── Color Value Validation ──────────────────────────────────────────────────
 
 const VALID_AGENT_COLORS = new Set(['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'cyan']);
@@ -240,6 +286,7 @@ describe('COLOR: color frontmatter must be a documented named color', () => {
   for (const agent of ALL_AGENTS) {
     test(`${agent} color: is a documented named color`, () => {
       const content = fs.readFileSync(path.join(AGENTS_DIR, agent + '.md'), 'utf-8');
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own agent .md frontmatter block, fixed-size author-controlled content
       const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
       const frontmatter = fmMatch ? fmMatch[1] : '';
       const colorMatch = frontmatter.match(/^color:\s*(.+)$/m);
@@ -1450,6 +1497,7 @@ describe('Bug #2990: cleanup tail fast-forwards $branch and deletes the temp bra
   test('recovery sentinel JSON shape records reviewfix_branch alongside worktree_path', () => {
     // Find the writeFileSync call that constructs the sentinel JSON.
     // Parse the JSON.stringify argument list to extract the field names.
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored workflow markdown, bounded prose, not adversarial input
     const match = md.match(/fs\.writeFileSync\(sentinelPath,\s*JSON\.stringify\(\{([^}]+)\}/);
     assert.notEqual(match, null, 'expected JSON.stringify({...}) inside the sentinel write');
     const fields = match[1].split(',').map(s => s.trim().split(':')[0].trim()).filter(Boolean);

@@ -1,7 +1,7 @@
 {
   "id": "opencode",
   "role": "runtime",
-  "version": "1.10.0",
+  "version": "1.15.0",
   "title": "OpenCode",
   "description": "OpenCode — XDG-based config dir; flat commands/ + skills artifact layout; settings-json config format; no lifecycle hook registration; tier-2 support.",
   "tier": "core",
@@ -38,6 +38,14 @@
           "nesting": "flat",
           "recursive": true,
           "converter": "convertClaudeCommandToOpencodeSkill"
+        },
+        {
+          "kind": "agents",
+          "destSubpath": "agents",
+          "prefix": "gsd-",
+          "nesting": "flat",
+          "recursive": false,
+          "converter": "convertClaudeToOpencodeFrontmatter"
         }
       ],
       "local": [
@@ -56,9 +64,21 @@
           "nesting": "flat",
           "recursive": true,
           "converter": "convertClaudeCommandToOpencodeSkill"
+        },
+        {
+          "kind": "agents",
+          "destSubpath": "agents",
+          "prefix": "gsd-",
+          "nesting": "flat",
+          "recursive": false,
+          "converter": "convertClaudeToOpencodeFrontmatter"
         }
       ]
     },
+    "triggerPrecedence": [
+      "skills",
+      "commands"
+    ],
     "commandStyle": "slash-hyphen",
     "hooksSurface": "none",
     "extensionEvents": "opencode",
@@ -78,7 +98,8 @@
         "background": false,
         "subagentToolkit": "full",
         "backgroundDispatch": false,
-        "isolation": "orchestrator-worktree"
+        "isolation": "orchestrator-worktree",
+        "maxConcurrency": "undocumented"
       },
       "modelMode": "active",
       "hookBus": "host",
@@ -108,9 +129,7 @@
       },
       "skipHomePrefixSubstitution": true,
       "skipSettingsUi": true,
-      "skipUpdateBannerCommand": true,
-      "skipCodexSkillsManifest": true,
-      "reviewerCli": true
+      "skipUpdateBannerCommand": true
     }
   },
   "reviewer": {
@@ -139,12 +158,15 @@
       "effortChannel": "argv"
     },
     "timeoutFloorMs": 660000,
+    "timeoutConfigKey": "review.timeouts.opencode",
     "emptyOutput": "stub-with-stderr",
     "reviewsSection": "OpenCode",
     "evidenceClass": "source-grounded",
     "requiresBinaries": [],
-    "promptBudgetKey": null,
+    "promptBudgetKey": "review.max_prompt_tokens_per_reviewer.opencode",
     "modelConfigKey": "review.models.opencode",
+    "effortConfigKey": "review.effort.opencode",
+    "defaultEffort": "high",
     "handler": "opencode"
   },
   "config": {
@@ -152,6 +174,21 @@
       "type": "string",
       "default": "",
       "description": "Model passed to the OpenCode reviewer lane."
+    },
+    "review.max_prompt_tokens_per_reviewer.opencode": {
+      "type": "number",
+      "default": -1,
+      "description": "Prompt-token budget for the OpenCode reviewer lane. Unset is -1, a sentinel: 0 is a legitimate value meaning \"do not trim this lane\", so it cannot double as \"not configured\"."
+    },
+    "review.timeouts.opencode": {
+      "type": "number",
+      "default": -1,
+      "description": "Outer wall-clock timeout override (seconds) for the OpenCode reviewer lane. Unset is -1, a sentinel: 0 or a negative number is also treated as unset (a timeout has no legitimate zero/negative value), so no second sentinel is needed. Falls back to the lane's built-in timeoutFloorMs when unset."
+    },
+    "review.effort.opencode": {
+      "type": "string",
+      "default": "",
+      "description": "Reasoning effort for the OpenCode reviewer lane: minimal, low, medium, high, xhigh, max, or inherit. Unset falls back to the lane's declared review default (high); inherit emits no effort argument so the CLI's own configuration decides. An unrecognized value falls back to the lane default rather than being forwarded."
     }
   }
 }

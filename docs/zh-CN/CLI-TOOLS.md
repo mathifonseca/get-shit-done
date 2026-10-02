@@ -323,7 +323,7 @@ if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 
 ```bash
 # 归档里程碑
-node gsd-tools.cjs milestone complete <version> [--name <name>] [--no-archive-phases]
+node gsd-tools.cjs milestone complete <version> (--confirm | --dry-run) [--name <name>] [--no-archive-phases] [--force] [--archive-quick]
 
 # 将需求标记为完成
 node gsd-tools.cjs requirements mark-complete <ids>
@@ -396,7 +396,7 @@ node gsd-tools.cjs progress [json|table|bar]
 node gsd-tools.cjs progress --json
 
 # 完成待办事项
-node gsd-tools.cjs todo complete <filename>
+node gsd-tools.cjs todo complete <filename> [--dry-run]
 
 # UAT 审计——扫描所有阶段的未解决事项
 node gsd-tools.cjs audit-uat
@@ -479,7 +479,7 @@ node gsd-tools.cjs graphify snapshot [name]
 
 ```bash
 node gsd-tools.cjs config-set review.models.codex    "codex exec --model gpt-5"
-node gsd-tools.cjs config-set review.models.gemini   "gemini -m gemini-2.5-pro"
+node gsd-tools.cjs config-set review.models.agy      "gemini-3.1-pro-preview"
 node gsd-tools.cjs config-set review.models.opencode "opencode run --model claude-sonnet-4"
 node gsd-tools.cjs config-set review.models.claude   ""   # 清除——回退到会话模型
 ```

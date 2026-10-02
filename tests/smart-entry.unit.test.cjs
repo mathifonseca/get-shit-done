@@ -114,6 +114,52 @@ describe('smart-entry: situation coverage', () => {
     });
   }
 
+  // #3860-family guard is NOT wanted here; these are #3864's missing pins:
+  // the classifier's verify branch must match the same verif* stem that
+  // state-document's normalizeStateStatus matches, or a STATE.md declaring
+  // `status: verified` falls through to `unknown` (and, on a clean tree with
+  // unpushed commits, to idle-stranded — differently wrong).
+  test('#3864: status "verified" classifies as verify-pending', () => {
+    const dir = track(makeProject({ state: state({ status: 'verified', total_phases: 5, current_phase: 2 }), roadmap: true }));
+    const result = classifyProject(dir);
+    assert.equal(result.situation, 'verify-pending');
+  });
+
+  test('#3864: status "verification" classifies as verify-pending', () => {
+    const dir = track(makeProject({ state: state({ status: 'verification', total_phases: 5, current_phase: 2 }), roadmap: true }));
+    const result = classifyProject(dir);
+    assert.equal(result.situation, 'verify-pending');
+  });
+
+  test('#3864: the stem does not over-match — "completed" still reaches complete', () => {
+    const dir = track(makeProject({ state: state({ status: 'completed', total_phases: 5, current_phase: 5 }), roadmap: true }));
+    const result = classifyProject(dir);
+    assert.equal(result.situation, 'complete');
+  });
+
+  test('#3864: "Phase complete — ready for verification" at 5/5 stays complete (complete beats a verif-bearing status)', () => {
+    // A real handler-written Status default (state-document.cts). It carries
+    // the verif stem but names COMPLETION — isComplete must win over the
+    // verify-pending branch when the project is actually done.
+    const dir = track(makeProject({ state: state({ status: 'Phase complete — ready for verification', total_phases: 5, current_phase: 5 }), roadmap: true }));
+    const result = classifyProject(dir);
+    assert.equal(result.situation, 'complete');
+  });
+
+  test('#3864: "Phase complete — ready for verification" mid-project is verify-pending', () => {
+    // Same real status word, phases remaining: pre-fix this fell through to
+    // unknown/idle-stranded (no "verify" substring); the stem now routes it.
+    const dir = track(makeProject({ state: state({ status: 'Phase complete — ready for verification', total_phases: 5, current_phase: 2 }), roadmap: true }));
+    const result = classifyProject(dir);
+    assert.equal(result.situation, 'verify-pending');
+  });
+
+  test('#3864: verify-failed still wins over the verify-pending stem (ordering pinned)', () => {
+    const dir = track(makeProject({ state: state({ status: 'verify-failed', total_phases: 5, current_phase: 2 }), roadmap: true, verifyFail: true }));
+    const result = classifyProject(dir);
+    assert.equal(result.situation, 'verify-failed');
+  });
+
   test('SITUATIONS constant lists all 11 (incl unknown) and is frozen', () => {
     assert.equal(SITUATIONS.length, 11);
     assert.ok(SITUATIONS.includes('unknown'));
@@ -281,7 +327,7 @@ describe('smart-entry: real STATE.md schema (nested progress YAML + body Phase f
       roadmap: true,
     }));
     const signals = detectSignals(dir);
-    assert.equal(signals.current_phase, 3, 'current_phase from body Phase: field');
+    assert.equal(signals.current_phase, '3', 'current_phase from body Phase: field');
     assert.equal(signals.total_phases, 5, 'total_phases from nested progress.total_phases');
     assert.equal(signals.progress, 40, 'percent from nested progress.percent');
     assert.equal(signals.status, 'verifying');
@@ -410,6 +456,19 @@ describe('smart-entry: JSON shape invariants', () => {
 
 describe('smart-entry: CLI dispatch (gsd-tools smart-entry)', () => {
   afterEach(removeAll);
+
+  test('#4023: --json preserves decimal current_phase as a phase-id string', () => {
+    for (const phase of ['12.1', '12.10']) {
+      const dir = track(makeProject({
+        state: state({ status: 'executing', total_phases: 13, current_phase: phase }),
+        roadmap: true,
+      }));
+      const r = runNode([TOOLS, 'smart-entry', '--json', '--cwd', dir], { timeoutMs: PROBE_TIMEOUT_MS });
+      throwIfFailed(r, 'gsd-tools smart-entry --json');
+      const out = JSON.parse(r.stdout);
+      assert.equal(out.signals.current_phase, phase);
+    }
+  });
 
   test('--json in an empty dir returns no-project machine JSON', () => {
     // A bare tmpdir with no .planning is a true no-project.
@@ -548,6 +607,536 @@ describe('#2427 — roadmap-grounded completion + tightened status regex', () =>
     const result = classifyProject(dir);
     assert.notEqual(result.situation, 'complete',
       `legacy fallback must still reject completion when current_phase < total_phases. Got: ${result.situation}`);
+  });
+});
+
+describe('smart-entry: stale_activity honors the template\'s "date — description" shape (#2570)', () => {
+  afterEach(removeAll);
+
+  // A fixed "now" far enough past 2026-06-08 that any real date there is well
+  // beyond IDLE_STALE_MS (72h). Injected so the test is deterministic and does
+  // not depend on the wall clock.
+  const FIXED_NOW = () => Date.parse('2026-08-01T00:00:00Z');
+
+  // gsd-core's own STATE.md carries last_activity as "YYYY-MM-DD — <description>"
+  // (templates/state.md prescribes `Last activity: [YYYY-MM-DD] — [What happened]`
+  // for the body; the frontmatter mirrors it). Before the fix, parseActivityTimestamp
+  // ran Date.parse on the whole string → NaN → staleActivity failed OPEN to false,
+  // so the ONLY idle/staleness detector never fired on any project whose
+  // last_activity retained its description.
+
+  test('frontmatter last_activity with " — description" suffix is detected stale', () => {
+    const stateMd = [
+      '---',
+      'gsd_state_version: 1.0',
+      'status: executing',
+      'last_activity: 2026-06-08 — Milestone 2 executed autonomously (all passed)',
+      'progress:',
+      '  total_phases: 5',
+      '  percent: 40',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 3',
+      '',
+      '**Status:** executing',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(
+      signals.stale_activity,
+      true,
+      'a 54-day-old last_activity carrying a description must read stale, not fail open to false',
+    );
+  });
+
+  test('body "Last activity: <date> — <desc>" fallback is detected stale', () => {
+    const stateMd = [
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 1 of 1 (X)',
+      'Status: In progress',
+      'Last activity: 2026-06-08 — started the widget',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(signals.stale_activity, true, 'body-field fallback must also parse the leading date');
+  });
+
+  test('bare ISO date (control) still reads stale', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2026-06-08',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(signals.stale_activity, true, 'bare-date parsing must be unchanged');
+  });
+
+  test('recent activity with a description is NOT stale (no false positive)', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2026-07-31 — shipped a thing',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(
+      signals.stale_activity,
+      false,
+      'a next-day activity with a description must NOT be flagged stale',
+    );
+  });
+
+  // Boundary coverage for the fallback branch. NOTE: these are NOT fail-first
+  // regressions — a malformed or empty value returned null before the fix too.
+  // They pin the degrade-safely contract so a future change to the leading-date
+  // regex cannot start throwing, or start guessing, on unparseable input.
+  for (const [label, value] of [
+    ['a malformed leading date', '2026-13-45 — nonsense month and day'],
+    ['a non-date prefix', 'yesterday — did some work'],
+    ['an empty value', ''],
+    ['a whitespace-only value', '   '],
+  ]) {
+    test(`${label} degrades to not-stale without throwing`, () => {
+      const stateMd = [
+        '---',
+        'status: executing',
+        `last_activity: ${value}`,
+        '---',
+        '',
+        '# Project State',
+        '',
+        'Phase: 1',
+        '',
+      ].join('\n');
+      const dir = track(makeProject({ state: stateMd, roadmap: true }));
+      let signals;
+      assert.doesNotThrow(() => {
+        signals = detectSignals(dir, FIXED_NOW);
+      }, `${label} must not throw`);
+      // Unparseable reads as not-stale because staleActivity treats null as
+      // "not stale". That fail-open is pre-existing and out of scope for #2570
+      // (which is fenced to the description-suffix parse); asserted here so the
+      // behavior is recorded rather than silently assumed.
+      assert.equal(
+        signals.stale_activity,
+        false,
+        `${label} must degrade to not-stale, not throw or guess`,
+      );
+    });
+  }
+
+  // ADR-227: shape validation alone is not enough. Date.parse rolls an
+  // out-of-range DAY forward instead of rejecting it, so a shape-only guard
+  // propagates a different, wrong instant rather than failing safe. The
+  // pre-existing '2026-13-45' case above only exercises an invalid MONTH,
+  // which Date.parse happens to reject outright — it cannot catch this class.
+  //
+  // Only the two BARE cases are fail-first. On pre-fix code '2026-02-30'
+  // parses to 2026-03-02 and '2026-06-31' to 2026-07-01 — both read
+  // stale=true where the fix now reads false.
+  //
+  // The two suffixed cases are NOT fail-first: the trailing description
+  // already makes the pre-fix whole-string Date.parse return NaN, so
+  // stale_activity is false both before and after. They are kept because
+  // they pin the new calendar-validity behaviour for the suffix-carrying
+  // shape templates/state.md prescribes — but they do not demonstrate the
+  // regression, and should not be cited as if they did.
+  for (const [label, value] of [
+    ['Feb 30 with a description', '2026-02-30 — fat-fingered the day'],
+    ['Feb 30 bare', '2026-02-30'],
+    ['Apr 31 with a description', '2026-04-31 — thirty days hath September'],
+    ['Jun 31 bare', '2026-06-31'],
+  ]) {
+    test(`an impossible calendar date (${label}) fails safe instead of rolling forward`, () => {
+      const stateMd = [
+        '---',
+        'status: executing',
+        `last_activity: ${value}`,
+        '---',
+        '',
+        '# Project State',
+        '',
+        'Phase: 1',
+        '',
+      ].join('\n');
+      const dir = track(makeProject({ state: stateMd, roadmap: true }));
+      const signals = detectSignals(dir, FIXED_NOW);
+      assert.equal(
+        signals.stale_activity,
+        false,
+        `${label} must coerce to the safe default, not a rolled-forward instant`,
+      );
+    });
+  }
+
+  test('a real leap day still parses (the guard must not over-reject)', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2024-02-29 — leap day is a real date',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(
+      signals.stale_activity,
+      true,
+      'a valid Feb 29 in a leap year must parse and read stale, not be rejected',
+    );
+  });
+
+  // RULESET.TESTS.boundary-coverage on IDLE_STALE_MS (72h). The comparison is a
+  // strict `now() - lastActivityMs > IDLE_STALE_MS`, so exactly-72h is NOT
+  // stale. Full ISO instants (not bare dates) are used deliberately: a bare
+  // date truncates to UTC midnight, which cannot express limit±1.
+  //
+  // NOT fail-first — these pass pre-fix too. They close the [24,95]h band the
+  // property tests skip, so an off-by-one in the threshold cannot land green.
+  for (const [label, value, expected] of [
+    ['71h — one hour inside the window', '2026-07-29T01:00:00Z — 71h ago', false],
+    ['72h — exactly at the limit (strict >)', '2026-07-29T00:00:00Z — 72h ago', false],
+    ['73h — one hour past the limit', '2026-07-28T23:00:00Z — 73h ago', true],
+  ]) {
+    test(`staleness boundary: ${label} -> stale=${expected}`, () => {
+      const stateMd = [
+        '---',
+        'status: executing',
+        `last_activity: ${value}`,
+        '---',
+        '',
+        '# Project State',
+        '',
+        'Phase: 1',
+        '',
+      ].join('\n');
+      const dir = track(makeProject({ state: stateMd, roadmap: true }));
+      const signals = detectSignals(dir, FIXED_NOW);
+      assert.equal(
+        signals.stale_activity,
+        expected,
+        `${label} must read stale=${expected} against the 72h threshold`,
+      );
+    });
+  }
+
+  // Leniency guard. The calendar check must not narrow what already parsed:
+  // reading the leading token in preference to the whole string would DROP a
+  // trailing zone name and re-read the time as local, shifting the instant by
+  // the host's UTC offset. Pinned with a value whose verdict flips if that
+  // happens on a host east of UTC.
+  test('a trailing zone name is still honored, not dropped for the leading token', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2026-07-28 23:30:00 GMT',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    // 2026-07-28T23:30:00Z is 72.5h before FIXED_NOW -> stale.
+    assert.equal(
+      signals.stale_activity,
+      true,
+      'GMT must be read as UTC; dropping it re-reads the time as local and moves the instant',
+    );
+  });
+
+  // #2571 B1 (fail-first): the SAME trailing zone but WITH a description suffix.
+  // The suffix makes the whole-string Date.parse fail (the #2570 premise), so
+  // control reaches the FALLBACK — the branch the test above never exercises,
+  // and the exact gap the round-4 review flagged. ISO_LEADING_RE's offset group
+  // captures only Z / +-HH:MM, so " GMT" is not in the leading token;
+  // reconstructing `${date}${time}` without it and letting Date.parse read the
+  // result as LOCAL time produces a wrong, host-dependent instant. The fix
+  // returns null (fails open to not-stale, ADR-227) instead of guessing.
+  //
+  // Fail-first and host-independent: on pre-fix code the reconstruction yields a
+  // still-~54-day-old local instant on ANY host (±14h can't cross 72h at that
+  // age) -> stale=true; the fix -> null -> false.
+  test('#2571: a named zone + description suffix fails open to not-stale, never a wrong local-time instant', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2026-06-08T12:00:00 GMT — Milestone 2 executed autonomously',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(
+      signals.stale_activity,
+      false,
+      'an unpreservable named zone must fail open to not-stale (null), not reconstruct a ' +
+        'local-time instant whose verdict depends on the host UTC offset',
+    );
+  });
+
+  // #2571 (round-10, fail-first): a leading real date followed by a
+  // WHITESPACE/COLON separator and an ordinary description — no zone designator.
+  // The pre-fix fallback guard ("/^\\s*[A-Za-z]/", return null on any letter)
+  // could not tell a named zone from a plain word, so it failed open on exactly
+  // these and silently re-opened #2570 for hand-edited STATE.md that omits the
+  // template em dash. The narrowed guard reconstructs from the leading date;
+  // only a zone-shaped remainder (short all-caps run) still fails open.
+  //
+  // Fail-first and host-independent: `2026-06-08` is ~54 days before FIXED_NOW,
+  // so the reconstructed UTC-midnight instant reads stale on any host; the
+  // pre-fix guard returns null -> not-stale, inverting the verdict.
+  // The last two lead with an all-caps tech acronym on a BARE date: a zone
+  // qualifies a clock time, so a date with no time-of-day carries no zone hazard
+  // and must reconstruct. A time-agnostic all-caps guard would fail open on these.
+  for (const value of [
+    'last_activity: 2026-06-08 caught up on backlog', // space + lowercase
+    'last_activity: 2026-06-08\tfixed the login bug', // tab + lowercase
+    'last_activity: 2026-06-08 Milestone two executed', // space + Capitalised word
+    'last_activity: 2026-06-08: reviewed the PR queue', // colon separator
+    'last_activity: 2026-06-08 CI green, shipped it', // bare date + acronym lead
+    'last_activity: 2026-06-08 API refactor complete', // bare date + acronym lead
+  ]) {
+    test(`#2571: a plain description after "${value.slice(29, 45)}…" reads stale, not fail-open`, () => {
+      const stateMd = ['---', 'status: executing', value, '---', '', '# Project State', '', 'Phase: 1', ''].join(
+        '\n',
+      );
+      const dir = track(makeProject({ state: stateMd, roadmap: true }));
+      const signals = detectSignals(dir, FIXED_NOW);
+      assert.equal(
+        signals.stale_activity,
+        true,
+        'a leading real date with a non-zone description suffix must reconstruct and read ' +
+          'stale, not fail open the way the "any letter" guard did',
+      );
+    });
+  }
+
+  // CONTRIBUTING.md QA Matrix: "Mixed CRLF/LF newlines" for frontmatter parsing
+  // changes. No live defect — the fallback branch trims before matching — but
+  // the standard asks for the fixture, and this pins it.
+  test('a CRLF-terminated STATE.md parses the suffixed date identically', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2026-06-08 — started the widget',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\r\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(
+      signals.stale_activity,
+      true,
+      'CRLF line endings must not change the parsed instant',
+    );
+  });
+
+  // #2570 × #3099 composition: a suffixed value whose LEADING DATE parses must
+  // take the stale path AND must NOT emit LAST_ACTIVITY_UNPARSEABLE. Guards
+  // against two independent staleness signals firing on one field — #3099's
+  // diagnostic is for genuinely unusable values, and #2570 makes this shape
+  // usable, so the diagnostic must stay silent here.
+  test('suffixed-but-parseable last_activity is stale and emits NO diagnostic (composes with #3099)', () => {
+    const {
+      _resetUnusableInputWarningsForTests,
+      _unusableInputEmissionCountForTests,
+    } = require('../gsd-core/bin/lib/unusable-input.cjs');
+    _resetUnusableInputWarningsForTests();
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2026-06-08 — Milestone 2 executed autonomously',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(signals.stale_activity, true,
+      'a suffixed value whose leading date parses must read stale');
+    assert.equal(_unusableInputEmissionCountForTests(), 0,
+      'a now-parseable value must NOT emit LAST_ACTIVITY_UNPARSEABLE (no double staleness signal)');
+  });
+});
+
+// ─── #2573: STATE.md commit-age freshness signal ─────────────────────────────
+
+describe('detectSignals — state_head commit-age freshness (#2573)', () => {
+  const { runGit } = require('./helpers/process-seam.cjs');
+
+  const dirs = [];
+  const track = (d) => { dirs.push(d); return d; };
+  afterEach(() => { while (dirs.length) cleanup(dirs.pop()); });
+
+  function gitProject(stateHead) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-se-'));
+    fs.mkdirSync(path.join(dir, '.planning'), { recursive: true });
+    runGit(['init', '-q'], { cwd: dir });
+    runGit(['config', 'user.email', 't@t.com'], { cwd: dir });
+    runGit(['config', 'user.name', 'T'], { cwd: dir });
+    runGit(['config', 'commit.gpgsign', 'false'], { cwd: dir });
+    fs.writeFileSync(path.join(dir, 'seed.txt'), 'seed\n');
+    runGit(['add', '-A'], { cwd: dir });
+    runGit(['commit', '-q', '-m', 'seed'], { cwd: dir });
+    const base = runGit(['rev-parse', 'HEAD'], { cwd: dir }).stdout.trim();
+
+    fs.writeFileSync(
+      path.join(dir, '.planning', 'STATE.md'),
+      [
+        '---',
+        'status: executing',
+        ...(stateHead === null ? [] : [`state_head: ${stateHead === 'BASE' ? base : stateHead}`]),
+        '---',
+        '',
+        '# Project State',
+        '',
+        'Phase: 1',
+        '',
+      ].join('\n'),
+    );
+    return { dir: track(dir), base };
+  }
+
+  function advance(dir, n) {
+    for (let i = 0; i < n; i++) {
+      fs.writeFileSync(path.join(dir, `c${i}.txt`), `${i}\n`);
+      runGit(['add', '-A'], { cwd: dir });
+      runGit(['commit', '-q', '-m', `c${i}`], { cwd: dir });
+    }
+  }
+
+  test('state_head at HEAD → commits_behind 0, commit_stale false (known fresh)', () => {
+    const { dir } = gitProject('BASE');
+    const s = detectSignals(dir);
+    assert.strictEqual(s.state_commits_behind, 0);
+    assert.strictEqual(s.state_commit_stale, false);
+  });
+
+  test('state_head N commits back → commits_behind N', () => {
+    const { dir } = gitProject('BASE');
+    advance(dir, 3);
+    const s = detectSignals(dir);
+    assert.strictEqual(s.state_commits_behind, 3,
+      'commits_behind must count commits between state_head and HEAD');
+    assert.strictEqual(s.state_commit_stale, true);
+  });
+
+  test('missing state_head → tri-state null ("we don\'t know"), NOT false', () => {
+    // Mirrors graphify's shipped commit_stale contract (src/graphify.cts:446):
+    // null = unknown, distinct from false = known fresh. Collapsing unknown to
+    // false would assert freshness the engine cannot actually vouch for.
+    const { dir } = gitProject(null);
+    const s = detectSignals(dir);
+    assert.strictEqual(s.state_commits_behind, null);
+    assert.strictEqual(s.state_commit_stale, null);
+  });
+
+  test('malformed / unreachable state_head → null, never throws', () => {
+    for (const bad of ['not-a-sha', 'zzzz', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef']) {
+      const { dir } = gitProject(bad);
+      let s;
+      assert.doesNotThrow(() => { s = detectSignals(dir); }, `${bad} must not throw`);
+      assert.strictEqual(s.state_commits_behind, null, `${bad} → null`);
+      assert.strictEqual(s.state_commit_stale, null, `${bad} → null`);
+    }
+  });
+
+  test('non-git project → null (no signal), never throws', () => {
+    const dir = track(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-nogit-')));
+    fs.mkdirSync(path.join(dir, '.planning'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.planning', 'STATE.md'),
+      ['---', 'status: executing', 'state_head: abc1234', '---', '', '# Project State', ''].join('\n'),
+    );
+    let s;
+    assert.doesNotThrow(() => { s = detectSignals(dir); });
+    assert.strictEqual(s.state_commit_stale, null);
+  });
+
+  // #2573 × #3099 composition: the commit-age freshness signal reads `state_head`
+  // while the LAST_ACTIVITY_UNPARSEABLE diagnostic reads `last_activity` — two
+  // DIFFERENT fields. A STATE.md carrying both an unparseable last_activity AND a
+  // valid state_head must resolve each independently: the diagnostic fires for
+  // last_activity, and the freshness signal still reads state_head. Neither
+  // shadows the other (they are not "two staleness signals on one field").
+  test('unparseable last_activity + valid state_head compose: diagnostic fires AND freshness reads independently (#3099)', () => {
+    const {
+      _resetUnusableInputWarningsForTests,
+      _unusableInputEmissionCountForTests,
+    } = require('../gsd-core/bin/lib/unusable-input.cjs');
+    _resetUnusableInputWarningsForTests();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-compose-'));
+    fs.mkdirSync(path.join(dir, '.planning'), { recursive: true });
+    runGit(['init', '-q'], { cwd: dir });
+    runGit(['config', 'user.email', 't@t.com'], { cwd: dir });
+    runGit(['config', 'user.name', 'T'], { cwd: dir });
+    runGit(['config', 'commit.gpgsign', 'false'], { cwd: dir });
+    fs.writeFileSync(path.join(dir, 'seed.txt'), 'seed\n');
+    runGit(['add', '-A'], { cwd: dir });
+    runGit(['commit', '-q', '-m', 'seed'], { cwd: dir });
+    const base = runGit(['rev-parse', 'HEAD'], { cwd: dir }).stdout.trim();
+    track(dir);
+    fs.writeFileSync(
+      path.join(dir, '.planning', 'STATE.md'),
+      [
+        '---',
+        'status: executing',
+        'last_activity: not-a-real-date at all',
+        `state_head: ${base}`,
+        '---',
+        '',
+        '# Project State',
+        '',
+        'Phase: 1',
+        '',
+      ].join('\n'),
+    );
+    const s = detectSignals(dir);
+    // last_activity is unusable → its diagnostic fires (its own field), exactly once.
+    assert.strictEqual(_unusableInputEmissionCountForTests(), 1,
+      'unparseable last_activity must emit exactly one LAST_ACTIVITY_UNPARSEABLE — the freshness path adds none');
+    // state_head still resolves independently → fresh (0 commits behind HEAD).
+    assert.strictEqual(s.state_commits_behind, 0,
+      'state_head freshness must resolve independently of the last_activity diagnostic');
+    assert.strictEqual(s.state_commit_stale, false);
   });
 });
 

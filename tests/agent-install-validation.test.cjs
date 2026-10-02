@@ -135,6 +135,57 @@ describe('init commands: agents_installed field (#1371)', () => {
     assert.deepStrictEqual(output.missing_agents, []);
   });
 
+  test('init reports codex when the session signal is present', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    const result = runGsdTools('init plan-phase 1 --raw', tmpDir, { CODEX_SANDBOX: 'seatbelt' });
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.agent_runtime, 'codex');
+  });
+
+  test('init honors explicit config runtime over detection', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({ runtime: 'claude' }),
+    );
+
+    const result = runGsdTools('init plan-phase 1 --raw', tmpDir, { CODEX_SANDBOX: 'seatbelt' });
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.agent_runtime, 'claude');
+  });
+
+  test('init is unaffected in a non-codex session', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    const result = runGsdTools('init plan-phase 1 --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.agent_runtime, 'claude');
+  });
+
+  test('init honors GSD_RUNTIME over detection', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    const result = runGsdTools('init plan-phase 1 --raw', tmpDir, {
+      GSD_RUNTIME: 'opencode',
+      CODEX_SANDBOX: 'seatbelt',
+    });
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.agent_runtime, 'opencode');
+  });
+
   test('init execute-phase includes missing_agents list when agents are missing', () => {
     const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
     fs.mkdirSync(phaseDir, { recursive: true });
@@ -485,6 +536,59 @@ describe('validate agents subcommand (#1371)', () => {
     const output = JSON.parse(result.output);
     // The expected agents come from MODEL_PROFILES keys
     assert.ok(output.expected.length > 0, 'Must have expected agents');
+  });
+});
+
+// ─── Sandbox posture drift, at the COMMAND (#3897 rung 3, ADR-3473 §8.3) ─────
+//
+// tests/agent-install-check.test.cjs's T28 already proves checkCodexSandboxPosture
+// itself detects a drifted sandbox_mode. That is a UNIT row — it drives the
+// helper directly. Before verify.cts wired the helper into cmdValidateAgents,
+// T28 stayed green while `gsd-tools validate agents` (the actual command a
+// user/CI runs) never surfaced the drift at all — the ADR-3180 Decision 4(b)
+// failure shape ("asserting at a helper's return, not at the consumer's
+// output"). This row drives the real CLI end to end and asserts on ITS JSON,
+// so a future regression that leaves the helper correct but un-wired from the
+// command fails here even if T28 stays green.
+describe('validate agents surfaces sandbox posture drift at the command (#3897 rung 3)', () => {
+  let tmpDir;
+  let agentsDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+    agentsDir = path.join(tmpDir, 'codex-agents');
+    fs.mkdirSync(agentsDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('validateAgentsSurfacesSandboxDriftAtTheCommand_3897: `validate agents` reports the drifted agent/expected/found via sandbox_posture', () => {
+    // agents/gsd-executor.md (the real repo role source — checkCodexSandboxPosture
+    // reads it directly, it is not fixture-overridable) declares tools that derive
+    // workspace-write. Install a drifted TOML claiming read-only instead.
+    fs.writeFileSync(
+      path.join(agentsDir, 'gsd-executor.toml'),
+      'name = "gsd-executor"\ndescription = "Executes plans"\nsandbox_mode = "read-only"\n'
+      + "developer_instructions = '''\nExecute.\n'''\n",
+    );
+
+    const env = { GSD_AGENTS_DIR: agentsDir, GSD_RUNTIME: 'codex' };
+    const result = runGsdTools('validate agents --raw', tmpDir, env);
+    assert.ok(result.success, `validate agents failed: ${result.error}`);
+    assert.strictEqual(result.exitCode, 0, 'model-posture drift is report-only, not fatal — sandbox posture must match that precedent');
+
+    const output = JSON.parse(result.output);
+    assert.ok(
+      output.sandbox_posture,
+      `expected \`validate agents\` output to carry a sandbox_posture key, got keys: ${Object.keys(output).join(', ')}`,
+    );
+    assert.strictEqual(output.sandbox_posture.ok, false);
+    const violation = output.sandbox_posture.violations.find((v) => v.agent === 'gsd-executor');
+    assert.ok(violation, 'the command output must name the drifted agent');
+    assert.strictEqual(violation.expected, 'workspace-write');
+    assert.strictEqual(violation.found, 'read-only');
   });
 });
 

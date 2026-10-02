@@ -34,7 +34,7 @@ const src = readFileSync('./bin/lib/plan.cjs', 'utf8');
 assert(src.includes('plan-1.1')); // never do this
 ```
 
-**Enforcement:** `local/no-source-grep` (ESLint, currently `warn`; becomes `error` after issue #453 merges).
+**Enforcement:** `local/no-source-grep` (ESLint, `error`; promoted repo-wide by #3313).
 
 ### 2. No vacuous-truth assertions
 
@@ -83,6 +83,44 @@ See [`CONTRIBUTING.md` — "QA Matrix Requirements"](CONTRIBUTING.md#qa-matrix-r
 
 **Enforcement:** Code review, `no-only-tests/no-only-tests` ESLint rule (prevents happy-path-only merges via `test.only`).
 
+#### Standing rule: assert the degraded verdict, not just "did not throw"
+
+A counter-test that feeds a hostile or failing input satisfies the letter of contract 6 above and can still be worthless. If a function has an error or fallback branch — a guard that degrades permissively on bad input, a resolver that falls back to a default root, a lock that expires — the test for that branch must assert the **specific degraded verdict** the branch produces, not merely that the call completed without throwing or returned *some* value of the right type.
+
+**Non-compliant (the actual pre-fix shape of `tests/worktree-safety.test.cjs`'s `resolveWorktreeContext` timeout counter-test, per [#3050](https://github.com/open-gsd/gsd-core/issues/3050) finding 2 and epic [#3051](https://github.com/open-gsd/gsd-core/issues/3051) Phase 3, generalized here as [#3053](https://github.com/open-gsd/gsd-core/issues/3053) H4):**
+
+```javascript
+// A liveness test wearing a correctness test's name — it proves the call
+// survived a timeout, not that it degraded to the RIGHT shape.
+test('resolveWorktreeContext handles a timeout', () => {
+  const result = resolveWorktreeContext('/repo/wt', { execGit: makeTimeoutStub() });
+  assert.doesNotThrow(() => resolveWorktreeContext('/repo/wt', { execGit: makeTimeoutStub() }));
+  assert.strictEqual(typeof result.effectiveRoot, 'string'); // true of ANY string, including the wrong one
+});
+```
+
+**Compliant (the actual fixed test, `tests/worktree-safety.test.cjs`):**
+
+```javascript
+test('returns effectiveRoot=cwd, mode=current_directory, reason=git_timed_out on timeout, not throw', () => {
+  const result = resolveWorktreeContext('/tmp', { execGit: makeTimeoutStub() });
+  assert.deepStrictEqual(result, {
+    effectiveRoot: '/tmp',           // the specific degraded value, not just "a string"
+    mode: 'current_directory',
+    reason: 'git_timed_out',
+  });
+});
+```
+
+This is not the same requirement as the input-rejection rule above it. A test can already satisfy "feed the SUT a hostile input" while still failing this one, if it never checks *what the SUT did in response*. Two shapes are explicitly out of scope for this rule — they are not fail-open guards and adding this counter-test to them would be noise, not signal:
+
+- A branch that re-throws or propagates the error rather than producing a degraded verdict — contract 4 above ("test the claimed path") already covers it via `assert.throws`.
+- A branch that returns a documented, structured error signal that the test already asserts on directly (a three-state policy that fails closed on malformed input, a dispatch convention, an `{isError: true}` return shape) — the structured field *is* the verdict; asserting on it already satisfies this rule.
+
+**Why this isn't a lint rule.** A pattern scan for fail-open shapes was measured directly against this repo's `src/*.cts` during epic #3051: it scored 1 true positive against 3 false positives (a documented three-state policy, a dispatch convention, and a structured `isError` return each looked like a fail-open guard and were not). The permissive-verdict shape is module-specific, not mechanically enumerable, so a lint rule here would be both incomplete and noisy. This is a code-review expectation, not a CI gate — it will not fail a build on its own; it fails when a reviewer (human or `/code-review`) lets a "did not throw" test stand in for a correctness test.
+
+**Enforcement:** Code review only — deliberately not lint-enforced (see above). Cross-linked from [`CONTRIBUTING.md` — "QA Matrix Requirements"](CONTRIBUTING.md#qa-matrix-requirements) so reviewers see it at the point they already apply the negative-space matrix.
+
 ---
 
 ## New policies (ADR 456)
@@ -99,11 +137,11 @@ await doWork();
 assert(Date.now() - start < 200, 'must complete in 200ms');
 ```
 
-**Enforcement:** `local/no-elapsed-assertion` (ESLint, currently `warn`; becomes `error` after issue #453 merges). Also `no-restricted-syntax` ban on `performance.now()` comparisons in assertions.
+**Enforcement:** `local/no-elapsed-assertion` (ESLint, `error` — promoted by [#3331](https://github.com/open-gsd/gsd-core/issues/3331) once #3314 delivered its precondition: ADR-456 §(a) amended with a reachability-based selection rule covering all three clock-control mechanisms this repo uses, and the direct-use modules carrying real time-gating logic (`commands.cts`, `init.cts`, `io.cts`) backfilled with deterministic coverage). Also `no-restricted-syntax` ban on `performance.now()` comparisons in assertions.
 
 ### Clock-seam pattern for concurrency
 
-Concurrency logic must be tested via an injectable clock seam backed by `node:test` `mock.timers`. Real OS scheduler races are non-deterministic on loaded CI runners and are not a permitted test pattern.
+Concurrency logic must be tested deterministically, via one of three reachability-selected mechanisms (see ADR-456 §(a)): an injectable clock seam for modules that accept `{clock = Date}`, `node:test` `mock.timers` for in-process direct-`Date`-reading code, or the `GSD_TEST_MODE`+`GSD_NOW_MS` subprocess pin (routed through `realClock`) for CLI-spawned code. Real OS scheduler races are non-deterministic on loaded CI runners and are not a permitted test pattern regardless of which mechanism applies.
 
 **Compliant pattern:**
 
@@ -124,7 +162,7 @@ test('lock expires after TTL', (t) => {
 });
 ```
 
-**Enforcement:** `local/no-magic-sleep-in-tests` (bans `setTimeout`/`sleep`/`delay` inside test bodies; ESLint, currently `warn`; becomes `error` after issue #453 merges). Code review catches the race pattern directly.
+**Enforcement:** `local/no-magic-sleep-in-tests` (bans `setTimeout`/`sleep`/`delay` inside test bodies; ESLint, `error`). Code review catches the race pattern directly.
 
 ### Property-based testing tier
 
@@ -135,6 +173,38 @@ Invariant categories to consider: round-trip, monotonicity, boundary containment
 **Threshold:** No hard per-file threshold is enforced by CI tooling; the gate is Stryker mutation score (see below). Property tests are the mechanism that drives mutation score above the threshold on logic-heavy paths.
 
 **Enforcement:** Code review verifies that property tests exist for modules in scope. Stryker mutation score below 80 % blocks merge (see next section).
+
+### No ad hoc timeout literals
+
+Do not write a bare numeric `timeout`/`timeoutMs` option value at a test call site. Two independently-guessed copies of the same magic number can silently drift apart, or worse, collide exactly and produce a zero-margin race: `bin/check-latest-version.cjs`'s `timeout: 15_000` and this suite's independent `timeoutMs: 15000` could SIGKILL the whole process tree at the exact same instant, and it failed specifically on Windows CI (fixed in PR #4428).
+
+**Non-compliant:**
+
+```javascript
+const r = runHookSeam(WORKER_PATH, [], { timeoutMs: 15000 });
+```
+
+**Compliant — same class of subprocess as an existing class-norm:**
+
+```javascript
+const { GIT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+
+const r = runHookSeam(WORKER_PATH, [], { timeoutMs: GIT_TIMEOUT_MS });
+```
+
+**Compliant — a genuinely distinct class, declared locally with a margin over the thing it wraps** (the actual fix in PR #4428 — the worker's inner `npm view` call is bounded by its own named `NPM_VIEW_TIMEOUT_MS`, so the outer test imports it and adds explicit headroom instead of re-guessing a number):
+
+```javascript
+const { NPM_VIEW_TIMEOUT_MS } = require('../gsd-core/bin/check-latest-version.cjs');
+
+const WORKER_TEARDOWN_MARGIN_MS = 10_000; // real headroom beyond the inner timeout it wraps
+
+const r = runHookSeam(WORKER_PATH, [], { timeoutMs: NPM_VIEW_TIMEOUT_MS + WORKER_TEARDOWN_MARGIN_MS });
+```
+
+Import an existing class-norm constant from `tests/helpers/timeouts.cjs` (`PROBE_TIMEOUT_MS`, `GIT_TIMEOUT_MS`, `BUILD_TIMEOUT_MS`, `INSTALL_TIMEOUT_MS`) when the call is the same class of subprocess, or declare a local one with a comment justifying why it is a distinct class — see CONTRIBUTING.md's "Use Centralized Test Helpers" section.
+
+**Enforcement:** `local/no-adhoc-timeout-literal` (ESLint, `error`). A non-literal value (an `Identifier`, `MemberExpression`, or `CallExpression`) is trusted; only a resolvable numeric literal is flagged. There is no marker-comment escape — the fix is always to extract a named constant. There is no allowlist. `eslint-rules/no-adhoc-timeout-literal.allowlist.json` grandfathered pre-existing legacy violations; the epic that introduced it (#4445) migrated every site across seventeen batches and deleted the file in its terminal batch, so `local/no-adhoc-timeout-literal` now runs with **no exemption surface**.
 
 ### Mutation testing — 80 % threshold
 
@@ -169,14 +239,15 @@ Real multi-process race tests are deleted once the corresponding deterministic c
 
 | Rule | Severity | What it catches |
 |---|---|---|
-| `local/no-source-grep` | `warn` → `error` (#453) | `readFileSync` on source files + text assertions; `assert.match`/`doesNotMatch` on raw stdout/stderr |
-| `local/no-magic-sleep-in-tests` | `warn` → `error` (#453) | `setTimeout`/`sleep`/`delay` calls inside `test()`/`it()`/`describe()` bodies |
-| `local/no-elapsed-assertion` | `warn` → `error` (#453) | Assertions on `Date.now()` delta, `process.hrtime()`, `performance.now()` comparisons |
+| `local/no-source-grep` | `error` (promoted by #3313) | `readFileSync` on source files + text assertions; `assert.match`/`doesNotMatch` on raw stdout/stderr |
+| `local/no-magic-sleep-in-tests` | `error` | `setTimeout`/`sleep`/`delay` calls inside `test()`/`it()`/`describe()` bodies |
+| `local/no-elapsed-assertion` | `error` (promoted by #3331, precondition delivered by #3314) | Assertions on `Date.now()` delta, `process.hrtime()`, `performance.now()` comparisons |
+| `local/no-adhoc-timeout-literal` | `error` | Bare numeric `timeout`/`timeoutMs` option literal in `tests/**/*.cjs` (PR #4428) |
 | `no-only-tests/no-only-tests` | `error` | `test.only`/`describe.only`/`it.only` committed to non-scratch files |
 | `no-restricted-syntax` (ban 1) | `error` | Top-level `setTimeout` in `ExpressionStatement` |
 | `no-restricted-syntax` (ban 2) | `error` | `.only` member access on `test`/`it`/`describe` (belt-and-suspenders) |
 
-All three `local/*` rules currently ship at `warn`. They become `error` after the cleanup sweep tracked at [#453](https://github.com/open-gsd/gsd-core/issues/453) merges. New violations added after the acceptance of ADR 456 are out of policy regardless of the current ESLint severity.
+`local/no-source-grep` and `local/no-magic-sleep-in-tests` ship at `error` (promoted by [#3313](https://github.com/open-gsd/gsd-core/issues/3313), absorbing the cleanup sweep originally tracked at #453). `local/no-elapsed-assertion` now also ships at `error` (promoted by [#3331](https://github.com/open-gsd/gsd-core/issues/3331)) — [#3314](https://github.com/open-gsd/gsd-core/issues/3314) delivered its precondition first (ADR-456 §(a) amended with a reachability-based 3-mechanism rule; `commands.cts`/`init.cts`/`io.cts` backfilled with deterministic coverage), mirroring the same handover boundary the epic draws for its other items. New violations added after the acceptance of ADR 456 are out of policy regardless of ESLint severity.
 
 ESLint harness details: [`docs/adr/452-eslint-lint-harness.md`](docs/adr/452-eslint-lint-harness.md).
 

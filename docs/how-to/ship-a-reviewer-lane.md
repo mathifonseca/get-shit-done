@@ -51,6 +51,7 @@ Most lanes are `transport: "spawn"` — GSD runs a binary and reads its output. 
       "effortChannel": "none"
     },
     "timeoutFloorMs": 900000,
+    "timeoutConfigKey": "review.timeouts.acme",
     "emptyOutput": "stub-with-stderr",
     "reviewsSection": "Acme",
     "evidenceClass": "source-grounded",
@@ -65,6 +66,11 @@ Most lanes are `transport: "spawn"` — GSD runs a binary and reads its output. 
       "type": "string",
       "default": "",
       "description": "Model passed to the Acme reviewer lane."
+    },
+    "review.timeouts.acme": {
+      "type": "number",
+      "default": -1,
+      "description": "Outer wall-clock timeout override (seconds) for the Acme reviewer lane."
     }
   }
 }
@@ -107,6 +113,7 @@ If your reviewer is a served model endpoint rather than a CLI, use `transport: "
     "effortChannel": "none"
   },
   "timeoutFloorMs": 120000,
+  "timeoutConfigKey": "review.timeouts.acme_local",
   "emptyOutput": "stub-with-stderr",
   "reviewsSection": "Acme Local",
   "evidenceClass": "source-grounded",
@@ -127,7 +134,7 @@ If your reviewer is a served model endpoint rather than a CLI, use `transport: "
 
 Declare the lane's keys in your own manifest `config` block, never in the central schema. A key present in both is a build failure, not a warning — federated ownership is exclusive.
 
-Name `modelConfigKey` and `promptBudgetKey` to match keys you actually declare. A lane pointing at a key nobody owns resolves to nothing, which reads to the user as "my model override is being ignored."
+Name `modelConfigKey`, `promptBudgetKey`, and `timeoutConfigKey` to match keys you actually declare. A lane pointing at a key nobody owns resolves to nothing, which reads to the user as "my model override is being ignored."
 
 Users then set them the ordinary way, in `.planning/config.json`:
 
@@ -219,6 +226,46 @@ For the reasoning behind consent-plus-integrity rather than a sandbox, see [The 
 
 ---
 
+## Migrate off the removed `reviewerCli` flag
+
+Before 1.9.0, a runtime capability declared itself a reviewer with a boolean in the open host-behaviors bag:
+
+```json
+"runtime": { "hostBehaviors": { "reviewerCli": true } }
+```
+
+That flag carried no invocation data — it only added the capability id to the roster, leaving the probe, argv shape, timeout, and output policy hardcoded in GSD core. It was superseded by the `reviewer` body in 1.9.0, kept working for one release as a derived alias, and **was removed in the release after that**.
+
+**Symptom.** Your capability installs and validates exactly as before, but `/gsd-review` no longer offers your flag and your lane never runs. On a registry build or a capability install you will see:
+
+```
+⚠ capability "your-cap" runtime.hostBehaviors.reviewerCli was removed (ADR-2782 D9)
+  — ignored, and it contributes no reviewer lane. Declare a `reviewer` body instead;
+  see docs/how-to/ship-a-reviewer-lane.md
+```
+
+**Fix.** Delete the flag and declare a `reviewer` body, following [Declare a spawned-CLI lane](#declare-a-spawned-cli-lane) above. Your `reviewer.slug` should be whatever the flag used to contribute — your **capability id** — so existing `review.default_reviewers` entries and `--<slug>` flags keep working:
+
+```json
+{
+  "id": "your-cap",
+  "role": "runtime",
+  "runtime": { "hostBehaviors": { } },
+  "reviewer": {
+    "slug": "your-cap",
+    "flags": ["--your-cap"]
+  }
+}
+```
+
+Then rebuild and re-verify with the steps in [Build and install](#build-and-install) and [Verify the lane resolves](#verify-the-lane-resolves).
+
+Two things the migration buys you beyond restoring the lane: your invocation shape becomes declared data rather than something GSD core has to know about, and your lane can own its own config keys (see [Own your lane's config keys](#own-your-lanes-config-keys)).
+
+> **Nothing else about your capability changes.** A manifest still carrying the removed key parses, validates, and installs exactly as before — it simply contributes no lane, and says so. The key is inert, not fatal.
+
+---
+
 ## Conditionals: when the vocabulary does not fit your tool
 
 Third-party lanes are **data-only**. `handler` is a closed enum of first-party names (`antigravity`, `openai-compatible`, `opencode`, or `null`) — you may reference an existing member, but you cannot ship your own handler module.
@@ -238,6 +285,7 @@ Filing the issue is the supported route, not a workaround. The `openai-http` tra
 ## Related
 
 - [Capability manifest](../reference/capability-manifest.md) — the full `reviewer` body field table and validation rules
+- [Capability manifest → `hostBehaviors`](../reference/capability-manifest.md#hostbehaviors) — why the bag is unvalidated, and the one removal notice inside it
 - [Set up cross-AI review](set-up-cross-ai-review.md) — the user-facing side: choosing, configuring, and running reviewers
 - [Develop a Capability for GSD 1.5+](develop-a-capability.md) — manifests, registry generation, and federated config
 - [Publish a capability](publish-a-capability.md) — versioning, `engines.gsd`, and distribution

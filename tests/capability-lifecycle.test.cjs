@@ -20,6 +20,7 @@ const path = require('node:path');
 const { cleanup } = require('./helpers.cjs');
 const lifecycle = require('../gsd-core/bin/lib/capability-lifecycle.cjs');
 const ledgerMod = require('../gsd-core/bin/lib/capability-ledger.cjs');
+const { escapeRegex } = require('../gsd-core/bin/lib/pattern.cjs');
 const { CAP_MARKER } = lifecycle;
 
 // ---------------------------------------------------------------------------
@@ -3218,7 +3219,7 @@ test('IC-05/WIN-2: a consent-store write failure leaves the install status:insta
   assert.ok(fs.existsSync(path.join(dir, '.gsd', 'capabilities', 'rofs-cap', 'capability.json')), 'the bundle is committed on disk');
   assert.match(buf, /capability consent:/i, 'a consent diagnostic was written to stderr');
   assert.match(buf, /could not write the consent record/i, 'the warning explains the write failure');
-  assert.match(buf, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'the warning names the consent store path');
+  assert.match(buf, new RegExp(escapeRegex(home)), 'the warning names the consent store path');
 });
 
 // ---------------------------------------------------------------------------
@@ -3395,4 +3396,49 @@ test('#1463 outdated: npm EXACT-pinned source (@1.2.3) → status pinned (update
   const fakeNpm = () => ({ exitCode: 0, stdout: '9.9.9\n', stderr: '', signal: null, error: null });
   const [rec] = lifecycle.outdatedCapabilities({ runtimeDir: dir, execOverrides: { npm: fakeNpm } });
   assert.strictEqual(rec.status, 'pinned');
+});
+
+// ---------------------------------------------------------------------------
+// #3514 (epic #1900 F21c) — the lifecycle threads integrityPinned from the
+// install opts (and a git #sha: pin) into the trust verdict's disclosure, so
+// the consent prompt the CLI renders distinguishes pinned from unverified.
+// ---------------------------------------------------------------------------
+
+test('#3514: an unpinned executable install aborts with an unverified disclosure', async () => {
+  const dir = runtime();
+  const res = await lifecycle.installCapability('./exec', {
+    runtimeDir: dir, hostVersion: '1.6.0', consentGranted: false,
+    _resolve: fakeResolve(execCap('exec', '1.0.0')),
+  });
+  assert.strictEqual(res.status, 'aborted');
+  assert.strictEqual(res.disclosure.integrityStatus, 'unverified');
+});
+
+test('#3514: an install with a supplied --integrity pin aborts with a pinned disclosure', async () => {
+  const dir = runtime();
+  const res = await lifecycle.installCapability('./exec', {
+    runtimeDir: dir, hostVersion: '1.6.0', consentGranted: false,
+    integrity: 'sha512-AAAA',
+    _resolve: fakeResolve(execCap('exec', '1.0.0'), { integrity: 'sha512-AAAA' }),
+  });
+  assert.strictEqual(res.status, 'aborted');
+  assert.strictEqual(res.disclosure.integrityStatus, 'pinned');
+});
+
+test('#3514: a git #sha:<hex-commit> source renders commit-pinned; a #sha:<mutable-ref> does not', async () => {
+  const dir = runtime();
+  const shaPin = await lifecycle.installCapability('https://example.com/repo.git#sha:0123456789abcdef0123456789abcdef01234567', {
+    runtimeDir: dir, hostVersion: '1.6.0', consentGranted: false,
+    _resolve: fakeResolve(execCap('exec', '1.0.0')),
+  });
+  assert.strictEqual(shaPin.status, 'aborted');
+  assert.strictEqual(shaPin.disclosure.integrityStatus, 'commit-pinned');
+
+  const mutable = await lifecycle.installCapability('https://example.com/repo.git#sha:main', {
+    runtimeDir: dir, hostVersion: '1.6.0', consentGranted: false,
+    _resolve: fakeResolve(execCap('exec', '1.0.0')),
+  });
+  assert.strictEqual(mutable.status, 'aborted');
+  assert.strictEqual(mutable.disclosure.integrityStatus, 'unverified',
+    'a #sha:<non-hex> ref is a moving ref and must not render as pinned');
 });

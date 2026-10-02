@@ -260,6 +260,14 @@ export const VERIFY_COMMAND_ALIASES: CommandAlias[] = [
     ],
     "subcommand": "codebase-drift",
     "mutation": false
+  },
+  {
+    "canonical": "verify.context-drift",
+    "aliases": [
+      "verify context-drift"
+    ],
+    "subcommand": "context-drift",
+    "mutation": false
   }
 ];
 
@@ -310,6 +318,14 @@ export const INIT_COMMAND_ALIASES: CommandAlias[] = [
       "init quick"
     ],
     "subcommand": "quick",
+    "mutation": false
+  },
+  {
+    "canonical": "init.quick-batch",
+    "aliases": [
+      "init quick-batch"
+    ],
+    "subcommand": "quick-batch",
     "mutation": false
   },
   {
@@ -629,6 +645,14 @@ export const ROADMAP_COMMAND_ALIASES: CommandAlias[] = [
     "mutation": false
   },
   {
+    "canonical": "roadmap.milestone-scope",
+    "aliases": [
+      "roadmap milestone-scope"
+    ],
+    "subcommand": "milestone-scope",
+    "mutation": false
+  },
+  {
     "canonical": "roadmap.get-phase",
     "aliases": [
       "roadmap get-phase"
@@ -700,6 +724,20 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
   {
     "canonical": "commit",
     "aliases": [],
+    "mutation": true
+  },
+  {
+    "canonical": "commit-docs-guard.disable",
+    "aliases": [
+      "commit-docs-guard disable"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "commit-docs-guard.enable",
+    "aliases": [
+      "commit-docs-guard enable"
+    ],
     "mutation": true
   },
   {

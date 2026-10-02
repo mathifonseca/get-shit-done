@@ -1,3 +1,5 @@
+@~/.claude/gsd-core/references/response-language-directive.md
+
 # sync-skills — Cross-Runtime GSD Skill Sync
 
 **Command:** `/gsd-sync-skills`
@@ -11,7 +13,7 @@ Sync managed `gsd-*` skill directories from one canonical runtime's skills root 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--from <runtime>` | Yes | *(none)* | Source runtime — the canonical runtime to copy from |
-| `--to <runtime\|all>` | Yes | *(none)* | Destination runtime or `all` supported runtimes |
+| `--to <runtime\|all>` | Yes | *(none)* | Destination runtime or `all` supported runtimes. **Must equal `--from`** — cross-runtime sync is refused (#3025: skill content/layout is runtime-specific and produced by the installer's per-runtime converters; use the installer for a different runtime). |
 | `--dry-run` | No | *on by default* | Preview changes without writing anything |
 | `--apply` | No | *off* | Execute the diff (overrides dry-run) |
 
@@ -30,14 +32,14 @@ IS_APPLY=false
 
 # Parse --from
 if [[ "$@" == *"--from"* ]]; then
-  FROM_RUNTIME=$(echo "$@" | grep -oP '(?<=--from )\S+')
+  FROM_RUNTIME=$(echo "$@" | sed -E 's/.*--from[[:space:]]+([^[:space:]]+).*/\1/')
 fi
 
 # Parse --to
 if [[ "$@" == *"--to all"* ]]; then
   TO_RUNTIMES=(antigravity augment claude cline codebuddy codex copilot cursor grok hermes kilo kimi kimi-code opencode pi qwen trae windsurf zcode)
 elif [[ "$@" == *"--to"* ]]; then
-  TO_RUNTIMES=( $(echo "$@" | grep -oP '(?<=--to )\S+') )
+  TO_RUNTIMES=( $(echo "$@" | sed -E 's/.*--to[[:space:]]+([^[:space:]]+).*/\1/') )
 fi
 
 # Parse --apply
@@ -50,6 +52,61 @@ fi
 - If `--from` is missing or unrecognized: print error and exit
 - If `--to` is missing or unrecognized: print error and exit
 - If `--from` == `--to` (single destination): print `[no-op: source and destination are the same runtime]` and exit
+- If any `--to` destination differs from `--from` (cross-runtime): REFUSE with the installer pointer below and exit. sync only supports identity sync — see the guard.
+- If `--from` or any `--to` value is not a runtime-id shape (`^[a-z0-9][a-z0-9-]*$`): REFUSE and exit — runtime ids are lowercase alphanumeric (+ hyphen); this rejects shell metacharacters before any interpolation (see security guard).
+
+**#3025 — Runtime-id shape validation (security: run BEFORE any interpolation):**
+
+`--from`/`--to` are interpolated into later `echo`/heredoc/`[[ ]]` contexts. Reject any value that is not a runtime-id shape BEFORE it reaches them, so a hostile value (e.g. `--to '$(cmd)'`, captured wholesale by the parser) cannot execute via command substitution in an error message.
+
+```bash
+# #3025 (security): runtime ids are lowercase alphanumeric (+ hyphen). Reject
+# anything else BEFORE any echo/heredoc/[[ ]] so a hostile --from/--to value
+# cannot execute via command substitution in a later error message.
+is_runtime_id() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]]; }
+if ! is_runtime_id "$FROM_RUNTIME"; then
+  echo "error: invalid --from runtime id (not lowercase alphanumeric): '$FROM_RUNTIME'" >&2
+  exit 1
+fi
+for DEST in "${TO_RUNTIMES[@]}"; do
+  if ! is_runtime_id "$DEST"; then
+    echo "error: invalid --to runtime id (not lowercase alphanumeric): '$DEST'" >&2
+    exit 1
+  fi
+done
+```
+
+**#3025 — Cross-runtime refuse guard (run BEFORE Step 2 resolution / Step 5 copy):**
+
+Skill content and directory layout are runtime-specific. The installer applies per-runtime
+converters, adapter headers, brand swaps, and layout rules at install time, and one runtime
+(`grok`) resolves to ANOTHER runtime's skills root. A verbatim copy from one runtime's
+skills root therefore produces content the installer would never have written for the destination,
+and can damage a runtime the user never named. Every cross-runtime pair is unsafe (content and/or
+layout and/or aliasing); only identity (`--from` == `--to`) is safe. Refuse cross-runtime and point
+the user at the installer — the only path that produces correctly converted skills.
+
+```bash
+# #3025: refuse cross-runtime skill sync before any resolution or copy.
+for DEST in "${TO_RUNTIMES[@]}"; do
+  if [[ "$DEST" != "$FROM_RUNTIME" ]]; then
+    cat >&2 <<EOF
+error: cross-runtime skill sync is not supported (--from $FROM_RUNTIME --to $DEST).
+       Skill content and directory layout are runtime-specific: the installer applies
+       per-runtime converters, adapter headers, brand swaps, and layout rules that a
+       verbatim copy cannot reproduce, and some runtimes share another runtime's skills
+       root — so a cross-runtime sync can damage a runtime you did not name.
+       To install correctly-converted skills for the '$DEST' runtime, run the GSD
+       installer for that runtime (not sync):
+         npx -y @opengsd/gsd-core@latest --global --<runtime>
+       (grok has no dedicated installer flag — it aliases the codex skills root,
+       which is itself why sync refuses it.)
+       sync only supports identity sync, where --from and --to are the same runtime.
+EOF
+    exit 1
+  fi
+done
+```
 
 ---
 
@@ -58,7 +115,7 @@ fi
 Resolve paths via `gsd_run query skills-root` — this reuses the single authoritative path table via the shipped `gsd-tools` binary (#3024: the installer entry point is not shipped in installed trees, but `gsd-tools` is):
 
 ```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { _gsd_at "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
 SRC_SKILLS_ROOT=$(gsd_run query skills-root "$FROM_RUNTIME" --raw)
 if [ $? -ne 0 ] || [ -z "$SRC_SKILLS_ROOT" ]; then
   echo "error: failed to resolve skills root for runtime '$FROM_RUNTIME' (gsd_run query skills-root $FROM_RUNTIME --raw)" >&2
@@ -175,19 +232,25 @@ DEST_ROOT=$(gsd_run query skills-root "$DEST_RUNTIME" --raw)
 
 mkdir -p "$DEST_ROOT"
 
-# #3025: verbatim cp -r copies the SOURCE runtime's converted skill form, which
-# corrupts skills for destinations that need a different conversion (e.g. Claude
-# SKILL.md → Codex TOML agent). Until the installer exposes a per-skill conversion
-# CLI, sync is limited to runtime pairs that share the same skill format.
-# Run `gsd install --<dest-runtime> --local` to get correctly converted skills
-# for a destination that uses a different format.
+# #3025: cross-runtime sync is refused in Step 1's guard (skill content/layout is
+# runtime-specific; a verbatim copy corrupts destinations and can alias another
+# runtime's root). This loop is therefore reached only for IDENTITY sync, where
+# every skill is SKIP (source == destination) and the create/update lists are
+# empty. If per-runtime conversion is ever wired in, this is where it would go;
+# until then the cp -r must never run for a destination != source.
 
-for SKILL in $CREATE_LIST $UPDATE_LIST; do
+# Rewrapped through unquoted command substitution (gsd-core#4109): a bare
+# `$VAR` word-splits under bash but not zsh, collapsing every element onto
+# one iteration there.
+for SKILL in $(printf '%s' "$CREATE_LIST") $(printf '%s' "$UPDATE_LIST"); do
   rm -rf "$DEST_ROOT/$SKILL"
   cp -r "$SRC_SKILLS_ROOT/$SKILL" "$DEST_ROOT/$SKILL"
 done
 
-for SKILL in $REMOVE_LIST; do
+# Rewrapped through unquoted command substitution (gsd-core#4109): a bare
+# `$VAR` word-splits under bash but not zsh, collapsing every element onto
+# one iteration there.
+for SKILL in $(printf '%s' "$REMOVE_LIST"); do
   rm -rf "$DEST_ROOT/$SKILL"
 done
 ```
@@ -215,6 +278,6 @@ Sync complete: <N> skills synced to <M> runtime(s).
 
 ## Limitations
 
-- Sync copies files verbatim and does not apply runtime-specific content transformations. Use the GSD installer directly for runtimes that require format conversion.
+- Sync copies files verbatim and does not apply runtime-specific content transformations. **Cross-runtime sync is refused** (#3025): skill content and layout are runtime-specific, and some runtimes alias another runtime's skills root, so a verbatim cross-runtime copy corrupts the destination (and can damage a runtime you did not name). Only identity sync (`--from` == `--to`) is supported. To install skills for a different runtime, run the GSD installer for that runtime (`npx -y @opengsd/gsd-core@latest --global --<runtime>`).
 - Cross-project skills (`.agents/skills/`) are out of scope — this command only touches global runtime skills roots.
 - Bidirectional sync is not supported. Choose one canonical source with `--from`.

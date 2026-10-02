@@ -37,7 +37,18 @@ const os = require('node:os');
 
 const stateMod = require('../gsd-core/bin/lib/state.cjs');
 const { writeStateMd } = stateMod;
+const { rebuildStateTransaction } = require('../gsd-core/bin/lib/state-transition.cjs');
+const { extractFrontmatter } = require('../gsd-core/bin/lib/frontmatter.cjs');
 const { cleanup } = require('./helpers.cjs');
+
+// ADR-3473 §8.6: writeStateMd's third argument is now a transaction. Both
+// tests below mirror MINIMAL_STATE_MD's own pre-write content back to itself
+// (no frontmatter on disk yet, so the snapshot is legitimately {}) — this is
+// the M8 concurrency invariant under test, not a preservation scenario, so
+// a `rebuild()` transaction (no preservation applied) is correct here.
+function rebuildTransactionFor(content) {
+  return rebuildStateTransaction({ snapshot: extractFrontmatter(content) });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -53,6 +64,7 @@ const MINIMAL_STATE_MD = [
 /** Parse progress.total_plans out of the STATE.md frontmatter block. */
 function readTotalPlans(statePath) {
   const written = fs.readFileSync(statePath, 'utf-8');
+  // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md this test just wrote via a fixture, fixed-size test-controlled content
   const fmMatch = written.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   assert.ok(fmMatch, 'STATE.md must have a frontmatter block after writeStateMd');
   const m = fmMatch[1].match(/total_plans:\s*(\d+)/);
@@ -98,7 +110,7 @@ describe('M8: writeStateMd scans disk AFTER acquiring the lock (scan-in-lock)', 
       },
     });
 
-    writeStateMd(statePath, MINIMAL_STATE_MD, tmpDir);
+    writeStateMd(statePath, MINIMAL_STATE_MD, rebuildTransactionFor(MINIMAL_STATE_MD), tmpDir);
 
     assert.equal(fired, 1, 'afterAcquire hook must fire exactly once inside writeStateMd');
 
@@ -115,7 +127,7 @@ describe('M8: writeStateMd scans disk AFTER acquiring the lock (scan-in-lock)', 
   test('single-threaded callers (no hook) are byte-for-behaviour unchanged: count = 1', () => {
     // Regression guard: with no concurrent writer (hook unset), the count must be
     // exactly the on-disk truth — the fix must NOT change the uncontended result.
-    writeStateMd(statePath, MINIMAL_STATE_MD, tmpDir);
+    writeStateMd(statePath, MINIMAL_STATE_MD, rebuildTransactionFor(MINIMAL_STATE_MD), tmpDir);
     assert.equal(
       readTotalPlans(statePath), 1,
       'uncontended writeStateMd must stamp the real on-disk plan count (1)'

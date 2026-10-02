@@ -26,7 +26,17 @@ GSD will:
 8. Offer to restore the user-added files it backed up in step 5.
 9. Report whether locally modified GSD files were backed up to `gsd-local-patches/`.
 
-Restart your runtime after the update to pick up new commands and agents.
+Before reporting completion, the installer checks each GSD-managed script and interpreter path written into runtime configuration, resolving the interpreter against the current install-time `PATH`. This only proves the path resolves now — a hook fired later under a different, more restricted `PATH` (e.g. a GUI launcher) can still fail even after this check passes.
+
+If a script is missing, unreadable, has the wrong file type, lacks a required execute permission, or its interpreter cannot be resolved, the update fails and reports every invalid path, each tagged with what happens to that runtime's config next. For Claude Code and other settings.json-based runtimes, this check runs before the update writes settings.json, so nothing new is persisted (an earlier settings.json/settings.local.json migration, if one applied, is the one exception and stays applied) — reported as "not persisted". For Codex, this reverts config.toml/hooks.json along with the rest of that runtime's pre-install snapshot (skills/, agents/, gsd-core/VERSION) — reported as "reverted". For Cursor, Windsurf, Kimi, and Cline, the runtime's config file is already written earlier in the update, ahead of this check, so a failure is reported but that file is left in place, broken — reported as "NOT reverted". Fix the reported path problem and rerun `/gsd-update` — do not restart into the incomplete update.
+
+Restart your runtime after a successful update to pick up new commands and agents.
+
+---
+
+## If the update target cannot be resolved
+
+`UPDATE_TARGET_UNRESOLVED` means GSD could not identify an installed runtime to update. No update, cache clear, or installer run occurred. Rerun `/gsd-update` from a valid installed runtime, or use the [standard installer](install-on-your-runtime.md#standard-install) for a fresh install.
 
 ---
 
@@ -75,9 +85,12 @@ Installed: 1.39.0
 Latest:    1.41.0
 
 ### What's New
-────────────────────────────────────────────────────────────
+
+---
+
 [changelog entries for 1.40.0 and 1.41.0]
-────────────────────────────────────────────────────────────
+
+---
 
 Proceed with update? [Yes, update now / No, cancel]
 ```

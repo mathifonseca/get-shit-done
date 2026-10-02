@@ -42,6 +42,7 @@ const {
   HOOKS_WINDOWS_SHIM_SRC,
   KIMI_ROOT_AGENT_SRC,
   AGENT_TRANSFORM_SRCS,
+  RUNTIME_NOTE_FILTER_TRANSFORM_SRCS,
   stripSkillPrefix,
   matchRules,
   attributeEmittedPath,
@@ -323,9 +324,10 @@ test('spot-check: cline rules are code-derived (attributable), not exempt', () =
     assert.equal(got.kind, 'code-derived', `${rel} must stay attributable`);
     assert.deepEqual(got.sources, [CLINE_BODY_SRC]);
   }
-  const agentsMd = attributeEmittedPath('.agents/AGENTS.md', 'cline');
-  assert.equal(agentsMd.kind, 'code-derived');
-  assert.deepEqual(agentsMd.sources, [CLINE_BODY_SRC]);
+  // #3547 dropped the `.agents/AGENTS.md` spot-check: that path only entered a
+  // manifest while the harness's collapsed --config-dir walked cline's
+  // ~/.agents sibling; with the real `.cline` config home it can never occur,
+  // and the rule was removed by the dead-rule arm.
 });
 
 test('spot-check: install-time state is exempt with an empty source list', () => {
@@ -334,7 +336,6 @@ test('spot-check: install-time state is exempt with an empty source list', () =>
     ['gsd-core/VERSION', 'claude'],
     ['gsd-core/.gsd-runtime', 'claude'],
     ['package.json', 'opencode'],
-    ['.gsd/defaults.json', 'opencode'],
     ['opencode.json', 'opencode'],
   ]) {
     const got = attributeEmittedPath(rel, rt);
@@ -359,8 +360,22 @@ test('agents-verbatim is reclassified to derived with the same transforms, sourc
   assert.deepEqual(got.transforms, AGENT_TRANSFORM_SRCS);
 });
 
+test('#4482 runtime-note-filtered command and skill surfaces declare their converter transform', () => {
+  const command = attributeEmittedPath('commands/gsd-plan-phase.md', 'opencode');
+  const skill = attributeEmittedPath('skills/gsd-plan-phase/SKILL.md', 'opencode');
+  const workflow = attributeEmittedPath('gsd-core/workflows/mvp-phase.md', 'opencode');
+  assert.deepEqual(command.transforms, RUNTIME_NOTE_FILTER_TRANSFORM_SRCS);
+  assert.deepEqual(skill.transforms, RUNTIME_NOTE_FILTER_TRANSFORM_SRCS);
+  assert.deepEqual(workflow.transforms, RUNTIME_NOTE_FILTER_TRANSFORM_SRCS);
+
+  assert.deepEqual(attributeEmittedPath('commands/gsd-plan-phase.md', 'kilo').transforms, RUNTIME_NOTE_FILTER_TRANSFORM_SRCS);
+  assert.deepEqual(attributeEmittedPath('skills/gsd-plan-phase/SKILL.md', 'cursor').transforms, RUNTIME_NOTE_FILTER_TRANSFORM_SRCS);
+  assert.deepEqual(attributeEmittedPath('gsd-core/workflows/mvp-phase.md', 'claude-local').transforms, RUNTIME_NOTE_FILTER_TRANSFORM_SRCS);
+  assert.deepEqual(attributeEmittedPath('gsd-core/workflows/mvp-phase.md', 'copilot').transforms, []);
+});
+
 test('a rule with no transforms field still returns an empty array, never undefined', () => {
-  const got = attributeEmittedPath('gsd-core/workflows/plan-phase.md', 'claude');
+  const got = attributeEmittedPath('agents/gsd-planner.agent.md', 'copilot');
   assert.deepEqual(got.transforms, [], 'absence of transforms must be a stable empty array, not undefined');
 });
 
@@ -620,7 +635,9 @@ test('emitted paths that could traverse out of the repo are rejected', () => {
   assert.throws(() => attributeEmittedPath('', 'claude'), /non-empty string/);
 
   // A dot-prefixed segment is NOT traversal — this must still resolve normally.
-  assert.doesNotThrow(() => attributeEmittedPath('.gsd/defaults.json', 'opencode'));
+  // #3547: '.gsd/defaults.json' left the manifests with the collapsed shape; a
+  // dot-prefixed STILL-EMITTED path serves the same not-traversal example.
+  assert.doesNotThrow(() => attributeEmittedPath('.gsd-profile', 'opencode'));
 });
 
 test('sampleLimit truncation is exact at limit-1 / limit / limit+1', () => {

@@ -1,8 +1,3 @@
-// allow-test-rule: structural-regression-guard
-// Reads hook .js or bin/install.js source to assert structural invariants
-// (search array order, function wiring, path constants) that cannot be
-// verified by observing runtime outputs alone. Per CONTRIBUTING.md exception matrix.
-
 /**
  * GSD Tools Tests - settings.json JSONC (JSON with comments) support
  *
@@ -18,6 +13,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+
+const { cleanup, mockPartialWriteThenThrow } = require('./helpers.cjs');
 
 // ─── load real install.js exports once ───────────────────────────────────────
 //
@@ -40,7 +37,7 @@ let installExports;
     process.stdout.write = _origWrite;
   }
 }
-const { readSettings, stripJsonComments } = installExports;
+const { readSettings, writeSettings, stripJsonComments } = installExports;
 
 // ─── tests ───────────────────────────────────────────────────────────────────
 
@@ -145,22 +142,35 @@ describe('stripJsonComments (#1461)', () => {
 });
 
 describe('readSettings null return on malformed files (#1461)', () => {
-  test('install.js contains JSONC stripping in readSettings', () => {
-    const installPath = path.join(__dirname, '..', 'bin', 'install.js');
-    const content = fs.readFileSync(installPath, 'utf8');
-    assert.ok(content.includes('stripJsonComments'),
-      'install.js should use stripJsonComments in readSettings');
+  test('readSettings strips JSONC comments when reading a real file', (t) => {
+    const tmpFile = path.join(os.tmpdir(), `gsd-settings-test-jsonc-${process.pid}.json`);
+    fs.writeFileSync(tmpFile, `{\n  // a comment\n  "key": "value"\n}`);
+    t.after(() => fs.unlinkSync(tmpFile));
+    const result = readSettings(tmpFile);
+    assert.deepStrictEqual(
+      result,
+      { key: 'value' },
+      'readSettings should use stripJsonComments so a commented file parses, not warns-as-malformed'
+    );
   });
 
-  test('readSettings returns null on truly malformed files (not empty object)', () => {
-    const installPath = path.join(__dirname, '..', 'bin', 'install.js');
-    const content = fs.readFileSync(installPath, 'utf8');
-    assert.ok(content.includes('return null'),
-      'readSettings should return null on parse failure, not empty object');
+  test('readSettings returns null on truly malformed files (not empty object)', (t) => {
+    const tmpFile = path.join(os.tmpdir(), `gsd-settings-test-malformed-return-${process.pid}.json`);
+    fs.writeFileSync(tmpFile, '{ this is not valid json');
+    t.after(() => fs.unlinkSync(tmpFile));
+    const result = readSettings(tmpFile);
+    assert.strictEqual(result, null, 'readSettings should return null on parse failure, not empty object');
   });
 
   test('callers guard against null readSettings return', () => {
     const installPath = path.join(__dirname, '..', 'bin', 'install.js');
+    // allow-test-rule: structural-implementation-guard (#1461) (#3545) — structural
+    // assertion on internal wiring inside install()'s (~2500-line)
+    // settings-configuration call sites — the
+    // null-guard only manifests behaviorally deep inside a full install()
+    // run, so the source-text check is the minimum-cost regression guard
+    // that a caller was not added without also checking readSettings'
+    // documented null return
     const content = fs.readFileSync(installPath, 'utf8');
     // Should have null guards at the settings configuration call sites
     assert.ok(
@@ -178,13 +188,16 @@ describe('readSettings null return on malformed files (#1461)', () => {
 // the behavioural ones beneath it.
 
 describe('readSettings: JSON null coalesced to empty, malformed warns (#1191)', () => {
-  test('source contains the null-coalescing guard (parsed === null ? {})', () => {
-    // Structural anchor: if someone removes the coalescing, this test catches it
-    // before the behavioural test below even runs.
-    const installPath = path.join(__dirname, '..', 'bin', 'install.js');
-    const content = fs.readFileSync(installPath, 'utf8');
-    assert.ok(
-      content.includes('parsed === null ? {}'),
+  test('valid JSON null coalesces to {} via the real function (early behavioral anchor)', (t) => {
+    // Behavioral anchor: if someone removes the coalescing, this test catches
+    // it before the more detailed behavioural test below even runs.
+    const tmpFile = path.join(os.tmpdir(), `gsd-settings-test-null-anchor-${process.pid}.json`);
+    fs.writeFileSync(tmpFile, 'null');
+    t.after(() => fs.unlinkSync(tmpFile));
+    const result = readSettings(tmpFile);
+    assert.deepStrictEqual(
+      result,
+      {},
       'install.js readSettings must coalesce valid JSON null to {} (not malformed warning)'
     );
   });
@@ -262,5 +275,162 @@ describe('readSettings: JSON null coalesced to empty, malformed warns (#1191)', 
     }
     assert.deepStrictEqual(result, {}, 'absent file must return {}');
     assert.strictEqual(warnCalls.length, 0, 'no warning expected for absent file');
+  });
+});
+
+// ─── writeSettings durability (#1874 F5) ─────────────────────────────────────
+//
+// Claude Code discards the ENTIRE settings file on any parse failure, so a
+// truncated write costs the user every hook, permission, and statusline they
+// have — not just GSD's entries. writeSettings is the sole writer of this
+// surface for six runtimes, so it must never leave a partial file behind.
+
+describe('writeSettings durability (#1874 F5)', () => {
+
+  // The user's existing settings: entries GSD does not own and must not lose.
+  const PRIOR = JSON.stringify({
+    permissions: { allow: ['Bash(npm test)'] },
+    statusLine: { command: '/usr/local/bin/my-statusline' },
+    env: { MY_TOKEN: 'keep-me' },
+  }, null, 2) + '\n';
+
+  function withTmpDir(fn) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-write-settings-'));
+    try { return fn(dir); } finally { cleanup(dir); }
+  }
+
+  test('a failure mid-write leaves the previous settings file intact', (t) => {
+    withTmpDir((dir) => {
+      const settingsPath = path.join(dir, 'settings.json');
+      fs.writeFileSync(settingsPath, PRIOR);
+
+      // Simulate the crash window faithfully: the bytes that were written
+      // before the failure DO land on disk, then the call fails. A mock that
+      // merely throws would pass against a non-atomic writer, proving nothing.
+      t.after(mockPartialWriteThenThrow(fs, undefined, 12, {
+        code: 'ENOSPC',
+        message: 'ENOSPC: no space left on device',
+      }));
+
+      let threw = false;
+      try {
+        writeSettings(settingsPath, { hooks: { SessionStart: [] } });
+      } catch {
+        threw = true;
+      }
+
+      assert.ok(threw, 'the write failure must propagate, not be swallowed');
+      assert.strictEqual(
+        fs.readFileSync(settingsPath, 'utf8'),
+        PRIOR,
+        'settings.json must be byte-identical to its pre-write contents'
+      );
+      // The real cost of the bug: a truncated file is discarded wholesale by
+      // the host, so assert the user's non-GSD entries actually survive.
+      const recovered = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      assert.deepStrictEqual(recovered.permissions.allow, ['Bash(npm test)']);
+      assert.strictEqual(recovered.env.MY_TOKEN, 'keep-me');
+    });
+  });
+
+  test('a failure mid-write leaves no temp file behind', (t) => {
+    withTmpDir((dir) => {
+      const settingsPath = path.join(dir, 'settings.json');
+      fs.writeFileSync(settingsPath, PRIOR);
+
+      t.after(mockPartialWriteThenThrow(fs, undefined, 12, {
+        code: 'EIO',
+        message: 'simulated mid-write failure',
+      }));
+      try {
+        writeSettings(settingsPath, { hooks: {} });
+      } catch { /* expected */ }
+
+      assert.deepStrictEqual(
+        fs.readdirSync(dir).sort(),
+        ['settings.json'],
+        'no .tmp-* residue may survive a failed write'
+      );
+    });
+  });
+
+  test('a successful write produces the same bytes as before (format contract)', () => {
+    withTmpDir((dir) => {
+      const settingsPath = path.join(dir, 'settings.json');
+      const settings = { hooks: { SessionStart: [{ hooks: [{ command: 'x' }] }] }, env: { A: '1' } };
+
+      writeSettings(settingsPath, settings);
+
+      // Two-space indent + trailing newline is the on-disk contract other
+      // tooling (and users' diffs) depend on; atomicity must not disturb it.
+      assert.strictEqual(
+        fs.readFileSync(settingsPath, 'utf8'),
+        JSON.stringify(settings, null, 2) + '\n'
+      );
+      assert.deepStrictEqual(readSettings(settingsPath), settings, 'must round-trip through readSettings');
+      assert.deepStrictEqual(fs.readdirSync(dir), ['settings.json'], 'no temp residue on success');
+    });
+  });
+
+  test('hardened permissions survive the rewrite', () => {
+    withTmpDir((dir) => {
+      const settingsPath = path.join(dir, 'settings.json');
+      fs.writeFileSync(settingsPath, PRIOR);
+      // 0o600 is the hardened-secrets posture: settings.json can carry env
+      // tokens, and rename() would otherwise swap in a umask-default inode.
+      fs.chmodSync(settingsPath, 0o600);
+
+      writeSettings(settingsPath, { hooks: {}, env: { MY_TOKEN: 'keep-me' } });
+
+      assert.deepStrictEqual(
+        readSettings(settingsPath),
+        { hooks: {}, env: { MY_TOKEN: 'keep-me' } },
+        'the write must land through a chmod-hardened target on every OS'
+      );
+      if (process.platform !== 'win32') {
+        assert.strictEqual(
+          fs.statSync(settingsPath).mode & 0o7777,
+          0o600,
+          'a pre-existing non-default mode must survive the temp+rename write'
+        );
+      }
+    });
+  });
+
+  test('the temp file is created exclusively — a pre-planted symlink is not followed', { skip: process.platform === 'win32' }, (t) => {
+    withTmpDir((dir) => {
+      const settingsPath = path.join(dir, 'settings.json');
+      fs.writeFileSync(settingsPath, PRIOR);
+      const victimPath = path.join(dir, 'victim');
+      fs.writeFileSync(victimPath, 'victim-bytes');
+
+      // Squat every plausible near-future temp path with a symlink to the
+      // victim; an O_EXCL writer must skip them all instead of writing
+      // through one.
+      const planted = [];
+      const origWriteFileSync = fs.writeFileSync;
+      fs.writeFileSync = (target, data, options) => {
+        const resolved = String(target);
+        if (/\.tmp-\d+-\d+$/.test(resolved) && !fs.existsSync(resolved)) {
+          try {
+            fs.symlinkSync(victimPath, resolved);
+            planted.push(resolved);
+          } catch { /* already there */ }
+        }
+        return origWriteFileSync(target, data, options);
+      };
+      t.after(() => { fs.writeFileSync = origWriteFileSync; });
+      assert.throws(
+        () => writeSettings(settingsPath, { hooks: {} }),
+        (e) => e.code === 'EEXIST',
+        'an exclusive create must refuse every squatted temp path'
+      );
+
+      assert.strictEqual(fs.readFileSync(victimPath, 'utf8'), 'victim-bytes',
+        'the symlink target must never receive the settings payload');
+      assert.strictEqual(fs.readFileSync(settingsPath, 'utf8'), PRIOR,
+        'the settings file must be untouched when every temp path is squatted');
+      for (const link of planted) fs.unlinkSync(link);
+    });
   });
 });

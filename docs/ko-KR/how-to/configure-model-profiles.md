@@ -16,7 +16,7 @@
 | `adaptive` | Opus | Sonnet | Sonnet | Sonnet | 런타임 간 자주 전환할 때 사용; 다른 티어와 동일하게 런타임 인식 프로파일로 해결됨 |
 | `inherit` | (세션 모델) | (세션 모델) | (세션 모델) | (세션 모델) | 비 Anthropic 프로바이더(OpenRouter, 로컬 모델) — 모든 에이전트가 현재 세션 모델을 따름 |
 
-위 테이블은 대표적인 하위 집합을 보여줍니다. 출시된 33개 에이전트 모두 `sdk/shared/model-catalog.json`에 명시적인 프로파일별 티어 할당이 있습니다. 전체 테이블은 설정 참조의 [모델 프로파일](../CONFIGURATION.md#model-profiles)을 참고하세요.
+위 테이블은 대표적인 하위 집합을 보여줍니다. 출시된 33개 에이전트 모두 `gsd-core/bin/shared/model-catalog.json`에 명시적인 프로파일별 티어 할당이 있습니다. 전체 테이블은 설정 참조의 [모델 프로파일](../CONFIGURATION.md#model-profiles)을 참고하세요.
 
 **명령으로 빠르게 전환:**
 
@@ -154,7 +154,7 @@ npx @opengsd/gsd-core@latest --codex --global   # 또는 --opencode, --kilo 등
 
 ## 비 Anthropic 런타임에서 GSD 사용
 
-Codex, OpenCode, Gemini CLI, 또는 Kilo용으로 GSD를 설치한 경우 인스톨러가 이미 설정에 `resolve_model_ids: "omit"`을 설정했습니다. 이는 GSD가 Anthropic 모델 ID 해결을 건너뛰고 런타임이 자체 기본 모델을 선택하도록 합니다. 기본 사용 시 수동 설정이 필요 없습니다.
+Codex, OpenCode, Antigravity CLI, 또는 Kilo용으로 GSD를 설치한 경우 인스톨러가 이미 설정에 `resolve_model_ids: "omit"`을 설정했습니다. 이는 GSD가 Anthropic 모델 ID 해결을 건너뛰고 런타임이 자체 기본 모델을 선택하도록 합니다. 기본 사용 시 수동 설정이 필요 없습니다.
 
 **Codex에서 티어별 모델을 원하는 경우:**
 

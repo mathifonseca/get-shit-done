@@ -19,7 +19,14 @@
  *   state signal-resume                Remove WAITING.json signal
  *   resolve-model <agent-type>         Get model for agent based on profile
  *   find-phase <phase>                 Find phase directory by number
+ *   select-revert-commits (--phase P | --plan NN-MM) --range R
+ *                                       List commits within R whose DECLARED conventional-commit
+ *                                       scope identifies P or NN-MM (exact match; phase mode also
+ *                                       accepts a NN-MM-scoped commit). Used by /gsd:undo (#4661).
  *   commit <message> [--files f1 f2] [--no-verify]   Commit planning docs
+ *   commit-docs-guard enable|disable   Opt-in .git/hooks/pre-commit guard
+ *                                       that refuses a commit staging
+ *                                       .planning/ when commit_docs is false
  *   commit-to-subrepo <msg> --files f1 f2  Route commits to sub-repos
  *   verify-summary <path>              Verify a SUMMARY.md file
  *   generate-slug <text>               Convert text to URL-safe slug
@@ -27,6 +34,9 @@
  *   list-todos [area]                  Count and enumerate pending todos
  *   list-seeds [status]                List captured seeds (optional status filter)
  *   verify-path-exists <path>          Check file/directory existence
+ *   quick-tasks-migrate                Migrate STATE.md's "Quick Tasks Completed"
+ *                                      table onto the canonical schema (#3730).
+ *                                      No-op when absent or already canonical.
  *   quick-tasks-append --task <text>   Append a row to STATE.md's "Quick Tasks
  *                                      Completed" table (schema-backed via
  *                                      markdown-table.cjs; #2133/ADR-2143).
@@ -54,7 +64,7 @@
  *   roadmap update-plan-progress <N>   Update progress table row from disk (PLAN vs SUMMARY counts)
  *   roadmap annotate-dependencies <N>  Add wave dependency notes + cross-cutting constraints to ROADMAP.md
  *   roadmap validate                   Validate phase ID convention compliance
- *   roadmap upgrade [--apply] --convention milestone-prefixed  Migrate phase IDs to M-NN convention
+ *   roadmap upgrade [--apply] --convention <milestone-prefixed|bracket>  Migrate phase IDs (dry-run by default)
  *
  * Requirements Operations:
  *   requirements mark-complete <ids>   Mark requirement IDs as complete in REQUIREMENTS.md
@@ -65,9 +75,22 @@
  *                                      gaps_found-only, never call on the pass path
  *
  * Milestone Operations:
- *   milestone complete <version>       Archive milestone, create MILESTONES.md
+ *   milestone complete <version> (--confirm | --dry-run)
+ *                                      Archive milestone, create MILESTONES.md — one of the two is required
+ *     --confirm                      REQUIRED to mutate (#3726): the archive is irreversible (ROADMAP/
+ *                                    REQUIREMENTS archived, phase dirs MOVED, STATE.md rewritten), so
+ *                                    without this flag the command refuses and mutates nothing
+ *     --dry-run                      Preview what would move, mutates nothing (no --confirm needed; #2118)
  *     [--name <name>]
  *     [--no-archive-phases]          Skip moving phase dirs to milestones/vX.Y-phases/ (archived by default)
+ *     [--archive-quick]              Move .planning/quick/* dirs to milestones/vX.Y-quick/ + reset the
+ *                                    Quick Tasks Completed table (#2142; opt-in, default OFF)
+ *
+ *   milestone archive-quick <version>  Move .planning/quick/* dirs to milestones/vX.Y-quick/ + reset the
+ *                                      Quick Tasks Completed table, WITHOUT the milestone complete close-out
+ *                                      (no ROADMAP/REQUIREMENTS/MILESTONES.md writes, no completion guards);
+ *                                      safe against an already-completed milestone (#2142 escalation)
+ *     [--dry-run]                     Preview what would move, mutates nothing
  *
  * User Story Validation:
  *   user-story validate --story "..."  Validate "As a / I want to / so that" format
@@ -80,11 +103,21 @@
  *   drift-guard severity --status <S>    Classify a symbol verdict into { severity, hardBlock }
  *     [--authority <A>]                  Status: VERIFIED|MISSING|AMBIGUOUS|UNCHECKABLE
  *                                        Authority: grep|intel|treesitter|lsp|scip (default: config-resolved)
+ *   drift-guard phase-status [--phase N]     Compare STATE.md vs ROADMAP.md phase status
  *
  * Validation:
  *   validate consistency               Check phase numbering, disk/roadmap sync
  *   validate health [--repair]         Check .planning/ integrity, optionally repair
  *   validate agents                    Check GSD agent installation status
+ *
+ * Planning Snapshot:
+ *   planning inspect                   Read-only schema-v1 canonical planning snapshot
+ *                                      (milestone identity, active phase, per-phase
+ *                                      verification/roadmap-acceptance/UAT evidence kept
+ *                                      separate, requirement rows with mapped-phase
+ *                                      traceability, plan/task rows with planned+changed
+ *                                      file provenance, and independent accepted_phases /
+ *                                      completed_plans fractions). Takes no arguments.
  *
  * Progress:
  *   progress [json|table|bar]          Render progress in various formats
@@ -228,13 +261,22 @@ try {
   process.stderr.write((bootErr && bootErr.message ? bootErr.message : String(bootErr)) + '\n');
   // Fatal bootstrap failure before the CLI's ExitError/runMain machinery (which
   // lives in ./lib) is available to load, so a direct exit is the only option.
-  // eslint-disable-next-line n/no-process-exit
+  // #3910: this call runs BEFORE ./lib/cli-exit.cjs is even required, so the
+  // registered-exit seam (runMain/ExitError/terminateNow) does not exist yet
+  // at this point in the process's lifetime — there is nothing to route
+  // through. This is the second (and only other) sanctioned allowlist entry
+  // for local/require-registered-exit, alongside terminateNow's own body.
+  // #3914: n/no-process-exit and local/require-registered-exit are
+  // complementary, not predecessor/successor (see eslint.config.mjs and
+  // docs/adr/3889-process-exit-contract.md) — both remain 'error' on this
+  // glob, so both need a disable directive here.
+  // eslint-disable-next-line n/no-process-exit, local/require-registered-exit
   process.exit(1);
 }
 
-const { ExitError, runMain } = require('./lib/cli-exit.cjs');
+const { ExitError, runMain, resolveContractVersion } = require('./lib/cli-exit.cjs');
 const io = require('./lib/io.cjs');
-const { error, ERROR_REASON, setJsonErrorMode, output } = io;
+const { error, ERROR_REASON, setJsonErrorMode, output, formatDiagnosticToken } = io;
 const projectRoot = require('./lib/project-root.cjs');
 // Resolve findProjectRoot lazily at call time rather than binding it at module
 // load. It is sourced from project-root.cjs; a call-time lookup is robust
@@ -259,8 +301,7 @@ try {
   }
 } catch { /* advisory — never block */ }
 
-const { getActiveWorkstream } = require('./lib/planning-workspace.cjs');
-const { resolveActiveWorkstream, applyResolvedWorkstreamEnv } = require('./lib/active-workstream-store.cjs');
+const { resolveActiveWorkstream, applyResolvedWorkstreamEnv, peekActiveWorkstream } = require('./lib/active-workstream-store.cjs');
 const state = require('./lib/state.cjs');
 const phase = require('./lib/phase.cjs');
 const roadmap = require('./lib/roadmap.cjs');
@@ -275,6 +316,7 @@ const estimateCli = require('./lib/estimate-cli.cjs');
 const template = require('./lib/template.cjs');
 const milestone = require('./lib/milestone.cjs');
 const commands = require('./lib/commands.cjs');
+const runtimeIdentity = require('./lib/runtime-identity.cjs');
 const init = require('./lib/init.cjs');
 const frontmatter = require('./lib/frontmatter.cjs');
 const workstream = require('./lib/workstream.cjs');
@@ -286,6 +328,7 @@ const { routeVerifyCommand } = require('./lib/verify-command-router.cjs');
 const { routeEvalCommand } = require('./lib/eval-command-router.cjs');
 const evalMod = require('./lib/eval.cjs');
 const { routeVerificationCommand } = require('./lib/verification-command-router.cjs');
+const { routePlanningCommand } = require('./lib/planning-command-router.cjs');
 const verification = require('./lib/verification.cjs');
 const { routeInitCommand } = require('./lib/init-command-router.cjs');
 // Stale-bake guard (#1688): warns once when model config changed since agents
@@ -298,14 +341,19 @@ const { routePhaseCommand } = require('./lib/phase-command-router.cjs');
 const { routePhasesCommand } = require('./lib/phases-command-router.cjs');
 const { routeValidateCommand } = require('./lib/validate-command-router.cjs');
 const { routeRoadmapCommand } = require('./lib/roadmap-command-router.cjs');
+// #3676 (Phase 4, epic #3344): quick-batch is a first-party, always-on
+// command family (like `/gsd:quick`) — wired directly into
+// HOST_COMMAND_ROUTERS, not the opt-in capability-registry/`activationKey`
+// path graphify uses.
+const { routeQuickBatchCommand } = require('./lib/quick-batch-command-router.cjs');
 const { routeCapabilityCommand } = require('./lib/capability-command-router.cjs');
 const { routeAgentCommand, AGENT_FAILURE_CLASSES } = require('./lib/agent-command-router.cjs');
 const smartEntryMod = require('./lib/smart-entry.cjs');
 const { routeCheckCommand } = require('./lib/check-command-router.cjs');
 const { routeTaskCommand } = require('./lib/task-command-router.cjs');
-const { parseNamedArgs, parseMultiwordArg } = require('./lib/command-arg-projection.cjs');
+const { parseNamedArgsOrExit, parseMultiwordArg } = require('./lib/command-arg-projection.cjs');
 const { cmdGitBaseBranch } = require('./lib/git-base-branch.cjs');
-const { getEffectiveAuthority, classifyDriftSeverity } = require('./lib/plan-drift-guard.cjs');
+const { getEffectiveAuthority, classifyDriftSeverity, comparePhaseStatus } = require('./lib/plan-drift-guard.cjs');
 
 // ─── Bridge collapsed (Phase 4) ────────────────────────────────────────────────
 // Non-family commands now run through their CJS handlers directly. Keep the
@@ -394,8 +442,9 @@ function dispatchCapabilityCommand({ command, args, cwd, raw, error, registry, r
     // Step 2: confinement check — belt-and-suspenders even after the basename
     // validation above. Resolved path must be inside libDir (not equal to it,
     // and must start with libDir + sep so "libDir-suffix" can't sneak through).
-    const resolved = path.resolve(libDir, m);
-    if (resolved === libDir || !resolved.startsWith(libDir + path.sep)) {
+    const { tryWithinRootLexical } = require('./lib/security.cjs');
+    const resolved = tryWithinRootLexical(m, libDir);
+    if (resolved === null || resolved === path.resolve(libDir)) {
       throw new Error('capability module path escapes bin/lib/: ' + JSON.stringify(m));
     }
     // Step 3: require the resolved absolute path — the SAME representation that
@@ -471,18 +520,19 @@ function defaultRequireFromInstallRoot(installRoot, m) {
   if (typeof m !== 'string' || !/^[A-Za-z0-9._-]+\.cjs$/.test(m)) {
     throw new Error('capability module must be a bare .cjs basename: ' + JSON.stringify(m));
   }
-  // Realpath the root so a symlinked ancestor can't widen confinement.
-  const realRoot = fs.realpathSync(installRoot);
-  const resolved = path.resolve(realRoot, m);
-  if (resolved === realRoot || !resolved.startsWith(realRoot + path.sep)) {
+  const { tryWithinRoot, tryWithinRootLexical, PathAcceptance } = require('./lib/security.cjs');
+  // Lexical containment check: a symlinked ancestor can't widen confinement.
+  const lexical = tryWithinRootLexical(m, installRoot);
+  if (lexical === null || lexical === path.resolve(installRoot)) {
     throw new Error('capability module path escapes its install root: ' + JSON.stringify(m));
   }
-  // The module file itself must not be a symlink pointing outside the root.
-  const realResolved = fs.realpathSync(resolved);
-  if (realResolved !== realRoot && !realResolved.startsWith(realRoot + path.sep)) {
+  // Realpath/symlink check: the module file itself must not be a symlink
+  // pointing outside the root.
+  const real = tryWithinRoot(m, installRoot, PathAcceptance.RelativeOnly);
+  if (real === null) {
     throw new Error('capability module resolves outside its install root (symlink): ' + JSON.stringify(m));
   }
-  return require(realResolved);
+  return require(real);
 }
 
 /**
@@ -740,7 +790,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       error,
       output: output,
     });
-    if (!handled) config.cmdConfigSet(cwd, args[1], args[2], raw);
+    if (!handled) config.cmdConfigSet(cwd, args[1], args[2], raw, { dryRun: args.includes('--dry-run') });
   }
 
   function routeConfigSetModelProfile({ args, cwd, raw }) {
@@ -903,22 +953,258 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           if (!handled) phase.cmdFindPhase(cwd, args[1], raw);
   }
 
+  /**
+   * #4906 Phase 5 (issue #4661, absorbed from the original bug report):
+   * `gsd-tools.cjs query select-revert-commits --phase <id>|--plan <id>
+   * --range <git-revision-range>`.
+   *
+   * Replaces the two `git log --oneline | grep -E ...` pipelines
+   * `gsd-core/workflows/undo.md` used to run for `/gsd:undo --phase`/`--plan`
+   * selection. `--range` is the ALREADY-COMPUTED `$UNDO_RANGE` the workflow's
+   * own phase-directory anchor logic derives — this subcommand changes only
+   * the subject-matching step, never the ranging behavior.
+   *
+   * Validates `--phase`/`--range <id>` via `validatePhaseNumber`
+   * (src/security.cts) BEFORE running any git command — an invalid id is
+   * refused here, never reaching git or the selection regex (closes bug
+   * class 1 of #4661 by construction). A `--plan NN-MM` id is two
+   * phase-number-shaped segments joined by the FIRST `-`: `validatePhaseNumber`'s
+   * bracket-style alternative requires a leading letter, so a plain numeric
+   * plan id never matches it whole — each segment is validated on its own
+   * instead of forking a second grammar.
+   *
+   * Selection itself is delegated to `selectCommitsByDeclaredScope`
+   * (src/undo-commit-selection.cts), which parses each commit subject
+   * through the SAME anchored conventional-commit header regex the
+   * changelog/PR-title gate uses and compares the declared scope to the
+   * validated id by exact string equality — no regex is ever built from
+   * user input.
+   *
+   * Output: JSON `{selected, classified}` by default; with `--raw`, one
+   * `<full-sha> <subject>` line per selected commit (preserves the visual
+   * shape `git log --oneline` produced, so the workflow's downstream
+   * confirm-screen display, >50 truncation count, and `git revert
+   * --no-commit` loop over COMMITS are unchanged).
+   */
+  function routeSelectRevertCommits({ args, cwd, raw, error, invokingCwd }) {
+    // #4906/#4465 review fix: `cwd` here has already been remapped to the
+    // MAIN worktree root by `resolveMainWorktreeCwd` (main(), applied
+    // BLANKET to every command before dispatch — correct for a router that
+    // reads `.planning/`, e.g. `find-phase`, but wrong for this one). This
+    // command reads NO `.planning/` content — it only runs `git log` — and
+    // that git operation must see the CALLER's own worktree: its HEAD, its
+    // branch, its reachable commit range. Using the remapped `cwd` instead
+    // silently resolves `--range` against a DIFFERENT repository checkout
+    // (reproduced: from a linked worktree with no local `.planning/`, a
+    // `--range HEAD~3..HEAD` that succeeds when run directly in that
+    // worktree fails with "ambiguous argument" through this command,
+    // because it silently ran against main's shorter HEAD instead —
+    // tests/undo-commit-selection-4465.test.cjs, "linked worktree: the main
+    // worktree's planning is the same repository, and is not refused").
+    // `invokingCwd` (threaded from main() through dispatchHostCommand) is
+    // the pre-remap value; falling back to `cwd` keeps direct callers that
+    // omit it (e.g. `dispatchHostCommand` invoked without the new field)
+    // working exactly as before rather than crashing on `undefined`.
+    const gitCwd = invokingCwd || cwd;
+    const { validatePhaseNumber } = require('./lib/security.cjs');
+    const { normalizePhaseName } = require('./lib/phase-id.cjs');
+    const { selectCommitsByDeclaredScope } = require('./lib/undo-commit-selection.cjs');
+    const { execGit } = require('./lib/shell-command-projection.cjs');
+
+    // #4906 Phase 5 review fix: the RETIRED phase-mode grep's `0*` prefix
+    // (`\(0*${TARGET_PHASE}(-[0-9]+)?\):`) tolerated an UNPADDED user-supplied
+    // phase number against a zero-padded commit scope — `--phase 3` matched
+    // `feat(03-01): ...` because `0*3` matches the literal text `03`.
+    // `selectCommitsByDeclaredScope` compares by exact string equality, and
+    // `gsd-core/workflows/undo.md`'s parse_arguments step passes `TARGET_PHASE`
+    // through with NO normalization, so without this, `--phase 3` would
+    // silently select nothing against real (zero-padded) commit scopes — a
+    // behavior regression, not just a documented known-limit. Zero-pad via
+    // `normalizePhaseName` (src/phase-id.cts), the canonical owner of this
+    // exact operation (confirmed: `normalizePhaseName('3') === '03'`).
+    //
+    // GUARDED to digit-first ids only: `normalizePhaseName` also runs
+    // `stripProjectCodePrefix`, which strips a leading `LETTERS-`-shaped
+    // prefix UNCONDITIONALLY — `normalizePhaseName('PROJ-42') === '42'`,
+    // discarding the "PROJ-" entirely (confirmed by direct call). That is
+    // exactly the shape `validatePhaseNumber`'s bracket-style alternative
+    // legitimately accepts as a phase id in ITS OWN right (`PROJ-42`,
+    // `AUTH-101` — see tests/security.test.cjs). Running a letter-first id
+    // through it would silently widen the match (a wildcard-style
+    // over-match reintroducing bug classes 1/2). The old grep's `0*` was
+    // never meaningful for a letter-first target anyway — `0*` before a
+    // non-'0' character matches zero repetitions, a no-op — so a
+    // letter-first id needs neither padding nor this normalization.
+    // `PROJECT_CODE_PREFIX_STRIP_RE_I` (`src/phase-id.cts:33`) itself
+    // requires `^[A-Z]`, so it can never fire on a digit-first id — the
+    // guard below is therefore exactly the safe/unsafe boundary.
+    const normalizePaddedPhase = (id) => (/^\d/.test(id) ? normalizePhaseName(id) : id);
+
+    const parsed = parseNamedArgsOrExit(
+      args,
+      { valueFlags: ['phase', 'plan', 'range'], positionals: 1 },
+      error,
+    );
+    const rawPhase = parsed.phase;
+    const rawPlan = parsed.plan;
+    const range = parsed.range;
+
+    if ((rawPhase && rawPlan) || (!rawPhase && !rawPlan)) {
+      error('select-revert-commits requires exactly one of --phase <id> or --plan <id>', ERROR_REASON.USAGE);
+      return;
+    }
+    if (!range) {
+      error('select-revert-commits requires --range <git-revision-range>', ERROR_REASON.USAGE);
+      return;
+    }
+    // Belt-and-suspenders alongside the --end-of-options guard below (mirrors
+    // src/git-base-branch.cts's isSafeRevisionRef posture for the same class
+    // of argument): refuse an option-shaped range before it ever reaches git.
+    if (typeof range !== 'string' || range.startsWith('-')) {
+      error(`Invalid --range: ${JSON.stringify(range)}`, ERROR_REASON.USAGE);
+      return;
+    }
+
+    let mode;
+    let normalizedId;
+    if (rawPhase) {
+      mode = 'phase';
+      const check = validatePhaseNumber(rawPhase);
+      if (!check.valid) {
+        error(`Invalid --phase: ${check.error}`, ERROR_REASON.USAGE);
+        return;
+      }
+      normalizedId = normalizePaddedPhase(check.normalized);
+    } else {
+      mode = 'plan';
+      // Split on the FIRST `-` only, giving exactly two segments (phase,
+      // plan). This is deliberately NOT a general N-segment composite-id
+      // parser: checked against docs/reference/plan-md.md (frontmatter
+      // `plan` field + `.planning/phases/<NN>-<slug>/<NN>-<PP>-PLAN.md`
+      // layout) and every `--plan` usage in gsd-core/workflows/*.md, the only
+      // plan-id shape this repo documents or emits is the plain two-segment
+      // `NN-MM`. A THREE-segment purely-numeric shape (`NN-MM-PP`) does exist
+      // elsewhere in the codebase, but as a MILESTONE-phase-plan composite
+      // under the (already-deprecated-forward) `milestone-prefixed`
+      // `phase_id_convention` — a different id space than phase-plan, which
+      // `docs/adr/612-bracket-phase-id-convention.md:15` itself documents as
+      // having "no deterministic parse" once a token carries both a
+      // milestone-joined phase AND a plan (the exact ambiguity that
+      // motivated bracket's own `[PROJECT.MM] PP-PP` grammar). No function in
+      // `src/phase-id.cts` validates the phase-PLAN grammar end-to-end
+      // either: `parsePhaseId` explicitly REJECTS a bare `NN-MM` token by
+      // design (its own doc comment lists `02-04` as a rejected "ambiguous /
+      // bare token"), and `getPhaseDirFromPhaseId`'s N-segment dash grammar
+      // is a MILESTONE-phase(-subphase) directory-name constructor — a
+      // structurally similar but semantically different id space (first
+      // segment = milestone, not phase) whose return value doesn't map back
+      // to (phase, plan) anyway. Given no suitable whole-string validator
+      // exists and no real usage needs more than two segments, a `NN-MM-PP`
+      // id is refused today (see
+      // tests/undo-commit-selection.test.cjs "refuses a 3-segment plan id"),
+      // not silently mis-parsed — extending this to N segments is a product
+      // decision for whichever future issue actually needs it. The same
+      // "only the plain two-segment shape is supported" standard applies to
+      // a bracket-style PHASE segment here too: `--plan PROJ-42-01` splits
+      // on the first `-` into phase segment `PROJ` (no internal dash) and
+      // plan segment `42-01`, and `validatePhaseNumber`'s bracket branch
+      // requires the internal dash on ITS side (`PROJ-42`, not bare `PROJ`),
+      // so the phase segment fails and the whole id is refused — bracket-style
+      // ids are supported for `--phase` only, never as a `--plan` segment (no
+      // real usage found; see tests/undo-commit-selection.test.cjs "bracket-
+      // style phase segment in --plan is refused").
+      const dashIdx = rawPlan.indexOf('-');
+      if (dashIdx === -1) {
+        error(`Invalid --plan: "${rawPlan}" (expected NN-MM)`, ERROR_REASON.USAGE);
+        return;
+      }
+      const phasePart = rawPlan.slice(0, dashIdx);
+      const planPart = rawPlan.slice(dashIdx + 1);
+      const phaseCheck = validatePhaseNumber(phasePart);
+      if (!phaseCheck.valid) {
+        error(`Invalid --plan: "${rawPlan}" (phase segment: ${phaseCheck.error})`, ERROR_REASON.USAGE);
+        return;
+      }
+      const planCheck = validatePhaseNumber(planPart);
+      if (!planCheck.valid) {
+        error(`Invalid --plan: "${rawPlan}" (plan segment: ${planCheck.error})`, ERROR_REASON.USAGE);
+        return;
+      }
+      normalizedId = `${normalizePaddedPhase(phaseCheck.normalized)}-${normalizePaddedPhase(planCheck.normalized)}`;
+    }
+
+    const GIT_LOG_TIMEOUT_MS = 15000;
+    const gitResult = execGit(
+      ['log', '--format=%H%x00%s', '--no-merges', '--no-decorate', '--end-of-options', range],
+      { cwd: gitCwd, timeout: GIT_LOG_TIMEOUT_MS },
+    );
+    if (gitResult.exitCode !== 0) {
+      // `execGit` (src/shell-command-projection.cts) exposes `timedOut` on
+      // its SpawnResultOutput — thread it through so a hung `git log` reads
+      // distinctly from an ordinary non-zero exit with no stderr, which
+      // otherwise both surfaced as the same unhelpful "(no stderr)" message.
+      const gitFailureDetail = gitResult.timedOut
+        ? `git log timed out after ${GIT_LOG_TIMEOUT_MS}ms`
+        : `git log failed: ${gitResult.stderr || '(no stderr)'}`;
+      error(
+        `select-revert-commits: ${gitFailureDetail} for range "${range}"`,
+        ERROR_REASON.USAGE,
+      );
+      return;
+    }
+
+    const commits = (gitResult.stdout ? gitResult.stdout.split('\n') : [])
+      .filter((line) => line.length > 0)
+      .map((line) => {
+        const nulIdx = line.indexOf('\0');
+        return nulIdx === -1 ? null : { sha: line.slice(0, nulIdx), subject: line.slice(nulIdx + 1) };
+      })
+      .filter((c) => c !== null);
+
+    const result = selectCommitsByDeclaredScope(commits, normalizedId, mode);
+    const rawLines = result.selected.map((c) => `${c.sha} ${c.subject}`).join('\n');
+    output(result, raw, rawLines);
+  }
+
   function routeCommit({ args, cwd, raw, error }) {
     const amend = args.includes('--amend');
           const noVerify = args.includes('--no-verify');
-          const filesIndex = args.indexOf('--files');
+          // #4208: `--files` and `--files-removed` are two path lists, each
+          // running from its flag to the NEXT LIST FLAG. A boolean flag
+          // inside a list (`--files a --amend b`) is skipped, not a
+          // terminator: that is what the previous slice-to-end collection
+          // did (it filtered `--` tokens and kept everything else), and a
+          // list that stopped at any `--` token silently dropped `b`
+          // (review of #4253). The previous form could not carry a second
+          // list flag at all, which is the only thing that changed.
+          // A REPEATED list flag (`--files a --files b`) merges, as the old
+          // slice-to-end parse merged it: every occurrence contributes its
+          // run, and none of them ends another's silently.
+          const firstListFlag = args.findIndex((a, i) => i > 0 && COMMIT_LIST_FLAGS.has(a));
           // Collect all positional args between command name and first flag,
           // then join them — handles both quoted ("multi word msg") and
           // unquoted (multi word msg) invocations from different shells
-          const endIndex = filesIndex !== -1 ? filesIndex : args.length;
+          const endIndex = firstListFlag !== -1 ? firstListFlag : args.length;
           const messageArgs = args.slice(1, endIndex).filter(a => !a.startsWith('--'));
           const message = messageArgs.join(' ') || undefined;
-          const files = filesIndex !== -1 ? args.slice(filesIndex + 1).filter(a => !a.startsWith('--')) : [];
-          commands.cmdCommit(cwd, message, files, raw, amend, noVerify);
+          const files = collectListFlagValues(args, '--files');
+          const filesRemoved = collectListFlagValues(args, '--files-removed');
+          commands.cmdCommit(cwd, message, files, raw, amend, noVerify, filesRemoved);
   }
 
   function routeCheckCommit({ args, cwd, raw, error }) {
     commands.cmdCheckCommit(cwd, raw);
+  }
+
+  function routeCommitDocsGuard({ args, cwd, raw, error }) {
+    const subcommand = args[1];
+    if (subcommand === 'enable') {
+      commands.cmdCommitDocsGuardEnable(cwd, raw);
+    } else if (subcommand === 'disable') {
+      commands.cmdCommitDocsGuardDisable(cwd, raw);
+    } else {
+      error('Unknown commit-docs-guard subcommand. Available: enable, disable', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+    }
   }
 
   function routeCommitToSubrepo({ args, cwd, raw, error }) {
@@ -930,7 +1216,16 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
 
   function routePrSubrepo({ args, cwd, raw, error }) {
     const message = args[1];
-          const { repo, branch } = parseNamedArgs(args, ['repo', 'branch']);
+          // #3884: the commit message is an optional leading positional the
+          // caller owns (args[1]) — but when it is OMITTED, args[1] is itself
+          // the first flag (e.g. `--repo`), and a static `positionals: 2`
+          // treats that flag's own value as an unexpected trailing positional
+          // before cmdPrSubrepo's own "commit message required" guard ever
+          // runs. Widen the boundary only when args[1] genuinely looks like a
+          // message (not flag-shaped), mirroring the same fix applied to
+          // `state complete-phase`.
+          const messagePresent = message !== undefined && !message.startsWith('--');
+          const { repo, branch } = parseNamedArgsOrExit(args, { valueFlags: ['repo', 'branch'], positionals: messagePresent ? 2 : 1 }, error);
           commands.cmdPrSubrepo(cwd, repo, branch, message, raw);
   }
 
@@ -947,7 +1242,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             template.cmdTemplateSelect(cwd, args[2], raw);
           } else if (subcommand === 'fill') {
             const templateType = args[2];
-            const { phase, plan, name, type, wave, fields: fieldsRaw } = parseNamedArgs(args, ['phase', 'plan', 'name', 'type', 'wave', 'fields']);
+            const { phase, plan, name, type, wave, fields: fieldsRaw } = parseNamedArgsOrExit(args, { valueFlags: ['phase', 'plan', 'name', 'type', 'wave', 'fields'], positionals: 3 }, error);
             let fields = {};
             if (fieldsRaw) {
               const { safeJsonParse } = require('./lib/security.cjs');
@@ -996,14 +1291,14 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           }
           // CJS fallback (SDK unavailable or unknown subcommand)
           if (subcommand === 'get') {
-            frontmatter.cmdFrontmatterGet(cwd, file, parseNamedArgs(args, ['field']).field, raw);
+            frontmatter.cmdFrontmatterGet(cwd, file, parseNamedArgsOrExit(args, { valueFlags: ['field'], positionals: 3 }, error).field, raw);
           } else if (subcommand === 'set') {
-            const { field, value } = parseNamedArgs(args, ['field', 'value']);
+            const { field, value } = parseNamedArgsOrExit(args, { valueFlags: ['field', 'value'], positionals: 3 }, error);
             frontmatter.cmdFrontmatterSet(cwd, file, field, value !== null ? value : undefined, raw);
           } else if (subcommand === 'merge') {
-            frontmatter.cmdFrontmatterMerge(cwd, file, parseNamedArgs(args, ['data']).data, raw);
+            frontmatter.cmdFrontmatterMerge(cwd, file, parseNamedArgsOrExit(args, { valueFlags: ['data'], positionals: 3 }, error).data, raw);
           } else if (subcommand === 'validate') {
-            frontmatter.cmdFrontmatterValidate(cwd, file, parseNamedArgs(args, ['schema']).schema, raw);
+            frontmatter.cmdFrontmatterValidate(cwd, file, parseNamedArgsOrExit(args, { valueFlags: ['schema'], positionals: 3 }, error).schema, raw);
           } else {
             error('Unknown frontmatter subcommand. Available: get, set, merge, validate', ERROR_REASON.SDK_UNKNOWN_COMMAND);
           }
@@ -1045,6 +1340,15 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           // in tight subprocess loops where Windows CI has shown intermittent
           // native crashes (0xC0000005 / 3221225477).
           commands.cmdCurrentTimestamp(args[1] || 'full', raw);
+  }
+
+  function routeRuntimeIdentity({ raw }) {
+    // #3146: report this runtime's package identity so a shipped workflow can
+    // tell whether it reached THIS package's gsd-tools or a colliding one.
+    // Kept on the CJS fast path for the same reason as current-timestamp — the
+    // launcher preamble spawns it once per workflow run, so SDK bridge startup
+    // would be a per-run tax on every workflow.
+    runtimeIdentity.cmdRuntimeIdentity(raw);
   }
 
   function routeSkillsRoot({ args, raw, error }) {
@@ -1096,7 +1400,18 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             // First positional that isn't a flag also works (lenient); otherwise ignore unknown flags.
             if (!a.startsWith('-') && !pifRuntime) { pifRuntime = a; }
           }
-          const filename = getProjectInstructionFile(pifRuntime);
+          // A retired runtime id now THROWS rather than resolving (#4709 AC#1).
+          // Map it to the same clean single-line error routeSkillsRoot emits for
+          // an unknown runtime — a CLI must not answer a bad flag value with a
+          // stack trace. The thrown message already names the successor and the
+          // retiring issue, so it is surfaced verbatim.
+          let filename;
+          try {
+            filename = getProjectInstructionFile(pifRuntime);
+          } catch (err) {
+            if (err && err.code === 'GSD_RETIRED_RUNTIME') error(err.message);
+            throw err;
+          }
           process.stdout.write(filename + '\n');
   }
 
@@ -1112,16 +1427,85 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     commands.cmdVerifyPathExists(cwd, args[1], raw);
   }
 
+  function routeQuickTasksMigrate({ cwd, raw }) {
+    // #3730 (option b, maintainer decision 2026-09-02): the supported repair
+    // path for a legacy Quick Tasks table GSD's own pre-registry prose created.
+    // Silent no-op when the section is absent or the table is already canonical
+    // — the quick/fast workflows call this before their first append, so the
+    // migration runs exactly once, on the first quick run, unprompted otherwise.
+    const statePath = path.join(cwd, '.planning', 'STATE.md');
+    if (!fs.existsSync(statePath)) {
+      output({ ok: true, migrated: false, reason: `STATE.md not found at ${statePath}` }, raw);
+      return;
+    }
+    const { migrateQuickTasksTable } = require('./lib/markdown-table.cjs');
+    let report;
+    state.readModifyWriteStateMd(statePath, (content) => {
+      const result = migrateQuickTasksTable(content);
+      if (!result.ok) {
+        throw new ExitError(1, `⚠ quick-tasks-migrate: ${result.reason}`);
+      }
+      report = result.value;
+      return result.value.content;
+    }, cwd, { resync: false });
+    output({
+      ok: true,
+      migrated: report.migrated,
+      ...(report.migrated ? { from: report.from, rows: report.rows } : {}),
+    }, raw);
+  }
+
   function routeQuickTasksAppend({ args, cwd, raw, error }) {
     // #2133 / ADR-2143 §3,§7: schema-backed replacement for fast.md's inline
           // `awk NF-2` Quick Tasks column arithmetic. Row construction is delegated
           // to the pure appendQuickTaskRow (markdown-table.cjs); this case only
           // handles the I/O (read STATE.md, resolve date/commit, write STATE.md).
           const qtaArgs = args.slice(1);
-          const qtaTask = parseNamedArgs(qtaArgs, ['task']).task || args[1];
+          // Ambiguous boundary (ADR-3473 §8.4 Item 2 note): this command accepts
+          // EITHER a positional free-text description (qtaArgs[0]) OR --task
+          // <value> — the same token index is a caller-owned positional in one
+          // input shape and a flag in the other, which a single fixed
+          // `positionals` cursor cannot represent. `positionals: 'rest'`
+          // disables the boundary walk (as with `init quick`) so extraction
+          // (used for the --task form) and the `|| args[1]` fallback (used for
+          // the positional form) both keep working unchanged.
+          // #3356 defect 1: `--quick-id` / `--slug` / `--directory` are
+          // OPTIONAL widenings. A caller with no quick id or task directory
+          // (fast.md, the original #2133 caller) omits them and keeps the
+          // exact prior ordinal-`#`/`'—'`-Directory row. A caller that DOES
+          // have a real quick id + task dir (i.e. can match `workflows/
+          // quick.md`'s own Step 7c row for the same inputs) supplies them
+          // and gets the byte-equivalent canonical row `quick.md:632`
+          // documents — closing the false-equivalence gap `quick.md:627`
+          // claims. `--directory` wins outright when given explicitly;
+          // otherwise a supplied `--quick-id` + `--slug` pair derives the
+          // canonical permalink the same way `workflows/quick.md` renders it.
+          // #4906 Phase 3 (#4958, evidence #4736): `--status` is the OPTIONAL
+          // widening that closes the last gap between this CLI and
+          // `workflows/quick.md`'s own Step 7c row shapes. `appendQuickTaskRow`
+          // (markdown-table.cjs) has always accepted `status` — the schema's
+          // `Status` column exists precisely for `$VALIDATE_MODE` runs — but
+          // nothing on this CLI surface could set it, so quick.md's
+          // VALIDATE_MODE branch had no escaping-safe path and kept
+          // interpolating `${DESCRIPTION}` into raw markdown (#4736 D1: an
+          // unescaped `|` in a task description permanently rags the table).
+          // Omitted, `status` stays undefined and `appendQuickTaskRow` falls
+          // back to its own `'—'` default — unchanged for every existing
+          // caller (fast.md, quick.md's non-VALIDATE_MODE branch).
+          const qtaParsed = parseNamedArgsOrExit(
+            qtaArgs,
+            { valueFlags: ['task', 'quick-id', 'slug', 'directory', 'status'], positionals: 'rest' },
+            error,
+          );
+          const qtaTask = qtaParsed.task || args[1];
           if (!qtaTask) {
             error('quick-tasks-append requires --task <description> (or a positional description)', ERROR_REASON.USAGE);
           }
+          const qtaQuickId = qtaParsed['quick-id'] || undefined;
+          const qtaSlug = qtaParsed['slug'] || undefined;
+          const qtaDirectory = qtaParsed['directory']
+            || (qtaQuickId && qtaSlug ? `[${qtaQuickId}-${qtaSlug}](./quick/${qtaQuickId}-${qtaSlug}/)` : undefined);
+          const qtaStatus = qtaParsed['status'] || undefined;
 
           const statePath = path.join(cwd, '.planning', 'STATE.md');
           if (!fs.existsSync(statePath)) {
@@ -1147,8 +1531,22 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           // still releases the lock before the throw propagates; the transform
           // throws before returning new content, so nothing is ever written).
           let mutation;
+          // #3356 defect 2: this write touches only the Quick Tasks body
+          // table — a single appended row — so it must not trigger the
+          // default full re-derive of the disk-derived `progress.*`
+          // frontmatter block. `{ resync: false }` mirrors every other
+          // body-only STATE.md writer's convention (src/state.cts's own
+          // docstring on `readModifyWriteStateMd` prescribes it); this route
+          // was the lone outlier still passing no options at all.
           state.readModifyWriteStateMd(statePath, (content) => {
-            const result = appendQuickTaskRow(content, { description: qtaTask, date, commit });
+            const result = appendQuickTaskRow(content, {
+              description: qtaTask,
+              date,
+              commit,
+              status: qtaStatus,
+              quickId: qtaQuickId,
+              directory: qtaDirectory,
+            });
             if (!result.ok) {
               // Mirrors fast.md's old "skip with a brief log" behaviour (#2133): this
               // is an expected, recoverable condition (no table / unrecognized
@@ -1159,7 +1557,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             }
             mutation = result.value;
             return result.value.content;
-          }, cwd);
+          }, cwd, { resync: false });
 
           output({ ok: true, row: mutation.row, variant: mutation.variant }, raw, mutation.row);
   }
@@ -1180,7 +1578,8 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     const fsx = require('node:fs');
     const os = require('node:os');
     const { REVIEWER_LANES, mergeReviewerLanes } = require('./lib/review-lane-descriptor.cjs');
-    const { resolveLanePlan } = require('./lib/review-lane-invocation.cjs');
+    const { resolveLanePlan, resolveLaneEffort, resolveLaneBudget } = require('./lib/review-lane-invocation.cjs');
+    const modelCatalog = require('./lib/model-catalog.cjs');
     const runner = require('./lib/review-lane-runner.cjs');
     const cfgLoader = require('./lib/config-loader.cjs');
     const capabilityLoader = require('./lib/capability-loader.cjs');
@@ -1192,18 +1591,20 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     const sub = args[1];
     // Fail fast on an unrecognized subcommand. Without this check, `sub` fell through
     // to the `sub !== 'invoke'` usage-error branch far below (after loading the
-    // capability registry AND building a per-lane plan for every lane — which itself
-    // spawns one child `query resolve-execution` process per lane via `effortFor`,
-    // up to 12 subprocess spawns for the default lane set) before ever reporting the
-    // error. That made an invalid subcommand slow instead of instant, and under bench
-    // load (many sequential node spawns) `review-lane bogus` could exceed a caller's
-    // spawn timeout and be killed before writing anything to stderr — the CI-observed
-    // failure was empty stdout AND stderr, not the expected usage message (#3148).
+    // capability registry AND building a per-lane plan for every lane) before ever
+    // reporting the error. That made an invalid subcommand slow instead of instant, and
+    // under bench load `review-lane bogus` could exceed a caller's spawn timeout and be
+    // killed before writing anything to stderr — the CI-observed failure was empty stdout
+    // AND stderr, not the expected usage message (#3148). The plan path used to be far
+    // heavier still: it spawned one child `query resolve-execution` process PER LANE to
+    // fetch effort, up to 12 subprocess spawns for the default set. #4255 resolves effort
+    // in-process from the lane's own declaration, so that cost is gone; the fail-fast
+    // check stays because building 12 plans is still work an unrecognized sub should skip.
     // `plan`/`invoke` are the only subs that need the expensive plan-building path
     // below; `sections`/`flags` return earlier still. Anything else errors here, before
     // any of that work starts.
-    if (!['plan', 'invoke', 'sections', 'flags'].includes(sub)) {
-      error("Usage: review-lane <plan|invoke|sections|flags> [--selected a,b] [--run-dir D] [--repo-root R]");
+    if (!['plan', 'invoke', 'sections', 'flags', 'dispatch-step', 'explicit-from-argv'].includes(sub)) {
+      error("Usage: review-lane <plan|invoke|sections|flags|dispatch-step|explicit-from-argv> [--selected a,b] [--run-dir D] [--repo-root R]");
       return;
     }
     const runDir = flag('--run-dir') || '.';
@@ -1224,6 +1625,86 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       }
       return cur;
     };
+
+    // Shared by `invoke` and `dispatch-step` (#4209) — both need the SAME bounded
+    // spawn/http/fs seam `runLane` requires (RunnerDeps). Factored out so the two
+    // callers can never disagree about how a lane's binary is resolved or how its
+    // process is bounded; a fix to either reaches both.
+    const buildLaneRunnerDeps = () => ({
+      spawn: (binary, argv, opts) => {
+        // #3086: on Windows, reviewer CLIs (gemini, codex, etc.) are installed
+        // as .cmd shims. spawnSync with a bare name + shell:false fails with
+        // ENOENT (CreateProcess cannot start .cmd). Apply the same #2667 shim
+        // gate used in runWithTimeout: detect .cmd/.bat and mediate through
+        // cmd.exe /d /s /c with an explicit argv array (no shell:true).
+        //
+        // #3275: descriptors declare BARE names, so the gate above never saw an
+        // extension — resolve through the shared PATH+PATHEXT resolver FIRST
+        // (the same one `hasBinary` uses, so probe and spawn can never disagree
+        // about what the lane's binary is). POSIX keeps the bare name: Node's own
+        // PATH search already worked there, and the #3275 acceptance contract
+        // holds macOS/Linux behavior unchanged. A name that resolves to nothing
+        // falls back to the declared name so the ENOENT still surfaces (#3086).
+        // #3411: the resolve-then-mediate pair is one seam call now. Both halves had
+        // private copies here; `projectSpawnInvocation` owns them, so a fix to either
+        // reaches every spawn site instead of only this one.
+        //
+        // Unlike execTool, this lane adopts the RESOLVED path even for a non-batch
+        // binary: that is the behavior #3445 shipped and `deps.hasBinary` answers
+        // from the same resolver, so probe and spawn must agree on the exact file.
+        const { projectSpawnInvocation } = require('./lib/shell-command-projection.cjs');
+        const { command: spawnBinary, args: spawnArgv, windowsVerbatimArguments } = projectSpawnInvocation(binary, argv);
+        const r = cp.spawnSync(spawnBinary, spawnArgv, {
+          input: opts.input,
+          encoding: 'utf8',
+          timeout: opts.timeoutMs,
+          killSignal: 'SIGKILL',
+          maxBuffer: 64 * 1024 * 1024,
+          shell: false, // argv array only — never a shell string (no interpolation of config values)
+          // #2483: a lane's declared env pairs merged OVER this process's environment, for this
+          // child only. Passing a fresh object leaves `process.env` untouched, so nothing leaks
+          // into the orchestrating session or into the next lane.
+          ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+          ...(windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+        });
+        return {
+          status: r.status,
+          stdout: r.stdout || '',
+          stderr: r.stderr || '',
+          errorCode: r.error && r.error.code ? r.error.code : undefined,
+        };
+      },
+      httpJson: async (url, opts) => {
+        try {
+          const res = await fetch(url, {
+            method: opts.method,
+            headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
+            body: opts.body,
+            signal: AbortSignal.timeout(opts.timeoutMs),
+          });
+          return { ok: res.ok, status: res.status, body: await res.text() };
+        } catch (e) {
+          return { ok: false, status: 0, body: '', error: e && e.message ? e.message : String(e) };
+        }
+      },
+      readFile: (p) => fsx.readFileSync(p, 'utf8'),
+      writeFile: (p, c) => fsx.writeFileSync(p, c, 'utf8'),
+      exists: (p) => fsx.existsSync(p),
+      // PATH scan rather than spawning `command -v` / `where`. Two reasons: it spawns nothing at
+      // all (a probe that costs a process is a probe you avoid running, which is how the original
+      // Kimi probe ended up unbounded), and `shell: true` with an args array is deprecated in
+      // Node 26 (DEP0190) because the arguments are concatenated rather than escaped.
+      //
+      // #3275: the scan lives in `resolveSpawnBinary` now, SHARED with `deps.spawn`
+      // above. Two private copies of "what is this declared binary?" is how the
+      // defect hid: the probe resolved WITH PATHEXT while spawn resolved WITHOUT,
+      // so a lane reported available for a spawn that could never start. One
+      // resolver, both seams — if one changes, the other changes with it.
+      hasBinary: (name) => resolveSpawnBinary(name) !== null,
+      configGet,
+      homeDir: os.homedir(),
+      warn: (m) => process.stderr.write(`${m}\n`),
+    });
 
     const selected = (flag('--selected') || '')
       .split(',').map((s) => s.trim()).filter(Boolean);
@@ -1251,6 +1732,25 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     }
     const laneBySlug = new Map(mergedLanes.map((l) => [l.slug, l]));
     const chosen = selected.length ? selected : mergedLanes.map((l) => l.slug);
+
+    // #4209 RQ-02: match a workflow's raw CLI argv (e.g. `--codex`, `--agy`) against the SAME
+    // merged first-party+installed-overlay roster this whole function already built above,
+    // instead of a workflow re-deriving its own copy of `loadRegistry`/`mergeReviewerLanes` via
+    // an inline `node -e` (a rename-only duplicate of the block starting at `mergedLanes =
+    // REVIEWER_LANES` above — `code-review-flags.cjs`'s own header states "this is the canonical
+    // flag-parsing surface — do not replicate inline bash parsing" for exactly this reason).
+    // Everything after `--` is a candidate flag; matched lane slugs print sorted and comma-joined.
+    if (sub === 'explicit-from-argv') {
+      const sepIdx = args.indexOf('--');
+      const candidateArgs = new Set(sepIdx === -1 ? [] : args.slice(sepIdx + 1));
+      const slugs = [];
+      for (const lane of mergedLanes) {
+        const flags = Array.isArray(lane.flags) ? lane.flags : [];
+        if (flags.some((f) => candidateArgs.has(f))) slugs.push(lane.slug);
+      }
+      process.stdout.write([...new Set(slugs)].sort().join(','));
+      return;
+    }
 
     if (sub === 'sections') {
       const rows = chosen
@@ -1285,52 +1785,159 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       return;
     }
 
-    // Effort argv is resolved per lane by the host's own execution policy, exactly as the legs did
-    // via `resolve-execution … --pick effort_argv_string`. A lane whose slug is not a known host
-    // simply gets none.
-    // Resolved through the SAME `resolve-execution` surface the bash legs used
-    // (`--host <slug> --pick effort_argv_string`), so the host's negotiated effortSurface still
-    // decides whether an argument is emitted and the catalog still owns the syntax (ADR-1239 #2481,
-    // ADR-443's escalation ladder). `cmdResolveExecution` writes to stdout and exits, so it cannot
-    // be called in-process for a value — this spawns the same bounded query the legs did, once per
-    // selected lane. A lane whose slug is not a known host resolves to no effort argument at all.
-    const effortFor = (slug) => {
+    // Effort argv is resolved from the LANE's own review configuration (#4255), then rendered
+    // through the host's negotiated `effortSurface` so ADR-1239/#2481's trust-boundary invariant
+    // still decides whether an argument is emitted at all and the catalog still owns the syntax.
+    //
+    // What this replaced: a `query resolve-execution gsd-plan-checker --host <slug>` spawn per
+    // lane. The agent id was a hardcoded literal, so the `--host` argument chose only the argv
+    // RENDERING while the LEVEL always came from the installed plan-checker's frontmatter — `low`
+    // under every shipped model profile. Every prompt-fed reviewer therefore ran at a fast
+    // structural verifier's effort, and because the rendered argument is a CLI config override it
+    // silently beat the effort the operator had configured for that CLI. At `low` a large
+    // source-grounded prompt makes a model end its turn with no final message, so the lane came
+    // back empty and the stub read as a crash.
+    //
+    // `resolveLaneEffort` is pure and lives beside the other lane resolution; this closure only
+    // injects the rendering, which needs the registry and the catalog.
+    const renderLaneEffort = (host, level) => {
       try {
-        const r = cp.spawnSync(
-          process.execPath,
-          [__filename, 'query', 'resolve-execution', 'gsd-plan-checker',
-            // NOT `--raw`: that prints the resolved EFFORT ('low'), ignoring --pick. The picked
-            // field is what carries the host-specific syntax ('--effort low' for claude,
-            // '-c model_reasoning_effort=low' for codex), which is the whole point of asking.
-            '--host', slug, '--pick', 'effort_argv_string'],
-          { cwd, encoding: 'utf8', timeout: 15000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 },
-        );
-        if (r.status !== 0) return [];
-        const s = String(r.stdout || '').trim();
-        return s ? s.split(/\s+/).filter(Boolean) : [];
-      } catch { return []; }
+        const surface = commands.effortSurfaceForHost(cwd, host);
+        const r = modelCatalog.renderEffortArgv(host, level, surface);
+        return { argv: Array.isArray(r && r.argv) ? r.argv : [], value: (r && r.value) || null };
+      } catch { return { argv: [], value: null }; }
     };
+    const effortFor = (lane) => resolveLaneEffort(lane, configGet, renderLaneEffort);
 
-    /**
-     * Per-lane prompt budget (#2797 semantics, preserved exactly).
-     *
-     * `-1` is the UNSET sentinel and falls back to the central `review.max_prompt_tokens`, because
-     * `0` is a legitimate value meaning "do not trim this lane". Treating 0 as unset would silently
-     * switch a user who deliberately disabled trimming onto the global budget.
-     *
-     * Only the budget VALUE is resolved here. Assembly and trimming stay in `prompt-budget`, which
-     * already owns that machinery and is already tested; the workflow calls it and hands the
-     * trimmed file back via `--prompt-file`. Re-implementing it inside the runner would fork a
-     * tested surface for no gain.
-     */
-    const budgetFor = (lane) => {
-      if (!lane.promptBudgetKey) return null;
-      const per = configGet(lane.promptBudgetKey);
-      const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
-      if (isNum(per) && per !== -1) return per;
-      const global = configGet('review.max_prompt_tokens');
-      return isNum(global) ? global : null;
-    };
+    // Per-lane prompt budget: `resolveLaneBudget` (review-lane-invocation.cjs) owns the #2797
+    // resolution semantics (shared with src/reviewer-step-dispatch.cts, #4209 R3 — was two
+    // verbatim copies). Only the budget VALUE is resolved here; assembly/trimming stay in
+    // `prompt-budget`, which the workflow calls, handing the trimmed file back via `--prompt-file`.
+    const budgetFor = (lane) => resolveLaneBudget(lane, configGet);
+
+    // #4209 (ADR-2782 seam) — the ONE interpreter route for a step that declared
+    // `supportsReviewerLanes: true`. Wires `dispatchReviewerLanes` (src/reviewer-step-dispatch.cts)
+    // to the SAME plan/invoke machinery `plan`/`invoke` above use, so a step opting in gets exact
+    // parity with hand-driven `review-lane plan|invoke` rather than a second implementation.
+    // Canonical file paths travel on stdin, never argv (see gsd-core/workflows/code-review.md's
+    // "Files travel on stdin" note) — a 50+-file scope with long paths approaches the Windows
+    // execFileSync argv ceiling, and stdin has no such bound.
+    //
+    // Returns EARLY, like `sections`/`flags` above, rather than falling into the `plans` builder
+    // below: that builder spawns one `effortFor` child process PER LANE IN THE ROSTER (chosen
+    // defaults to every merged lane when nothing is selected), which would burn ~12 wasted spawns
+    // on every dispatch-step call whether or not anything was actually selected. `dispatchReviewerLanes`
+    // builds its own per-SELECTED-lane plan below instead, bounded by the (typically 0-3) explicitly
+    // requested slugs, not the whole roster.
+    if (sub === 'dispatch-step') {
+      const { dispatchReviewerLanes } = require('./lib/reviewer-step-dispatch.cjs');
+      const explicitFlags = (flag('--explicit') || '').split(',').map((s) => s.trim()).filter(Boolean);
+      const depth = flag('--depth') || '';
+      const baseSha = flag('--base-sha') || '';
+      // #4209: this command IS the reusable capability/step-dispatch trait check — see
+      // gsd-core/references/loop-hook-dispatch.md for what supportsReviewerLanes means and why
+      // this is the one place it's resolved. Calls the SAME resolver `loop render-hooks` uses,
+      // `resolveActiveHooksForPoint`, directly in-process — no subprocess, no JSON re-parse, and
+      // no exposure to `io.cjs`'s `@file:` overflow protocol (which only applies to the
+      // rendered-string envelope this path never touches).
+      const capId = flag('--cap-id') || '';
+      const point = flag('--point') || '';
+      let trait = false;
+      if (capId && point) {
+        try {
+          const { resolveActiveHooksForPoint } = loopResolver;
+          const { activeHooks } = resolveActiveHooksForPoint(cwd, point);
+          trait = activeHooks.some((h) => h && h.capId === capId && h.supportsReviewerLanes === true);
+        } catch (e) {
+          process.stderr.write(`Warning: reviewer-lane trait resolution failed for --cap-id ${capId} --point ${point}: ${e && e.message ? e.message : String(e)} — treating as not enabled.\n`);
+          trait = false;
+        }
+      } else if (capId || point) {
+        // #4209 RQ-03: exactly one of the two was passed — a caller with NO capability-step
+        // context at all (neither flag) is the legitimate, silent no-op documented above, but a
+        // caller that named a capability without its point (or vice versa) is misconfigured, not
+        // opted out, and that must not look identical to a correct opt-out on the wire.
+        process.stderr.write(`Warning: --cap-id and --point must both be given to resolve the reviewer-lane trait (got --cap-id=${JSON.stringify(capId)} --point=${JSON.stringify(point)}) — treating as not enabled.\n`);
+      }
+      // No piped stdin (interactive TTY): fail closed to empty paths instead of blocking
+      // indefinitely on a TTY EOF the caller never sends.
+      let stdinPaths = '';
+      if (!process.stdin.isTTY) {
+        try { stdinPaths = fsx.readFileSync(0, 'utf8'); } catch { stdinPaths = ''; }
+      }
+      const paths = stdinPaths.split('\n').map((s) => s.trim()).filter(Boolean);
+
+      // Reuse the exact effort-aware, per-lane plan `plan` builds above (DISP-03: "planned
+      // through the existing `review-lane plan` interface") rather than the interpreter's
+      // simpler default plan callback, which does not resolve per-host effort.
+      const planFn = (lane, ctx) => {
+        const effort = effortFor(lane.slug);
+        return resolveLanePlan({
+          lane, configGet: ctx.configGet, runDir: ctx.runDir, repoRoot: ctx.repoRoot,
+          effortArgs: effort.argv, effortValue: effort.value,
+        });
+      };
+
+      const runnerDeps = buildLaneRunnerDeps();
+      const invokeFn = async (lane, plan) => {
+        let consentedHost;
+        if (plan.transport === 'openai-http') {
+          try {
+            const consent = require('./lib/capability-consent.cjs');
+            const projectRoot = require('./lib/project-root.cjs').consentProjectRoot(cwd);
+            const capId = String(lane.slug).replace(/_/g, '-');
+            consentedHost = consent.readConsentedReviewerHost({ projectRoot, id: capId });
+          } catch { consentedHost = undefined; }
+        }
+        // DISP-04/05: every selected lane is invoked through this SAME `runner.runLane` seam
+        // `invoke` uses, exactly once (the interpreter's own for-loop over `selection.selected`
+        // never revisits a slug).
+        return runner.runLane(plan, runnerDeps, { consentedHost, explicitlyRequested: true, repoRoot });
+      };
+
+      // `resolveReviewerSelection` only selects an explicit flag present in `detected`
+      // (ADR-2782 D4: absent-safe governs discovery, never explicit selection — a slug the
+      // roster does not declare is rejected here as an explicit-selection error). REAL
+      // host availability (is the CLI actually installed?) is a separate, already-owned
+      // check inside `runner.runLane`'s `probeLane` at invoke time below — duplicating a
+      // second `command -v` probe here would let the two disagree about what "available"
+      // means, which is the exact defect class `resolveSpawnBinary` was consolidated to
+      // prevent (#3275).
+      //
+      // GUARDED ON explicitFlags.length, not unconditional: `resolveReviewerSelection`'s
+      // precedence chain (explicit > --all > review.default_reviewers > all detected) ends,
+      // when none of the first three apply, in `selected = [...detected]` — the SAME
+      // "no flags means every detected reviewer" default `/gsd:review` intentionally uses.
+      // Source review's COMP-01 contract is the opposite: no reviewer-lane flag means inert,
+      // unchanged from before #4209. Passing a non-empty
+      // `detected` unconditionally would silently opt every dispatch-step call with no
+      // `--explicit` into planning+invoking the WHOLE roster via that fallback branch. An
+      // empty `detected` when nothing was asked for makes that fallback resolve to
+      // `[...[]]` = `[]`, so `dispatchReviewerLanes` hits its own `NO_LANES_SELECTED`
+      // early-return before any plan/invoke call — the same fast, inert no-op the caller
+      // gets from an absent `supportsReviewerLanes` trait.
+      const rosterSlugs = explicitFlags.length > 0 ? [...laneBySlug.keys()] : [];
+
+      const dispatchResult = await dispatchReviewerLanes(
+        {
+          trait,
+          selection: { explicitFlags, detected: rosterSlugs },
+          repoRoot,
+          paths,
+          depth,
+          baseSha,
+          runDir,
+        },
+        {
+          getLane: (slug) => laneBySlug.get(slug),
+          configGet,
+          plan: planFn,
+          invoke: invokeFn,
+        },
+      );
+      output(dispatchResult, raw);
+      return;
+    }
 
     const plans = chosen.map((slug) => {
       const lane = laneBySlug.get(slug);
@@ -1341,7 +1948,8 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       // so losing all of them to one bad manifest is strictly worse. Belt and braces on purpose.
       let r;
       try {
-        r = resolveLanePlan({ lane, configGet, runDir, repoRoot, effortArgs: effortFor(slug) });
+        const effort = effortFor(lane);
+        r = resolveLanePlan({ lane, configGet, runDir, repoRoot, effortArgs: effort.argv, effortValue: effort.value });
       } catch (e) {
         return { slug, ok: false, reason: 'malformed_lane', detail: `resolver threw: ${e && e.message ? e.message : String(e)}` };
       }
@@ -1364,7 +1972,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     }
 
     if (sub !== 'invoke') {
-      error("Usage: review-lane <plan|invoke|sections|flags> [--selected a,b] [--run-dir D] [--repo-root R]");
+      error("Usage: review-lane <plan|invoke|sections|flags|dispatch-step|explicit-from-argv> [--selected a,b] [--run-dir D] [--repo-root R]");
       return;
     }
 
@@ -1378,74 +1986,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
 
     // EVERY spawn bounded — `DEFECT.UNBOUNDED-SUBPROCESS` (CONTEXT.md:772). A frozen sync spawn
     // cannot be interrupted by --test-force-exit and hangs a whole CI chunk to its 10-minute kill.
-    const deps = {
-      spawn: (binary, argv, opts) => {
-        // #3086: on Windows, reviewer CLIs (gemini, codex, etc.) are installed
-        // as .cmd shims. spawnSync with a bare name + shell:false fails with
-        // ENOENT (CreateProcess cannot start .cmd). Apply the same #2667 shim
-        // gate used in runWithTimeout: detect .cmd/.bat and mediate through
-        // cmd.exe /d /s /c with an explicit argv array (no shell:true).
-        const isWin = process.platform === 'win32';
-        const winShim = isWin && /\.(cmd|bat)$/i.test(path.basename(binary));
-        const spawnBinary = winShim ? (process.env.ComSpec || 'cmd.exe') : binary;
-        const spawnArgv = winShim ? ['/d', '/s', '/c', binary, ...argv] : argv;
-        const r = cp.spawnSync(spawnBinary, spawnArgv, {
-          input: opts.input,
-          encoding: 'utf8',
-          timeout: opts.timeoutMs,
-          killSignal: 'SIGKILL',
-          maxBuffer: 64 * 1024 * 1024,
-          shell: false, // argv array only — never a shell string (no interpolation of config values)
-        });
-        return {
-          status: r.status,
-          stdout: r.stdout || '',
-          stderr: r.stderr || '',
-          errorCode: r.error && r.error.code ? r.error.code : undefined,
-        };
-      },
-      httpJson: async (url, opts) => {
-        try {
-          const res = await fetch(url, {
-            method: opts.method,
-            headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
-            body: opts.body,
-            signal: AbortSignal.timeout(opts.timeoutMs),
-          });
-          return { ok: res.ok, status: res.status, body: await res.text() };
-        } catch (e) {
-          return { ok: false, status: 0, body: '', error: e && e.message ? e.message : String(e) };
-        }
-      },
-      readFile: (p) => fsx.readFileSync(p, 'utf8'),
-      writeFile: (p, c) => fsx.writeFileSync(p, c, 'utf8'),
-      exists: (p) => fsx.existsSync(p),
-      // PATH scan rather than spawning `command -v` / `where`. Two reasons: it spawns nothing at
-      // all (a probe that costs a process is a probe you avoid running, which is how the original
-      // Kimi probe ended up unbounded), and `shell: true` with an args array is deprecated in
-      // Node 26 (DEP0190) because the arguments are concatenated rather than escaped.
-      hasBinary: (name) => {
-        if (!name || name.includes('/') || name.includes('\\')) {
-          try { return fsx.statSync(name).isFile(); } catch { return false; }
-        }
-        const exts = process.platform === 'win32'
-          ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
-          : [''];
-        for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
-          for (const ext of exts) {
-            const candidate = path.join(dir, name + ext);
-            try {
-              const st = fsx.statSync(candidate);
-              if (st.isFile()) return true;
-            } catch { /* next candidate */ }
-          }
-        }
-        return false;
-      },
-      configGet,
-      homeDir: os.homedir(),
-      warn: (m) => process.stderr.write(`${m}\n`),
-    };
+    const deps = buildLaneRunnerDeps();
 
     // ADR-1517 reviewer instances resolve THROUGH a lane rather than being lanes themselves
     // (ADR-2782 D8), so they reuse this seam with three substitutions instead of duplicating the
@@ -1493,12 +2034,14 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           `model override (it declares no modelConfigKey). The review will use the CLI's own default.\n`,
         );
       }
+      const instanceEffort = effortFor(lane);
       const overridden = resolveLanePlan({
         lane,
         configGet: (k) => (key && k === key ? instanceModel : configGet(k)),
         runDir,
         repoRoot,
-        effortArgs: effortFor(entry.slug),
+        effortArgs: instanceEffort.argv,
+        effortValue: instanceEffort.value,
       });
       if (overridden.ok) {
         // Preserve any instance retargeting already applied above.
@@ -1575,7 +2118,8 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
   function routeDispatchShouldFlatten({ args, cwd, raw, error }) {
     // #1708 / #853: typed query replacing the `RUNTIME === 'codex'` prose rule.
           //
-          // Resolves the current runtime (GSD_RUNTIME > config.runtime > 'claude'),
+          // Resolves the current runtime (GSD_RUNTIME > config.runtime > per-install
+          // .gsd-runtime marker > 'claude'),
           // looks up registry.runtimes[id].runtime.hostIntegration.dispatch, and
           // calls shouldFlattenDispatch(dispatch) from host-integration.cjs.
           //
@@ -1621,6 +2165,31 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           }
   }
 
+  /**
+   * #3737 — strict read of the project-level worktree opt-out from
+   * `.planning/config.json`. True ONLY when `workflow.use_worktrees` is the
+   * boolean `false`; an absent key, unreadable/malformed config, or any
+   * non-boolean value (including the string "false") degrades to false —
+   * worktrees are ON by default, so the degraded answer is "not opted out".
+   * Direct file read, deliberately NOT loadConfig: this resolver backs
+   * sentinel writes and must never trigger config normalization/rewrites
+   * (same discipline as resolveDispatchIsolationDecision's resolveRuntime
+   * comment above). Never throws.
+   */
+  function projectWorktreesOptedOut(cwd) {
+    // #3972: single owner — planning-workspace's worktreesOptedOut ladder
+    // (scoped own-key, root inheritance under the ws gate, strict === false).
+    // Kept as a local name so routeDispatchIsolation's call sites read the
+    // same as they did in #3938/#3963; the logic itself now lives beside
+    // planningDir/planningRoot where every isolation surface can share it.
+    try {
+      const { worktreesOptedOut } = require('./lib/planning-workspace.cjs');
+      return worktreesOptedOut(cwd);
+    } catch {
+      return false;
+    }
+  }
+
   function routeDispatchIsolation({ args, cwd, raw, error }) {
     // #2584 Phase 3 (#2627): typed query exposing the negotiated
     // `dispatch.isolation` to the execute-phase wave scheduler, so the
@@ -1629,7 +2198,8 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     // #853) for exactly this reason — it replaced a `RUNTIME === 'codex'`
     // prose rule.
     //
-    // Resolves the current runtime (GSD_RUNTIME > config.runtime > 'claude'),
+    // Resolves the current runtime (GSD_RUNTIME > config.runtime > per-install
+    // .gsd-runtime marker > 'claude'),
     // reads registry.runtimes[id].runtime.hostIntegration.dispatch.isolation,
     // and validates it against the closed vocabulary.
     //
@@ -1664,12 +2234,357 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     // `per-plan-worktree-gate.md`) override the naturally-resolved mode
     // while still going through this single write path. Best-effort: a
     // sentinel write failure here must never fail the wave.
-    const VALID_ISOLATION = new Set(['harness-worktree', 'orchestrator-worktree', 'none']);
+    const decision = resolveDispatchIsolationDecision({ args, cwd });
+    const runtimeId = decision.runtimeId;
+    let { isolation, exec, harnessFlag } = decision;
+
+    // `--force-isolation <mode>` overrides the naturally-resolved mode with
+    // context this resolver has no way to see on its own (e.g. the #2474
+    // per-plan submodule intersection). Invalid/unrecognized values are
+    // ignored rather than erroring — this is a best-effort recording call,
+    // not a hard usage gate. Forcing to 'none' clears harnessFlag/exec since
+    // neither applies to sequential dispatch.
+    const forceIdx = args.indexOf('--force-isolation');
+    const forcedIsolation = forceIdx !== -1 ? args[forceIdx + 1] : undefined;
+    if (forcedIsolation && DISPATCH_ISOLATION_VOCABULARY.has(forcedIsolation)) {
+      isolation = forcedIsolation;
+      if (isolation === 'none') {
+        harnessFlag = null;
+        exec = null;
+      }
+    }
+
+    const phaseIdx = args.indexOf('--phase');
+    const phaseArg = phaseIdx !== -1 && args[phaseIdx + 1] && !args[phaseIdx + 1].startsWith('--')
+      ? args[phaseIdx + 1]
+      : null;
+    const planIdx = args.indexOf('--plan');
+    const planArg = planIdx !== -1 && args[planIdx + 1] && !args[planIdx + 1].startsWith('--')
+      ? args[planIdx + 1]
+      : null;
+
+    // #3737: the project-level opt-out (workflow.use_worktrees === false) is
+    // decided HERE, before the sentinel write — not only in the workflow
+    // shell blocks that run after this resolve. Pre-fix, any plain re-query
+    // (config re-read, wave transition, second plan dispatch) re-persisted
+    // the naturally-resolved host capability over the `--force-isolation
+    // none` record the dispatch-isolation reference mandates, and the guard
+    // then denied the sequential dispatch the config explicitly asked for.
+    // Applied AFTER --force-isolation so the documented rule holds: the
+    // opt-out wins on every host, over both the natural resolution and any
+    // force. Strict `=== false`: the default is worktrees ON, so an absent
+    // key, an unreadable/malformed config, or a non-boolean value degrades
+    // to "not opted out" (mirrors readConfigJsonBoolean's no-coercion
+    // discipline in lib/init.cjs).
+    if (projectWorktreesOptedOut(cwd)) {
+      isolation = 'none';
+      harnessFlag = null;
+      exec = null;
+    }
+
+    // Side-effect write (#3045 CORE REDESIGN) — see the doc comment above.
+    // Never allowed to affect this query's own stdout contract or throw.
+    try {
+      writeDispatchIsolationSentinel(cwd, { isolation, harnessFlag, phase: phaseArg, plan: planArg });
+    } catch {
+      // writeDispatchIsolationSentinel already swallows its own errors into
+      // a { recorded: false } result; this catch is defense in depth only.
+    }
+
+    if (args.indexOf('--json') !== -1) {
+      output({ runtime: runtimeId, isolation, exec, harnessFlag }, raw);
+    } else {
+      process.stdout.write(isolation);
+    }
+  }
+
+  /**
+   * #3673 (ADR-1239 Phase 1) — typed, PURE-READ query exposing the negotiated
+   * `dispatch.maxConcurrency` numeric sub-field. Sibling of `dispatch-isolation`
+   * above, but — per the #3673 design doc's explicit rejection of a write path
+   * for this query — writes NOTHING: no sentinel file, no side effect at all.
+   * A read-only capacity lookup for a later (Phase 4) scheduler to consult.
+   *
+   * Precedence:
+   *   1. GSD_DISPATCH_MAX_CONCURRENCY, if it parses as a positive safe
+   *      integer → source: "live". A malformed value (non-numeric, zero,
+   *      negative, fractional) is treated exactly as if the variable were
+   *      unset — it falls through to tier 2, never errors.
+   *   2. registry.runtimes[id].runtime.hostIntegration.dispatch.maxConcurrency,
+   *      if it is a positive safe integer → source: "descriptor". The
+   *      "undocumented" sentinel and any other malformed shape fall through
+   *      to tier 3.
+   *   3. 1 (the fail-closed floor) → source: "fallback".
+   *
+   * `isPositiveSafeInteger`, required below from `./lib/host-integration.cjs`,
+   * is the SAME exported predicate src/host-integration.cts's
+   * negotiateHostCapabilities applies to the descriptor value — applied
+   * identically to both the env value and the descriptor value here so the
+   * two tiers can never silently disagree on what counts as valid.
+   *
+   * `reason` names why the WINNING tier (or the fallback) was chosen: "ok" on
+   * the happy path (live or descriptor honored), else "missing" (descriptor
+   * omitted the field), "undocumented" (descriptor sentinel), "non_integer"
+   * (fractional or NaN), "unsafe_integer" (integer but outside
+   * Number.isSafeInteger's range), "non_positive" (zero or negative),
+   * "non_numeric" (string/object/array/null/boolean), or "unknown_runtime"
+   * (no registry entry for the resolved runtime id — resolution itself never
+   * throws; failure fails closed to the same fallback tier).
+   *
+   * Output:
+   *   --raw   → prints exactly one positive integer, nothing else
+   *   --json  → prints { runtime, capacity, declared, source, reason }
+   *   default → same as --raw
+   */
+  function routeDispatchCapacity({ args, cwd, raw }) {
+    const { UNDOCUMENTED, isPositiveSafeInteger } = require('./lib/host-integration.cjs');
+
+    let runtimeId = null;
+    let runtimeEntry = null;
+    try {
+      const { resolveRuntime } = require('./lib/runtime-slash.cjs');
+      runtimeId = resolveRuntime(cwd);
+      const registry = require('./lib/capability-registry.cjs');
+      runtimeEntry = registry.runtimes != null ? registry.runtimes[runtimeId] : null;
+    } catch {
+      runtimeEntry = null;
+    }
+    const declared = runtimeEntry?.runtime?.hostIntegration?.dispatch?.maxConcurrency ?? null;
+
+    let liveValue = null;
+    const rawEnv = process.env.GSD_DISPATCH_MAX_CONCURRENCY;
+    if (typeof rawEnv === 'string' && rawEnv.trim().length > 0) {
+      const parsed = Number(rawEnv.trim());
+      if (isPositiveSafeInteger(parsed)) {
+        liveValue = parsed;
+      }
+    }
+
+    let capacity;
+    let source;
+    let reason;
+    if (liveValue !== null) {
+      capacity = liveValue;
+      source = 'live';
+      reason = 'ok';
+    } else if (runtimeEntry == null) {
+      capacity = 1;
+      source = 'fallback';
+      reason = 'unknown_runtime';
+    } else if (declared === UNDOCUMENTED) {
+      capacity = 1;
+      source = 'fallback';
+      reason = 'undocumented';
+    } else if (isPositiveSafeInteger(declared)) {
+      capacity = declared;
+      source = 'descriptor';
+      reason = 'ok';
+    } else if (declared === null || declared === undefined) {
+      capacity = 1;
+      source = 'fallback';
+      reason = 'missing';
+    } else if (typeof declared !== 'number') {
+      capacity = 1;
+      source = 'fallback';
+      reason = 'non_numeric';
+    } else if (!Number.isSafeInteger(declared)) {
+      capacity = 1;
+      source = 'fallback';
+      reason = Number.isInteger(declared) ? 'unsafe_integer' : 'non_integer';
+    } else {
+      capacity = 1;
+      source = 'fallback';
+      reason = 'non_positive';
+    }
+
+    if (args.indexOf('--json') !== -1) {
+      output({ runtime: runtimeId, capacity, declared, source, reason }, raw);
+    } else {
+      process.stdout.write(String(capacity));
+    }
+  }
+
+  // #3714 follow-up — the dispatch seam gated only on PRESENCE of an explicit
+  // pin, never on its VALUE, so an Anthropic-flavored global default
+  // (~/.gsd/defaults.json model_overrides["gsd-executor"] = "sonnet"/"opus"/
+  // "claude-*") reached `codex exec --model sonnet`: the documented #2310/
+  // #2311 400 on a passive-posture host (ADR-1239/ADR-2313). It also let a
+  // repo-committed .planning/config.json inject shell-hostile argv (a
+  // `-c approval_policy=never` suffix, `$(...)`/`;` command injection,
+  // embedded control characters) straight onto exec's argv.
+  //
+  // This mirrors — deliberately, not by re-derivation — the same VALUE
+  // policy bin/install.js's generateCodexAgentToml() already applies to the
+  // identical model_overrides["gsd-executor"] config key for the .toml
+  // surface (bin/install.js ~3983-4046): trim; a whitespace-only value drops
+  // silently (#3241, no warning); an Anthropic-flavored value
+  // (isAnthropicFlavoredModel, single-sourced on bin/lib/model-catalog.cjs
+  // per #3241 specifically so it cannot diverge across Codex-posture
+  // surfaces) drops WITH a warning; a real pin survives verbatim. Two
+  // additions beyond the .toml surface, both specific to this seam: the
+  // 'inherit' sentinel (case/whitespace-insensitive) is a no-op here already
+  // and must stay one, and a value that doesn't look like a model id at all
+  // (the injection case above — the .toml surface never had to consider this
+  // because TOML string-quoting isn't a shell argv boundary) is dropped with
+  // a warning rather than ever reaching child_process argv.
+  // Single source of truth for the model-id "allowed characters" notion
+  // (#3714 follow-up — "Generative Fix Divergence"): the accept regex
+  // (MODEL_ID_CHARSET_RE, used to ADMIT a pin) and the sanitizer keep-class
+  // (MODEL_ID_SANITIZE_STRIP_RE, used to RENDER a rejected pin into a
+  // warning) are both derived from this one character-class body so they
+  // cannot drift apart again the way they already did once (the '@' added
+  // for Vertex pins landed in the accept regex but not the sanitizer,
+  // rendering "text-bison@002" as "text-bison?002" in the warning). '@' is
+  // included for Vertex model-version pins ("text-bison@002",
+  // "chat-bison@001"), which are legitimate model ids reachable through a
+  // custom model_provider.
+  // This body is interpolated raw into BOTH a positive character class
+  // (MODEL_ID_CHARSET_RE, `[BODY]`) and a negated one
+  // (MODEL_ID_SANITIZE_STRIP_RE, `[^BODY]`) below — only plain characters
+  // and `x-y` ranges are safe here. A class metacharacter (`^`, `]`, `\`)
+  // would mean different things in the two derived regexes if ever added.
+  const MODEL_ID_CHARSET_BODY = 'A-Za-z0-9._:/@-';
+  // The first character must be alphanumeric (#3714 hardening): a leading
+  // '.', '_', ':', '/', or '@' has no legitimate model-id use case and, for
+  // resolveOrchestratorExec's documented role as a GENERAL descriptor→argv
+  // seam other hosts may adopt, a leading '@' or '/' is exactly the shape an
+  // @-response-file or /-switch parser would key on. The leading-dash shape
+  // is enforced separately by LEADING_DASH_RE below — it is NOT relaxed
+  // here, since a flag-shaped value ("-c", "--config") must still fail the
+  // resolver's own unsafe_leading_dash_model guard path via that dedicated
+  // check, not this charset.
+  const MODEL_ID_CHARSET_RE = new RegExp(`^[A-Za-z0-9][${MODEL_ID_CHARSET_BODY}]*$`);
+  // Keep-class for sanitizing a REJECTED pin before it reaches the warning
+  // (a guaranteed-reachable raw-to-TTY sink — the dispatch step runs with no
+  // `2>` redirect). Built from the same MODEL_ID_CHARSET_BODY as the accept
+  // regex above, so every character the matcher accepts also survives the
+  // sanitizer unchanged, and a widened charset can never diverge from its
+  // rendering again.
+  //
+  // This `g`-flagged instance is for internal `.replace()` use ONLY — a
+  // `/g` regex is stateful (`.lastIndex` persists across calls) and
+  // `.test()` on it alternates true/false/true across repeated calls on the
+  // same string, a false-green trap for any test that reaches for `.test()`
+  // instead of `.replace()`. To make that trap impossible rather than just
+  // documenting it, this `g`-flagged object is never exported; the exported
+  // `MODEL_ID_SANITIZE_STRIP_RE` below is a separate, non-global instance
+  // built from the same body, safe for `.test()`/`.match()` in tests.
+  const MODEL_ID_SANITIZE_STRIP_RE_G = new RegExp(`[^${MODEL_ID_CHARSET_BODY}]`, 'g');
+  // Non-global companion of MODEL_ID_SANITIZE_STRIP_RE_G, exported for
+  // tests. Do not use with `.replace()` on a value containing more than one
+  // disallowed character — it only replaces the first match. Production
+  // code must use the `g`-flagged instance above instead.
+  const MODEL_ID_SANITIZE_STRIP_RE = new RegExp(`[^${MODEL_ID_CHARSET_BODY}]`);
+  // A model id has no legitimate reason to be long; this also keeps a
+  // pathological pin away from the Windows argv ceiling (execFileSync aborts
+  // if argv > 32,767 chars — CLAUDE.md "Windows ARGV Overflow"). A pin over
+  // this length is DROPPED WITH A WARNING like every other rejection, never
+  // truncated into argv — a truncated model id is a different model id.
+  const MODEL_ID_MAX_LENGTH = 200;
+  const _dispatchModelPinDropWarned = new Set();
+  function _warnDispatchModelPinDropped(agentName, rawValue, reason) {
+    const key = `${agentName}::${rawValue}::${reason}`;
+    if (_dispatchModelPinDropWarned.has(key)) return;
+    _dispatchModelPinDropWarned.add(key);
+    // Sanitize BEFORE truncating: every value that reaches this warning
+    // failed the model-id charset test by definition (or, for the
+    // over-length case, still only ever contains charset-legal bytes) —
+    // sanitizing first catches raw control/escape bytes (ESC, BEL, CSI
+    // sequences) using the identity-sanitizing pattern already used for
+    // --as at gsd-tools.cjs:1526. Sanitizing before truncating also ensures
+    // a truncated escape sequence can never survive (e.g. an SGR sequence
+    // cut before its reset, leaving sticky terminal state) — truncation
+    // only ever cuts already-safe characters.
+    const sanitized = String(rawValue).replace(MODEL_ID_SANITIZE_STRIP_RE_G, '?');
+    const safe = sanitized.length > 64 ? `${sanitized.slice(0, 64)}…` : sanitized;
+    process.stderr.write(
+      `gsd: warning — dispatch model pin for agent "${agentName}" (value "${safe}") ${reason}; ` +
+      `dropping it so the spawned executor falls back to the session model.\n`,
+    );
+  }
+  // A value starting with '-' (or '--') is a flag/option shape, not a model
+  // id — `-c`, `--config`, `-`, `--`, `-p` are unsafe to hand to
+  // resolveOrchestratorExec, whose own `unsafe_leading_dash_model` guard
+  // rejects them and fails the WHOLE resolution to `{ ok: false }` ->
+  // exec:null -> a FATAL wave abort (executor-isolation-dispatch.md:299-303),
+  // even on hosts (e.g. kimi-code) that declare no modelFlag at all and
+  // previously ignored the pin entirely. This check MUST run BEFORE
+  // MODEL_ID_CHARSET_RE below: the charset is anchored to `[A-Za-z0-9]` at
+  // the first character, so every dash-leading value already fails the
+  // charset test and would otherwise be swallowed by the generic "unsafe
+  // characters" message, losing the more specific and more actionable
+  // flag/option diagnosis. Reject here, at the VALUE-policy layer, so a
+  // leading-dash value degrades to "no model" like every other rejected
+  // shape, instead of reaching a resolver whose failure mode is fatal
+  // rather than a graceful drop.
+  const LEADING_DASH_RE = /^-/;
+  /**
+   * Resolve the VALUE policy for an explicit dispatch model pin. `rawValue`
+   * is whatever resolveAgentModelOverride(..., null) returned — a string
+   * pin, the 'inherit' sentinel, or null/''/undefined for "no explicit pin".
+   * Returns the trimmed model string to embed, or `undefined` to emit no
+   * --model flag at all. Never throws; never fails closed to an error —
+   * every rejection degrades to "no model" (drop-and-warn), matching the
+   * documented desired behavior of falling back to the session model rather
+   * than aborting the wave.
+   */
+  function resolveDispatchModelPin(agentName, rawValue) {
+    if (typeof rawValue !== 'string') return undefined; // not a string -> no model
+    const trimmed = rawValue.trim();
+    if (trimmed === '') return undefined; // whitespace-only -> no model, no warning (#3241)
+    if (trimmed.toLowerCase() === 'inherit') return undefined; // sentinel -> no model, no warning
+    const { isAnthropicFlavoredModel } = require('./lib/model-catalog.cjs');
+    if (isAnthropicFlavoredModel(trimmed)) {
+      _warnDispatchModelPinDropped(agentName, rawValue, 'is an Anthropic-flavored model/alias, not a valid Codex model');
+      return undefined;
+    }
+    if (LEADING_DASH_RE.test(trimmed)) {
+      _warnDispatchModelPinDropped(agentName, rawValue, 'looks like a flag/option, not a model id (leading "-")');
+      return undefined;
+    }
+    if (!MODEL_ID_CHARSET_RE.test(trimmed)) {
+      _warnDispatchModelPinDropped(agentName, rawValue, 'does not look like a model id (unsafe characters)');
+      return undefined;
+    }
+    if (trimmed.length > MODEL_ID_MAX_LENGTH) {
+      _warnDispatchModelPinDropped(agentName, rawValue, `exceeds the maximum model id length (${MODEL_ID_MAX_LENGTH} characters)`);
+      return undefined;
+    }
+    return trimmed;
+  }
+
+  const DISPATCH_ISOLATION_VOCABULARY = new Set(['harness-worktree', 'orchestrator-worktree', 'none']);
+
+  /**
+   * Shared, side-effect-free resolution of the negotiated dispatch isolation:
+   * runtime (GSD_RUNTIME > config.runtime > per-install .gsd-runtime marker >
+   * 'claude') → declared
+   * `dispatch.isolation` → harness-flag / orchestrator-exec degrade rules.
+   * Extracted (#2486) so `routeDispatchIsolation` (the #3045 recording
+   * dispatch path) and `routeInspectDispatchIsolation` (the read-only
+   * inspection path) share exactly one negotiation implementation and cannot
+   * drift apart. Resolution only — the caller decides whether the decision is
+   * recorded to the sentinel.
+   */
+  function resolveDispatchIsolationDecision({ args, cwd }) {
     let isolation = 'none';
     let runtimeId = null;
     let exec = null;
     let harnessFlag = null;
     try {
+      // Deliberately `resolveRuntime`, NOT `resolveActiveRuntime`/`loadConfig`:
+      // loadConfig normalizes and rewrites legacy keys back to disk, and this
+      // resolver backs the sentinel-free `inspect-dispatch-isolation` verb,
+      // which must never write. resolveRuntime reads config.json directly.
+      //
+      // KNOWN LIMITATION, tracked separately: resolveRuntime stops at
+      // GSD_RUNTIME > config.runtime > 'claude' and does not consult the
+      // per-install `.gsd-runtime` marker, so on a non-Claude install whose
+      // project config carries no `runtime` key this resolves 'claude'. That is
+      // open-gsd/gsd-core#2395 — a pre-existing defect in the canonical
+      // resolver, not introduced here, and deliberately NOT fixed in this PR
+      // (its blast radius reaches every consumer of that resolver, so it is
+      // being handled on its own).
       const { resolveRuntime } = require('./lib/runtime-slash.cjs');
       runtimeId = resolveRuntime(cwd);
 
@@ -1678,7 +2593,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
         ? registry.runtimes[runtimeId]
         : null;
       const declared = runtimeEntry?.runtime?.hostIntegration?.dispatch?.isolation ?? null;
-      if (typeof declared === 'string' && VALID_ISOLATION.has(declared)) {
+      if (typeof declared === 'string' && DISPATCH_ISOLATION_VOCABULARY.has(declared)) {
         isolation = declared;
       }
 
@@ -1701,14 +2616,67 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           const promptIdx = args.indexOf('--prompt');
           const promptArg = promptIdx !== -1 ? args[promptIdx + 1] : undefined;
           const hostIntegration = require('./lib/host-integration.cjs');
+          // #3714: resolve an EXPLICIT, non-sentinel per-agent model pin for the
+          // spawned worktree executor. Passing `null` as the runtime resolver
+          // (3rd arg) is LOAD-BEARING, not an oversight — it is what keeps
+          // profile/tier-derived models out of argv. Codex's `modelMode: passive`
+          // posture (ADR-1239) and ADR-2313 forbid GSD driving model selection on
+          // this host; only an operator's EXPLICIT override may cross this seam.
+          // resolveAgentModelOverride(..., null) returns a value ONLY when the
+          // operator pinned one explicitly (measured: unpinned -> null,
+          // "inherit" -> "inherit" meaning "use the ambient session model, don't
+          // pass a flag", "" -> null, profile-only -> null). Do NOT swap in
+          // resolve-model / a full model-resolver here: that resolver falls back
+          // to a default (e.g. "sonnet") for the unpinned/profile-only cases,
+          // and emitting that on Codex's exec argv is exactly the documented
+          // #2310/#2311 regression (a model unknown to Codex forced into a
+          // passive-posture host).
+          //
+          // Presence of a pin is necessary but not sufficient: resolveDispatchModelPin
+          // applies the same VALUE policy the install-side .toml surface already
+          // applies to this config key (trim / drop-inherit / drop-Anthropic-flavored
+          // with a warning / drop-non-model-id-charset with a warning) so a global
+          // Anthropic-flavored default or an injected config value never reaches argv.
+          //
+          // This whole VALUE policy — including its warning — is gated on the
+          // resolved runtime's descriptor actually declaring a non-empty
+          // `modelFlag`. The policy runs at this host-NEUTRAL site, so a host
+          // with no modelFlag at all (kimi, kimi-code, opencode) was never
+          // going to emit a --model regardless of the pin's value; running the
+          // policy anyway produced a stderr warning claiming "dropping it so
+          // the spawned executor falls back to the session model" on every
+          // dispatch for such a host — misleading today, and actively wrong if
+          // a Claude-capable host ever declares a modelFlag. When the
+          // descriptor declares no modelFlag, skip the policy entirely: no
+          // model, no warning, argv byte-identical to before this pin policy
+          // existed.
+          const declaresModelFlag = typeof runtimeEntry?.runtime?.orchestratorExec?.modelFlag === 'string' &&
+            runtimeEntry.runtime.orchestratorExec.modelFlag.length > 0;
+          let model;
+          if (declaresModelFlag) {
+            const { readGsdEffectiveModelOverrides, resolveAgentModelOverride } =
+              require('./lib/install-model-override-resolver.cjs');
+            const pinned = resolveAgentModelOverride(
+              'gsd-executor', readGsdEffectiveModelOverrides(cwd), null);
+            model = resolveDispatchModelPin('gsd-executor', pinned);
+          }
           const resolution = hostIntegration.resolveOrchestratorExec(
             runtimeEntry?.runtime?.orchestratorExec,
             cwdTarget,
             promptArg,
+            model,
           );
-          // A host declaring orchestrator-worktree whose exec descriptor does
-          // not resolve cannot be spawned — degrade to sequential rather than
-          // hand the scheduler an unusable command.
+          // A host declaring orchestrator-worktree whose exec descriptor does not
+          // resolve halts THIS wave's dispatch: isolation is forced to 'none' here,
+          // and executor-isolation-dispatch.md:299-303 treats a null exec as FATAL
+          // (exit 1) after the worktree has already been created — it does not
+          // degrade to sequential execution. resolveDispatchModelPin rejects any
+          // leading-dash value (flag/option shape) before it ever reaches this
+          // resolver specifically so it cannot trip the resolver's own
+          // `unsafe_leading_dash_model` guard and turn a bad config value into
+          // this fatal path; every other unresolvable model value likewise
+          // degrades to "no --model" (session model fallback) rather than to
+          // resolution.ok === false.
           if (resolution.ok) {
             exec = { command: resolution.command, args: resolution.args, cwd: resolution.cwd };
           } else {
@@ -1721,41 +2689,52 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       exec = null;
       harnessFlag = null;
     }
+    return { runtimeId, isolation, exec, harnessFlag };
+  }
 
-    // `--force-isolation <mode>` overrides the naturally-resolved mode with
-    // context this resolver has no way to see on its own (e.g. the #2474
-    // per-plan submodule intersection). Invalid/unrecognized values are
-    // ignored rather than erroring — this is a best-effort recording call,
-    // not a hard usage gate. Forcing to 'none' clears harnessFlag/exec since
-    // neither applies to sequential dispatch.
-    const forceIdx = args.indexOf('--force-isolation');
-    const forcedIsolation = forceIdx !== -1 ? args[forceIdx + 1] : undefined;
-    if (forcedIsolation && VALID_ISOLATION.has(forcedIsolation)) {
-      isolation = forcedIsolation;
-      if (isolation === 'none') {
-        harnessFlag = null;
-        exec = null;
-      }
+  function routeInspectDispatchIsolation({ args, cwd, raw }) {
+    // #2486: sentinel-free sibling of `dispatch-isolation` for INSPECTION
+    // surfaces — /gsd:health's W025 check and /gsd:settings' Worktrees
+    // branching. The dispatch verb above intentionally records its resolved
+    // decision to the isolation sentinel as an unconditional side effect
+    // (#3045 CORE REDESIGN): correct for executor dispatch, where the record
+    // must be structurally unskippable — but wrong for a read-only
+    // diagnostic. A health check that records a phase:null/plan:null
+    // sentinel can hard-block every executor dispatch for the sentinel's
+    // lifetime, across sessions sharing the main checkout. Inspection
+    // surfaces call this verb instead. Two claims, both narrower than
+    // "side-effect-free", and both exactly true (#2486 review, Majors 2 & 4):
+    //
+    //  1. SENTINEL-FREE, not write-free. This route writes nothing itself, and
+    //     in particular never writes .gsd/dispatch-isolation-sentinel.json —
+    //     the only write that can hard-block a later executor dispatch. It is
+    //     NOT an unconditional claim of total filesystem purity: like every
+    //     gsd-tools invocation, it runs the shared bootstrap and
+    //     active-workstream resolution first. As of #3579's root-cause fix
+    //     that bootstrap resolves via the non-mutating peekActiveWorkstream
+    //     (never unlinks); an actual stale/invalid pointer is still
+    //     self-healed, but only by whichever verb's own getActiveWorkstream
+    //     call later consumes it for real — this inspection route makes no
+    //     such call, so it is now also side-effect-free on the pointer file.
+    //
+    //  2. SHARED NEGOTIATION, for the arguments this verb accepts. Both verbs
+    //     call resolveDispatchIsolationDecision, so the natural resolution
+    //     cannot drift. It is NOT a claim of byte-identical output for every
+    //     argv: routeDispatchIsolation applies --force-isolation AFTER the
+    //     shared helper returns, so the same argv could otherwise yield
+    //     'none' there and the declared capability here. Rather than let a
+    //     caller receive a silently different answer, this verb REJECTS the
+    //     recording-only knobs outright — they exist to be recorded, and a
+    //     read has nothing to record.
+    const RECORDING_ONLY_ARGS = ['--force-isolation', '--phase', '--plan'];
+    const rejected = RECORDING_ONLY_ARGS.filter((flag) => args.indexOf(flag) !== -1);
+    if (rejected.length > 0) {
+      error(
+        `inspect-dispatch-isolation: ${rejected.join(', ')} ${rejected.length === 1 ? 'is a' : 'are'} recording-only argument${rejected.length === 1 ? '' : 's'} and cannot be used on the inspection verb — it resolves the runtime's DECLARED capability and records nothing. Use 'query dispatch-isolation' if you need the override applied and the decision recorded.`,
+        ERROR_REASON.USAGE,
+      );
     }
-
-    const phaseIdx = args.indexOf('--phase');
-    const phaseArg = phaseIdx !== -1 && args[phaseIdx + 1] && !args[phaseIdx + 1].startsWith('--')
-      ? args[phaseIdx + 1]
-      : null;
-    const planIdx = args.indexOf('--plan');
-    const planArg = planIdx !== -1 && args[planIdx + 1] && !args[planIdx + 1].startsWith('--')
-      ? args[planIdx + 1]
-      : null;
-
-    // Side-effect write (#3045 CORE REDESIGN) — see the doc comment above.
-    // Never allowed to affect this query's own stdout contract or throw.
-    try {
-      writeDispatchIsolationSentinel(cwd, { isolation, harnessFlag, phase: phaseArg, plan: planArg });
-    } catch {
-      // writeDispatchIsolationSentinel already swallows its own errors into
-      // a { recorded: false } result; this catch is defense in depth only.
-    }
-
+    const { runtimeId, isolation, exec, harnessFlag } = resolveDispatchIsolationDecision({ args, cwd });
     if (args.indexOf('--json') !== -1) {
       output({ runtime: runtimeId, isolation, exec, harnessFlag }, raw);
     } else {
@@ -1906,6 +2885,50 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
            }
   }
 
+  function routeResolveAgent({ args, cwd, raw, error }) {
+    // #1689: resolve a per-plan agent_hint specialist name to the subagent_type
+           // an Agent() call should use. Returns the name unchanged when a
+           // matching agent file exists in the active runtime's agent dir(s);
+           // 'gsd-executor' when the name is absent, blank, or does not resolve.
+           // Fail-closed is the fallback (gsd-executor) — never echo an
+           // unvalidated name, which would make Agent() error and block the wave.
+           //
+           // Output:
+           //   --raw (default) -> prints the resolved type (the hint, or 'gsd-executor')
+           //   --json          -> prints { runtime, requested, resolved, fallback }
+    const FALLBACK = 'gsd-executor';
+    try {
+      const nameIdx = args.indexOf('--name');
+      const requested = nameIdx !== -1 ? args[nameIdx + 1] : '';
+      const { resolveRuntime } = require('./lib/runtime-slash.cjs');
+      const runtimeId = resolveRuntime(cwd);
+      const { resolveAgentHint } = require('./lib/agent-install-check.cjs');
+      let resolved = FALLBACK;
+      let resolvedOk = false; // true only when resolveAgentHint returned a hit
+      if (requested && !requested.startsWith('-')) {
+        const hit = resolveAgentHint(requested, runtimeId, cwd);
+        if (hit !== null) {
+          resolved = hit;
+          resolvedOk = true;
+        }
+      }
+      // `fallback` = we did NOT honor a resolvable hint (absent/flag-shaped name,
+      // the named agent did not resolve, or resolution errored). Requesting
+      // gsd-executor explicitly and resolving to it is NOT a fallback.
+      const fellBack = !resolvedOk;
+      const jsonIdx = args.indexOf('--json');
+      if (jsonIdx !== -1) {
+        output({ runtime: runtimeId, requested: requested || null, resolved, fallback: fellBack }, raw);
+      } else {
+        process.stdout.write(String(resolved));
+      }
+    } catch {
+      // Fail-closed: degrade to the legacy executor on any error so dispatch
+      // never blocks on resolution.
+      process.stdout.write(FALLBACK);
+    }
+  }
+
   function routeAgentSkills({ args, cwd, raw, error }) {
     // --json emits typed IR { agent_type, block, skills_count } for test assertions
           // (#455). Default (no flag) outputs raw XML so workflow shell expansions work.
@@ -1962,8 +2985,19 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
                 .filter((t) => t.length > 0);
               termsOverride = list.length > 0 ? { pluralization: list } : undefined;
             }
+            // An unresolvable phase section is not a negative verdict. Feeding
+            // `''` to the detector reported "examined, found nothing" for a
+            // probe that never had input — no ROADMAP.md, or a phase number
+            // absent from it, both read as a confident `detected:false`
+            // (ADR-3889 failure class (c), #3909). Exit stays 0: this is an
+            // ADR-2980 degraded result carried in the payload, and ADR-3889 P8
+            // pins the gsd-tools exit projection at v1.
             const section = roadmap.getRoadmapPhaseWithFallback(cwd, phaseNum);
-            const result = detectAssumptionDelta(section ?? '', termsOverride);
+            if (typeof section !== 'string' || section.trim() === '') {
+              output({ skipped: true, reason: 'phase_unresolved' }, raw);
+              return;
+            }
+            const result = detectAssumptionDelta(section, termsOverride);
             output(result, raw);
             return;
           }
@@ -2006,9 +3040,24 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             const force = args.includes('--force');
             // #2118: --dry-run prints a preview plan without mutating.
             const dryRun = args.includes('--dry-run');
-            milestone.cmdMilestoneComplete(cwd, args[2], { name: milestoneName, archivePhases, force, dryRun }, raw);
+            // #2142: quick-task archival is opt-in (default OFF) — unlike
+            // --no-archive-phases' inverted shape, absence of this flag means
+            // "do nothing" rather than "skip a default-on behavior".
+            const archiveQuick = args.includes('--archive-quick');
+            // #3726: explicit mutation opt-in — without --confirm (and without
+            // --dry-run) the command refuses before touching anything. Distinct
+            // from --force, which bypasses the narrow scope guards only.
+            const confirm = args.includes('--confirm');
+            milestone.cmdMilestoneComplete(cwd, args[2], { name: milestoneName, archivePhases, force, dryRun, archiveQuick, confirm }, raw);
+          } else if (subcommand === 'archive-quick') {
+            // #2142 escalation: narrow archival-only entry point (does NOT
+            // touch ROADMAP/REQUIREMENTS/MILESTONES.md, runs no completion
+            // guards) — safe to call against an already-completed milestone,
+            // unlike `milestone complete --archive-quick`.
+            const dryRun = args.includes('--dry-run');
+            milestone.cmdQuickArchive(cwd, args[2], { dryRun }, raw);
           } else {
-            error('Unknown milestone subcommand. Available: complete', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+            error('Unknown milestone subcommand. Available: complete, archive-quick', ERROR_REASON.SDK_UNKNOWN_COMMAND);
           }
   }
 
@@ -2021,11 +3070,11 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     const subcommand = args[1];
           if (subcommand === 'render-checkpoint') {
             const uat = require('./lib/uat.cjs');
-            const options = parseNamedArgs(args, ['file']);
+            const options = parseNamedArgsOrExit(args, { valueFlags: ['file'], positionals: 2 }, error);
             uat.cmdRenderCheckpoint(cwd, options, raw);
           } else if (subcommand === 'classify-coverage') {
             const coverage = require('./lib/coverage.cjs');
-            const options = parseNamedArgs(args, ['summary', 'file']);
+            const options = parseNamedArgsOrExit(args, { valueFlags: ['summary', 'file'], positionals: 2 }, error);
             coverage.cmdClassify(cwd, options, raw);
           } else {
             error('Unknown uat subcommand. Available: render-checkpoint, classify-coverage', ERROR_REASON.SDK_UNKNOWN_COMMAND);
@@ -2040,7 +3089,20 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
   function routeTodo({ args, cwd, raw, error }) {
     const subcommand = args[1];
           if (subcommand === 'complete') {
-            commands.cmdTodoComplete(cwd, args[2], raw);
+            // #4096: this verb's flag surface is closed. `--dry-run` is parsed
+            // and plumbed (mirroring routeMilestone / #2118), and any OTHER
+            // flag fails loudly instead of being silently ignored — an
+            // accepted-but-ignored safety flag converts a deliberate preview
+            // into the mutation it was meant to avoid. (`--raw` is spliced by
+            // the dispatcher before routing; it stays in the set as a guard
+            // against that splice ever moving.)
+            const TODO_COMPLETE_KNOWN_FLAGS = new Set(['--dry-run', '--raw']);
+            for (const a of args.slice(3)) {
+              if (typeof a === 'string' && a.startsWith('-') && !TODO_COMPLETE_KNOWN_FLAGS.has(a)) {
+                error(`Unknown flag for todo complete: ${a}`, ERROR_REASON.USAGE);
+              }
+            }
+            commands.cmdTodoComplete(cwd, args[2], { dryRun: args.includes('--dry-run') }, raw);
           } else if (subcommand === 'match-phase') {
             commands.cmdTodoMatchPhase(cwd, args[2], raw);
           } else {
@@ -2050,8 +3112,13 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
 
   function routeScaffold({ args, cwd, raw, error }) {
     const scaffoldType = args[1];
+          // `--name` is multi-word (consumed separately by parseMultiwordArg,
+          // below) — a token count the single-token-per-flag boundary walk
+          // cannot represent. `positionals: 'rest'` disables that walk for
+          // this call, matching the existing (unchanged) permissive behavior
+          // for --name; --phase extraction is unaffected either way.
           const scaffoldOptions = {
-            phase: parseNamedArgs(args, ['phase']).phase,
+            phase: parseNamedArgsOrExit(args, { valueFlags: ['phase'], positionals: 'rest' }, error).phase,
             name: parseMultiwordArg(args, 'name'),
           };
           commands.cmdScaffold(cwd, scaffoldType, scaffoldOptions, raw);
@@ -2181,6 +3248,12 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             worktreeSafety.cmdWorktreeRecordAgent(cwd, args.slice(2));
           } else if (subcommand === 'reap-orphans') {
             worktreeSafety.cmdWorktreeReapOrphans(cwd);
+          } else if (subcommand === 'worker-record') {
+            worktreeSafety.cmdWorktreeWorkerRecord(cwd, args.slice(2));
+          } else if (subcommand === 'worker-status') {
+            worktreeSafety.cmdWorktreeWorkerStatus(cwd, args.slice(2));
+          } else if (subcommand === 'worker-complete') {
+            worktreeSafety.cmdWorktreeWorkerComplete(cwd, args.slice(2));
           } else if (subcommand === 'base-check') {
             require('./lib/worktree-base-ref.cjs').cmdWorktreeBaseCheck(cwd, args.slice(2));
           } else if (subcommand === 'set-baseref') {
@@ -2188,7 +3261,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           } else if (subcommand === 'create') {
             worktreeSafety.cmdWorktreeCreate(cwd, args.slice(2));
           } else {
-            error('Unknown worktree subcommand. Available: cleanup-wave, record-agent, reap-orphans, base-check, set-baseref, create', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+            error('Unknown worktree subcommand. Available: cleanup-wave, record-agent, reap-orphans, base-check, set-baseref, create, worker-record, worker-status, worker-complete', ERROR_REASON.SDK_UNKNOWN_COMMAND);
           }
   }
 
@@ -2255,9 +3328,17 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
         );
       }
     } catch (e) {
+      // ADR-3889: error() now throws ExitError instead of calling
+      // process.exit(1) directly, so an ExitError raised by error() INSIDE
+      // this try (e.g. the "Unknown windows subcommand" call above, or one
+      // inside cmdWindowsStatus/Append/Waive/MarkFixed) lands HERE instead of
+      // terminating uncatchably. It must be re-thrown unconditionally, before
+      // the WindowsError name check below, or it falls through to the
+      // generic branch and gets re-wrapped with a wrong message/reason,
+      // discarding the original exit code.
+      if (e instanceof ExitError) throw e;
       // WindowsError carries a REASON code; surface it through the structured
-      // error path so tests can assert on the typed reason. `error()` calls
-      // process.exit(1) internally so we never reach the fall-through.
+      // error path so tests can assert on the typed reason.
       if (e && e.name === 'WindowsError' && typeof e.reason === 'string') {
         error(e.message || 'broken-windows error', e.reason);
       }
@@ -2462,6 +3543,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
   const RESTORE_OUTCOME = Object.freeze({
     ELIGIBLE: 'eligible',
     RESTORED: 'restored',
+    ALREADY_PRESENT: 'already_present',
     SKIPPED_DESTINATION_MANAGED: 'skipped_destination_managed',
     SKIPPED_DESTINATION_EXISTS: 'skipped_destination_exists',
     SKIPPED_COPY_FAILED: 'skipped_copy_failed',
@@ -2520,18 +3602,30 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     return out;
   }
 
-  // Why these three checks rather than security.cjs's `validatePath`: that seam
-  // resolves symlinks with realpathSync and then tests containment, so a link
-  // whose target sits inside the config dir passes. For a restore that is still
-  // wrong — writing through any link overwrites whatever it points at instead
-  // of materializing a regular file at the backed-up path. These checks reject
-  // links outright, which is strictly stricter than validatePath, not a
-  // reimplementation of it. Do not "simplify" this to validatePath.
+  // Why these three checks rather than security.cjs's `assertWithinRoot` /
+  // `tryWithinRoot`: that seam resolves symlinks with realpathSync and then
+  // tests containment, so a link whose target sits inside the config dir
+  // passes. For a restore that is still wrong — writing through any link
+  // overwrites whatever it points at instead of materializing a regular file
+  // at the backed-up path. These checks reject links outright, which is
+  // strictly stricter than assertWithinRoot/tryWithinRoot, not a
+  // reimplementation of them. Do not "simplify" this to assertWithinRoot or
+  // tryWithinRoot. Reviewed under epic #4636 Phase 3: the containment
+  // DECISION now routes through the canonical lexical predicate
+  // (`tryWithinRootLexical`, ADR-4650 decision 6); isInsideDir below still
+  // treats target === root as NOT contained via its own extra `!==` check
+  // (unlike every other containment implementation in this repo, which
+  // treats target === root as contained) — that condition is this gate's
+  // own and is layered on top of the shared predicate, not folded into it.
 
   /** True when `target` resolves strictly inside `root`. */
   function isInsideDir(root, target) {
-    const rel = path.relative(path.resolve(root), path.resolve(target));
-    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+    // Containment decision: canonical lexical predicate (ADR-4650 decision 6).
+    // The extra `!==` condition is this gate's own: a restore must never
+    // target the config directory itself, only something strictly inside it.
+    if (path.resolve(target) === path.resolve(root)) return false;
+    const { tryWithinRootLexical } = require('./lib/security.cjs');
+    return tryWithinRootLexical(target, root) !== null;
   }
 
   /**
@@ -2729,9 +3823,13 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       }
 
       // An identical destination is a no-op restore, not a conflict: re-running
-      // the restore after a successful one must stay quiet and idempotent.
+      // the restore after a successful one must stay quiet and idempotent. It
+      // gets its own outcome so it is excluded from eligible_count — the update
+      // workflow drives its restore question off that count (#4558).
+      let destExists = false;
       let destDiffers = false;
       if (fs.existsSync(destPath)) {
+        destExists = true;
         try {
           destDiffers = !fs.readFileSync(destPath).equals(fs.readFileSync(srcPath));
         } catch {
@@ -2744,6 +3842,10 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           detail: 'a different file already exists at this path — restoring would overwrite it',
         });
         entries.push({ path: relPath, outcome: RESTORE_OUTCOME.SKIPPED_DESTINATION_EXISTS, warnings });
+        continue;
+      }
+      if (destExists) {
+        entries.push({ path: relPath, outcome: RESTORE_OUTCOME.ALREADY_PRESENT, warnings });
         continue;
       }
 
@@ -3283,12 +4385,213 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             return;
           }
 
+          if (subcommand === 'phase-status') {
+            // #1956: deterministic STATE.md-vs-ROADMAP.md phase-status drift.
+            const { planningDir } = require('./lib/planning-workspace.cjs');
+            const { stateExtractField, stateCurrentPositionSlice } = require('./lib/state-document.cjs');
+            const { findRoadmapProgressTable } = require('./lib/roadmap-parser.cjs');
+            const { phaseKeyFromProse } = require('./lib/phase-id.cjs');
+            // STATE.md's YAML frontmatter carries its own lowercase `status:`
+            // scalar ahead of the body's `## Current Position` prose "Status:"
+            // line; stateExtractField's non-scoped regex would otherwise match
+            // that frontmatter line first (it comes first in the file) and
+            // silently report the wrong value. Strip frontmatter so extraction
+            // is scoped to the body.
+            const { stripFrontmatter } = require('./lib/frontmatter.cjs');
+
+            const phaseIdx = args.indexOf('--phase');
+            const phaseArg = (phaseIdx !== -1 && args[phaseIdx + 1] && !args[phaseIdx + 1].startsWith('--'))
+              ? args[phaseIdx + 1]
+              : undefined;
+
+            const dir = planningDir(cwd);
+            const statePath = path.join(dir, 'STATE.md');
+            const roadmapPath = path.join(dir, 'ROADMAP.md');
+
+            let stateContent = null;
+            try {
+              stateContent = fs.readFileSync(statePath, 'utf-8');
+            } catch {
+              // missing_state below
+            }
+            if (stateContent === null) {
+              const phase = phaseArg !== undefined ? phaseKeyFromProse(phaseArg) : null;
+              output({
+                verdict: 'uncheckable',
+                reason: 'missing_state',
+                phase,
+                stateStatus: null,
+                roadmapStatus: null,
+                authority: 'STATE.md',
+              }, raw);
+              return;
+            }
+
+            let roadmapContent = null;
+            try {
+              roadmapContent = fs.readFileSync(roadmapPath, 'utf-8');
+            } catch {
+              // missing_roadmap below
+            }
+
+            const stateBody = stripFrontmatter(stateContent);
+            // #1956 fix: scope extraction to `## Current Position` (or `###`
+            // in the bootstrap template) so a historical `Phase:` / `Status:`
+            // line in an archive section (e.g. `## Session Continuity
+            // Archive`) can't shadow the real one — same #2956 scope state.cts
+            // uses for current_phase, via the shared owner in
+            // state-document.cjs.
+            //
+            // Deliberately NO whole-body fallback here. `state.cts`'s WRITE
+            // path falls back to the whole body when no Current Position
+            // heading is found (legacy behavior it must preserve for
+            // backward-compatible writes) — but that fallback is wrong for a
+            // READ that feeds a drift finding: a STATE.md with no Current
+            // Position heading is exactly the shape that let a stray historical
+            // `Status:` line elsewhere in the body shadow the real value and
+            // fabricate a 'drifted' verdict. A guess is worse than an
+            // abstention for a drift detector, so an absent Current Position
+            // section reports 'uncheckable' instead of guessing from the whole
+            // document.
+            const currentPositionBody = stateCurrentPositionSlice(stateBody);
+            if (currentPositionBody === null) {
+              const phase = phaseArg !== undefined ? phaseKeyFromProse(phaseArg) : null;
+              output({
+                verdict: 'uncheckable',
+                reason: 'no_current_position',
+                phase,
+                stateStatus: null,
+                roadmapStatus: null,
+                authority: 'STATE.md',
+              }, raw);
+              return;
+            }
+
+            // Resolve the target phase: --phase if given, else whatever
+            // STATE.md's Current Position reports as current.
+            const phase = phaseArg !== undefined
+              ? phaseKeyFromProse(phaseArg)
+              : phaseKeyFromProse(stateExtractField(currentPositionBody, 'Phase'));
+
+            if (roadmapContent === null) {
+              output({
+                verdict: 'uncheckable',
+                reason: 'missing_roadmap',
+                phase,
+                stateStatus: null,
+                roadmapStatus: null,
+                authority: 'STATE.md',
+              }, raw);
+              return;
+            }
+
+            const stateStatus = stateExtractField(currentPositionBody, 'Status');
+
+            // #1956/#2012: scoped to `## Progress` first (decoy-avoidance) —
+            // see findRoadmapProgressTable's doc comment (roadmap-parser.cts).
+            const table = findRoadmapProgressTable(roadmapContent);
+            const matchedRow = table
+              ? table.rows.find((row) => phaseKeyFromProse(row.Phase) === phase && phase !== null)
+              : undefined;
+
+            if (!matchedRow) {
+              const result = comparePhaseStatus({ stateStatus, roadmapStatus: null });
+              output({
+                verdict: 'uncheckable',
+                reason: 'phase_not_in_roadmap',
+                phase,
+                stateStatus,
+                roadmapStatus: null,
+                stateRank: result.stateRank,
+                roadmapRank: result.roadmapRank,
+                authority: 'STATE.md',
+              }, raw);
+              return;
+            }
+
+            const roadmapStatus = matchedRow.Status;
+            const result = comparePhaseStatus({ stateStatus, roadmapStatus });
+            output({
+              verdict: result.verdict,
+              phase,
+              stateStatus,
+              roadmapStatus,
+              stateRank: result.stateRank,
+              roadmapRank: result.roadmapRank,
+              authority: 'STATE.md',
+            }, raw);
+            return;
+          }
+
           error(
-            `Unknown drift-guard subcommand: ${subcommand || '(none)'}. Available: authority, severity`,
+            `Unknown drift-guard subcommand: ${subcommand || '(none)'}. Available: authority, severity, phase-status`,
             ERROR_REASON.SDK_UNKNOWN_COMMAND,
           );
   }
 
+
+/**
+ * #3275: resolve a DECLARED command name to the file a spawn can actually start.
+ *
+ * Lane descriptors (src/review-lane-descriptor.cts) declare BARE, platform-unaware
+ * binary names ('codex', 'gemini', 'kimi', 'agy'), and `review-lane invoke`'s
+ * `deps.spawn` + `deps.hasBinary` both need the on-disk form of that name. Before
+ * this helper existed they disagreed: `hasBinary` scanned PATH WITH PATHEXT (so
+ * probes reported lanes AVAILABLE on Windows) while `spawn` received the bare name
+ * — `CreateProcess` performs no PATHEXT resolution, so every spawn-transport lane
+ * ENOENT'd there, and the #3086 `.cmd`/`.bat` cmd.exe mediation gate never fired
+ * because the declared name never carried an extension. One shared resolver is the
+ * only shape that cannot drift back apart.
+ *
+ * win32: tries PATHEXT entries ONLY — never the bare name. npm global installs
+ * drop an EXTENSIONLESS POSIX sh shim (`...\npm\codex`) next to `codex.CMD`; a
+ * bare-name-first scan resolves to it, the mediation gate sees no `.cmd`, and the
+ * ENOENT returns unchanged (field-reported on Windows 11 — see the #3275 issue
+ * comment pinning exactly this pitfall).
+ *
+ * POSIX: answers EXISTENCE only (the old `hasBinary` contract, preserved
+ * byte-for-byte) by scanning PATH for the bare name. `deps.spawn` does NOT consult
+ * this on POSIX — the bare name goes to spawnSync unchanged and Node's own PATH
+ * search does the work, so macOS/Linux behavior is untouched (#3275 acceptance).
+ *
+ * Path-like names (any '/' or '\') bypass the PATH scan: the name is already an
+ * address, so it passes through when the file exists and is a file.
+ *
+ * #3411: the scan itself now lives in the declared platform seam
+ * (`src/shell-command-projection.cts` → `resolveExecutableBinary`). This function is
+ * the `bin/` entry point onto it and holds no copy of the logic — `CONTEXT.md`
+ * declares that file "All OS-facing I/O; single platform seam", and a private
+ * duplicate here is what made it untrue.
+ */
+const COMMIT_LIST_FLAGS = new Set(['--files', '--files-removed']);
+
+// #4208 review: hoisted out of routeCommit's closure so the parser is reachable
+// from a test. It is the whole of the two-list argument contract, and its edge
+// cases (a boolean flag inside a run, a repeated list flag, either order) were
+// already the subject of a review round -- a parser that only the CLI can reach
+// can only be tested by example, one spawn at a time.
+//
+// Every occurrence of `flag` contributes a run; a run ends at the next LIST
+// flag and skips boolean flags on the way, so no token strictly between one
+// list flag and the next is ever dropped. Repeated runs of the same flag merge,
+// as the pre-#4208 slice-to-end parse merged them.
+function collectListFlagValues(args, flag) {
+  const values = [];
+  args.forEach((a, i) => {
+    if (a !== flag) return;
+    for (const b of args.slice(i + 1)) {
+      if (COMMIT_LIST_FLAGS.has(b)) break;
+      if (b.startsWith('--')) continue;
+      values.push(b);
+    }
+  });
+  return values;
+}
+
+function resolveSpawnBinary(name, platform = process.platform, env = process.env) {
+  const { resolveExecutableBinary } = require('./lib/shell-command-projection.cjs');
+  return resolveExecutableBinary(name, { platform, env });
+}
 
 const HOST_COMMAND_ROUTERS = {
   // Each entry wraps its `route*Command` router so it receives the module-scope
@@ -3326,6 +4629,21 @@ const HOST_COMMAND_ROUTERS = {
   // rather than a family — ADR-2346 promotes to a family only at >=3.
   'estimate-check': ({ args, cwd, raw }) => estimateCli.cmdEstimateCheck(cwd, args.slice(1), raw),
   'estimate-calibration': ({ args, cwd, raw }) => estimateCli.cmdEstimateCalibration(cwd, args.slice(1), raw),
+  // #3418: writes `last_mapped_commit` into every codebase-map document that
+  // exists, closing the loop drift.cjs was built for. A LEAF verb rather than a
+  // `verify` subcommand on purpose -- the verify family is read-only by
+  // contract and this one mutates; ADR-2346 promotes a leaf to a family only at
+  // >=3 verbs, and this is one.
+  'stamp-codebase-map': ({ args, cwd, raw, error }) => {
+    const { files } = parseNamedArgsOrExit(args, { valueFlags: ['files'], positionals: 1 }, error);
+    // A value flag with no value parses to `null`, same as an absent one, so
+    // presence is read off `args`: a bare `--files` (an unquoted empty shell
+    // variable) must hit the empty-filter refusal, not widen to all seven.
+    const only = args.includes('--files')
+      ? String(files ?? '').split(',').map((f) => f.trim()).filter(Boolean)
+      : undefined;
+    verify.cmdStampCodebaseMap(cwd, raw, only);
+  },
   'estimate-calibrate': ({ args, cwd, raw }) => estimateCli.cmdEstimateCalibrate(cwd, args.slice(1), raw),
   'config-new-project': routeConfigNewProject,
   'config-path': routeConfigPath,
@@ -3337,8 +4655,11 @@ const HOST_COMMAND_ROUTERS = {
     'smart-entry': routeSmartEntry,
     'check': routeCheck,
     'find-phase': routeFindPhase,
+    // #4906 Phase 5 (#4661): commit-scope selection for /gsd:undo --phase/--plan.
+    'select-revert-commits': routeSelectRevertCommits,
     'commit': routeCommit,
     'check-commit': routeCheckCommit,
+    'commit-docs-guard': routeCommitDocsGuard,
     'commit-to-subrepo': routeCommitToSubrepo,
     'pr-subrepo': routePrSubrepo,
     'verify-summary': routeVerifySummary,
@@ -3349,20 +4670,31 @@ const HOST_COMMAND_ROUTERS = {
     'verification': routeVerification,
     'generate-slug': routeGenerateSlug,
     'current-timestamp': routeCurrentTimestamp,
+    'runtime-identity': routeRuntimeIdentity,
     'project-instruction-file': routeProjectInstructionFile,
     'list-todos': routeListTodos,
     'list-seeds': routeListSeeds,
     'verify-path-exists': routeVerifyPathExists,
     'quick-tasks-append': routeQuickTasksAppend,
+    'quick-tasks-migrate': routeQuickTasksMigrate,
+    // #3676 (Phase 4, epic #3344): quick-batch coordination verbs.
+    'quick-batch': routeQuickBatchCommand,
     'normalize-test-command': routeNormalizeTestCommand,
     'dispatch-should-flatten': routeDispatchShouldFlatten,
     'dispatch-isolation': routeDispatchIsolation,
+    'dispatch-capacity': routeDispatchCapacity,
+    'inspect-dispatch-isolation': routeInspectDispatchIsolation,
     'record-dispatch-isolation': routeRecordDispatchIsolation,
     'resolve-dispatch-type': routeResolveDispatchType,
+    'resolve-agent': routeResolveAgent,
     'agent-skills': routeAgentSkills,
     'skill-manifest': routeSkillManifest,
     'history-digest': routeHistoryDigest,
     'phases': routePhases,
+    // #2790: read-only schema-v1 planning snapshot. The router imports its own
+    // io/planning-inspect deps, so it needs no module injection — it receives
+    // { args, cwd, raw, error } and ignores the rest of the dispatch context.
+    'planning': routePlanningCommand,
     'assumption-delta': routeAssumptionDelta,
     'requirements': routeRequirements,
     'gap-analysis': routeGapAnalysis,
@@ -3402,7 +4734,7 @@ const HOST_COMMAND_ROUTERS = {
 // through. Prototype-pollution-safe: own-property lookup rejects
 // `__proto__`/`constructor`/`prototype` command keys (same guard as
 // dispatchCapabilityCommand).
-async function dispatchHostCommand({ command, args, cwd, raw, error, defaultValue, workstreamContext }) {
+async function dispatchHostCommand({ command, args, cwd, raw, error, defaultValue, workstreamContext, invokingCwd }) {
   if (
     command === '__proto__' ||
     command === 'constructor' ||
@@ -3417,7 +4749,13 @@ async function dispatchHostCommand({ command, args, cwd, raw, error, defaultValu
   if (typeof router !== 'function') return false;
   // `await` so async host routers (e.g. capability's install/upgrade ops)
   // complete before runCommand returns; sync routers pass through unchanged.
-  await router({ args, cwd, raw, error, defaultValue, workstreamContext });
+  // `invokingCwd` (#4906/#4465): the pre-worktree-remap cwd, for the rare
+  // router (currently only `select-revert-commits`) whose own git operation
+  // must see the INVOKING worktree's HEAD, never the main-worktree remap
+  // every other router legitimately wants via `cwd`. Optional — callers/tests
+  // that omit it (every existing one) leave routers that don't read it
+  // byte-unaffected.
+  await router({ args, cwd, raw, error, defaultValue, workstreamContext, invokingCwd });
   return true; // consumed — don't emit "Unknown command"
 }
 
@@ -3450,7 +4788,7 @@ async function dispatchHostCommand({ command, args, cwd, raw, error, defaultValu
 // keep working. No shell is spawned (argv array) — no injection surface beyond
 // the old `timeout … bash -c "$CMD"`.
 function runWithTimeout(argv) {
-  const { spawn } = require('node:child_process');
+  const { spawn, spawnSync } = require('node:child_process');
   const os = require('node:os');
 
   const USAGE = 'Usage: gsd_run run-with-timeout <seconds> [--] <command> [args...]';
@@ -3475,9 +4813,11 @@ function runWithTimeout(argv) {
 
   const isWin = process.platform === 'win32';
   // Detached (own process group) on POSIX so a timeout can reap the WHOLE tree —
-  // a bare child.kill() misses grandchildren (e.g. a test runner's workers) and
-  // would not actually bound the wall clock. Windows has no POSIX process
-  // groups; a direct kill is the best portable option there.
+  // a bare child.kill() misses grandchildren (e.g. a test runner's workers).
+  // Windows has no POSIX process groups and process.kill(-pid) is unsupported
+  // there, so EVERY killTree attempt on Windows tree-kills via
+  // `taskkill /PID <pid> /T /F` while the root is alive (see killTree) — by the
+  // time the direct child exits, its descendants are already orphaned.
   const detached = !isWin && secs > 0;
   const spawnFailureCode = (err) =>
     (err && err.code === 'ENOENT' ? 127 : err && err.code === 'EACCES' ? 126 : 125);
@@ -3501,9 +4841,26 @@ function runWithTimeout(argv) {
   // cap's process-group kill (the wrapped child escapes reap → exit 124 never
   // fires) and risks cmd.exe mis-parsing an arg like `-e "setTimeout(()=>{})"`.
   // Only .cmd/.bat are the CVE-2024-27980 EINVAL cases that require mediation.
+  // #4797: the mediation is NOT hand-rolled here — the private `/d /s /c <cmd>
+  // ...args` copy broke on any shim path containing a space (Node quotes the
+  // argv token; `/s` strips the FIRST and LAST quote of the /c string, so
+  // cmd.exe took the pre-space fragment as the program). projectSpawnInvocation
+  // (the declared single owner, #3411/#3617) wraps the WHOLE command line in
+  // one extra quote pair with windowsVerbatimArguments — the shape that
+  // survives spaces. One behavior delta, accepted: the seam DECLINES mediation
+  // when the target or an arg carries CR/LF (the old block mediated anyway) —
+  // the unmediated spawn of a .cmd then fails EINVAL, loud, at the catch below.
   const winShim = isWin && /\.(cmd|bat)$/i.test(path.basename(cmd));
-  const spawnCmd = winShim ? (process.env.ComSpec || 'cmd.exe') : cmd;
-  const spawnArgs = winShim ? ['/d', '/s', '/c', cmd, ...cmdArgs] : cmdArgs;
+  let spawnCmd = cmd;
+  let spawnArgs = cmdArgs;
+  let spawnOpts;
+  if (winShim) {
+    const { projectSpawnInvocation } = require('./lib/shell-command-projection.cjs');
+    const inv = projectSpawnInvocation(cmd, cmdArgs);
+    spawnCmd = inv.command;
+    spawnArgs = inv.args;
+    if (inv.windowsVerbatimArguments) spawnOpts = { windowsVerbatimArguments: true };
+  }
   // Node's setTimeout delay is a 32-bit signed ms int; a larger value silently
   // clamps to 1ms → a spurious immediate timeout. Cap the budget (~24.8 days).
   const timerMs = Math.min(Math.round(secs * 1000), 2 ** 31 - 1);
@@ -3514,11 +4871,13 @@ function runWithTimeout(argv) {
   return new Promise((resolve) => {
     let child;
     try {
-      // #2667: on win32 `.cmd`/`.bat`/`.exe`, spawn cmd.exe with an explicit argv
-      // array (spawnCmd/spawnArgs) rather than the shim directly — preserves the
-      // array-only, no-shell-string argv contract. `detached` is always false on
-      // win32, so it never co-occurs with the cmd.exe mediation.
-      child = spawn(spawnCmd, spawnArgs, { stdio: 'inherit', detached });
+      // #2667: on win32 `.cmd`/`.bat` shims, spawn cmd.exe with an explicit
+      // argv ARRAY rather than the shim directly — preserves the array-only,
+      // no-shell-string argv contract. #4797: the exact argv shape (quote
+      // wrapping, verbatim arguments) is projected by projectSpawnInvocation —
+      // see the block above. `detached` is always false on win32, so it never
+      // co-occurs with the cmd.exe mediation.
+      child = spawn(spawnCmd, spawnArgs, { stdio: 'inherit', detached, ...spawnOpts });
     } catch (err) {
       process.stderr.write(`run-with-timeout: ${cmd}: ${err && err.message ? err.message : 'failed to start'}\n`);
       resolve(spawnFailureCode(err));
@@ -3529,6 +4888,27 @@ function runWithTimeout(argv) {
       try {
         if (detached && child.pid) {
           try { process.kill(-child.pid, signal); return; } catch { /* group already gone */ }
+        }
+        if (isWin && child.pid) {
+          // #4601: Windows has no POSIX process groups, so the tree kill rides
+          // on `taskkill /T`, which walks the child's descendants the way
+          // `process.kill(-pid)` reaches a POSIX group — this is what bounds
+          // the wall clock when the direct child mediates (cmd.exe /c shim) or
+          // spawns its own children. Deliberately NOT gated on the SIGKILL
+          // stage: child.kill on Windows is TerminateProcess regardless of
+          // signal, so by the time the direct child exits its descendants are
+          // orphaned and no taskkill can reach them — the tree kill must ride
+          // the FIRST attempt, while the root is still alive. /F is required:
+          // without it taskkill posts WM_CLOSE, which a headless CLI never
+          // pumps. Spawned as an argv array per the no-shell-for-argv-array
+          // contract, and bounded — a non-zero/absent status means taskkill
+          // lost a race with an exiting process, and we fall through to the
+          // direct kill so the attempt is never weaker than before.
+          const reap = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+            encoding: 'utf8',
+            timeout: 15000, // taskkill /T is sub-second in practice; bounded so a wedged taskkill can't hang the gate
+          });
+          if (reap.status === 0) return;
         }
         child.kill(signal);
       } catch { /* already exited */ }
@@ -3603,23 +4983,25 @@ function runWithTimeout(argv) {
 // this string and HOST_COMMAND_ROUTERS/SKIP_ROOT_RESOLUTION are three
 // independently hand-maintained sites and nothing previously caught them
 // drifting apart when a query command was added to only one or two.
-const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <field>] [--cwd <path>] [--ws <name>] [--json-errors]\n' +
-  'Commands: agent, agent-skills, assumption-delta, audit-open, audit-uat, check, check-commit, commit, commit-to-subrepo, pr-subrepo, ' +
+const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <field>] [--cwd <path>] [--project-dir <path>] [--ws <name>] [--json-errors] [--exit-contract=<v>]\n' +
+  'Commands: agent, agent-skills, assumption-delta, audit-open, audit-uat, check, check-commit, commit, commit-docs-guard, commit-to-subrepo, pr-subrepo, ' +
   'config-ensure-section, config-get, config-new-project, config-path, config-set, migrate-config, normalize-test-command, ' +
   'context-predicates, current-timestamp, detect-custom-files, docs-init, drift-guard, effort, extract-messages, find-phase, ' +
   'from-gsd2, frontmatter, gap-analysis, generate-claude-md, generate-claude-profile, ' +
   'generate-dev-preferences, generate-slug, graphify, history-digest, init, intel, ' +
-  'capability, classify-confidence, git, learnings, list-seeds, list-todos, loop, milestone, package-legitimacy, phase, phase-plan-index, phases, profile-questionnaire, ' +
-  'profile-sample, progress, project-instruction-file, prompt-budget, quick-tasks-append, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, scaffold, smart-entry, state, ' +
-  'config-set-model-profile, dispatch-isolation, dispatch-should-flatten, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-dispatch-type, ' +
-  'resolve-execution, review-lane, skill-manifest, skills-root, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
+  'capability, classify-confidence, git, learnings, list-seeds, list-todos, loop, milestone, package-legitimacy, phase, phase-plan-index, phases, planning, profile-questionnaire, ' +
+  'profile-sample, progress, project-instruction-file, prompt-budget, quick-batch, quick-tasks-append, quick-tasks-migrate, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, runtime-identity, scaffold, smart-entry, state, ' +
+  'config-set-model-profile, dispatch-capacity, dispatch-isolation, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
+  'resolve-execution, review-lane, select-revert-commits, skill-manifest, skills-root, stamp-codebase-map, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
   'task, template, user-story, validate, verify, verify-path-exists, verify-summary, eval, workstream, worktree\n\n' +
   'Global flags:\n' +
   '  --raw              Emit raw output without post-processing\n' +
   '  --pick <field>     Extract a single field from JSON output (dot/bracket notation)\n' +
   '  --cwd <path>       Override working directory for project-root resolution\n' +
+  '  --project-dir <path>  Explicit project root; skips the ancestor walk-up entirely (must already contain .planning/)\n' +
   '  --ws <name>        Override active workstream (or set GSD_WORKSTREAM)\n' +
-  '  --json-errors      Emit structured JSON error objects on stderr (or set GSD_JSON_ERRORS=1)\n\n' +
+  '  --json-errors      Emit structured JSON error objects on stderr (or set GSD_JSON_ERRORS=1)\n' +
+  '  --exit-contract=<v>  Exit-code contract version: v1 (default) or v2 (or set GSD_EXIT_CONTRACT)\n\n' +
   'For command-specific argument requirements, invoke the command without args ' +
   '(e.g. `gsd-tools phase add`) — the resulting error lists what is required.';
 
@@ -3638,6 +5020,10 @@ const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <fiel
 // below (never as the live Set itself; see that function's doc comment).
 const SKIP_ROOT_RESOLUTION = new Set([
   'generate-slug', 'current-timestamp', 'verify-path-exists',
+  // #3146: runtime-identity is a pure local read of baked package coordinates.
+  // It is probed from whatever cwd a workflow happens to be in — including
+  // outside any project — so it must never require a resolvable project root.
+  'runtime-identity',
   // #2844: verify-summary was previously skipped, leaving relative file-claim
   // paths resolved against the raw process.cwd() — invoking from a subdirectory
   // manufactured "missing files" on an otherwise-correct SUMMARY. It now goes
@@ -3709,18 +5095,19 @@ function resolveMainWorktreeCwd(cwd, deps = {}) {
 async function main() {
   let args = process.argv.slice(2);
 
-  // #2351: run-with-timeout bounds a spawned command's wall clock portably
-  // (coreutils-independent). It MUST intercept HERE, before the global-flag
-  // parsing below — the wrapped command's argv is opaque and may itself contain
-  // --raw / --cwd / --pick that this dispatcher would otherwise consume.
-  {
-    let rwt = args;
-    if (rwt[0] === 'query') rwt = rwt.slice(1);
-    if (rwt[0] === 'run-with-timeout') {
-      // Return the child's exit code; runMain() maps it to process.exitCode.
-      return runWithTimeout(rwt.slice(1));
-    }
-  }
+  // These two global-flag blocks (--json-errors, --exit-contract) MUST run
+  // BEFORE the run-with-timeout interception below. run-with-timeout treats
+  // args[0] (post `query` stripping) as the sentinel and otherwise passes the
+  // remaining argv straight to the wrapped child — it never reaches the
+  // dispatcher's "Unknown command" fallback, but a global flag left in LEADING
+  // position (e.g. `--exit-contract=v2 run-with-timeout ...`) would be spliced
+  // out too late if these ran after, since neither block currently exists
+  // below this point to consume it. Splicing here, before run-with-timeout's
+  // own argv slicing, is what keeps both flags position-independent for every
+  // command, run-with-timeout included. Do not move these back below the
+  // run-with-timeout block (#confirmed regression: leading --exit-contract=v2
+  // and leading --json-errors both broke run-with-timeout when these blocks
+  // sat after it).
 
   // --json-errors / GSD_JSON_ERRORS=1: when active, error() emits structured
   // JSON ({ ok: false, reason: <ERROR_REASON code>, message }) to stderr
@@ -3738,6 +5125,41 @@ async function main() {
     args.splice(jsonErrorsIdx, 1);
   } else if (process.env.GSD_JSON_ERRORS === '1') {
     setJsonErrorMode(true);
+  }
+
+  // --exit-contract=<v> / GSD_EXIT_CONTRACT: resolve FIRST, before the splice
+  // below, so an invalid value (e.g. `v3`, or an empty `--exit-contract=`)
+  // throws EARLY — matching the --json-errors block's own "detect early,
+  // before any flag parsing that can fire error()" rationale above. This also
+  // memoizes the resolved version into the shared contract-version cell so a
+  // later terminateNow()/runMain() call projects against it correctly.
+  //
+  // The argv splice must happen here too, otherwise the dispatcher below sees
+  // "--exit-contract=<v>" as an unknown command when the flag is given in
+  // LEADING position (argv[0] is what the dispatcher treats as the command
+  // name). Splice EVERY occurrence, not just the first — findExitContractFlag
+  // only consults the first match, so a stray second token would otherwise
+  // survive into the dispatcher and reproduce the same "Unknown command".
+  resolveContractVersion({ argv: process.argv, env: process.env });
+  for (let i = args.length - 1; i >= 0; i--) {
+    if (typeof args[i] === 'string' && args[i].startsWith('--exit-contract=')) {
+      args.splice(i, 1);
+    }
+  }
+
+  // #2351: run-with-timeout bounds a spawned command's wall clock portably
+  // (coreutils-independent). It MUST intercept HERE, before the remaining
+  // flag parsing below — the wrapped command's argv is opaque and may itself
+  // contain --raw / --cwd / --pick that this dispatcher would otherwise
+  // consume. (--json-errors / --exit-contract are handled above this block,
+  // not below, precisely so they keep working with run-with-timeout.)
+  {
+    let rwt = args;
+    if (rwt[0] === 'query') rwt = rwt.slice(1);
+    if (rwt[0] === 'run-with-timeout') {
+      // Return the child's exit code; runMain() maps it to process.exitCode.
+      return runWithTimeout(rwt.slice(1));
+    }
   }
 
   // Optional cwd override for sandboxed subagents running outside project root.
@@ -3760,17 +5182,78 @@ async function main() {
     error(`Invalid --cwd: ${cwd}`, ERROR_REASON.USAGE);
   }
 
+  // #3881: --project-dir <path> is a documented (docs/CONFIGURATION.md,
+  // "Project-Root Resolution in Multi-Repo Workspaces") explicit override of
+  // the project root. It is idempotent under findProjectRoot's ancestor
+  // walk-up — i.e. it short-circuits the walk-up rather than seeding it —
+  // so it MUST be validated and applied here, before findProjectRoot ever
+  // runs, and its result must skip that call entirely below. A relative
+  // value resolves against process.cwd(), matching --cwd's own resolution.
+  let projectDirExplicit = false;
+  const projectDirEqArg = args.find(arg => arg.startsWith('--project-dir='));
+  const projectDirIdx = args.indexOf('--project-dir');
+  let projectDirValue;
+  if (projectDirEqArg) {
+    projectDirValue = projectDirEqArg.slice('--project-dir='.length).trim();
+    if (!projectDirValue) error('Missing value for --project-dir', ERROR_REASON.USAGE);
+    args.splice(args.indexOf(projectDirEqArg), 1);
+  } else if (projectDirIdx !== -1) {
+    projectDirValue = args[projectDirIdx + 1];
+    if (!projectDirValue || projectDirValue.startsWith('--')) error('Missing value for --project-dir', ERROR_REASON.USAGE);
+    args.splice(projectDirIdx, 2);
+  }
+  if (projectDirValue !== undefined) {
+    const resolvedProjectDir = path.resolve(projectDirValue);
+    if (!fs.existsSync(resolvedProjectDir) || !fs.statSync(resolvedProjectDir).isDirectory()) {
+      error(`Invalid --project-dir: ${resolvedProjectDir} (path does not exist or is not a directory)`, ERROR_REASON.USAGE);
+    }
+    const resolvedProjectDirPlanning = path.join(resolvedProjectDir, '.planning');
+    if (!fs.existsSync(resolvedProjectDirPlanning) || !fs.statSync(resolvedProjectDirPlanning).isDirectory()) {
+      error(`Invalid --project-dir: ${resolvedProjectDir} (no .planning/ directory found — --project-dir must name the project root itself, not an ancestor to walk up from)`, ERROR_REASON.USAGE);
+    }
+    cwd = resolvedProjectDir;
+    projectDirExplicit = true;
+  }
+  // #4894: verification derives its root from a phase directory, not `cwd`, so
+  // hand it the validated explicit root. Always (re)set — `null` when the flag is
+  // absent — so a prior in-process main() call can never leak an override.
+  projectRoot.setExplicitProjectRoot(projectDirExplicit ? cwd : null);
+
   // Resolve worktree root: in a linked worktree, .planning/ lives in the main worktree.
   // However, in monorepo worktrees where the subdirectory itself owns .planning/,
   // skip worktree resolution — the CWD is already the correct project root.
+  //
+  // #4906/#4465: this remap is a BLANKET rewrite applied to every command, before
+  // `command` is even known — most commands need it (they read `.planning/`, which
+  // in a linked worktree lives only in the main one). A command whose own git
+  // operation must run against the INVOKING worktree's OWN HEAD/branch (never the
+  // main worktree's) needs the PRE-remap value instead — preserved here so it can be
+  // threaded through dispatchHostCommand as `invokingCwd` (see routeSelectRevertCommits,
+  // the first consumer: its `git log` must see the caller's own reachable history, not
+  // main's, or a linked-worktree revert range silently resolves against the wrong repo
+  // state — reproduced in tests/undo-commit-selection-4465.test.cjs's linked-worktree case).
+  const preWorktreeRemapCwd = cwd;
   cwd = resolveMainWorktreeCwd(cwd);
 
   // Optional workstream override for parallel milestone work.
   // Priority: --ws flag > GSD_WORKSTREAM env var > session/shared pointer > null.
   let workstreamContext = null;
   try {
+    // #3579 root-cause fix: this bootstrap resolution only decides whether to
+    // populate GSD_WORKSTREAM env for downstream routing — it is a check, not
+    // the consuming read. Using the mutating getActiveWorkstream here
+    // self-healed (cleared) a present-but-unresolvable pointer BEFORE the
+    // dispatched command's own resolution/diagnostic ran, so a second read in
+    // the same process (e.g. a subcommand's own getActiveWorkstream call, or
+    // a fail-safe guard's diagnoseUnresolvedActiveWorkstream) observed
+    // already-cleared state — silently falling through to a fallback marker
+    // it should never have inherited (isolation violation), or losing the
+    // evidence a diagnostic needed to explain why nothing resolved. peek
+    // shares the identical resolution logic and only differs by never
+    // calling adapter.clear(); self-heal still happens, exactly once, at
+    // whichever call site actually consumes the workstream for real.
     workstreamContext = resolveActiveWorkstream(cwd, args, process.env, {
-      getStored: getActiveWorkstream,
+      getStored: peekActiveWorkstream,
     });
     args = workstreamContext.args;
     // Set env var so all modules (planningDir, planningPaths) auto-resolve workstream paths.
@@ -3859,24 +5342,45 @@ async function main() {
     }
   }
 
-  if (!SKIP_ROOT_RESOLUTION.has(command)) {
+  // #3881: an explicit --project-dir already IS the resolved project root
+  // (validated above) — findProjectRoot's ancestor walk-up must not run
+  // over it, per docs/CONFIGURATION.md's documented idempotence.
+  if (!projectDirExplicit && !SKIP_ROOT_RESOLUTION.has(command)) {
     cwd = findProjectRoot(cwd);
   }
 
   // When --pick is active, capture stdout and extract the requested field.
+  // ADR-3473 §8.4 (#3365, #3358): an absent field or non-JSON command output
+  // is a failure ("I could not answer"), never a demotion to an empty answer
+  // at exit 0. `resolveAtFileOutput` MUST run before JSON.parse — @file:
+  // payloads (io.cjs output() writes these for JSON > 50KB) are not
+  // themselves JSON text, so resolving late would make every large result a
+  // false "output was not JSON" (negative space N8).
   if (pickField) {
     const captured = await captureStdoutSyncWrites(async () => {
-      await runCommand(command, args, cwd, raw, defaultValue, originalCommand, workstreamContext);
+      await runCommand(command, args, cwd, raw, defaultValue, originalCommand, workstreamContext, preWorktreeRemapCwd);
     });
     const resolved = resolveAtFileOutput(captured);
+    let obj;
     try {
-      const obj = JSON.parse(resolved);
-      const value = extractField(obj, pickField);
-      const result = value === null || value === undefined ? '' : String(value);
-      fs.writeSync(1, result);
+      obj = JSON.parse(resolved);
     } catch {
-      fs.writeSync(1, captured);
+      error(`--pick ${formatDiagnosticToken(pickField)}: command output was not JSON`, ERROR_REASON.PICK_OUTPUT_NOT_JSON);
+      return;
     }
+    const { found, value } = extractField(obj, pickField);
+    if (!found) {
+      const rootDescription = isPlainRecord(obj)
+        ? `available top-level keys: ${Object.keys(obj).map(formatKeyForDiagnosticList).join(', ') || '(none)'}`
+        : `the command's output is a JSON ${describeJsonRootType(obj)}, not an object with that field`;
+      error(`--pick ${formatDiagnosticToken(pickField)}: field not found; ${rootDescription}`, ERROR_REASON.PICK_FIELD_ABSENT);
+      return;
+    }
+    // N1/N2: `null` and `''` are answers, not failures — an absent field
+    // above already exited non-zero, so reaching here means the field EXISTS
+    // and this is its real value (including `0` and `false`, #3365).
+    const result = value === null || value === undefined ? '' : String(value);
+    fs.writeSync(1, result);
     return;
   }
 
@@ -3886,7 +5390,7 @@ async function main() {
   // every workflow to have a bash-specific `if [[ "$INIT" == @file:* ]]` check
   // that breaks on PowerShell and other non-bash shells.
   const captured = await captureStdoutSyncWrites(async () => {
-    await runCommand(command, args, cwd, raw, defaultValue, originalCommand, workstreamContext);
+    await runCommand(command, args, cwd, raw, defaultValue, originalCommand, workstreamContext, preWorktreeRemapCwd);
   });
   fs.writeSync(1, resolveAtFileOutput(captured));
 }
@@ -3938,30 +5442,71 @@ function resolveAtFileOutput(captured) {
   return fs.readFileSync(captured.slice(6), 'utf-8');
 }
 
+// A plain object root/intermediate value — everything else (null, an array,
+// a number, a string, a boolean) is treated as non-object for NAMED-key
+// lookup purposes (#3365 / #3358, ADR-3473 §8.4): only bracket notation may
+// reach into an array.
+function isPlainRecord(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+// Describes the JSON root's shape for a --pick "field not found" message
+// when the root is NOT a plain object (so listing "top-level keys" would be
+// meaningless).
+function describeJsonRootType(v) {
+  if (Array.isArray(v)) return 'array';
+  if (v === null) return 'null';
+  return typeof v;
+}
+
+// A command's JSON output can be a USER-authored document (e.g. `frontmatter
+// get`), so its top-level keys are untrusted the same way an argv token is.
+// `formatDiagnosticToken` (io.cjs) is the shared escape (see its JSDoc for
+// why `error()` cannot do this itself); this thin wrapper reuses that exact
+// escaping but strips the surrounding quotes JSON.stringify adds, so a key
+// list reads as "a, b, c" rather than the noisier "\"a\", \"b\", \"c\"" while
+// a key containing \n/\r/\t/other C0 bytes still cannot forge a second
+// stderr "Error:" line or span more than one line.
+function formatKeyForDiagnosticList(key) {
+  return formatDiagnosticToken(key).slice(1, -1);
+}
+
 /**
  * Extract a field from an object using dot-notation and bracket syntax.
  * Supports: 'field', 'parent.child', 'arr[-1]', 'arr[0]'
+ *
+ * Returns a discriminated `{ found, value }` rather than a bare value so a
+ * caller can distinguish "the field exists and is null/''/0/false" (an
+ * ANSWER, exit 0) from "no such field" (an absence, exit non-zero) — #3365.
+ * Reports NOT-FOUND for: a missing key; a dotted path that dies partway; an
+ * array index out of range (after negative-index normalization); a bracket
+ * applied to a non-array; and any key lookup against a non-object (null, a
+ * number, a string, a boolean, or an array root).
  */
 function extractField(obj, fieldPath) {
   const parts = fieldPath.split('.');
   let current = obj;
   for (const part of parts) {
-    if (current === null || current === undefined) return undefined;
     const bracketMatch = part.match(/^(.+?)\[(-?\d+)]$/);
     if (bracketMatch) {
       const key = bracketMatch[1];
       const index = parseInt(bracketMatch[2], 10);
-      current = current[key];
-      if (!Array.isArray(current)) return undefined;
-      current = index < 0 ? current[current.length + index] : current[index];
+      if (!isPlainRecord(current)) return { found: false, value: undefined };
+      const arr = current[key];
+      if (!Array.isArray(arr)) return { found: false, value: undefined };
+      const resolvedIndex = index < 0 ? arr.length + index : index;
+      if (resolvedIndex < 0 || resolvedIndex >= arr.length) return { found: false, value: undefined };
+      current = arr[resolvedIndex];
     } else {
+      if (!isPlainRecord(current)) return { found: false, value: undefined };
+      if (!Object.prototype.hasOwnProperty.call(current, part)) return { found: false, value: undefined };
       current = current[part];
     }
   }
-  return current;
+  return { found: true, value: current };
 }
 
-async function runCommand(command, args, cwd, raw, defaultValue, originalCommand, workstreamContext = null) {
+async function runCommand(command, args, cwd, raw, defaultValue, originalCommand, workstreamContext = null, invokingCwd) {
   switch (command) {
 
     default: {
@@ -3982,7 +5527,7 @@ async function runCommand(command, args, cwd, raw, defaultValue, originalCommand
       // commands (state, …) routed via their `route*Command` router instead of
       // a hardcoded `case` arm. Tried after capability/overlay dispatch and
       // before the unknown-command error.
-      if (await dispatchHostCommand({ command, args, cwd, raw, error, defaultValue, workstreamContext })) break;
+      if (await dispatchHostCommand({ command, args, cwd, raw, error, defaultValue, workstreamContext, invokingCwd })) break;
 
       // #3243: if the caller passed a dotted form (e.g. "foo.bar"), the shim
       // above split it so `command` here is the head ("foo"). Use
@@ -4024,5 +5569,28 @@ module.exports = {
   TOP_LEVEL_USAGE,
   skipsRootResolution,
   resolveMainWorktreeCwd,
+  // #3275: exported for tests — the shared PATH+PATHEXT resolver behind
+  // review-lane invoke's `deps.spawn` / `deps.hasBinary` seams.
+  resolveSpawnBinary,
+  // #4208 review: exported for tests — the two-list commit parser is otherwise
+  // reachable only by spawning the CLI, which a property test cannot afford.
+  collectListFlagValues,
+  COMMIT_LIST_FLAGS,
+  // #3714 follow-up: exported for tests — the dispatch model-pin VALUE
+  // policy (charset accept/render parity, max-length boundary, leading-char
+  // anchor) is otherwise unreachable from outside the dispatchOverlayCapabilityCommand closure.
+  resolveDispatchModelPin,
+  MODEL_ID_CHARSET_RE,
+  // The shared character-class body both MODEL_ID_CHARSET_RE and
+  // MODEL_ID_SANITIZE_STRIP_RE are derived from — exported so a test can
+  // assert its own expected charset literal EQUALS this value, making a
+  // silent widening of the production body fail the test instead of only
+  // the (unexported) regexes built from it.
+  MODEL_ID_CHARSET_BODY,
+  // Non-global companion of the internal g-flagged sanitize regex — see the
+  // comment at its definition for why the g-flagged instance is never
+  // exported.
+  MODEL_ID_SANITIZE_STRIP_RE,
+  MODEL_ID_MAX_LENGTH,
 };
 

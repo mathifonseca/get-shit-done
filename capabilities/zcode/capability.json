@@ -1,7 +1,7 @@
 {
   "id": "zcode",
   "role": "runtime",
-  "version": "1.10.0",
+  "version": "1.15.0",
   "title": "ZCode",
   "description": "ZCode (Z.ai) — desktop Agentic Development Environment for GLM-5.2; Claude-shaped nested skills at ~/.zcode/skills/<name>/SKILL.md, slash commands, named subagents, native MCP; declarative plugin surface; profile-marker install; tier-2 community support.",
   "tier": "core",
@@ -43,7 +43,7 @@
           "prefix": "gsd-",
           "nesting": "flat",
           "recursive": false,
-          "converter": null
+          "converter": "convertClaudeAgentToZcodeAgent"
         }
       ],
       "local": [
@@ -69,10 +69,14 @@
           "prefix": "gsd-",
           "nesting": "flat",
           "recursive": false,
-          "converter": null
+          "converter": "convertClaudeAgentToZcodeAgent"
         }
       ]
     },
+    "triggerPrecedence": [
+      "skills",
+      "commands"
+    ],
     "commandStyle": "slash-hyphen",
     "hooksSurface": "none",
     "sandboxTier": "none",
@@ -91,7 +95,8 @@
         "background": false,
         "subagentToolkit": "full",
         "backgroundDispatch": false,
-        "isolation": "none"
+        "isolation": "none",
+        "maxConcurrency": "undocumented"
       },
       "modelMode": "passive",
       "hookBus": "host",

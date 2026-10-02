@@ -119,6 +119,46 @@ Choose the hook kind that matches the behaviour:
 
 Declare file artefact flow with `produces` and `consumes`. The registry uses those arrays to order hooks and to reject unsatisfied dependencies.
 
+### Check the point dispatches your kind
+
+A point having a call site does not mean it dispatches every kind. Each host workflow decides, per
+point, which kinds its dispatch text handles — the wire-on-demand model — and the registry build
+enforces the result: `gen-capability-registry.cjs` scans the host workflows with `getWiredKinds()`
+and rejects a manifest that declares a kind the point does not dispatch. You find out at
+`npm run gen:capability-registry`, not at runtime:
+
+```
+capability "demo" steps[0].point "ship:pre" registers a step hook, but the host call site's
+dispatch text never covers `kind == "step"` (it covers: gate). A hand-rolled single-kind consumer
+silently never dispatches the other kinds — dispatch every registered kind per
+gsd-core/references/loop-hook-dispatch.md.
+```
+
+That error is the answer, not a bug to route around. Either pick a point that dispatches your kind,
+express the behaviour as a kind the point does dispatch, or open an issue to wire the arm — that
+last route is what [#3866](https://github.com/open-gsd/gsd-core/issues/3866) did for `verify:pre`,
+which dispatched only `gate` and so let a capability refuse to let UAT start but never contribute
+to what UAT covers.
+
+For which kinds a given point dispatches, and the `verify:pre` step / `produces` semantics, see
+[Valid `point` values](../reference/capability-manifest.md#valid-point-values) — that table is the
+single source of truth. One operational note it does not carry: a `verify:pre` `produces` name
+whose artefact is absent at UAT time is reported and skipped, so a step that was inactive, skipped,
+or failed never drops a deliverable and never blocks UAT.
+
+## Ship skills — and know what you are shipping
+
+A skill your Capability declares is not an inert asset. Its `SKILL.md` body is copied **verbatim** into the user's runtime skills directory at install, where it becomes an agent-invocable instruction file. GSD does **not** scan it: there is no content inspection of any kind, at install or at any later point. What you write is what reaches the agent.
+
+That makes a skill body an **instruction surface**, and it carries author responsibility that an inert artifact does not:
+
+- **Write instructions you would be comfortable defending.** Your reach is bounded only by what the agent will do when told. Consent, integrity pinning and reversibility are the user's protections; content review is not among them.
+- **Do not embed anything that tries to redirect the agent away from the user's task** — reframing its role, overriding host instructions, or persisting directives past the skill's own scope. That is indistinguishable from a prompt-injection payload, and the fact that it is not scanned is not permission.
+- **Treat anything your skill tells the agent to read as data, not instructions.** If your skill has the agent ingest a file, a URL, or tool output, say so explicitly in the body. See [the untrusted-input boundary](../adr/1577-untrusted-input-boundary-and-injection-blocking.md).
+- **The surface is disclosed.** The skills your Capability contributes are named, by stem, in their own section of the pre-install consent summary ([#3248](https://github.com/open-gsd/gsd-core/issues/3248)). Write your skill body on the assumption that a user sees it listed before they accept. Declared `agents[]` are not named there today — a third-party capability's agents are never staged into the agent's instruction context, so there is nothing to disclose — but they remain classified as an instruction surface, not an inert or safe one.
+
+The reasoning behind this posture — including why scanning was considered and rejected — is recorded in [ADR-2363](../adr/2363-capability-instruction-surface-trust.md), and the user-facing side is [the capability trust model](../explanation/capability-trust-model.md).
+
 ## Use prompt fragments
 
 Use `fragment.path` for prompt text longer than a short sentence:

@@ -18,6 +18,23 @@ import {
 } from './installer-migration-authoring.cjs';
 import { platformWriteSync, retryRenameSync, posixNormalize } from './shell-command-projection.cjs';
 import { realClock, type Clock } from './clock.cjs';
+import { isInstallScopeId, type InstallScope } from './install-scope.cjs';
+import { tryWithinRootLexical } from './security.cjs';
+// #2874 (ADR-58 cleanup phase): this file is the ~1200-line migration
+// plan/apply/rollback/lock/journal engine — almost none of it is on the
+// installRuntimeArtifacts call tree. Only `readInstallManifest` and
+// `classifyArtifact` are reached (via install-engine.cts's
+// _migrateLegacyOpencodeCommandDir and retired-artifact-cleanup.cts's
+// pruneRetiredRuntimeArtifacts), so only those two entry points — plus their
+// shared `readJsonIfPresent` helper and `classifyArtifact`'s `sha256File`
+// hashing helper — are routed through the injectable seam. Everything else
+// in this file (locking, journal, apply/rollback, migration discovery)
+// keeps using real `fs` directly: it is not reachable from
+// installRuntimeArtifacts, so routing it would grow this seam past what
+// AC2 actually requires. See install-fs-adapter.cts's module doc.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import installFsAdapter = require('./install-fs-adapter.cjs');
+const { installFs } = installFsAdapter;
 
 const MANIFEST_NAME = 'gsd-file-manifest.json';
 const INSTALL_STATE_NAME = 'gsd-install-state.json';
@@ -26,18 +43,31 @@ const DEFAULT_MIGRATIONS_DIR = path.join(__dirname, 'installer-migrations');
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
 const STRICT_JSON = Symbol('strict-json');
 
+// #2874: routed through installFs()'s openSync/readSync/closeSync trio
+// instead of importing `node:fs` directly, so classifyArtifact — reachable
+// from installRuntimeArtifacts — can be exercised against an injected
+// adapter. This function was briefly converted to a single
+// `installFs().readFileSync` call (buffering the whole file); that broke
+// tests/installer-migrations.test.cjs's "classifies large files without
+// loading the whole file through readFileSync", which monkeypatches real
+// fs.readFileSync to throw for the file under test and asserts hashing still
+// succeeds — an explicit, pre-existing contract that large files must be
+// streamed, not buffered. Restored to the original raw-fd streaming shape,
+// now going through the adapter instead of `node:fs` directly. This is the
+// ONLY call site of sha256File in this file (confirmed by inspection) — no
+// other caller is affected.
 function sha256File(filePath: string): string {
   const hash = crypto.createHash('sha256');
   const buffer = Buffer.allocUnsafe(1024 * 1024);
-  const fd = fs.openSync(filePath, 'r');
+  const fd = installFs().openSync(filePath, 'r');
   try {
     while (true) {
-      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+      const bytesRead = installFs().readSync(fd, buffer, 0, buffer.length, null);
       if (bytesRead === 0) break;
       hash.update(buffer.subarray(0, bytesRead));
     }
   } finally {
-    fs.closeSync(fd);
+    installFs().closeSync(fd);
   }
   return hash.digest('hex');
 }
@@ -46,25 +76,6 @@ function sha256Text(value: string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-/**
- * Copy a managed path for the rollback snapshot or the user-facing backup,
- * WITHOUT dereferencing a symlink.
- *
- * `fs.copyFileSync` follows symlinks, so a managed path that has been replaced
- * by a link (tampering, or an unexpected user layout) would have had the
- * LINK TARGET's bytes copied into `gsd-migration-journal/…-backups/` — e.g. a
- * `gsd.cjs` symlinked at `~/.ssh/id_rsa` would land that key's contents in the
- * backup tree. Nothing GSD installs is ever a symlink, so the faithful snapshot
- * of a symlinked managed path is the link itself: recreating it preserves
- * rollback fidelity (restore re-creates the same link) while never reading the
- * referent. Deletion was already safe — `fs.rmSync` unlinks the link, never the
- * target.
- *
- * Windows note: `fs.symlinkSync` can throw EPERM for unprivileged users. That
- * surfaces as an apply failure and triggers the normal rollback path, which is
- * the correct outcome — refusing to proceed beats silently copying referent
- * bytes.
- */
 /**
  * Evaluate and, if safe, perform a `remove-empty-dir` action against `fullPath`.
  *
@@ -113,8 +124,16 @@ function evaluateRemoveEmptyDir(configDir: string, fullPath: string): string {
   } catch {
     return 'left-in-place';
   }
-  if (resolvedTarget === resolvedRoot || !resolvedTarget.startsWith(resolvedRoot + path.sep)) {
-    // Refuses both "target IS configDir" and "target escaped configDir".
+  // `resolvedTarget === resolvedRoot` is a DELIBERATE ADDITIONAL rejection,
+  // separate from the containment decision: `tryWithinRootLexical` treats
+  // target === root as CONTAINED, but removing the config root itself is
+  // never in scope for this action (see the doc comment above) — this arm
+  // prevents `rmdirSync` from ever being asked to remove `configDir` itself.
+  // Kept as its own check per ADR-4650 decision 6 (a wrapper may add its own
+  // conditions on top of the canonical predicate, never invert it).
+  if (resolvedTarget === resolvedRoot) return 'left-in-place';
+  if (tryWithinRootLexical(resolvedTarget, resolvedRoot) === null) {
+    // Refuses "target escaped configDir".
     return 'left-in-place';
   }
 
@@ -134,23 +153,54 @@ function evaluateRemoveEmptyDir(configDir: string, fullPath: string): string {
   }
 }
 
+/**
+ * Copy a managed path for the rollback snapshot or the user-facing backup,
+ * WITHOUT dereferencing a symlink.
+ *
+ * `fs.copyFileSync` follows symlinks, so a managed path that has been replaced
+ * by a link (tampering, or an unexpected user layout) would have had the
+ * LINK TARGET's bytes copied into `gsd-migration-journal/…-backups/` — e.g. a
+ * `gsd.cjs` symlinked at `~/.ssh/id_rsa` would land that key's contents in the
+ * backup tree. Nothing GSD installs is ever a symlink, so the faithful snapshot
+ * of a symlinked managed path is the link itself: recreating it preserves
+ * rollback fidelity (restore re-creates the same link) while never reading the
+ * referent. Deletion was already safe — `fs.rmSync` unlinks the link, never the
+ * target.
+ *
+ * Windows note: `fs.symlinkSync` can throw EPERM for unprivileged users. That
+ * surfaces as an apply failure and triggers the normal rollback path, which is
+ * the correct outcome — refusing to proceed beats silently copying referent
+ * bytes.
+ *
+ * #2875 (epic #2866 Phase 6): all five fs calls routed through `installFs()`
+ * so this primitive can be reused on the routed install path (by
+ * user-artifact-staging.cts) without punching a hole through the seam Phase 5
+ * built. Every EXISTING caller of this function is on the migration
+ * plan/apply/rollback tree, which never wraps a call in `withInstallFs` — the
+ * ambient adapter there resolves to real `node:fs` by default, so this
+ * routing is behavior-preserving for them (test-matrix D2).
+ */
 function copyPreservingSymlink(srcPath: string, destPath: string): void {
-  if (fs.lstatSync(srcPath).isSymbolicLink()) {
+  if (installFs().lstatSync(srcPath).isSymbolicLink()) {
     // symlinkSync fails with EEXIST on an occupied path, so clear it first.
     // Scoped to this branch on purpose: the regular-file path below keeps
     // copyFileSync's overwrite-in-place, so a mid-restore failure cannot leave
     // the destination destroyed.
-    fs.rmSync(destPath, { force: true });
-    fs.symlinkSync(fs.readlinkSync(srcPath), destPath);
+    installFs().rmSync(destPath, { force: true });
+    installFs().symlinkSync(installFs().readlinkSync(srcPath), destPath);
     return;
   }
-  fs.copyFileSync(srcPath, destPath);
+  installFs().copyFileSync(srcPath, destPath);
 }
 
+// Shared by readInstallManifest (on the installRuntimeArtifacts call tree —
+// routed) and readInstallState/readJson (not on that call tree — the
+// ambient default resolves to real fs for those, unchanged). Routing once
+// here is safe for all three callers.
 function readJsonIfPresent(filePath: string, fallback: unknown): unknown {
-  if (!fs.existsSync(filePath)) return fallback;
+  if (!installFs().existsSync(filePath)) return fallback;
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return JSON.parse(installFs().readFileSync(filePath, 'utf8'));
   } catch (error) {
     if (fallback === STRICT_JSON) {
       throw new Error(`invalid installer migration state JSON: ${filePath}: ${(error as Error).message}`);
@@ -164,19 +214,122 @@ interface InstallManifest {
   timestamp: string | null;
   mode: string | null;
   files: Record<string, string>;
+  /**
+   * Schema version of the manifest DOCUMENT (#2872, ADR-2866 Phase 3) — NOT
+   * the GSD package version, which `version` above already carries. The two
+   * are deliberately separate fields: `version` holds `pkg.version` and is
+   * read by the golden-parity fixtures, so overloading it with a schema
+   * number would be the textbook Hyrum break (same key, new meaning).
+   *
+   *   `null` — no manifest at this configDir (or an unparseable one; see
+   *            `readJsonIfPresent`'s long-standing fallback).
+   *   `1`    — a manifest written before #2872: no `manifestVersion` key, and
+   *            therefore no recorded `runtime`/`scope`. **This is a correct
+   *            manifest, not a broken one** — read without error and without
+   *            requiring a reinstall.
+   *   `>= 2` — records `runtime` and `scope`.
+   *
+   * A value written by a NEWER GSD is reported verbatim rather than clamped
+   * or rejected: two GSD versions on one machine is a supported state, and an
+   * older reader must not crash on a newer writer. Consumers branch on
+   * `>= 2`, never `=== 2`.
+   */
+  manifestVersion: number | null;
+  /** Runtime that wrote this manifest, or `null` for a v1 manifest. Reported
+   *  verbatim up to `MAX_REPORTED_RUNTIME_LENGTH` chars, then truncated with
+   *  `…` — an unregistered runtime string is a fact about the file, and this
+   *  reader reports facts; callers decide what to do with one. Charset is
+   *  deliberately NOT gated (see `normalizeReportedRuntime`). */
+  runtime: string | null;
+  /** Install scope that wrote this manifest, or `null` for a v1 manifest (or
+   *  an unrecognized value). Validated through Install Scope Module's shared
+   *  membership predicate, never a second copy of the rule — so `'project'`
+   *  (the consent/lifecycle vocabulary) reads as `null` rather than being
+   *  silently mistaken for `'local'`. */
+  scope: InstallScope | null;
+}
+
+/** Lowest manifest schema version that records `runtime`/`scope` (#2872). */
+const MANIFEST_SCHEMA_VERSION = 2;
+
+/**
+ * Longest `runtime` string this reader will report. Real runtime ids are
+ * registry keys (`claude`, `antigravity`, `kimi-code` — 11 chars at the
+ * longest), so this loses nothing legitimate; it exists because the manifest
+ * is attacker-influenceable (a project-local one lives inside a repository a
+ * user may merely have cloned) and the value reaches a consumer that renders
+ * it. Same 64-char convention as `truncatePostureValue`
+ * (`agent-install-check.cts`), deliberately, so the subsystem caps reported
+ * values one way.
+ */
+const MAX_REPORTED_RUNTIME_LENGTH = 64;
+
+/**
+ * A manifest's `runtime` is reported as a FACT about the file — it is
+ * deliberately NOT validated against the capability registry, because an
+ * unregistered id is exactly the kind of mismatch the Installed Surface
+ * Resolver exists to surface (#2872 design row B8). It is, however, LENGTH
+ * bounded: "report the fact" never required "report unbounded bytes".
+ */
+function normalizeReportedRuntime(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  if (raw.trim() === '') return null;
+  return raw.length > MAX_REPORTED_RUNTIME_LENGTH
+    ? `${raw.slice(0, MAX_REPORTED_RUNTIME_LENGTH)}…`
+    : raw;
+}
+
+/**
+ * Normalize a raw `manifestVersion`. Only a finite integer >= 1 is a version
+ * claim; everything else (absent, `"2"`, `0`, `-1`, `2.5`, `NaN`, `Infinity`)
+ * reads as `1` — a pre-#2872 manifest. Liberal in what it accepts, but the
+ * normalization is a stated value rather than a silent guess: a caller can
+ * always tell v1 (`1`) from "no manifest at all" (`null`).
+ */
+function normalizeManifestVersion(raw: unknown): number {
+  if (typeof raw !== 'number') return 1;
+  if (!Number.isInteger(raw)) return 1;
+  if (raw < 1) return 1;
+  return raw;
 }
 
 function readInstallManifest(configDir: string): InstallManifest {
   const manifest = readJsonIfPresent(path.join(configDir, MANIFEST_NAME), null);
-  if (!manifest || typeof manifest !== 'object') {
-    return { version: null, timestamp: null, mode: null, files: {} };
+  // `typeof [] === 'object'` in JS, so a bare `typeof !== 'object'` guard lets
+  // a top-level JSON array (valid JSON, but not the manifest's documented
+  // object shape) fall through to the field reads below — `m.manifestVersion`
+  // reads `undefined` off an array, which `normalizeManifestVersion` then
+  // reports as `1` (a v1 manifest), misclassifying "not an object" as
+  // "installed". `Array.isArray` closes that gap explicitly rather than
+  // relying on the object-shape checks below to catch it incidentally.
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    return {
+      version: null,
+      timestamp: null,
+      mode: null,
+      files: {},
+      manifestVersion: null,
+      runtime: null,
+      scope: null,
+    };
   }
   const m = manifest as Record<string, unknown>;
+  const rawRuntime = m.runtime;
   return {
     version: typeof m.version === 'string' ? m.version : null,
     timestamp: typeof m.timestamp === 'string' ? m.timestamp : null,
     mode: typeof m.mode === 'string' ? m.mode : null,
-    files: m.files && typeof m.files === 'object' ? m.files as Record<string, string> : {},
+    // #4544 (review): `typeof [] === 'object'` — a manifest whose `files` is a
+    // JSON array passed the object-shape guard, and Object.keys() then yielded
+    // "0","1",... as install-relative file paths. Consumers iterate these keys,
+    // so an array shape must degrade to the empty set exactly like a
+    // non-object shape does.
+    files: m.files && typeof m.files === 'object' && !Array.isArray(m.files)
+      ? m.files as Record<string, string>
+      : {},
+    manifestVersion: normalizeManifestVersion(m.manifestVersion),
+    runtime: normalizeReportedRuntime(rawRuntime),
+    scope: isInstallScopeId(m.scope) ? m.scope : null,
   };
 }
 
@@ -261,7 +414,7 @@ function classifyArtifact(configDir: string, relPath: string, manifest: InstallM
   const normalized = normalizeRelPath(relPath);
   const originalHash = manifest.files[normalized] || null;
   const fullPath = path.join(configDir, normalized);
-  if (!fs.existsSync(fullPath)) {
+  if (!installFs().existsSync(fullPath)) {
     return { classification: originalHash ? 'managed-missing' : 'missing', originalHash, currentHash: null };
   }
   const currentHash = sha256File(fullPath);
@@ -449,17 +602,20 @@ function acquireInstallMigrationLock(
     let lockCreatedByUs = false;
     try {
       fd = fs.openSync(lockPath, 'wx');
-      // Close the open descriptor before writing so the file handle is
-      // released on Windows before the release closure unlinks it.
-      // Write payload via writeFileSync with the path (not the fd) so we
-      // don't hold an open fd across the lifetime of the lock.
-      fs.closeSync(fd);
-      fd = null;
       lockCreatedByUs = true; // we own the file; clean it up on any subsequent error
-      fs.writeFileSync(lockPath, JSON.stringify({
+      // Write the payload through the exclusively-created descriptor: a
+      // second open-by-path here would be a TOCTOU window (CWE-367) where a
+      // co-writer of the directory could symlink-swap the just-created empty
+      // lock file before the payload lands.
+      fs.writeFileSync(fd, JSON.stringify({
         pid: process.pid,
         acquiredAt: new Date().toISOString(),
       }) + '\n');
+      // Close before returning so no handle stays open across the lock's
+      // lifetime — Windows cannot unlink a file with an open handle when the
+      // release closure runs.
+      fs.closeSync(fd);
+      fd = null;
       lockCreatedByUs = false; // release closure owns cleanup from here
       return () => {
         const failures: Error[] = [];
@@ -524,11 +680,30 @@ interface EnsureInsideConfigResult {
   fullPath: string;
 }
 
+// DELIBERATELY LEXICAL — the RESOLUTION policy stays lexical, never realpath
+// (`assertWithinRoot` / `tryWithinRoot`, src/security.cts).
+//
+// Reviewed under epic #4636 Phase 3 and reverted after the remote matrix proved
+// the realpath collapse wrong. This module's contract is that a symlinked
+// managed path is treated AS A LINK and never dereferenced — it is snapshotted
+// as a link, restored as a link, and backed up as a link. The realpath-based
+// predicate dereferences exactly the symlinks this module exists to preserve
+// and then rejects them for escaping configDir
+// ("migration path escapes configDir: extensions/gsd.cjs"). Four tests in
+// tests/installer-migrations.test.cjs pin that behavior.
+//
+// The containment DECISION now routes through the canonical LEXICAL predicate
+// (`tryWithinRootLexical`, ADR-4650 decision 6) — only the comparison moved;
+// the lexical policy itself remains this module's own required choice, and
+// the thrown message / returned `fullPath` are unchanged.
+//
+// `normalizeRelPath` is the pre-gate: it throws on absolute paths and on any
+// '..' segment BEFORE this runs, so the check below is defense-in-depth over
+// already-traversal-free input rather than the primary boundary.
 function ensureInsideConfig(configDir: string, relPath: string): EnsureInsideConfigResult {
   const normalized = normalizeRelPath(relPath);
   const fullPath = path.resolve(configDir, normalized);
-  const root = path.resolve(configDir);
-  if (fullPath !== root && !fullPath.startsWith(root + path.sep)) {
+  if (tryWithinRootLexical(fullPath, configDir) === null) {
     throw new Error(`migration path escapes configDir: ${relPath}`);
   }
   return { normalized, fullPath };
@@ -1090,8 +1265,10 @@ export = {
   acquireInstallMigrationLock,
   applyInstallerMigrationPlan,
   classifyArtifact,
+  copyPreservingSymlink,
   discoverInstallerMigrations,
   evaluateRemoveEmptyDir,
+  MANIFEST_SCHEMA_VERSION,
   migrationChecksum,
   planInstallerMigrations,
   readInstallManifest,

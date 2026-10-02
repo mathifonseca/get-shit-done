@@ -22,26 +22,59 @@
  * is the minimum-cost contract.
  */
 
-// allow-test-rule: structural-regression-guard
-// structural assertion on spawn-options shape; the behavior
-// (Windows-only shell resolution) is platform-gated at runtime and cannot be
-// reached on POSIX CI without a Windows lane.
-
 'use strict';
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const { scanFencedBlocks } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
+const { NPM_VIEW_TIMEOUT_MS } = require('../gsd-core/bin/check-latest-version.cjs');
+
+/**
+ * NOT a margin above NPM_VIEW_TIMEOUT_MS (imported above for disclosure,
+ * per this batch's epic issue -- this file and check-latest-version.cjs
+ * once independently guessed the same 15000ms value, causing a Windows
+ * double-SIGKILL collision fixed in PR #4428). This specific scenario
+ * (missing compiled runtime library) degrades BEFORE reaching the wrapped
+ * `npm view` call at all -- see this test's own #3582 comment
+ * ("checkLatestVersion -> not ok" on the degrade, never invoked) -- so its
+ * bound has no margin relationship to NPM_VIEW_TIMEOUT_MS to preserve.
+ * Kept as its own independent, pre-existing value.
+ */
+const WORKER_DEGRADED_PATH_TIMEOUT_MS = 8000;
+
+/**
+ * gsd-update-banner.js only reads a small cache file from disk and prints
+ * JSON -- no subprocess/network work -- so this leaves generous headroom
+ * over its sub-second worst case even on a contended CI runner. NOT
+ * related to NPM_VIEW_TIMEOUT_MS or WORKER_DEGRADED_PATH_TIMEOUT_MS above
+ * (a different hook script entirely).
+ */
+const UPDATE_BANNER_HOOK_TIMEOUT_MS = 10_000;
+
+// Imported for disclosure only (see WORKER_DEGRADED_PATH_TIMEOUT_MS's own
+// doc comment above): confirms this file references the collision-prone
+// constant from check-latest-version.cjs without deriving any of this
+// file's own timeout values from it.
+void NPM_VIEW_TIMEOUT_MS;
 
 const WORKER_PATH = path.join(__dirname, '..', 'hooks', 'gsd-check-update-worker.js');
 const PROJECTION_PATH = path.join(
   __dirname, '..', 'gsd-core', 'bin', 'lib', 'shell-command-projection.cjs',
 );
 
+// allow-test-rule: structural-regression-guard (#3103)
+// This helper feeds real source (via readFileSync) into structural
+// assertions below. The behavior it guards — Windows-only shell
+// resolution — is platform-gated at runtime and cannot be reached on
+// POSIX CI without a Windows lane, so a structural assertion on the
+// spawn-options shape is the minimum-cost contract.
 function codeOnly(file) {
   return fs.readFileSync(file, 'utf8')
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own bounded hooks/lib source, not adversarial input
     .replace(/\/\*[\s\S]*?\*\//g, '')
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own bounded hooks source, not adversarial input
     .replace(/(^|[^:])\/\/[^\r\n]*/g, '$1');
 }
 
@@ -85,6 +118,191 @@ describe('worker delegates the npm spawn (does not re-open the gate, #498)', () 
     assert.match(codeOnly(WORKER_PATH), /check-latest-version/);
   });
 });
+
+// ─── #3582: cold tree (no gsd-core/bin/lib/*.cjs) — degrade, not crash ─────
+//
+// gsd-core/bin/lib/semver-compare.cjs, package-identity.cjs, and (via
+// check-latest-version.cjs's own transitive requires) gsd-core/bin/lib/
+// cli-exit.cjs + shell-command-projection.cjs are tsc build artifacts
+// (ADR-457), gitignored and absent on a raw plugin-marketplace / git-clone
+// install that never ran `npm run build:lib`. This worker is a DETACHED
+// SessionStart background process (spawned with stdio: 'ignore' by
+// hooks/gsd-check-update.js) — before #3582 a missing library crashed the
+// worker at module load with no visible signal (stderr discarded by the
+// parent) and no cache-file write at all, so the statusline/banner would
+// silently never see an update signal. The fix wraps ensureRuntimeBuild()
+// and the three compiled-lib requires in one try/catch and degrades to
+// no-signal fallbacks (isSemverNewer -> false, checkLatestVersion -> not ok,
+// PACKAGE_NAME -> null) on failure — the worker still runs to completion and
+// writes a result cache record. Simulated hermetically via a fixture install
+// tree that copies hooks/ + the seam module but never gsd-core/bin/lib/ or
+// tsconfig.build.json (tests/helpers/cold-runtime-lib-fixture.cjs) — the REAL
+// gsd-core/bin/lib/ is never touched.
+{
+  const { describe, test } = require('node:test');
+  const assert = require('node:assert/strict');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { runHook: runHookSeam } = require('./helpers/process-seam.cjs');
+  const { buildColdInstallTree } = require('./helpers/cold-runtime-lib-fixture.cjs');
+  const { createTempDir, cleanup } = require('./helpers.cjs');
+
+  describe('gsd-check-update-worker.js: #3582 cold tree — degrade, not crash', () => {
+    test('missing compiled runtime library -> worker still writes a degraded result cache, no crash', (t) => {
+      const cold = buildColdInstallTree();
+      t.after(cold.cleanup);
+      const cacheDir = createTempDir('gsd-worker-cold-');
+      t.after(() => cleanup(cacheDir));
+      const cacheFile = path.join(cacheDir, 'cache.json');
+
+      const env = {
+        ...process.env,
+        GSD_CACHE_FILE: cacheFile,
+        GSD_PROJECT_VERSION_FILE: path.join(cacheDir, 'no-such-project', 'VERSION'),
+        GSD_GLOBAL_VERSION_FILE: path.join(cacheDir, 'no-such-global', 'VERSION'),
+      };
+      const r = runHookSeam(path.join(cold.hooksDir, 'gsd-check-update-worker.js'), [], {
+        env,
+        timeoutMs: WORKER_DEGRADED_PATH_TIMEOUT_MS,
+      });
+      assert.equal(r.exitCode, 0, `worker must exit 0 on a build failure; stderr: ${r.stderr}`);
+      assert.ok(fs.existsSync(cacheFile), 'worker must still reach the end and write a cache record');
+      const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+      assert.equal(cache.package_name, null, 'degraded package_name must be null (no-signal, never a stale/foreign value)');
+      assert.ok(!cache.update_available, 'degraded update_available must be falsy');
+      assert.equal(cache.installed, '0.0.0', 'installed detection is unaffected by the compiled-lib degrade');
+    });
+  });
+}
+
+// ─── #3582: cold-tree fixture must tolerate a concurrent build-hooks.js
+// staging dir, without mutating the live hooks/ tree ─────────────────────
+//
+// scripts/build-hooks.js writes atomically via a per-PID staging dir
+// (hooks/.dist-staging-<pid>) that it creates and removes; up to nine test
+// files invoke it concurrently from their `before()` hooks, so the live
+// hooks/ dir is never guaranteed stable during a test run. This is proven
+// HERMETICALLY, against a fake source tree under a temp dir — planting a
+// staging dir inside the REAL repo's hooks/ would itself be the exact
+// shared-state race this fixture exists to guard against (other test files
+// read hooks/ concurrently), and cleanup() (tests/helpers.cjs) deliberately
+// refuses to remove any path outside the known temp roots, so a real-repo
+// plant can never be cleaned up through it either.
+{
+  const { describe, test } = require('node:test');
+  const assert = require('node:assert/strict');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { buildColdInstallTree, REPO_ROOT, shouldCopyHookEntry } = require('./helpers/cold-runtime-lib-fixture.cjs');
+  const { cleanup } = require('./helpers.cjs');
+
+  describe('cold-runtime-lib-fixture.cjs: #3582 tolerates a concurrent hooks/.dist-staging-<pid> dir', () => {
+    test('a live .dist-staging-test-<random> dir does not break the fixture copy, and is excluded from it', (t) => {
+      // Build a hermetic fake source tree — never touch the real repo's hooks/.
+      const fakeRepoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-fake-repo-'));
+      t.after(() => cleanup(fakeRepoRoot));
+
+      const fakeHooksDir = path.join(fakeRepoRoot, 'hooks');
+      fs.mkdirSync(fakeHooksDir, { recursive: true });
+      // Representative real hook entries the fixture must still carry over.
+      fs.writeFileSync(path.join(fakeHooksDir, 'hooks.json'), '{}');
+      fs.writeFileSync(path.join(fakeHooksDir, 'top-level-hook.js'), '// fake hook\n');
+      fs.mkdirSync(path.join(fakeHooksDir, 'lib'), { recursive: true });
+      fs.writeFileSync(path.join(fakeHooksDir, 'lib', 'helper.js'), '// fake lib helper\n');
+      // Build output dir — must be excluded.
+      fs.mkdirSync(path.join(fakeHooksDir, 'dist'), { recursive: true });
+      fs.writeFileSync(path.join(fakeHooksDir, 'dist', 'built.js'), '// built output\n');
+      // Concurrent build-hooks.js staging dir — must be excluded, and must
+      // not break the copy even while "live".
+      const stagingName = `.dist-staging-99999`;
+      const stagingDir = path.join(fakeHooksDir, stagingName);
+      fs.mkdirSync(stagingDir);
+      fs.writeFileSync(path.join(stagingDir, 'scratch.txt'), 'transient build output');
+
+      // The fixture also copies gsd-core/bin/ensure-runtime-build.cjs — give
+      // the fake tree a real copy of it so buildColdInstallTree() succeeds.
+      const fakeBinDir = path.join(fakeRepoRoot, 'gsd-core', 'bin');
+      fs.mkdirSync(fakeBinDir, { recursive: true });
+      fs.copyFileSync(
+        path.join(REPO_ROOT, 'gsd-core', 'bin', 'ensure-runtime-build.cjs'),
+        path.join(fakeBinDir, 'ensure-runtime-build.cjs'),
+      );
+
+      // Filtered by shouldCopyHookEntry — the same predicate the fixture
+      // itself uses to decide what to copy. Up to nine other test files'
+      // before() hooks concurrently invoke scripts/build-hooks.js, which
+      // creates/removes hooks/.dist-staging-<pid> at unpredictable times, so
+      // a RAW (unfiltered) before/after listing comparison of the live
+      // hooks/ dir is itself racy — it can observe a sibling build's
+      // transient staging dir appear or vanish between the two snapshots and
+      // fail with no real defect. Filtering both snapshots the same way the
+      // fixture does preserves the actual intent (this test adds/removes no
+      // REAL entry in the repo's hooks/) while tolerating scratch that is
+      // not this test's doing and is excluded from the fixture anyway.
+      const realHooksBefore = fs
+        .readdirSync(path.join(REPO_ROOT, 'hooks'))
+        .filter(shouldCopyHookEntry)
+        .sort();
+
+      const cold = buildColdInstallTree({ repoRoot: fakeRepoRoot });
+      t.after(cold.cleanup);
+
+      const entries = fs.readdirSync(cold.hooksDir);
+      assert.ok(
+        !entries.some((e) => e.startsWith('.dist-staging')),
+        `fixture hooks/ must not contain any .dist-staging* entry, got: ${entries.join(', ')}`,
+      );
+      assert.ok(!entries.includes('dist'), `fixture hooks/ must not contain dist/, got: ${entries.join(', ')}`);
+      assert.ok(entries.includes('hooks.json'), 'fixture must still contain the representative hooks.json');
+      assert.ok(entries.includes('top-level-hook.js'), 'fixture must still contain the representative top-level hook');
+      assert.ok(
+        fs.existsSync(path.join(cold.hooksDir, 'lib', 'helper.js')),
+        'fixture must still contain the representative hooks/lib/ subdir file',
+      );
+
+      const realHooksAfter = fs
+        .readdirSync(path.join(REPO_ROOT, 'hooks'))
+        .filter(shouldCopyHookEntry)
+        .sort();
+      assert.deepEqual(
+        realHooksAfter,
+        realHooksBefore,
+        'the real repo hooks/ directory listing, filtered by shouldCopyHookEntry, must be unchanged by ' +
+          'this test (transient hooks/.dist-staging-<pid> entries from concurrent build-hooks.js runs are ' +
+          'excluded from the comparison since this test does not own them)',
+      );
+    });
+  });
+
+  // Direct pin on shouldCopyHookEntry() itself — the predicate IS the fix
+  // (exact 'dist' match plus a '.dist-staging' PREFIX, not a loose
+  // startsWith('dist')/includes('dist') substring match). Pinning it only
+  // indirectly, via the fixture-shape assertions above, would let a looser
+  // implementation (e.g. name.startsWith('dist')) pass every case above
+  // while still being wrong — this pins the exact rule.
+  describe('cold-runtime-lib-fixture.cjs: shouldCopyHookEntry() name-filter rule', () => {
+    const { shouldCopyHookEntry } = require('./helpers/cold-runtime-lib-fixture.cjs');
+
+    test('excludes the build output dir and any .dist-staging* prefix name', () => {
+      assert.equal(shouldCopyHookEntry('dist'), false);
+      assert.equal(shouldCopyHookEntry('.dist-staging-20836'), false);
+      assert.equal(shouldCopyHookEntry('.dist-staging-test-abc'), false);
+      assert.equal(shouldCopyHookEntry('.dist-staging'), false);
+    });
+
+    test('keeps real hook entries', () => {
+      assert.equal(shouldCopyHookEntry('hooks.json'), true);
+      assert.equal(shouldCopyHookEntry('lib'), true);
+      assert.equal(shouldCopyHookEntry('gsd-check-update.js'), true);
+    });
+
+    test('does not over-match on a bare "dist" substring/prefix', () => {
+      assert.equal(shouldCopyHookEntry('dist-staging-no-dot'), true);
+      assert.equal(shouldCopyHookEntry('distant.js'), true);
+    });
+  });
+}
 
 
 // ────────────────────────────────────────────────────────────────────────
@@ -289,17 +507,14 @@ describe('Issue #815: --next dist-tag support', () => {
  *   4. Single-source: check-latest-version's PACKAGE_NAME === the seam's
  *      packageName === the scoped '@opengsd/gsd-core'.
  *
- * Source-grep policy: this test reads hook source via readFileSync. The repo's
- * lint-no-source-grep rule targets bin/lib/gsd-core — hooks/ is out of
- * scope. The behavior (correct name → no E404) only manifests at runtime
+ * Source-grep policy: this test reads hook source via readFileSync. Since
+ * #3545 lint-no-source-grep also covers hooks/, not just bin/lib/gsd-core.
+ * The behavior (correct name → no E404) only manifests at runtime
  * against the live registry; structural assertions are the minimum-cost
- * contract for the worker, the same rationale #378 carried.
+ * contract for the worker, the same rationale #378 carried. See the
+ * site-scoped `allow-test-rule` marker directly above the readFileSync()
+ * call in workerCodeOnly() below.
  */
-
-// allow-test-rule: structural-regression-guard (see #378)
-// structural assertion on hook delegation; the behavior being
-// tested (correct package name → no E404) only manifests at runtime against the
-// live npm registry, which CI does not call.
 
 'use strict';
 
@@ -314,9 +529,16 @@ const SEAM = require('../gsd-core/bin/lib/package-identity.cjs');
 const { PACKAGE_NAME } = require('../gsd-core/bin/check-latest-version.cjs');
 
 function workerCodeOnly() {
+  // allow-test-rule: structural-regression-guard (see #378) — the behavior
+  // being tested (correct scoped package name → no E404) only manifests at
+  // runtime against the live npm registry, which CI does not call; the
+  // stripped-source text is the minimum-cost contract for this worker
+  // (#3545 widening brings hooks/ into the rule's scope)
   const src = fs.readFileSync(WORKER_PATH, 'utf8');
   return src
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own bounded hooks source, not adversarial input
     .replace(/\/\*[\s\S]*?\*\//g, '')
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own bounded hooks source, not adversarial input
     .replace(/(^|[^:])\/\/[^\r\n]*/g, '$1');
 }
 
@@ -376,10 +598,11 @@ describe('bug #378 / #498: update worker queries the scoped name via the seam', 
 {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-2784-update-cache-clear-path (consolidation epic #1969 B5 #1974)", () => {
-// allow-test-rule: structural-regression-guard (see #2784)
 // Reads hook .js or bin/install.js source to assert structural invariants
 // (search array order, function wiring, path constants) that cannot be
-// verified by observing runtime outputs alone. Per CONTRIBUTING.md exception matrix.
+// verified by observing runtime outputs alone. Per CONTRIBUTING.md exception
+// matrix. See the site-scoped `allow-test-rule` marker directly above the
+// readFileSync() call below (#3545 widening brings hooks/ into scope).
 
 /**
  * Regression test for bug #2784
@@ -413,8 +636,12 @@ const CHECK_UPDATE_HOOK = path.join(REPO_ROOT, 'hooks', 'gsd-check-update.js');
 
 describe('bug-2784: update.md cache-clear covers shared cache path', () => {
   test('gsd-check-update.js hook constructs cache dir from .cache and gsd path segments', () => {
+    // allow-test-rule: structural-regression-guard (see #2784) — asserts
+    // the path.join() segment structure that cannot be verified by
+    // observing runtime outputs alone (#3545)
     const hookContent = fs.readFileSync(CHECK_UPDATE_HOOK, 'utf-8');
     // Parse the path.join() call structurally rather than text-grepping.
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own bounded hooks/gsd-check-update.js source, not adversarial input
     const m = hookContent.match(/const cacheDir\s*=\s*path\.join\(([^)]+)\)/);
     assert.ok(
       m !== null,
@@ -434,15 +661,18 @@ describe('bug-2784: update.md cache-clear covers shared cache path', () => {
   test('update.md run_update bash commands include rm for shared gsd cache file', () => {
     const workflowContent = fs.readFileSync(UPDATE_WORKFLOW, 'utf-8');
     // Parse the step block structurally, then extract only bash fenced code lines.
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own workflow .md content, fixed-size author-controlled content
     const stepMatch = workflowContent.match(/<step name="run_update">[\s\S]*?<\/step>/);
     assert.ok(stepMatch, 'update.md must have a <step name="run_update"> block');
     const stepContent = stepMatch[0];
 
     const bashLines = [];
-    const fenceRe = /```(?:bash|sh)\r?\n([\s\S]*?)```/g;
-    let m;
-    while ((m = fenceRe.exec(stepContent)) !== null) {
-      for (const line of m[1].split(/\r?\n/)) {
+    const stepLines = stepContent.split(/\r?\n/);
+    for (const block of scanFencedBlocks(stepLines)) {
+      if (block.closeLineIdx === -1) continue;
+      const info = (block.infoString || '').trim();
+      if (info !== 'bash' && info !== 'sh') continue;
+      for (const line of stepLines.slice(block.openLineIdx + 1, block.closeLineIdx)) {
         const trimmed = line.trim();
         if (trimmed) bashLines.push(trimmed);
       }
@@ -662,7 +892,7 @@ describe('gsd-update-banner.js end-to-end', () => {
     // contended CI runner.
     const r = seamRunHook(HOOK_PATH, [], {
       env: { ...process.env, HOME: home, USERPROFILE: home },
-      timeoutMs: 10_000,
+      timeoutMs: UPDATE_BANNER_HOOK_TIMEOUT_MS,
     });
     return { status: r.exitCode, stdout: r.stdout, stderr: r.stderr };
   }
@@ -774,6 +1004,58 @@ describe('gsd-update-banner.js end-to-end', () => {
     } finally {
       cleanup(home);
     }
+  });
+});
+
+// ─── #3582: cold tree (no gsd-core/bin/lib/*.cjs) — degrade, not crash ─────
+//
+// gsd-core/bin/lib/package-identity.cjs is a tsc build artifact (ADR-457),
+// gitignored and absent on a raw plugin-marketplace / git-clone install that
+// never ran `npm run build:lib`. This is an opt-in SessionStart hook — a
+// build failure must degrade (PACKAGE_NAME stays null), not crash session
+// start. The DEGRADED VERDICT this locks: buildBannerOutput's own lineage
+// guard (`!cache.package_name || cache.package_name !== PACKAGE_NAME`)
+// unconditionally distrusts ANY cache once PACKAGE_NAME is null, so even a
+// cache written by a healthy worker (real package_name, update_available:
+// true) must be suppressed rather than surfaced — the hook stays SILENT
+// (exit 0, empty stdout), never a crash and never a stale/wrong banner.
+// Simulated hermetically via tests/helpers/cold-runtime-lib-fixture.cjs — the
+// REAL gsd-core/bin/lib/ is never touched.
+describe('gsd-update-banner.js: #3582 cold tree — degrades to silent, never crashes', () => {
+  const { buildColdInstallTree } = require('./helpers/cold-runtime-lib-fixture.cjs');
+
+  test('missing compiled runtime library -> exits 0 with empty stdout even for an otherwise-valid update-available cache', (t) => {
+    const cold = buildColdInstallTree();
+    t.after(cold.cleanup);
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-banner-cold-home-'));
+    t.after(() => cleanup(home));
+    fs.mkdirSync(path.join(home, '.cache', 'gsd'), { recursive: true });
+    // The generic fallback filename the hook's own #3582 degrade uses when
+    // package-identity.cjs cannot be built (mirrors gsd-check-update.js's
+    // identical fallback literal) — this is the SAME cache path a degraded
+    // worker would also have written to.
+    fs.writeFileSync(
+      path.join(home, '.cache', 'gsd', 'gsd-update-check.json'),
+      JSON.stringify({
+        update_available: true,
+        installed: '1.39.0',
+        latest: '1.40.0',
+        package_name: '@opengsd/gsd-core',
+      }),
+    );
+
+    const r = seamRunHook(path.join(cold.hooksDir, 'gsd-update-banner.js'), [], {
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+      timeoutMs: UPDATE_BANNER_HOOK_TIMEOUT_MS,
+    });
+
+    assert.equal(r.exitCode, 0, `hook must exit 0 on a build failure; stderr: ${r.stderr}`);
+    assert.equal(
+      r.stdout.trim(),
+      '',
+      'a cold tree must silently suppress the banner (PACKAGE_NAME degrades to null, ' +
+        'so the lineage guard distrusts every cache) rather than crash or print stale content',
+    );
   });
 });
 

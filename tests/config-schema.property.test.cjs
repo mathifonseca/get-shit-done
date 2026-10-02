@@ -24,6 +24,7 @@ const os = require('node:os');
 const path = require('node:path');
 const fc = require('./helpers/fast-check-setup.cjs');
 const { cleanup } = require('./helpers.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const {
   isValidConfigKey,
@@ -31,6 +32,7 @@ const {
   VALID_CONFIG_KEYS,
   RUNTIME_STATE_KEYS,
 } = require('../gsd-core/bin/lib/config-schema.cjs');
+const { escapeRegex } = require('../gsd-core/bin/lib/pattern.cjs');
 
 describe('config-schema: isValidConfigKey properties', () => {
   // (a) Never throws on any input
@@ -147,6 +149,22 @@ describe('config-schema: isValidConfigKey properties', () => {
   test('empty string is not a valid config key', () => {
     const result = isValidConfigKey('');
     assert.equal(result, false, 'empty string must not be a valid config key');
+  });
+
+  test('hooks.commit_types is a valid config key (#4443)', () => {
+    assert.equal(
+      isValidConfigKey('hooks.commit_types'),
+      true,
+      'hooks.commit_types is a documented, hook-consumed key (see the CLI reference) and must be settable via config-set'
+    );
+  });
+
+  test('hooks.community is a valid config key (sibling of #4443)', () => {
+    assert.equal(
+      isValidConfigKey('hooks.community'),
+      true,
+      'hooks.community is the gsd-validate-commit.sh opt-in gate and must be settable via config-set'
+    );
   });
 
   // Boundary: null/undefined/number return false (not throw, not true)
@@ -487,7 +505,7 @@ const SECTION_HEADERS = ['Planning', 'Execution', 'Docs & Output', 'Features', '
 function hasPathLike(block, field) {
   const parts = field.split('.');
   if (parts.length === 1) return block.includes(parts[0]);
-  const escaped = parts.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const escaped = parts.map((p) => escapeRegex(p));
   const pattern = new RegExp(escaped.join('[\\s\\S]{0,600}'), 'i');
   return pattern.test(block);
 }
@@ -742,17 +760,56 @@ describe('feat-3210: fallow integration module', () => {
     const { resolveFallowBinary } = require('../gsd-core/bin/lib/fallow-runner.cjs');
     // N2: use shared helper
     const baseTmp = getWritableTmp();
-    const tmp = fs.mkdtempSync(path.join(baseTmp, 'gsd-fallow-bin-'));
-    const binDir = path.join(tmp, 'node_modules', '.bin');
-    fs.mkdirSync(binDir, { recursive: true });
-    const fallowPath = path.join(binDir, 'fallow');
-    fs.writeFileSync(fallowPath, '#!/usr/bin/env sh\n');
-    if (process.platform !== 'win32') fs.chmodSync(fallowPath, 0o755);
 
-    const resolved = resolveFallowBinary({ cwd: tmp, envPath: '' });
-    assert.strictEqual(resolved, fallowPath);
+    if (process.platform === 'win32') {
+      // #3618/#3275: npm's Windows install drops `fallow.cmd` in node_modules/.bin
+      // (plus a bare extensionless POSIX `sh` shim beside it — npm's shim for
+      // non-Windows shells, which CreateProcess cannot execute; the seam
+      // deliberately never tries a bare name on win32). Assert BOTH contracts:
+      // the .cmd resolves, and the bare shim ALONE (no .cmd sibling) resolves
+      // to null, so the deliberate win32 carve-out stays pinned.
+      const tmp = fs.mkdtempSync(path.join(baseTmp, 'gsd-fallow-bin-'));
+      try {
+        const binDir = path.join(tmp, 'node_modules', '.bin');
+        fs.mkdirSync(binDir, { recursive: true });
+        const cmdPath = path.join(binDir, 'fallow.cmd');
+        fs.writeFileSync(cmdPath, '@echo off\r\n');
 
-    cleanup(tmp);
+        const resolved = resolveFallowBinary({ cwd: tmp, envPath: '' });
+        // Case-insensitive: PATHEXT casing (ambient env or DEFAULT_PATHEXT) is
+        // conventionally uppercase, so the resolver constructs `fallow.CMD` —
+        // the same file as `fallow.cmd` on case-insensitive NTFS, just a
+        // different string.
+        assert.strictEqual(String(resolved).toLowerCase(), cmdPath.toLowerCase());
+      } finally {
+        cleanup(tmp);
+      }
+
+      const tmpBare = fs.mkdtempSync(path.join(baseTmp, 'gsd-fallow-bin-bare-'));
+      try {
+        const binDir = path.join(tmpBare, 'node_modules', '.bin');
+        fs.mkdirSync(binDir, { recursive: true });
+        const bareOnly = path.join(binDir, 'fallow');
+        fs.writeFileSync(bareOnly, '#!/usr/bin/env sh\n');
+
+        const resolvedBare = resolveFallowBinary({ cwd: tmpBare, envPath: '' });
+        assert.strictEqual(resolvedBare, null, 'win32: bare extensionless fallow alone must not resolve (#3275)');
+      } finally {
+        cleanup(tmpBare);
+      }
+    } else {
+      const tmp = fs.mkdtempSync(path.join(baseTmp, 'gsd-fallow-bin-'));
+      const binDir = path.join(tmp, 'node_modules', '.bin');
+      fs.mkdirSync(binDir, { recursive: true });
+      const fallowPath = path.join(binDir, 'fallow');
+      fs.writeFileSync(fallowPath, '#!/usr/bin/env sh\n');
+      fs.chmodSync(fallowPath, 0o755);
+
+      const resolved = resolveFallowBinary({ cwd: tmp, envPath: '' });
+      assert.strictEqual(resolved, fallowPath);
+
+      cleanup(tmp);
+    }
   });
 
   // H6: replaced wholesale win32 skip with platform-adapted assertion
@@ -772,9 +829,14 @@ describe('feat-3210: fallow integration module', () => {
         fs.writeFileSync(bareFile, '@echo off\r\n');
         fs.writeFileSync(cmdFile, '@echo off\r\n');
         const resolved = resolveFallowBinary({ cwd: tmp, envPath: pathDir });
+        // Case-insensitive: PATHEXT casing (ambient env or DEFAULT_PATHEXT) is
+        // conventionally uppercase, so the resolver constructs `fallow.CMD` —
+        // the same file as `fallow.cmd` on case-insensitive NTFS, just a
+        // different string. Comparing exact case here would be over-specifying
+        // a filesystem-level identity as a string identity.
         assert.strictEqual(
-          resolved,
-          cmdFile,
+          String(resolved).toLowerCase(),
+          cmdFile.toLowerCase(),
           'Windows: .cmd candidate must be preferred over bare extensionless file',
         );
       } finally {
@@ -914,22 +976,42 @@ describe('feat-3210: M2 - node_modules/.bin resolution order', () => {
     const baseTmp = getWritableTmp();
     const tmp = fs.mkdtempSync(path.join(baseTmp, 'gsd-fallow-order-'));
     try {
-      // local node_modules/.bin/fallow
       const binDir = path.join(tmp, 'node_modules', '.bin');
       fs.mkdirSync(binDir, { recursive: true });
-      const localFallow = path.join(binDir, 'fallow');
-      fs.writeFileSync(localFallow, '#!/usr/bin/env sh\necho local\n');
-      if (process.platform !== 'win32') fs.chmodSync(localFallow, 0o755);
-
-      // PATH fallow (a different file)
       const pathDir = path.join(tmp, 'pathbin');
       fs.mkdirSync(pathDir, { recursive: true });
-      const pathFallow = path.join(pathDir, 'fallow');
-      fs.writeFileSync(pathFallow, '#!/usr/bin/env sh\necho path\n');
-      if (process.platform !== 'win32') fs.chmodSync(pathFallow, 0o755);
 
-      const resolved = resolveFallowBinary({ cwd: tmp, envPath: pathDir });
-      assert.strictEqual(resolved, localFallow, 'node_modules/.bin/fallow must win over PATH fallow');
+      if (process.platform === 'win32') {
+        // #3618/#3275: exercise precedence against the real Windows candidate
+        // shape (npm's `fallow.cmd`), not the bare extensionless POSIX shim the
+        // resolver deliberately no longer matches on win32.
+        const localFallow = path.join(binDir, 'fallow.cmd');
+        fs.writeFileSync(localFallow, '@echo off\r\necho local\r\n');
+        const pathFallow = path.join(pathDir, 'fallow.cmd');
+        fs.writeFileSync(pathFallow, '@echo off\r\necho path\r\n');
+
+        const resolved = resolveFallowBinary({ cwd: tmp, envPath: pathDir });
+        // Case-insensitive for the same PATHEXT-casing reason as the sibling
+        // tests above (resolver constructs `fallow.CMD`, not `fallow.cmd`).
+        assert.strictEqual(
+          String(resolved).toLowerCase(),
+          localFallow.toLowerCase(),
+          'node_modules/.bin/fallow.cmd must win over PATH fallow.cmd',
+        );
+      } else {
+        // local node_modules/.bin/fallow
+        const localFallow = path.join(binDir, 'fallow');
+        fs.writeFileSync(localFallow, '#!/usr/bin/env sh\necho local\n');
+        fs.chmodSync(localFallow, 0o755);
+
+        // PATH fallow (a different file)
+        const pathFallow = path.join(pathDir, 'fallow');
+        fs.writeFileSync(pathFallow, '#!/usr/bin/env sh\necho path\n');
+        fs.chmodSync(pathFallow, 0o755);
+
+        const resolved = resolveFallowBinary({ cwd: tmp, envPath: pathDir });
+        assert.strictEqual(resolved, localFallow, 'node_modules/.bin/fallow must win over PATH fallow');
+      }
     } finally {
       cleanup(tmp);
     }
@@ -1032,10 +1114,16 @@ describe('feat-3210: workflow and config contracts', () => {
 
   test('config-set accepts code_quality.fallow keys', () => {
     const originalTmpDir = process.env.TMPDIR;
+    const originalTemp = process.env.TEMP;
+    const originalTmp = process.env.TMP;
     // L2: fail loudly if no writable tmp dir is found (was silent skip)
     const writableTmp = getWritableTmp(); // N2: use shared helper
     assert.ok(writableTmp, 'no writable tmp directory found'); // L2: explicit fail-loud assertion
+    // #4220 class: os.tmpdir() never reads TMPDIR on Windows (only TEMP, then
+    // TMP), so redirecting only TMPDIR silently no-ops there — set all three.
     process.env.TMPDIR = writableTmp;
+    process.env.TEMP = writableTmp;
+    process.env.TMP = writableTmp;
     const tmpDir = createTempProject('gsd-fallow-config-');
     try {
       const cases = [
@@ -1052,6 +1140,10 @@ describe('feat-3210: workflow and config contracts', () => {
       cleanup(tmpDir);
       if (originalTmpDir === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = originalTmpDir;
+      if (originalTemp === undefined) delete process.env.TEMP;
+      else process.env.TEMP = originalTemp;
+      if (originalTmp === undefined) delete process.env.TMP;
+      else process.env.TMP = originalTmp;
     }
   });
 
@@ -1072,6 +1164,7 @@ describe('feat-3210: workflow and config contracts', () => {
     );
 
     // Parse: the <step name="structural_pre_pass"> block must exist and be closed
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own workflow .md content, fixed-size author-controlled content
     const stepMatch = workflow.match(/<step\s+name="structural_pre_pass">([\s\S]*?)<\/step>/);
     assert.ok(
       stepMatch,
@@ -1096,15 +1189,41 @@ describe('feat-3210: workflow and config contracts', () => {
       stepFile.includes('FALLOW.json'),
       'structural-pre-pass.md step file must reference the FALLOW.json output artifact',
     );
+  });
 
-    // Structural property: the config-gate fact is resolved from the real
-    // code_quality.fallow.enabled config key — checked against the resolver
-    // it was hoisted into (src/init.cts's detectFallowConfig).
-    const initSource = fs.readFileSync(path.join(ROOT, 'src', 'init.cts'), 'utf8');
-    assert.ok(
-      /detectFallowConfig[\s\S]{0,600}'code_quality'[\s\S]{0,40}'fallow'[\s\S]{0,40}'enabled'/.test(initSource),
-      'detectFallowConfig (src/init.cts) must gate on code_quality.fallow.enabled',
-    );
+  // #3508: behavioral replacement for the `detectFallowConfig` source-grep
+  // that used to sit here. `detectFallowConfig` (src/init.cts) is unexported,
+  // but its EFFECT is observable through `init code-review`'s `fallow_enabled`
+  // output field (wired at cmdInitCodeReview) -- driving the real CLI with
+  // code_quality.fallow.enabled set both ways proves detectFallowConfig
+  // resolves THAT config key specifically, without reading init.cts's source.
+  test('init code-review\'s fallow_enabled field tracks the code_quality.fallow.enabled config key (behavioral form of detectFallowConfig)', () => {
+    const tmpDir = createTempProject('gsd-fallow-detect-');
+    try {
+      const setTrue = runGsdTools(['config-set', 'code_quality.fallow.enabled', 'true'], tmpDir, { HOME: tmpDir });
+      assert.ok(setTrue.success, `config-set code_quality.fallow.enabled true failed: ${setTrue.error}`);
+
+      const trueResult = runGsdTools(['init', 'code-review', '1'], tmpDir, { HOME: tmpDir });
+      assert.ok(trueResult.success, `init code-review failed: ${trueResult.error}`);
+      assert.strictEqual(
+        JSON.parse(trueResult.output).fallow_enabled,
+        true,
+        'init code-review must report fallow_enabled: true once code_quality.fallow.enabled is set true',
+      );
+
+      const setFalse = runGsdTools(['config-set', 'code_quality.fallow.enabled', 'false'], tmpDir, { HOME: tmpDir });
+      assert.ok(setFalse.success, `config-set code_quality.fallow.enabled false failed: ${setFalse.error}`);
+
+      const falseResult = runGsdTools(['init', 'code-review', '1'], tmpDir, { HOME: tmpDir });
+      assert.ok(falseResult.success, `init code-review failed: ${falseResult.error}`);
+      assert.strictEqual(
+        JSON.parse(falseResult.output).fallow_enabled,
+        false,
+        'init code-review must report fallow_enabled: false once code_quality.fallow.enabled is set false',
+      );
+    } finally {
+      cleanup(tmpDir);
+    }
   });
 
   // B4: agent output contract — doc-parity check (approved fallback per config-schema-docs-parity
@@ -1130,3 +1249,47 @@ describe('feat-3210: workflow and config contracts', () => {
 });
   });
 }
+
+describe('config-set: hooks.commit_types end-to-end (#4443)', () => {
+  const { spawnSync } = require('node:child_process');
+
+  test('config-set hooks.commit_types accepts a JSON array and does not report Unknown config key', (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4443-'));
+    t.after(() => cleanup(dir));
+    fs.mkdirSync(path.join(dir, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.planning', 'config.json'), '{}\n');
+
+    const gsdTools = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
+    const result = spawnSync(
+      process.execPath,
+      [gsdTools, 'config-set', 'hooks.commit_types', '["enhance"]'],
+      { cwd: dir, encoding: 'utf8', timeout: PROBE_TIMEOUT_MS },
+    );
+
+    assert.equal(result.status, 0, `config-set failed: ${result.stderr || result.stdout}`);
+    assert.doesNotMatch(result.stdout + result.stderr, /Unknown config key/);
+
+    const written = JSON.parse(fs.readFileSync(path.join(dir, '.planning', 'config.json'), 'utf8'));
+    assert.deepEqual(written.hooks.commit_types, ['enhance']);
+  });
+
+  test('config-set hooks.community accepts a boolean and does not report Unknown config key', (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4443-community-'));
+    t.after(() => cleanup(dir));
+    fs.mkdirSync(path.join(dir, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.planning', 'config.json'), '{}\n');
+
+    const gsdTools = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
+    const result = spawnSync(
+      process.execPath,
+      [gsdTools, 'config-set', 'hooks.community', 'true'],
+      { cwd: dir, encoding: 'utf8', timeout: PROBE_TIMEOUT_MS },
+    );
+
+    assert.equal(result.status, 0, `config-set failed: ${result.stderr || result.stdout}`);
+    assert.doesNotMatch(result.stdout + result.stderr, /Unknown config key/);
+
+    const written = JSON.parse(fs.readFileSync(path.join(dir, '.planning', 'config.json'), 'utf8'));
+    assert.equal(written.hooks.community, true);
+  });
+});

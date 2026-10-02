@@ -8,7 +8,7 @@
 
 ## Decide which reviewers to use
 
-GSD Core can route review requests to any combination of: Gemini CLI, Claude (separate session), Codex CLI, CodeRabbit, OpenCode, Qwen Code, Cursor, Antigravity CLI, Ollama, LM Studio, llama.cpp, and Kimi Code.
+GSD Core can route review requests to any combination of: Claude (separate session), Codex CLI, CodeRabbit, OpenCode, Qwen Code, Cursor, Antigravity CLI, Ollama, LM Studio, llama.cpp, and Kimi Code.
 
 That list is not fixed. Each of those is a declared reviewer lane, and a capability can ship its own — see [Ship a reviewer lane in your capability](ship-a-reviewer-lane.md). To see exactly which lanes your installation has, run `gsd-tools review-lane sections`.
 
@@ -17,9 +17,6 @@ Each reviewer runs the same structured prompt against your `PLAN.md` files indep
 **If you have no external CLIs installed yet**, install at least one:
 
 ```bash
-# Gemini CLI (free with Google credentials)
-npm install -g @google/gemini-cli
-
 # Antigravity CLI (free with Google credentials)
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 
@@ -37,12 +34,12 @@ By default, `/gsd-review` runs all detected CLIs. To pin a subset as project def
 /gsd-config --integrations
 ```
 
-The integrations wizard covers API keys, code-review CLI routing, and the `review.default_reviewers` list. Set the list to the reviewers you want as the no-flag default — for example `["gemini","codex"]`.
+The integrations wizard covers API keys, code-review CLI routing, and the `review.default_reviewers` list. Set the list to the reviewers you want as the no-flag default — for example `["codex","claude"]`.
 
 Alternatively, set it directly with `gsd-tools`:
 
 ```bash
-gsd config-set review.default_reviewers '["gemini","codex"]'
+gsd config-set review.default_reviewers '["codex","claude"]'
 ```
 
 For the full integration settings schema (API keys, model overrides per reviewer, local server host addresses), see [Configuration](../CONFIGURATION.md).
@@ -64,7 +61,7 @@ GSD invokes each reviewer in sequence, collects structured feedback (Summary, St
 ### Select a single reviewer for a one-off run
 
 ```bash
-/gsd-review --phase 3 --gemini
+/gsd-review --phase 3 --agy
 /gsd-review --phase 3 --codex
 /gsd-review --phase 3 --cursor
 ```
@@ -99,6 +96,17 @@ The `{padded_phase}-REVIEWS.md` file contains:
 - Individual reviews from each reviewer with severity-classified concerns
 - A **Consensus Summary** section that synthesises concerns raised by two or more reviewers — start here for the highest-priority signal
 - A **Divergent Views** section for areas where reviewers disagreed
+- `models:` and `model_sources:` frontmatter maps — the resolved model each reviewer actually ran under, and how that value was determined
+
+### Which model produced a review
+
+Compare two reviewers' verdicts only after checking what actually produced each one — `models:` in the frontmatter gives the model per reviewer, and `model_sources:` gives the mechanism that recovered it.
+
+If a reviewer's entry reads `unknown`, pin it: set `review.models.<slug>` for that lane (the key suffix is not always the lane's slug — Antigravity's is `review.models.agy`) so the next run records `pinned`. See [Code-review CLI routing](../CONFIGURATION.md#code-review-cli-routing) for the full key table.
+
+Some `unknown` values are expected, not a bug to chase: lanes that accept no model at all (`cursor`, `qwen`, `coderabbit`), and any lane whose CLI didn't disclose one on this run. `pinned` is a certain value; `banner` and `transcript` are recovered from third-party CLI output and can degrade to `unknown` after an upstream release changes that output.
+
+A `models:` entry like `gpt-5.6-sol (reasoning=high)` is not a formatting quirk: the `(reasoning=<level>)` suffix reflects a reasoning effort GSD itself applied to that lane, driven by your `effort.*` config — not the CLI's own default.
 
 ---
 
@@ -128,7 +136,7 @@ This runs `plan-phase → review → replan → re-review` up to three cycles (d
 
 ```bash
 /gsd-plan-review-convergence 3 --codex
-/gsd-plan-review-convergence 3 --gemini
+/gsd-plan-review-convergence 3 --agy
 ```
 
 ### Convergence with all reviewers and a higher cycle cap
@@ -145,13 +153,13 @@ This runs `plan-phase → review → replan → re-review` up to three cycles (d
 
 | Situation | Recommended approach |
 |-----------|---------------------|
-| You have Gemini CLI already installed | `--gemini` is always a good starting reviewer |
-| You want free multi-reviewer coverage | `--gemini` + `--agy` (both use Google credentials) |
+| You have Antigravity already installed | `--agy` is always a good starting reviewer |
+| You want free multi-reviewer coverage | `--agy` (Google credentials) + `--claude` |
 | Your project is OpenAI-heavy | add `--codex` for an OpenAI-model perspective |
 | You want GitHub Copilot's model | add `--opencode` |
 | You want to avoid API costs entirely | configure Ollama with a local model and use `--ollama` |
 | You need maximum coverage before a release | `/gsd-plan-review-convergence N --all` |
-| You're iterating quickly and want fast feedback | pick one CLI: `/gsd-review --phase N --gemini` |
+| You're iterating quickly and want fast feedback | pick one CLI: `/gsd-review --phase N --agy` |
 
 ---
 

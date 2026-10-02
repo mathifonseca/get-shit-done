@@ -1,3 +1,4 @@
+// docs-guard-exempt: docs/TESTING-SUITES.md is cited only in a header comment; never read.
 // allow-test-rule: pending-migration-to-typed-ir [#3090]
 // run-tests.cjs is a CLI test harness with no --json/structured output mode;
 // these tests regex/substring-match its human-readable stderr (usage errors,
@@ -15,14 +16,16 @@
 
 'use strict';
 
-const { describe, test, beforeEach, afterEach } = require('node:test');
+const { describe, test, before, after, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('node:child_process');
 
 const { runNode } = require('./helpers/process-seam.cjs');
 const { toLegacyResult } = require('./helpers/git-fixture.cjs');
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, CONFIG_LOCATION_ENV_KEYS } = require('./helpers.cjs');
+const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
 
 const HARNESS = path.join(__dirname, '..', 'scripts', 'run-tests.cjs');
 
@@ -53,6 +56,24 @@ function runHarness(testDir, args = [], extraEnv = {}) {
   // doesn't refuse to run with "recursive run() skipping running files".
   const env = { ...process.env, GSD_TEST_DIR: testDir, ...extraEnv };
   delete env.NODE_TEST_CONTEXT;
+  // #4070: strip RUN_TESTS_SHARD_RESERVE inherited from the OUTER job's own
+  // environment. test.yml sets it on the "Run unit tests" step for the real
+  // production shard 1 of the full-scope lane — and since these tests spawn
+  // run-tests.cjs as a CHILD of that same step, they inherit it via
+  // `...process.env` above like any other ambient var. Left unstripped, a
+  // reserve of 77 weight units utterly dwarfs these synthetic 9-file
+  // fixtures' combined weight (~0.3, since none of them are in the real
+  // timings table), so shard index 1 gets EVERY file routed away from it —
+  // a real, reproducible corruption of every test in this describe block,
+  // not a flake (confirmed live: CI run 33288554040, shard 2/3, 7 of these
+  // tests failed with exactly this signature). Deleted before `extraEnv` is
+  // applied above would be too late (spread order), so it is deleted here,
+  // AFTER composition, then only reinstated if a specific test opted in via
+  // extraEnv — preserving this file's one legitimate use (the #4070 E2E
+  // bounds-check test below, which sets it deliberately).
+  if (!Object.prototype.hasOwnProperty.call(extraEnv, 'RUN_TESTS_SHARD_RESERVE')) {
+    delete env.RUN_TESTS_SHARD_RESERVE;
+  }
   const r = runNode([HARNESS, ...args], {
     cwd: path.join(__dirname, '..'),
     env,
@@ -388,6 +409,15 @@ test('ambient GSD workstream vars are stripped by the runner', () => {
       const r = runHarness(tmpDir, [], {
         RUN_TESTS_MAX_CMDLINE_CHARS: '100000',
         RUN_TESTS_MAX_FILES_PER_CHUNK: '3',
+        // #4434: without this, these tiny-*.test.cjs names fall through to the
+        // REAL committed tests/test-timings.json as unmeasured entries, and on
+        // win32 an unmeasured entry in a loaded table now weighs
+        // WINDOWS_UNMEASURED_COST_MULTIPLIER (2.2), not 1 — breaking the exact
+        // {3,2,2} count-based split this test asserts. Point at a path that
+        // cannot exist so the harness takes the no-table branch (uniform
+        // weight 1 on every platform), matching this test's actual intent:
+        // pure file-count chunking, independent of any cost table.
+        RUN_TESTS_TIMINGS_FILE: path.join(tmpDir, 'no-such-timings-4434.json'),
       });
       assert.strictEqual(
         r.status,
@@ -409,6 +439,39 @@ test('ambient GSD workstream vars are stripped by the runner', () => {
       );
     });
 
+    test('the unmeasured-file cap has no effect when no timings table loads at all', () => {
+      // Same 7-file seed and file-count-chunking env as the sibling test above,
+      // but with RUN_TESTS_MAX_UNMEASURED_PER_CHUNK set to 1 — lower than any
+      // chunk's file count under plain {3,2,2} file-count chunking. If the
+      // unmeasured cap wrongly applied when no table loads (main() deriving it
+      // unconditionally instead of gating on loadedTimings()), a cap of 1 would
+      // force 7 single-file chunks instead of 3. Proves the cap genuinely has
+      // NO effect in the no-table case, not just that it happens not to bind.
+      const names = Array.from({ length: 7 }, (_, i) => `tiny-${String(i).padStart(2, '0')}.test.cjs`);
+      seed(tmpDir, names);
+      const r = runHarness(tmpDir, [], {
+        RUN_TESTS_MAX_CMDLINE_CHARS: '100000',
+        RUN_TESTS_MAX_FILES_PER_CHUNK: '3',
+        RUN_TESTS_MAX_UNMEASURED_PER_CHUNK: '1',
+        RUN_TESTS_TIMINGS_FILE: path.join(tmpDir, 'no-such-timings-4434.json'),
+      });
+      assert.strictEqual(
+        r.status,
+        0,
+        `expected zero exit; got status=${r.status} signal=${r.signal}\nSTDERR:\n${r.stderr}`,
+      );
+      assert.match(
+        r.stderr,
+        /run-tests: chunk 1\/3 — 3 files/,
+        `expected file-count chunking marker (unaffected by unmeasured cap) in stderr; STDERR:\n${r.stderr}`,
+      );
+      assert.match(
+        r.stderr,
+        /run-tests: chunk 3\/3 — 2 files/,
+        `expected final file-count chunking marker (unaffected by unmeasured cap) in stderr; STDERR:\n${r.stderr}`,
+      );
+    });
+
     // #2088: expensive files must never all land in one chunk — otherwise the
     // unsharded targeted lane packs the whole install surface into a single chunk
     // that blows the 600s per-chunk backstop on the slow Windows runner. #2088
@@ -423,19 +486,32 @@ test('ambient GSD workstream vars are stripped by the runner', () => {
       return p;
     }
 
-    test('expensive files SPREAD across chunks instead of clustering (#2088, #2456)', () => {
+    test('expensive files SPREAD across chunks instead of clustering (#2088, #2456, #4733)', () => {
       // Discriminating by construction: the three EXPENSIVE files carry names the
       // old prefix heuristic scored 1, and the three TRIVIAL ones carry the
       // `install-` prefix it scored 12 — i.e. exactly inverted from their real
       // cost. Under the old packer this packs {2,2,1,1} (4 chunks, with two
-      // expensive files sharing chunk 1); under measured weights it packs
-      // {2,2,2}, one expensive file per chunk. The assertion below therefore
-      // cannot pass on the old algorithm, nor with the timings file removed.
+      // expensive files sharing chunk 1).
+      //
+      // #4733: isolation is now an ABSOLUTE ms bar (ISOLATION_BUDGET_FRACTION
+      // * CHUNK_WORKING_BUDGET_MS = 0.3 * 400000 = 120000ms), converted to the
+      // packer's weight units via the LIVE table's own mean — NOT scaled by
+      // RUN_TESTS_MAX_FILES_PER_CHUNK (2 here) the way the old ratio-of-budget
+      // rule was. Each heavy file is measured at 200000ms, well above the
+      // 120000ms bar, so it is pulled out by partitionIsolatedFiles into its
+      // own dedicated chunk, BEFORE packChunks ever sees it — an even stronger
+      // guarantee than LPT spread: the three heavy files can never land in the
+      // same chunk as each other or as a trivial file. That yields 5 chunks
+      // total: 3 isolated singles (the heavy files, one per chunk) plus the 3
+      // trivial files packed by count floor (ceil(3/2)=2 chunks: {2,1}), where
+      // 2 is RUN_TESTS_MAX_FILES_PER_CHUNK below (packing budget only — it no
+      // longer influences isolation). The assertion below therefore cannot
+      // pass on the old algorithm, nor with the timings file removed.
       const heavy = ['heavy-0.test.cjs', 'heavy-1.test.cjs', 'heavy-2.test.cjs'];
       const trivial = ['install-cheap-0.test.cjs', 'install-cheap-1.test.cjs', 'install-cheap-2.test.cjs'];
       seed(tmpDir, [...heavy, ...trivial]);
       const timingsFile = writeTimings(tmpDir, {
-        ...Object.fromEntries(heavy.map((f) => [f, 30000])),
+        ...Object.fromEntries(heavy.map((f) => [f, 200000])),
         ...Object.fromEntries(trivial.map((f) => [f, 10])),
       });
       const rh = runHarness(tmpDir, [], {
@@ -444,13 +520,11 @@ test('ambient GSD workstream vars are stripped by the runner', () => {
         RUN_TESTS_TIMINGS_FILE: timingsFile,
       });
       assert.strictEqual(rh.status, 0, `heavy: expected zero exit; STDERR:\n${rh.stderr}`);
-      for (const n of [1, 2, 3]) {
-        assert.match(
-          rh.stderr,
-          new RegExp(`run-tests: chunk ${n}/3 — 2 files`),
-          `expensive files must spread one-per-chunk across exactly 3 chunks; STDERR:\n${rh.stderr}`,
-        );
-      }
+      assert.match(rh.stderr, /run-tests: chunk 1\/5 — 1 files/, `expected isolated heavy chunk 1/5; STDERR:\n${rh.stderr}`);
+      assert.match(rh.stderr, /run-tests: chunk 2\/5 — 1 files/, `expected isolated heavy chunk 2/5; STDERR:\n${rh.stderr}`);
+      assert.match(rh.stderr, /run-tests: chunk 3\/5 — 1 files/, `expected isolated heavy chunk 3/5; STDERR:\n${rh.stderr}`);
+      assert.match(rh.stderr, /run-tests: chunk 4\/5 — 2 files/, `expected packed trivial chunk 4/5; STDERR:\n${rh.stderr}`);
+      assert.match(rh.stderr, /run-tests: chunk 5\/5 — 1 files/, `expected packed trivial chunk 5/5; STDERR:\n${rh.stderr}`);
     });
 
     test('trivial files the old heuristic over-weighted now stay in ONE chunk (#2088, #2456)', () => {
@@ -538,6 +612,56 @@ test('ambient GSD workstream vars are stripped by the runner', () => {
       // And the diagnostic must show the table was actually consumed.
       assert.match(r.stderr, /table=loaded/, 'shard diagnostics must report the injected table as loaded');
       assert.match(r.stderr, /sig=[0-9a-f]+/, 'shard diagnostics must emit an input fingerprint');
+    });
+
+    // #4070 E2E: main()'s own bounds check on RUN_TESTS_SHARD_RESERVE — an
+    // index that does not exist for the shard total in play — is invisible to
+    // every pure in-memory selectShard/parseShardReserve test, because that
+    // check lives in main() itself (scripts/run-tests.cjs, the
+    // `reserve.index <= parsed.shard.total` guard and its console.error
+    // fallback), which only runs through the CLI subprocess seam. Proves both
+    // halves: the warning fires, AND the selection is provably unaffected
+    // (byte-identical to a control run with no RUN_TESTS_SHARD_RESERVE at
+    // all, both against the SAME injected timings table so the comparison
+    // isn't muddied by table drift).
+    test('RUN_TESTS_SHARD_RESERVE with an out-of-range index warns and is ignored (#4070)', () => {
+      seed(tmpDir, SHARD_NAMES);
+      const timings = {
+        schema_version: 1, unit: 'ms', timings: Object.fromEntries(
+          SHARD_NAMES.map((n, i) => [n, i % 3 === 0 ? 30000 : 100]),
+        ),
+      };
+      const tablePath = path.join(tmpDir, 'injected-timings-oob.json');
+      fs.writeFileSync(tablePath, JSON.stringify(timings));
+      try {
+        // --shard 1/3 → valid indices are 1..3. "5:999" is out of range.
+        const withBadReserve = runHarness(
+          tmpDir, ['--shard', '1/3'],
+          { RUN_TESTS_TIMINGS_FILE: tablePath, RUN_TESTS_SHARD_RESERVE: '5:999' },
+        );
+        assert.strictEqual(withBadReserve.status, 0, `stderr: ${withBadReserve.stderr}`);
+        assert.match(
+          withBadReserve.stderr,
+          /RUN_TESTS_SHARD_RESERVE="5:999" is not a valid .* for --shard total 3 — ignoring/,
+          `expected the out-of-range-index fallback warning; got stderr: ${withBadReserve.stderr}`,
+        );
+
+        const control = runHarness(
+          tmpDir, ['--shard', '1/3'],
+          { RUN_TESTS_TIMINGS_FILE: tablePath },
+        );
+        assert.strictEqual(control.status, 0, `stderr: ${control.stderr}`);
+        assert.doesNotMatch(control.stderr, /RUN_TESTS_SHARD_RESERVE/, 'control run must not warn — it sets no reserve at all');
+
+        const filesLine = (s) => (s.match(/files=\d+: (.*)$/m) || [])[1] || '';
+        assert.strictEqual(
+          filesLine(withBadReserve.stderr), filesLine(control.stderr),
+          'an out-of-range reserve index must select EXACTLY the same files as no reserve at all — '
+          + 'the fallback warning alone is not proof the reserve was actually ignored',
+        );
+      } finally {
+        try { fs.unlinkSync(tablePath); } catch { /* best effort */ }
+      }
     });
 
     test('shard diagnostics report an identical input fingerprint across shards', () => {
@@ -811,6 +935,366 @@ test('noop', () => {});
         0,
         `expected zero exit with force-exit enabled; got status=${r.status} signal=${r.signal}\nSTDERR:\n${r.stderr}`,
       );
+    });
+  });
+
+  describe('chunk-timeout instrumentation (#3889)', () => {
+    // Consolidation (CI cost, #4015): this describe block used to spawn the
+    // harness once PER assertion group (3 success-path runs + 2 timeout-path
+    // runs = 5 subprocess boots). Each boot is expensive — run-tests.cjs
+    // starts, globs the suite, then spawns `node --test` children — so on a
+    // CI shard already within ~39s of its 15-minute cap, paying for 5 boots
+    // to check facts that all hold against the SAME run is wasted spend.
+    // Below, exactly ONE successful run and ONE timed-out run are captured
+    // once (via `before`) and every assertion group below reads from those
+    // captured results instead of spawning its own. This is the whole
+    // savings — no assertion is weakened or removed.
+    // The fixture served to the timeout-path run below (#4105). Parks on a
+    // SETTLING timer — the #4104 idiom — so the hang is a property of the
+    // FIXTURE on every Node line, not of the runtime: the retired
+    // `new Promise(() => {})` shape held NO libuv handle, so whether the
+    // spawned child hung was decided by the Node line's test-runner shutdown
+    // behavior (measured: v24/v26 happen to hold the loop open; v22.22.0
+    // exits on its own in ~60ms with `# cancelled 1`, so the chunk never
+    // reached the timeout path and T1/T4 below asserted nothing). The park
+    // must outlast the chunk bound below with wide margin (asserted
+    // structurally in the #4105 regression test), stays ~0% CPU while parked,
+    // and the settle guarantees the fixture SELF-TERMINATES if a kill orphans
+    // it — unlike `setInterval`-forever (never exits) or `while (true) {}`
+    // (100% CPU forever), the two shapes #4104's pairing note rules out.
+    const HANG_PARK_MS = 10_000;
+    const HANGS_BODY = `'use strict';
+const { test } = require('node:test');
+test('hangs forever', () => new Promise((resolve) => { setTimeout(resolve, ${HANG_PARK_MS}); }));
+`;
+
+    // The per-chunk timeout the timeout-path run below arms. Hoisted (#4105)
+    // so the #4105 fixture guard below asserts against the SAME bound the
+    // harness run uses, not a re-typed literal that can drift from it.
+    const CHUNK_TIMEOUT_MS_FOR_HANG_RUN = 2000;
+
+    let successDir;
+    let successRun;
+    let eventsDirBefore;
+    let eventsDirAfter;
+    let timeoutDir;
+    let timeoutRun;
+
+    before(() => {
+      // Single SUCCESS-path run, reused by T2/T3/T5 below.
+      successDir = createTempDir('gsd-3889-success-');
+      seed(successDir, ['a.test.cjs']);
+      eventsDirBefore = fs.readdirSync(require('os').tmpdir())
+        .filter((n) => n.startsWith('gsd-run-tests-events-'));
+      successRun = runHarness(successDir, []);
+      eventsDirAfter = fs.readdirSync(require('os').tmpdir())
+        .filter((n) => n.startsWith('gsd-run-tests-events-'));
+
+      // Single TIMEOUT-path run, reused by T1/T4 below. 2000ms is kept —
+      // it is already the smallest value this suite used anywhere for the
+      // per-chunk timeout, and going lower risks flaking on a loaded CI
+      // box that has to boot node --test, register the hang, and observe
+      // the kill inside the window.
+      timeoutDir = createTempDir('gsd-3889-timeout-');
+      fs.writeFileSync(path.join(timeoutDir, 'hangs.test.cjs'), HANGS_BODY, 'utf8');
+      timeoutRun = runHarness(timeoutDir, [], {
+        RUN_TESTS_NO_FORCE_EXIT: '1',
+        RUN_TESTS_CHUNK_TIMEOUT_MS: String(CHUNK_TIMEOUT_MS_FOR_HANG_RUN),
+      });
+    });
+
+    after(() => {
+      cleanup(successDir);
+      cleanup(timeoutDir);
+    });
+
+    // T2: per-chunk elapsed timing appears on the normal SUCCESS path, not
+    // only when something goes wrong — this is what makes "which chunk is
+    // drifting toward the cap" readable across ordinary green runs.
+    test('a successful chunk prints its elapsed time', () => {
+      assert.strictEqual(successRun.status, 0, `expected a clean pass; STDERR:\n${successRun.stderr}`);
+      assert.match(
+        successRun.stderr,
+        /run-tests: chunk 1\/1 completed in \d+ms/,
+        `expected a per-chunk completion timing line; STDERR:\n${successRun.stderr}`,
+      );
+    });
+
+    // T3: the ndjson companion reporter's destination file is a temp
+    // artifact of the instrumentation, not a product output — it must not
+    // survive a successful run. Assert against the OS temp root's own
+    // "gsd-run-tests-events-*" prefix (scripts/run-tests.cjs's mkdtemp
+    // prefix) rather than any run-tests-owned directory, since that IS the
+    // leak surface being guarded.
+    test('the ndjson reporter temp dir is cleaned up after a successful run', () => {
+      assert.strictEqual(successRun.status, 0, `expected a clean pass; STDERR:\n${successRun.stderr}`);
+      assert.deepStrictEqual(
+        eventsDirAfter,
+        eventsDirBefore,
+        `expected no leaked gsd-run-tests-events-* temp dir after a successful run; ` +
+          `before=${JSON.stringify(eventsDirBefore)} after=${JSON.stringify(eventsDirAfter)}`,
+      );
+    });
+
+    // T5 (regression): the human reporter's --test-reporter-destination
+    // pairing must be a regular file, not os.devNull. devNull is a character
+    // device; Node opens the reporter destination as an fs.WriteStream and
+    // fsyncs it on close, and fsync on a character device fails with EINVAL
+    // — surfaced as "Emitted 'error' event on WriteStream instance" /
+    // "EINVAL: invalid argument, fsync", which crashed EVERY chunk on the
+    // real remote run this regresses (43/43 failures), not only the timeout
+    // path. The argv construction lives entirely inside main() with no
+    // exported seam to unit-test directly (see NOTES), so this asserts the
+    // closest real, externally-observable consequence: a normal successful
+    // run must not surface that error text, and must still complete and
+    // exit 0 — both of which a reintroduced devNull destination would break
+    // on any platform where fsync(devNull) actually returns EINVAL (this
+    // suite's own bench platform, historically).
+    test('a successful run never surfaces the devNull fsync/EINVAL reporter crash', () => {
+      assert.strictEqual(successRun.status, 0, `expected a clean pass; STDERR:\n${successRun.stderr}`);
+      assert.doesNotMatch(
+        successRun.stderr,
+        /EINVAL|invalid argument, fsync|WriteStream instance/i,
+        `expected no reporter-destination fsync crash; STDERR:\n${successRun.stderr}`,
+      );
+    });
+
+    // T1: on a chunk timeout, the diagnostic must NAME the file that was
+    // still executing — not merely list every file the chunk contained (the
+    // pre-instrumentation behavior). A test that hangs INSIDE its own body
+    // (parks on a settling timer that outlasts the chunk bound, so it never
+    // resolves inside the window) keeps its test:start event unmatched by any
+    // test:pass/test:fail in the ndjson companion reporter's output, which
+    // is exactly the signal the diagnostic reads back on timeout.
+    test('a chunk timeout names the file that was in flight when killed', () => {
+      assert.notStrictEqual(
+        timeoutRun.status,
+        0,
+        `expected non-zero exit from a timed-out chunk; got status=${timeoutRun.status}\nSTDERR:\n${timeoutRun.stderr}`,
+      );
+      assert.match(
+        timeoutRun.stderr,
+        /In flight when killed.*hangs\.test\.cjs/s,
+        `expected the diagnostic to NAME the in-flight file, not just list the chunk; STDERR:\n${timeoutRun.stderr}`,
+      );
+    });
+
+    // Regression (#3889 recurrence): the reporter module itself, called
+    // directly with no subprocess, must return nully — this is the exact
+    // contract violation (`return []`) that crashed every chunk on the real
+    // remote run this file regresses ("Expected nully to be returned from
+    // the 'body' function but got an instance of Array", thrown by
+    // node:stream's `compose` when its async-function body returns an
+    // iterable instead of undefined/null). Also pins the NDJSON side effect:
+    // only the two handled event types are appended, verbatim, one per line.
+    test('the reporter returns nully and appends only the handled event types as NDJSON', async () => {
+      const reporter = require('../scripts/lib/ndjson-reporter.cjs');
+      const eventsFile = path.join(tmpDir, 'ndjson-reporter-events.ndjson');
+      const savedEventsFile = process.env.GSD_RUN_TESTS_EVENTS_FILE;
+      process.env.GSD_RUN_TESTS_EVENTS_FILE = eventsFile;
+      try {
+        async function* fakeEvents() {
+          yield { type: 'test:start', data: { file: 'a.test.cjs', name: 't', nesting: 0, testNumber: 1 } };
+          yield { type: 'test:diagnostic', data: { message: 'ignored' } };
+          yield { type: 'test:pass', data: { file: 'a.test.cjs', name: 't', nesting: 0, testNumber: 1 } };
+        }
+        const result = await reporter(fakeEvents());
+        assert.strictEqual(
+          result ?? null,
+          null,
+          `expected the reporter to return nully (undefined/null) per stream.compose's ` +
+            `async-function body contract; got ${JSON.stringify(result)}`,
+        );
+        const rawContent = fs.readFileSync(eventsFile, 'utf8');
+        const lines = splitLines(rawContent.trim()).filter((l) => l.length > 0);
+        assert.strictEqual(lines.length, 3, `expected exactly 3 NDJSON lines (init marker + 2 handled events); got:\n${lines.join('\n')}`);
+        const [init, start, pass] = lines.map((l) => JSON.parse(l));
+        assert.strictEqual(init.type, 'reporter:init');
+        assert.strictEqual(start.type, 'test:start');
+        assert.strictEqual(start.file, 'a.test.cjs');
+        assert.strictEqual(pass.type, 'test:pass');
+        assert.strictEqual(pass.file, 'a.test.cjs');
+      } finally {
+        if (savedEventsFile === undefined) {
+          delete process.env.GSD_RUN_TESTS_EVENTS_FILE;
+        } else {
+          process.env.GSD_RUN_TESTS_EVENTS_FILE = savedEventsFile;
+        }
+        cleanup(eventsFile);
+      }
+    });
+
+    // Regression (#3889 root cause): a hang inside a test body NEVER produces
+    // a `test:start`/`test:pass`/`test:fail` for that subtest (node:test only
+    // surfaces those to the parent once the child reports completion), so
+    // those three event types alone can never see a hang. `test:enqueue` and
+    // `test:dequeue` are emitted by the RUNNER as it queues/begins a file,
+    // independent of completion — this pins that the reporter now records
+    // both, verbatim, for exactly the "enqueue then dequeue, then nothing"
+    // shape a real hang produces.
+    test('the reporter records test:enqueue and test:dequeue for the hang shape (enqueue, dequeue, nothing else)', async () => {
+      const reporter = require('../scripts/lib/ndjson-reporter.cjs');
+      const eventsFile = path.join(tmpDir, 'ndjson-reporter-hang-shape.ndjson');
+      const savedEventsFile = process.env.GSD_RUN_TESTS_EVENTS_FILE;
+      process.env.GSD_RUN_TESTS_EVENTS_FILE = eventsFile;
+      try {
+        async function* hangShapeEvents() {
+          yield { type: 'test:enqueue', data: { file: 'hangs.test.cjs', name: 'hangs.test.cjs', nesting: 0 } };
+          yield { type: 'test:dequeue', data: { file: 'hangs.test.cjs', name: 'hangs.test.cjs', nesting: 0 } };
+          // Never yields test:start/test:pass/test:fail — this IS the hang.
+        }
+        const result = await reporter(hangShapeEvents());
+        assert.strictEqual(result ?? null, null);
+        const rawContent = fs.readFileSync(eventsFile, 'utf8');
+        const lines = splitLines(rawContent.trim()).filter((l) => l.length > 0);
+        assert.strictEqual(
+          lines.length,
+          3,
+          `expected exactly 3 NDJSON lines (init marker + enqueue + dequeue); got:\n${lines.join('\n')}`,
+        );
+        const [init, enqueue, dequeue] = lines.map((l) => JSON.parse(l));
+        assert.strictEqual(init.type, 'reporter:init');
+        assert.strictEqual(enqueue.type, 'test:enqueue');
+        assert.strictEqual(enqueue.file, 'hangs.test.cjs');
+        assert.strictEqual(dequeue.type, 'test:dequeue');
+        assert.strictEqual(dequeue.file, 'hangs.test.cjs');
+      } finally {
+        if (savedEventsFile === undefined) {
+          delete process.env.GSD_RUN_TESTS_EVENTS_FILE;
+        } else {
+          process.env.GSD_RUN_TESTS_EVENTS_FILE = savedEventsFile;
+        }
+        cleanup(eventsFile);
+      }
+    });
+
+    // #3889: the init marker is the reporter's FIRST action, written before
+    // the `for await` loop even begins — so it must land even when the
+    // source event stream yields ZERO events (e.g. the child is killed
+    // before node:test emits anything). This pins the marker's whole
+    // purpose: its presence alone proves the reporter module loaded and was
+    // invoked, independent of whether any test ever started.
+    test('the reporter writes only the init marker when the source yields zero events', async () => {
+      const reporter = require('../scripts/lib/ndjson-reporter.cjs');
+      const eventsFile = path.join(tmpDir, 'ndjson-reporter-init-only.ndjson');
+      const savedEventsFile = process.env.GSD_RUN_TESTS_EVENTS_FILE;
+      process.env.GSD_RUN_TESTS_EVENTS_FILE = eventsFile;
+      try {
+        async function* emptyEvents() {}
+        const result = await reporter(emptyEvents());
+        assert.strictEqual(
+          result ?? null,
+          null,
+          `expected the reporter to return nully even with zero source events; got ${JSON.stringify(result)}`,
+        );
+        const rawContent = fs.readFileSync(eventsFile, 'utf8');
+        const lines = splitLines(rawContent.trim()).filter((l) => l.length > 0);
+        assert.strictEqual(
+          lines.length,
+          1,
+          `expected exactly 1 NDJSON line (the init marker only); got:\n${lines.join('\n')}`,
+        );
+        const [init] = lines.map((l) => JSON.parse(l));
+        assert.strictEqual(init.type, 'reporter:init');
+        assert.strictEqual(typeof init.ts, 'number');
+      } finally {
+        if (savedEventsFile === undefined) {
+          delete process.env.GSD_RUN_TESTS_EVENTS_FILE;
+        } else {
+          process.env.GSD_RUN_TESTS_EVENTS_FILE = savedEventsFile;
+        }
+        cleanup(eventsFile);
+      }
+    });
+
+    // T4: the pre-existing timeout / abort / force-exit behavior (#1051)
+    // still holds with the reporter instrumentation wired in — the new
+    // --test-reporter flags must not change detection, the abort-on-timeout
+    // control flow, or the exit code.
+    test('existing timeout diagnostic and abort behavior are unchanged', () => {
+      assert.notStrictEqual(timeoutRun.status, 0, `expected non-zero exit; STDERR:\n${timeoutRun.stderr}`);
+      assert.match(
+        timeoutRun.stderr,
+        /exceeded the per-chunk timeout/,
+        `expected the original timeout diagnostic wording to survive; STDERR:\n${timeoutRun.stderr}`,
+      );
+      assert.match(
+        timeoutRun.stderr,
+        /run-tests: chunk 1\/1 was killed after \d+ms/,
+        `expected the new killed/elapsed line; STDERR:\n${timeoutRun.stderr}`,
+      );
+    });
+
+    // Regression (#4105): T1/T4 above are only meaningful if the fixture
+    // above GENUINELY hangs, and the hang must be a property of the FIXTURE,
+    // not of the runtime's test-runner shutdown behavior. A never-settling
+    // `new Promise(() => {})` holds NO libuv handle, so whether the spawned
+    // child hangs is decided by the Node line: on v24/v26 the runner happens
+    // to hold the loop open, but on v22 the child exits on its own in ~60ms
+    // (`# cancelled 1`, rc=1) — the chunk then never reaches the timeout path
+    // and T1/T4 assert nothing about the timeout diagnostic (measured:
+    // v22.22.0 `node --test` exits after 61ms). RED at this test's introducing
+    // sha against the then-current body: on Node 24 it fails the
+    // self-termination arm (an unheld never-settling promise also never
+    // self-terminates on lines where the runner DOES hold it open), and on
+    // off-24 lines it fails the still-hanging arm. Deterministic guard, the
+    // #4104 self-exit regression's event-driven shape: spawn the EXACT served
+    // body directly — no harness, no runner, no polling — and observe that its
+    // natural 'exit' event (a) arrives no earlier than past the chunk bound
+    // the harness run above arms (it hangs by itself, without any runtime
+    // holding it up), and (b) carries a natural exit — exit code 0, no
+    // signal. The `{ timeout: 2 * HANG_PARK_MS }` backstop (the
+    // health-validation #663 pattern) fails an immortal body — one that never
+    // delivers 'exit' — instead of hanging the suite; a `{ timeout }` option
+    // is the no-elapsed-assertion-compliant bound. Liveness of a SUBPROCESS
+    // cannot be driven through the clock seam (mock.timers cannot reach
+    // inside a separately spawned node), so the guard asserts observable
+    // exit/signal/liveness behavior only — never a measured duration value
+    // (RULESET.TESTS.no-timing-assertion).
+    test('the #3889 hang fixture genuinely hangs by itself and self-terminates (#4105)', { timeout: 2 * HANG_PARK_MS }, (t, done) => {
+      // (a) Structural margin, single-sourced with the served body: the park
+      // must outlast the chunk bound by >= 4x, so a loaded box's scheduling
+      // jitter can never let the timer settle before the harness kill fires.
+      assert.ok(
+        HANG_PARK_MS >= 4 * CHUNK_TIMEOUT_MS_FOR_HANG_RUN,
+        `fixture park (${HANG_PARK_MS}ms) must exceed the chunk bound (${CHUNK_TIMEOUT_MS_FOR_HANG_RUN}ms) with margin`,
+      );
+      const dir = createTempDir('gsd-3889-hang-fixture-');
+      t.after(() => cleanup(dir));
+      const tf = path.join(dir, 'hangs.test.cjs');
+      fs.writeFileSync(tf, HANGS_BODY, 'utf8');
+      const child = spawn(process.execPath, [tf], { stdio: 'ignore' });
+      // The runner timeout above fails an immortal body; this hook guarantees
+      // the child is reaped on every exit path, including that one.
+      t.after(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } });
+      const spawnedAt = Date.now();
+      // Past the chunk bound the harness kills at: the fixture's natural exit
+      // must arrive no earlier than this — that is the vacuity guard. +400ms
+      // covers child spawn startup so the checkpoint measures the fixture,
+      // not boot time.
+      const stillHangingAt = spawnedAt + CHUNK_TIMEOUT_MS_FOR_HANG_RUN + 400;
+      // Fast-fail on a spawn error (execPath unspawnable): 'exit' never fires
+      // for a failed spawn, so without this the runner timeout would expire
+      // with a generic timeout message instead of the real cause (same
+      // hardening as #4104).
+      child.on('error', (err) => {
+        assert.fail(`could not spawn the fixture directly: ${err.message}`);
+      });
+      // `exitCode !== null` alone misses a SIGNALED exit (exitCode stays null
+      // when a signal ends the child); the assertions name signalCode as the
+      // failure when that happens.
+      child.on('exit', () => {
+        assert.ok(
+          Date.now() >= stillHangingAt,
+          `fixture must still be hanging past the ${CHUNK_TIMEOUT_MS_FOR_HANG_RUN}ms chunk bound — ` +
+            `it exited after only ${Date.now() - spawnedAt}ms ` +
+            '(#4105 regression: the hang is the runtime\'s, not the fixture\'s)',
+        );
+        assert.strictEqual(child.signalCode, null,
+          'fixture must SELF-terminate (natural exit) — a signal means we had to kill it (#4105/#4104 regression)');
+        assert.strictEqual(child.exitCode, 0, 'the parked fixture settles and its test passes cleanly');
+        done();
+      });
     });
   });
 });
@@ -1145,6 +1629,149 @@ describe('selectShard weight-aware partition (#2472)', () => {
   });
 });
 
+// ─── #4070: reserved-weight shard partition ─────────────────────────────────
+//
+// `test.yml`'s `scope: full` lane tacks four unsharded aux suites
+// (integration/security/install/slow) onto shard 1 only, outside this
+// packer's model entirely — it balances the UNIT-TEST slice as if all three
+// shards carried equal fixed cost, when shard 1 actually carries a fixed
+// aux-suite overhead the other two do not. `initialWeights` lets a caller
+// give one (or more) bins a virtual head start before LPT places any real
+// file, so the algorithm converges on equalizing FINAL total cost (reserve +
+// assigned files) instead of raw assigned-file weight alone — the same
+// "greedy into the lightest bin" placement rule, just with non-zero starting
+// points.
+describe('selectShard reserved-weight partition (#4070)', () => {
+  const fc = require('fast-check');
+
+  const uniform = Array.from({ length: 30 }, (_, i) => `u${String(i).padStart(3, '0')}.test.cjs`);
+  const uniformWeight = () => 10;
+
+  const finalTotals = (files, total, weightOf, initialWeights) => {
+    const out = [];
+    for (let i = 1; i <= total; i++) {
+      const assigned = selectShard(files, { index: i, total }, weightOf, initialWeights)
+        .reduce((a, f) => a + weightOf(f), 0);
+      out.push(assigned + ((initialWeights && initialWeights[i - 1]) || 0));
+    }
+    return out;
+  };
+
+  // The regression: without reserve support, bin 0 gets an EQUAL share of
+  // files despite already carrying a head start, so its true final total
+  // (assigned + reserve) sits well above the other bins' — exactly the shard
+  // 1 overload this issue reports. With reserve support, LPT starts bin 0
+  // "already heavier" and hands it fewer files so all three converge.
+  test('REGRESSION: an initial reserve on one bin rebalances the rest (#4070)', () => {
+    const reserve = 80; // 8 average-cost files' worth, on a 30-file/300-weight suite
+    const totals = finalTotals(uniform, 3, uniformWeight, [reserve, 0, 0]);
+    const spread = Math.max(...totals) - Math.min(...totals);
+    assert.ok(
+      spread <= uniformWeight(),
+      `a reserved bin must converge toward the others' final totals (within one file's `
+      + `weight), not just add the reserve on top of an equal share; got totals=${totals} `
+      + `(spread=${spread})`,
+    );
+    // The reserved bin must have been handed FEWER files than an unreserved bin —
+    // otherwise "rebalancing" did nothing and the reserve is purely additive.
+    const reservedBinFiles = selectShard(uniform, { index: 1, total: 3 }, uniformWeight, [reserve, 0, 0]).length;
+    const unreservedBinFiles = selectShard(uniform, { index: 2, total: 3 }, uniformWeight, [reserve, 0, 0]).length;
+    assert.ok(
+      reservedBinFiles < unreservedBinFiles,
+      `the reserved bin (${reservedBinFiles} files) must receive fewer files than an `
+      + `unreserved bin (${unreservedBinFiles}) — otherwise the reserve had no effect on `
+      + 'placement',
+    );
+  });
+
+  test('back-compat: omitting initialWeights reproduces the unreserved partition exactly', () => {
+    for (let i = 1; i <= 3; i++) {
+      assert.deepStrictEqual(
+        selectShard(uniform, { index: i, total: 3 }, uniformWeight),
+        selectShard(uniform, { index: i, total: 3 }, uniformWeight, undefined),
+      );
+    }
+  });
+
+  test('a zero reserve is a no-op', () => {
+    for (let i = 1; i <= 3; i++) {
+      assert.deepStrictEqual(
+        selectShard(uniform, { index: i, total: 3 }, uniformWeight),
+        selectShard(uniform, { index: i, total: 3 }, uniformWeight, [0, 0, 0]),
+      );
+    }
+  });
+
+  test('a reserve applies to any bin index, not only the first', () => {
+    const reserve = 80;
+    const totals = finalTotals(uniform, 3, uniformWeight, [0, reserve, 0]);
+    const spread = Math.max(...totals) - Math.min(...totals);
+    assert.ok(spread <= uniformWeight(), `expected convergence around index 2; got ${totals}`);
+    const reservedBinFiles = selectShard(uniform, { index: 2, total: 3 }, uniformWeight, [0, reserve, 0]).length;
+    const otherBinFiles = selectShard(uniform, { index: 1, total: 3 }, uniformWeight, [0, reserve, 0]).length;
+    assert.ok(reservedBinFiles < otherBinFiles, `reserved bin 2 should get fewer files; got ${reservedBinFiles} vs ${otherBinFiles}`);
+  });
+
+  test('REGRESSION: a reserve larger than the whole suite still terminates and assigns every file', () => {
+    const reserve = 1e9;
+    const shards = [];
+    for (let i = 1; i <= 3; i++) shards.push(selectShard(uniform, { index: i, total: 3 }, uniformWeight, [reserve, 0, 0]));
+    const flat = shards.flat();
+    assert.deepStrictEqual([...flat].sort(), [...uniform].sort(), 'every file must still be placed exactly once');
+    // The massively-reserved bin should get the fewest (possibly zero) files.
+    assert.ok(shards[0].length <= shards[1].length && shards[0].length <= shards[2].length);
+  });
+
+  test('REGRESSION: a hostile reserve value clamps to zero instead of poisoning placement', () => {
+    for (const hostile of [NaN, -5, Infinity]) {
+      const shards = [];
+      for (let i = 1; i <= 3; i++) shards.push(selectShard(uniform, { index: i, total: 3 }, uniformWeight, [hostile, 0, 0]));
+      const sizes = shards.map((s) => s.length);
+      assert.ok(
+        Math.max(...sizes) - Math.min(...sizes) <= 1,
+        `a hostile reserve (${hostile}) must clamp to 0, not collapse/starve a bin; sizes=${sizes}`,
+      );
+    }
+  });
+
+  // Generalizes the existing "no shard exceeds average + heaviest file" bound
+  // (#2472) to include a single reserved bin — but the Graham-style proof
+  // (the max-load bin was the argmin, hence <= average, at the moment its
+  // LAST item was placed) only applies to a bin that actually received at
+  // least one item. A reserve large enough that its bin never receives any
+  // real item stays at EXACTLY its initial reserve forever — no amount of
+  // routing real items elsewhere can dilute a fixed head start below itself
+  // — so the true bound is the LARGER of the classic Graham term and the
+  // single biggest reserve. (Counterexample that falsified the original,
+  // reserve-blind-to-domination version of this bound: weights=[1,1,1],
+  // total=2, reserve=6 on bin 0 — bin 0 receives zero items and stays at 6,
+  // while (sum+reserve)/total+max = 4.5+1 = 5.5 < 6.)
+  test('property: no shard exceeds max(reserve, average(+reserve) + heaviest file)', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.integer({ min: 1, max: 60000 }), { minLength: 3, maxLength: 60 }),
+        fc.integer({ min: 2, max: 6 }),
+        fc.integer({ min: 0, max: 200000 }),
+        fc.integer({ min: 0, max: 5 }),
+        (weights, total, reserve, reserveIdxRaw) => {
+          const files = weights.map((_, i) => `p${String(i).padStart(3, '0')}.test.cjs`);
+          const w = (f) => weights[Number(f.slice(1, 4))];
+          const reserveIdx = reserveIdxRaw % total;
+          const initialWeights = Array.from({ length: total }, (_, i) => (i === reserveIdx ? reserve : 0));
+          const sums = finalTotals(files, total, w, initialWeights);
+          const grahamBound = (weights.reduce((a, b) => a + b, 0) + reserve) / total + Math.max(...weights);
+          const bound = Math.max(reserve, grahamBound);
+          assert.ok(
+            Math.max(...sums) <= bound + 1e-9,
+            `bound violated: max=${Math.max(...sums)} bound=${bound} sums=${sums}`,
+          );
+        },
+      ),
+      { numRuns: 200, seed: 24724 },
+    );
+  });
+});
+
 describe('parseShardArg (#1212)', () => {
   test('parses i/n into { index, total }', () => {
     assert.deepStrictEqual(parseShardArg('2/3'), { index: 2, total: 3 });
@@ -1160,6 +1787,31 @@ describe('parseShardArg (#1212)', () => {
   }
 });
 
+// #4070: RUN_TESTS_SHARD_RESERVE env-var grammar — "<index>:<weight>", the
+// operator knob test.yml uses to tell the full-scope lane's unit-test shard
+// selection that shard 1 already carries a fixed aux-suite cost. Fail-open
+// on anything malformed (mirrors positiveNumberEnv's precedent elsewhere in
+// this file): a typo must degrade to "no reserve", never poison placement or
+// throw and take the whole CI job down with it.
+describe('parseShardReserve (#4070)', () => {
+  const { parseShardReserve } = require('../scripts/run-tests.cjs');
+
+  test('parses "<index>:<weight>" into { index, weight }', () => {
+    assert.deepEqual(parseShardReserve('1:77'), { index: 1, weight: 77 });
+    assert.deepEqual(parseShardReserve('2:0'), { index: 2, weight: 0 });
+    assert.deepEqual(parseShardReserve('3:12.5'), { index: 3, weight: 12.5 });
+  });
+
+  for (const v of [undefined, null, '', '  ', 'x', '1', '1:', ':77', '0:77', '-1:77', '1:-5', '1.5:77', '1:abc', 'a:b', '1:2:3']) {
+    test(`rejects malformed value ${JSON.stringify(v)}`, () => {
+      assert.equal(parseShardReserve(v), null, `expected null for ${JSON.stringify(v)}`);
+    });
+  }
+
+  test('whitespace around a valid value is tolerated', () => {
+    assert.deepEqual(parseShardReserve(' 1:77 '), { index: 1, weight: 77 });
+  });
+});
 
 // ────────────────────────────────────────────────────────────────────────
 // Folded from tests/bug-969-test-infra-flake-hardening.test.cjs — consolidation epic #1969 (B6 #1975)
@@ -1412,10 +2064,17 @@ describe('bug #969 B — runGsdTools kill-signal discrimination', () => {
    * We test the identical logic paths using a tiny timeout.
    */
   function runGsdToolsWithTimeout(args, cwd, env, timeoutMs) {
+    // The session-identity subset stays a local literal on purpose: this helper
+    // mirrors the production one to prove its CONTRACT, so it must not simply
+    // re-import what it is testing. The config-LOCATION keys are the exception —
+    // they are a safety scrub rather than part of the contract under test, and a
+    // hand-copied list of them is the #2665 drift this change exists to end. So
+    // spread the canonical derived set (tests/helpers.cjs) and keep the rest local.
     const TEST_ENV_BASE = {
       GSD_SESSION_KEY: '',
       CODEX_THREAD_ID: '',
       CLAUDE_SESSION_ID: '',
+      ...Object.fromEntries(CONFIG_LOCATION_ENV_KEYS.map((k) => [k, ''])),
     };
     try {
       let result;
@@ -1677,9 +2336,11 @@ describe('bug #969 C — ensureBuiltHooks populates hooks/dist before concurrent
 const {
   packChunks,
   makeFileWeigher,
+  WINDOWS_UNMEASURED_COST_MULTIPLIER,
   loadTestTimings,
   positiveNumberEnv,
   DEFAULT_TIMINGS_PATH,
+  defaultMaxUnmeasuredPerChunk,
 } = require('../scripts/run-tests.cjs');
 
 describe('chunk packing weights measured cost (#2456)', () => {
@@ -1806,15 +2467,102 @@ describe('chunk packing weights measured cost (#2456)', () => {
   });
 
   describe('timings are advisory, never gated', () => {
-    test('a file missing from the table falls back to the median weight', () => {
-      // 10s, 20s, 60s → mean 30s, median 20s → median weight = 20/30.
+    test('a file missing from the table falls back to the mean weight (1), not the median', () => {
+      // 10s, 20s, 60s → mean 30s, median 20s. Absent files weigh 1 (the mean),
+      // not 20/30 (the median) — see #2456 follow-up, red-next 2026-09-14.
       const t = tableFrom({ 'a.test.cjs': 10000, 'b.test.cjs': 20000, 'c.test.cjs': 60000 });
       try {
-        const weigh = makeFileWeigher(loadTestTimings(t.path));
-        assert.strictEqual(weigh('brand-new-test.test.cjs'), 20000 / 30000);
+        const weigh = makeFileWeigher(loadTestTimings(t.path), 'linux');
+        assert.strictEqual(weigh('brand-new-test.test.cjs'), 1);
       } finally {
         cleanup(t.dir);
       }
+    });
+
+    test('#4434: on win32, a file missing from the table falls back to the documented Windows multiplier (2.2), not the mean', () => {
+      const t = tableFrom({ 'a.test.cjs': 10000, 'b.test.cjs': 20000, 'c.test.cjs': 60000 });
+      try {
+        const weigh = makeFileWeigher(loadTestTimings(t.path), 'win32');
+        assert.strictEqual(weigh('brand-new-test.test.cjs'), WINDOWS_UNMEASURED_COST_MULTIPLIER);
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+
+    test('#4434: on linux/darwin, a file missing from the table still falls back to the plain mean (1)', () => {
+      const t = tableFrom({ 'a.test.cjs': 10000, 'b.test.cjs': 20000, 'c.test.cjs': 60000 });
+      try {
+        assert.strictEqual(makeFileWeigher(loadTestTimings(t.path), 'linux')('brand-new-test.test.cjs'), 1);
+        assert.strictEqual(makeFileWeigher(loadTestTimings(t.path), 'darwin')('brand-new-test.test.cjs'), 1);
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+
+    test('#4434: on win32, a MEASURED file is unaffected by the unmeasured-file multiplier', () => {
+      const t = tableFrom({ 'a.test.cjs': 10000, 'b.test.cjs': 20000, 'c.test.cjs': 60000 });
+      try {
+        const weighWin = makeFileWeigher(loadTestTimings(t.path), 'win32');
+        const weighLinux = makeFileWeigher(loadTestTimings(t.path), 'linux');
+        assert.strictEqual(
+          weighWin('b.test.cjs'),
+          weighLinux('b.test.cjs'),
+          'a measured file must weigh identically regardless of platform',
+        );
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+
+    test('#4434: a completely missing table still degrades to uniform weight 1 on win32 — the Windows multiplier only applies to a file absent FROM an otherwise-loaded table', () => {
+      const weigh = makeFileWeigher(null, 'win32');
+      assert.strictEqual(
+        weigh('anything.test.cjs'),
+        1,
+        'no table at all must keep the pre-#2456 uniform-weight invariant on every platform, including win32',
+      );
+    });
+
+    test('property: an unmeasured file weighs exactly the Windows multiplier on win32, and exactly 1 on every other platform, for any measured table', () => {
+      const fc = require('fast-check');
+      fc.assert(
+        fc.property(
+          fc.array(fc.integer({ min: 1, max: 500000 }), { minLength: 1, maxLength: 30 }),
+          fc.constantFrom('win32', 'linux', 'darwin', 'freebsd', 'sunos'),
+          (mss, platform) => {
+            const timingsMap = Object.fromEntries(
+              mss.map((ms, i) => [`p${String(i).padStart(3, '0')}.test.cjs`, ms]),
+            );
+            const mean = mss.reduce((a, b) => a + b, 0) / mss.length;
+            const timings = { timings: timingsMap, mean, medianWeight: 1 };
+            const weigh = makeFileWeigher(timings, platform);
+            const expected = platform === 'win32' ? WINDOWS_UNMEASURED_COST_MULTIPLIER : 1;
+            assert.strictEqual(weigh('never-measured.test.cjs'), expected);
+          },
+        ),
+        { numRuns: 200, seed: 44340 },
+      );
+    });
+
+    test('property: a MEASURED file weighs identically regardless of platform, for any measured table', () => {
+      const fc = require('fast-check');
+      fc.assert(
+        fc.property(
+          fc.array(fc.integer({ min: 1, max: 500000 }), { minLength: 1, maxLength: 30 }),
+          fc.constantFrom('win32', 'linux', 'darwin', 'freebsd', 'sunos'),
+          (mss, platform) => {
+            const timingsMap = Object.fromEntries(
+              mss.map((ms, i) => [`p${String(i).padStart(3, '0')}.test.cjs`, ms]),
+            );
+            const mean = mss.reduce((a, b) => a + b, 0) / mss.length;
+            const timings = { timings: timingsMap, mean, medianWeight: 1 };
+            const weighPlatform = makeFileWeigher(timings, platform);
+            const weighLinux = makeFileWeigher(timings, 'linux');
+            assert.strictEqual(weighPlatform('p000.test.cjs'), weighLinux('p000.test.cjs'));
+          },
+        ),
+        { numRuns: 200, seed: 44341 },
+      );
     });
 
     test('an unknown file packs without error rather than failing the run', () => {
@@ -1878,7 +2626,7 @@ describe('chunk packing weights measured cost (#2456)', () => {
         assert.ok(table.medianWeight < 0.05, 'fixture must actually be right-skewed');
         const files = Array.from({ length: 30 }, (_, i) => `unmeasured-${i}.test.cjs`);
         const chunks = packChunks(files, {
-          weightOf: makeFileWeigher(table),
+          weightOf: makeFileWeigher(table, 'linux'),
           maxWeight: 6,
           maxChars: ROOMY_CHARS,
           fixedOverhead: FIXED_OVERHEAD,
@@ -1888,6 +2636,72 @@ describe('chunk packing weights measured cost (#2456)', () => {
           Math.ceil(files.length / 6),
           'a right-skewed table must still chunk exactly as count-based packing did',
         );
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+  });
+
+  describe('an unmeasured file is charged the mean, not the median (red next, 2026-09-14)', () => {
+    // MEASURED_MS (above) is NOT right-skewed the way the real table is: its
+    // median (~82435) sits ABOVE its mean (~75959), so medianWeight ≈ 1.09 —
+    // the bug this block guards ("median under-declares an unknown file in a
+    // right-skewed table") is not even expressible against that fixture. Do
+    // NOT reuse MEASURED_MS here or fold this fixture into it; other tests
+    // above depend on MEASURED_MS's exact shape.
+    //
+    // SKEWED_MS models the real suite's shape instead: mostly trivial files
+    // with a long right tail of a few very expensive ones (real table: mean
+    // 7152ms, median 381ms, ratio 0.0533).
+    const SKEWED_MS = {
+      ...Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`small-${i}.test.cjs`, 350])),
+      'huge-a.test.cjs': 100000,
+      'huge-b.test.cjs': 200000,
+      'huge-c.test.cjs': 400000,
+      'huge-d.test.cjs': 575000,
+    };
+
+    test('a file absent from the table weighs 1 (the mean), not the median', () => {
+      const t = tableFrom(SKEWED_MS);
+      try {
+        const table = loadTestTimings(t.path);
+        // Prove the fixture actually models the skew this test exists to
+        // guard against — without this, a passing assertion below would be
+        // meaningless.
+        assert.ok(
+          table.medianWeight < 0.2,
+          `fixture must be right-skewed; got medianWeight=${table.medianWeight}`,
+        );
+        const weigh = makeFileWeigher(table, 'linux');
+        assert.strictEqual(weigh('never-measured.test.cjs'), 1);
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+
+    test('that matches what a MISSING table already does — both mean "unknown"', () => {
+      const t = tableFrom(SKEWED_MS);
+      try {
+        const weigh = makeFileWeigher(loadTestTimings(t.path), 'linux');
+        const weighNull = makeFileWeigher(null);
+        assert.strictEqual(weighNull('anything.test.cjs'), 1);
+        assert.strictEqual(weighNull('anything.test.cjs'), weigh('never-measured.test.cjs'));
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+
+    test('a chunk of unmeasured files declares their real share of the budget', () => {
+      const t = tableFrom(SKEWED_MS);
+      try {
+        const table = loadTestTimings(t.path);
+        const weigh = makeFileWeigher(table);
+        const unmeasured = Array.from({ length: 10 }, (_, i) => `new-${i}.test.cjs`);
+        const total = unmeasured.reduce((sum, f) => sum + weigh(f), 0);
+        // Under the old median rule this would have summed to about
+        // 10 * table.medianWeight (~0.05 against this fixture), letting ten
+        // unknown files hide inside a chunk that looked essentially empty.
+        assert.ok(total >= 10, `expected sum >= 10, got ${total}`);
       } finally {
         cleanup(t.dir);
       }
@@ -2085,14 +2899,14 @@ describe('chunk packing weights measured cost (#2456)', () => {
       // an Object.prototype member — so these BARE names are the only inputs
       // that actually reach that path, and makeFileWeigher is exported, so it
       // does not control its caller's strings. The contract is that any key not
-      // present in the table weighs the median, whatever it resolves to.
+      // present in the table weighs 1 (the mean), whatever it resolves to.
       const t = tableFrom({ 'a.test.cjs': 10000, 'b.test.cjs': 20000, 'c.test.cjs': 60000 });
       try {
-        const weigh = makeFileWeigher(loadTestTimings(t.path));
+        const weigh = makeFileWeigher(loadTestTimings(t.path), 'linux');
         for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
           const w = weigh(name);
           assert.strictEqual(typeof w, 'number', `${name} must weigh a number, not a function`);
-          assert.strictEqual(w, 20000 / 30000, `${name} must fall back to the median weight`);
+          assert.strictEqual(w, 1, `${name} must fall back to the mean weight`);
         }
       } finally {
         cleanup(t.dir);
@@ -2129,5 +2943,1012 @@ describe('chunk packing weights measured cost (#2456)', () => {
         .map(([file, value]) => `${file}=${value}`);
       assert.deepStrictEqual(invalid, [], 'every timing-table entry must be a finite non-negative number');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// packChunks unmeasured-file cap — red `next` @ccfed6335 (2026-09-20, shard
+// 3/3 chunk 6/8) and @af822a80 (2026-09-23, shard 2/3 chunk 7/9). Both chunks
+// were killed at 600000ms+ with zero failing tests, each holding 5-6 files
+// absent from tests/test-timings.json (new conformance-tier files, never
+// profiled) packed alongside the chunk's measured files: each unmeasured
+// file's GUESSED weight looked affordable alone, the chunk's total weight
+// still cleared the existing budget, and the chunk still blew the 600s
+// backstop because several guesses compounded. See packChunks'
+// isMeasured/maxUnmeasuredPerChunk comment for the fix rationale.
+// ---------------------------------------------------------------------------
+
+describe('packChunks unmeasured-file cap (red next @ccfed6335, @af822a80, 2026-09-20/23)', () => {
+  const UC_FIXED_OVERHEAD = 120;
+  const UC_ROOMY_CHARS = 100000;
+
+  // Trivial, uniform weight model — this suite is about the COUNT cap, not
+  // weight — so any weight-driven splitting is ruled out by a generous
+  // maxWeight.
+  const weightOf = () => 1;
+  const isNewFile = (file) => /^new-\d+\.test\.cjs$/.test(file);
+
+  const countUnmeasured = (chunk) => chunk.filter((f) => isNewFile(f)).length;
+
+  test('reproduces the incident shape and proves the fix', () => {
+    const unmeasured = Array.from({ length: 6 }, (_, i) => `new-${i}.test.cjs`);
+    const measured = ['heavy-a.test.cjs', 'heavy-b.test.cjs'];
+    const files = [...unmeasured, ...measured];
+
+    const capped = packChunks(files, {
+      weightOf,
+      maxWeight: 100, // roomy — weight alone would never force a split
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+      isMeasured: (f) => !isNewFile(f),
+      maxUnmeasuredPerChunk: 2,
+    });
+    assert.ok(capped.length >= 3, `expected at least 3 chunks with the cap applied, got ${capped.length}`);
+    for (const [i, chunk] of capped.entries()) {
+      assert.ok(countUnmeasured(chunk) <= 2, `chunk ${i} holds ${countUnmeasured(chunk)} unmeasured files, cap is 2`);
+    }
+    assert.strictEqual(capped.flat().length, files.length, 'no file may be dropped or duplicated');
+
+    // Without the cap (omitted), all 8 files pack into a single chunk — this
+    // is the pre-fix behavior the cap must change.
+    const uncapped = packChunks(files, {
+      weightOf,
+      maxWeight: 100,
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+      isMeasured: (f) => !isNewFile(f),
+      // maxUnmeasuredPerChunk intentionally omitted
+    });
+    assert.strictEqual(uncapped.length, 1, 'without a cap, weight/chars alone keep all 8 files in one chunk');
+  });
+
+  describe('boundary (cap-1 / cap / cap+1)', () => {
+    const CAP = 3;
+
+    test('cap-1 unmeasured files fit one chunk', () => {
+      const files = Array.from({ length: CAP - 1 }, (_, i) => `new-${i}.test.cjs`);
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: (f) => !isNewFile(f),
+        maxUnmeasuredPerChunk: CAP,
+      });
+      assert.strictEqual(chunks.length, 1, `${CAP - 1} unmeasured files under cap ${CAP} must fit one chunk`);
+    });
+
+    test('exactly cap unmeasured files fit one chunk', () => {
+      const files = Array.from({ length: CAP }, (_, i) => `new-${i}.test.cjs`);
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: (f) => !isNewFile(f),
+        maxUnmeasuredPerChunk: CAP,
+      });
+      assert.strictEqual(chunks.length, 1, `${CAP} unmeasured files at cap ${CAP} must fit one chunk`);
+    });
+
+    test('cap+1 unmeasured files require a second chunk', () => {
+      const files = Array.from({ length: CAP + 1 }, (_, i) => `new-${i}.test.cjs`);
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: (f) => !isNewFile(f),
+        maxUnmeasuredPerChunk: CAP,
+      });
+      assert.strictEqual(chunks.length, 2, `${CAP + 1} unmeasured files over cap ${CAP} must split into 2 chunks`);
+      for (const [i, chunk] of chunks.entries()) {
+        assert.ok(countUnmeasured(chunk) <= CAP, `chunk ${i} holds ${countUnmeasured(chunk)} unmeasured, cap is ${CAP}`);
+      }
+    });
+  });
+
+  test('backward compatible: isMeasured omitted treats every file as measured, cap is a no-op', () => {
+    const files = Array.from({ length: 8 }, (_, i) => `new-${i}.test.cjs`);
+    const withoutIsMeasured = packChunks(files, {
+      weightOf,
+      maxWeight: 100,
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+      maxUnmeasuredPerChunk: 2, // has no effect: nothing is "unmeasured" without isMeasured
+    });
+    const noCapAtAll = packChunks(files, {
+      weightOf,
+      maxWeight: 100,
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+    });
+    assert.deepStrictEqual(withoutIsMeasured, noCapAtAll, 'omitting isMeasured must reproduce the no-cap packing exactly');
+    assert.strictEqual(withoutIsMeasured.length, 1, 'all 8 files land in one chunk, matching pre-fix behavior');
+  });
+
+  describe('maxUnmeasuredPerChunk degrades safely', () => {
+    test('no-op when zero files are unmeasured', () => {
+      const files = ['measured-a.test.cjs', 'measured-b.test.cjs', 'measured-c.test.cjs'];
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: () => true,
+        maxUnmeasuredPerChunk: 2,
+      });
+      assert.strictEqual(chunks.length, 1, 'a cap with nothing unmeasured must not affect packing');
+    });
+
+    test('a NaN override degrades to no cap rather than throwing', () => {
+      const files = Array.from({ length: 8 }, (_, i) => `new-${i}.test.cjs`);
+      assert.doesNotThrow(() => {
+        const chunks = packChunks(files, {
+          weightOf,
+          maxWeight: 100,
+          maxChars: UC_ROOMY_CHARS,
+          fixedOverhead: UC_FIXED_OVERHEAD,
+          isMeasured: (f) => !isNewFile(f),
+          maxUnmeasuredPerChunk: NaN,
+        });
+        assert.strictEqual(chunks.length, 1, 'NaN cap must degrade to unbounded, all 8 files in one chunk');
+      });
+    });
+
+    test('a negative override degrades to no cap rather than throwing', () => {
+      const files = Array.from({ length: 8 }, (_, i) => `new-${i}.test.cjs`);
+      assert.doesNotThrow(() => {
+        const chunks = packChunks(files, {
+          weightOf,
+          maxWeight: 100,
+          maxChars: UC_ROOMY_CHARS,
+          fixedOverhead: UC_FIXED_OVERHEAD,
+          isMeasured: (f) => !isNewFile(f),
+          maxUnmeasuredPerChunk: -1,
+        });
+        assert.strictEqual(chunks.length, 1, 'negative cap must degrade to unbounded, all 8 files in one chunk');
+      });
+    });
+  });
+
+  describe('defaultMaxUnmeasuredPerChunk platform behavior', () => {
+    test('win32 default is 2', () => {
+      assert.strictEqual(defaultMaxUnmeasuredPerChunk('win32'), 2);
+    });
+
+    test('linux and darwin defaults are Infinity (unbounded)', () => {
+      assert.strictEqual(defaultMaxUnmeasuredPerChunk('linux'), Infinity);
+      assert.strictEqual(defaultMaxUnmeasuredPerChunk('darwin'), Infinity);
+    });
+
+    test('the default is still overridable by RUN_TESTS_MAX_UNMEASURED_PER_CHUNK', () => {
+      const def = defaultMaxUnmeasuredPerChunk('win32');
+      const override = positiveNumberEnv('7', def);
+      assert.strictEqual(override, 7);
+      assert.notStrictEqual(override, def);
+    });
+  });
+});
+
+// ─── analyzeChunkEvents (#3889 durability fix) ──────────────────────────────
+//
+// scripts/lib/ndjson-reporter.cjs now writes durably (fs.appendFileSync to a
+// GSD_RUN_TESTS_EVENTS_FILE path) instead of yielding strings for Node to
+// pipe through a buffered --test-reporter-destination WriteStream that a
+// SIGKILL can wipe out before it flushes. These tests exercise the READER
+// side (analyzeChunkEvents) directly against a hand-written events file, so
+// they pin the reader's contract independently of whether the writer side
+// managed to flush anything in a given subprocess run.
+const { analyzeChunkEvents } = require('../scripts/run-tests.cjs');
+
+describe('analyzeChunkEvents (#3889)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempDir('gsd-3889-events-');
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('a missing events file is reported as an explicit read error, not silently as "no events"', () => {
+    const missingPath = path.join(tmpDir, 'does-not-exist.ndjson');
+    const result = analyzeChunkEvents(missingPath);
+    assert.strictEqual(result.readError, true, 'a missing file must set readError=true');
+    assert.strictEqual(result.sawAnyEvent, false);
+    assert.deepStrictEqual(result.files, []);
+  });
+
+  test('an existing-but-empty events file is distinguished from a missing one (readError=false)', () => {
+    const emptyPath = path.join(tmpDir, 'empty.ndjson');
+    fs.writeFileSync(emptyPath, '', 'utf8');
+    const result = analyzeChunkEvents(emptyPath);
+    assert.strictEqual(result.readError, false, 'an existing empty file must NOT be reported as a read error');
+    assert.strictEqual(result.sawAnyEvent, false);
+    assert.deepStrictEqual(result.files, []);
+  });
+
+  test('a truncated final line does not crash the reader and earlier complete lines are still reported', () => {
+    const truncatedPath = path.join(tmpDir, 'truncated.ndjson');
+    const complete = [
+      JSON.stringify({ type: 'test:start', file: 'a.test.cjs', name: 'first', nesting: 0, testNumber: 1, ts: 1000 }),
+      JSON.stringify({ type: 'test:pass', file: 'a.test.cjs', name: 'first', nesting: 0, testNumber: 1, ts: 1010 }),
+      JSON.stringify({ type: 'test:start', file: 'b.test.cjs', name: 'hangs', nesting: 0, testNumber: 1, ts: 1020 }),
+    ].join('\n');
+    // Simulate a SIGKILL mid-appendFileSync: the trailing line is cut off
+    // partway through a JSON object, exactly as an unbuffered but non-atomic
+    // write can be interrupted.
+    const truncatedTrailer = '\n{"type":"test:start","file":"c.test.cjs","name":"cut off mid-writ';
+    fs.writeFileSync(truncatedPath, complete + truncatedTrailer, 'utf8');
+
+    const result = analyzeChunkEvents(truncatedPath);
+    assert.strictEqual(result.readError, false, 'a readable-but-truncated file must not be a read error');
+    // The complete test:start (b.test.cjs) with no matching pass/fail is
+    // still identified as in-flight despite the unparsable trailing line.
+    assert.deepStrictEqual(result.files, ['b.test.cjs']);
+    // a.test.cjs completed (start+pass), so it must NOT show as in-flight.
+    assert.ok(!result.files.includes('a.test.cjs'));
+    // c.test.cjs never parsed (truncated line), so it cannot appear either.
+    assert.ok(!result.files.includes('c.test.cjs'));
+    assert.strictEqual(result.sawAnyEvent, true, 'the complete lines before the truncation must still count as events');
+  });
+
+  // Regression (#3889 root cause): test:start/test:pass/test:fail are the
+  // exact three event types a genuine hang guarantees are never emitted —
+  // node:test only surfaces a subtest event to the parent once the child
+  // reports it, which happens on completion. test:dequeue is the RUNNER's
+  // own "began this file" signal and fires independent of completion; these
+  // four cases pin analyzeChunkEvents' dequeue-based in-flight rule directly
+  // against the synthetic event shapes a real hang, and a real finish, produce.
+  test('a dequeued file with no terminal event is reported as in flight', () => {
+    const eventsPath = path.join(tmpDir, 'dequeue-only.ndjson');
+    const lines = [
+      JSON.stringify({ type: 'reporter:init', ts: 900 }),
+      JSON.stringify({ type: 'test:enqueue', file: 'a.test.cjs', ts: 1000 }),
+      JSON.stringify({ type: 'test:dequeue', file: 'a.test.cjs', ts: 1010 }),
+    ].join('\n');
+    fs.writeFileSync(eventsPath, lines, 'utf8');
+
+    const result = analyzeChunkEvents(eventsPath);
+    assert.deepStrictEqual(result.files, ['a.test.cjs']);
+    assert.strictEqual(result.anyDequeued, true);
+    assert.strictEqual(result.sawInitMarker, true);
+  });
+
+  test('a dequeued file that also terminates reports nothing in flight (all files finished)', () => {
+    const eventsPath = path.join(tmpDir, 'dequeue-then-pass.ndjson');
+    const lines = [
+      JSON.stringify({ type: 'reporter:init', ts: 900 }),
+      JSON.stringify({ type: 'test:enqueue', file: 'a.test.cjs', ts: 1000 }),
+      JSON.stringify({ type: 'test:dequeue', file: 'a.test.cjs', ts: 1010 }),
+      JSON.stringify({ type: 'test:pass', file: 'a.test.cjs', ts: 1020 }),
+    ].join('\n');
+    fs.writeFileSync(eventsPath, lines, 'utf8');
+
+    const result = analyzeChunkEvents(eventsPath);
+    assert.deepStrictEqual(result.files, [], 'a terminated file must not show as in flight');
+    assert.strictEqual(result.anyDequeued, true, 'the file WAS dequeued — "all files finished" is a distinct state from "nothing ran"');
+  });
+
+  test('one terminated file followed by a second dequeued-but-unterminated file reports only the second', () => {
+    const eventsPath = path.join(tmpDir, 'two-files.ndjson');
+    const lines = [
+      JSON.stringify({ type: 'reporter:init', ts: 900 }),
+      JSON.stringify({ type: 'test:dequeue', file: 'a.test.cjs', ts: 1000 }),
+      JSON.stringify({ type: 'test:pass', file: 'a.test.cjs', ts: 1010 }),
+      JSON.stringify({ type: 'test:dequeue', file: 'b.test.cjs', ts: 1020 }),
+    ].join('\n');
+    fs.writeFileSync(eventsPath, lines, 'utf8');
+
+    const result = analyzeChunkEvents(eventsPath);
+    assert.deepStrictEqual(result.files, ['b.test.cjs']);
+    assert.ok(!result.files.includes('a.test.cjs'));
+  });
+
+  test('an init marker with no dequeue at all is distinguished (anyDequeued=false) from "all finished"', () => {
+    const eventsPath = path.join(tmpDir, 'init-only.ndjson');
+    fs.writeFileSync(eventsPath, JSON.stringify({ type: 'reporter:init', ts: 900 }), 'utf8');
+
+    const result = analyzeChunkEvents(eventsPath);
+    assert.deepStrictEqual(result.files, []);
+    assert.strictEqual(result.anyDequeued, false);
+    assert.strictEqual(result.sawInitMarker, true);
+    assert.strictEqual(result.sawAnyEvent, false);
+  });
+});
+
+// ─── partitionIsolatedFiles (#4497 codex-config.test.cjs chunk isolation) ───
+//
+// 2026-09-07: codex-config.test.cjs (weight 17.87, genuinely measured) is
+// pulled out of the weight-balanced packing pool and given its own dedicated
+// chunk, on every platform, so no future single-file addition can reshuffle a
+// companion into its chunk and retrigger the per-chunk timeout two prior
+// incidents already hit.
+//
+// 2026-09-14 (#4733): the isolated set used to be a hand-maintained Set, then
+// briefly a ratio (ISOLATION_RATIO) of the per-platform file-COUNT cap
+// (MAX_FILES_PER_CHUNK) — a category error (count vs. weight) that also made
+// the isolated set platform-dependent, silently dropping seven of the eight
+// files #4497/#4603 proved dangerous back into the shared pool on
+// linux/darwin (only run-tests-harness.test.cjs, at 31.23, still cleared the
+// 0.447 * 60 = 26.82 threshold there). It is now an ABSOLUTE ms bar
+// (ISOLATION_BUDGET_FRACTION * CHUNK_WORKING_BUDGET_MS), converted to the packer's weight units via the
+// LIVE table's own mean — platform-independent by construction, since the
+// timings table is not sharded by OS. These tests pin partitionIsolatedFiles
+// directly — the pure split, not the chunk-execution loop around it.
+const {
+  CHUNK_WORKING_BUDGET_MS,
+  ISOLATION_BUDGET_FRACTION,
+  partitionIsolatedFiles,
+} = require('../scripts/run-tests.cjs');
+
+// Synthetic weigher/measured-predicate builders, keyed by basename, so these
+// tests do not depend on the live tests/test-timings.json table.
+function weigherFromMap(weights) {
+  return (f) => weights[f.split(/[\\/]/).pop()] ?? 1;
+}
+function measuredFromMap(weights) {
+  return (f) => Object.hasOwn(weights, f.split(/[\\/]/).pop());
+}
+
+describe('partitionIsolatedFiles (#4497 codex-config.test.cjs chunk isolation, derived #4733)', () => {
+  test('a file whose weight crosses thresholdWeight is isolated', () => {
+    const thresholdWeight = 9.834;
+    const weights = { 'a.test.cjs': 1, 'heavy.test.cjs': 9.834, 'b.test.cjs': 2 };
+    const files = ['/repo/tests/a.test.cjs', '/repo/tests/heavy.test.cjs', '/repo/tests/b.test.cjs'];
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weights),
+      isMeasured: measuredFromMap(weights),
+      thresholdWeight,
+    });
+    assert.deepStrictEqual(isolated, ['/repo/tests/heavy.test.cjs']);
+    assert.deepStrictEqual(packable, ['/repo/tests/a.test.cjs', '/repo/tests/b.test.cjs']);
+  });
+
+  test('a file just under the threshold is NOT isolated', () => {
+    const thresholdWeight = 9.834;
+    const weights = { 'a.test.cjs': 1, 'almost-heavy.test.cjs': 9.8, 'b.test.cjs': 2 };
+    const files = ['/repo/tests/a.test.cjs', '/repo/tests/almost-heavy.test.cjs', '/repo/tests/b.test.cjs'];
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weights),
+      isMeasured: measuredFromMap(weights),
+      thresholdWeight,
+    });
+    assert.deepStrictEqual(isolated, []);
+    assert.deepStrictEqual(packable, files);
+  });
+
+  // #4733 regression: changing thresholdWeight alone (no change to the
+  // file's own weight) must move a file across the isolation line — proves
+  // the split tracks the threshold parameter rather than a frozen boundary.
+  test('changing thresholdWeight alone moves a file across the isolation line', () => {
+    const weight = { 'borderline.test.cjs': 9.9 };
+    const files = ['/repo/tests/borderline.test.cjs'];
+    const atOldThreshold = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weight),
+      isMeasured: measuredFromMap(weight),
+      thresholdWeight: 17.88, // 9.9 stays packable
+    });
+    assert.deepStrictEqual(atOldThreshold, { isolated: [], packable: files });
+
+    const atNewThreshold = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weight),
+      isMeasured: measuredFromMap(weight),
+      thresholdWeight: 9.834, // 9.9 now crosses it
+    });
+    assert.deepStrictEqual(atNewThreshold, { isolated: files, packable: [] });
+  });
+
+  // #4733 (finding 6): eligibility for isolation is "is this file heavy?",
+  // not "which suite does it belong to" — the suite/unit restriction that
+  // used to live inside partitionIsolatedFiles is gone. Suite scoping still
+  // happens upstream in selectFiles before this function ever sees the list
+  // (verified: main() calls selectFiles(allFiles, suite) to build
+  // `selected`, then feeds `selected` into partitionIsolatedFiles — a
+  // suite='unit' run therefore never presents an install-suite file here at
+  // all), so a heavy install-suite file IS isolated when it reaches this
+  // function, e.g. on an 'all'/'install'-suite run.
+  test('a non-unit-suite file (foo.install.test.cjs) IS isolated when heavy, since suite scoping happens upstream', () => {
+    const weights = { 'foo.install.test.cjs': 1000 };
+    const files = ['/repo/tests/foo.install.test.cjs'];
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weights),
+      isMeasured: measuredFromMap(weights),
+      thresholdWeight: 1,
+    });
+    assert.deepStrictEqual(isolated, files);
+    assert.deepStrictEqual(packable, []);
+  });
+
+  test('an unmeasured file is not isolated on the strength of the fallback weight alone', () => {
+    // weightOf returns a large fallback (as makeFileWeigher's unknown-file
+    // fallback of 1 normalized weight would for a tiny thresholdWeight), but
+    // isMeasured reports false — isolation must refuse it regardless of what
+    // weightOf returns.
+    const files = ['/repo/tests/unknown.test.cjs'];
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: () => 1000,
+      isMeasured: () => false,
+      thresholdWeight: 1,
+    });
+    assert.deepStrictEqual(isolated, []);
+    assert.deepStrictEqual(packable, files);
+  });
+
+  test('matches by BASENAME, so it isolates regardless of platform path separator or directory prefix', () => {
+    const weights = { 'heavy.test.cjs': 100 };
+    const files = [
+      'C:\\repo\\tests\\heavy.test.cjs',
+      '/repo/tests/subdir/heavy.test.cjs',
+      'heavy.test.cjs',
+    ];
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weights),
+      isMeasured: measuredFromMap(weights),
+      thresholdWeight: 1,
+    });
+    assert.deepStrictEqual(isolated, files, 'every path ending in the heavy basename must be isolated, regardless of prefix/separator');
+    assert.deepStrictEqual(packable, []);
+  });
+
+  test('no heavy files present: everything is packable, order preserved', () => {
+    const weights = { 'z.test.cjs': 1, 'a.test.cjs': 1 };
+    const files = ['/repo/tests/z.test.cjs', '/repo/tests/a.test.cjs'];
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weights),
+      isMeasured: measuredFromMap(weights),
+      thresholdWeight: 22,
+    });
+    assert.deepStrictEqual(isolated, []);
+    assert.deepStrictEqual(packable, files);
+  });
+
+  test('an empty file list produces two empty buckets', () => {
+    assert.deepStrictEqual(
+      partitionIsolatedFiles([], { weightOf: () => 1, isMeasured: () => false, thresholdWeight: 22 }),
+      { isolated: [], packable: [] },
+    );
+  });
+
+  // #4733 (finding 5): a non-finite/non-positive thresholdWeight would make
+  // every `>=` comparison false, silently disabling isolation with no error
+  // — partitionIsolatedFiles must throw instead of failing open.
+  for (const [label, bad] of [
+    ['zero', 0],
+    ['negative', -1],
+    ['NaN', NaN],
+    ['undefined', undefined],
+  ]) {
+    test(`thresholdWeight=${label} throws instead of failing open`, () => {
+      assert.throws(
+        () => partitionIsolatedFiles(['/repo/tests/a.test.cjs'], {
+          weightOf: () => 100,
+          isMeasured: () => true,
+          thresholdWeight: bad,
+        }),
+        /thresholdWeight must be a finite, positive number/,
+      );
+    });
+  }
+
+  // ── Live-table rows (#4733) ─────────────────────────────────────────────
+  //
+  // These rows pin partitionIsolatedFiles against the REAL
+  // tests/test-timings.json table, computing thresholdWeight the same way
+  // main() does (CHUNK_WORKING_BUDGET_MS/ISOLATION_BUDGET_FRACTION over the
+  // table's own mean).
+  //
+  // Deliberate-mutation check performed while authoring this test (not
+  // committed, reverted after observing the failure): temporarily changing
+  // ISOLATION_BUDGET_FRACTION from 0.3 to 0.1 (thresholdWeight ~5.59 instead
+  // of ~16.78) made row 1 below fail with an extra file
+  // (workflow-fragments-emission.install.test.cjs, weight 15.93) present in
+  // the actual isolated set but absent from EXPECTED_ISOLATED_UNIT_FILES,
+  // and row 2 below fail because win32/linux/darwin no longer computed the
+  // same set as each other under the OLD (pre-fix) platform-scaled rule this
+  // row is guarding against — confirming both rows are load-bearing, not
+  // vacuous.
+  //
+  // #4249 split codex-config.test.cjs's heavy install()-pipeline blocks into
+  // codex-config-hooks.test.cjs, dropping codex-config.test.cjs's own
+  // measured weight from 127783ms to 189ms — well under this derived bar
+  // (0.3 * CHUNK_WORKING_BUDGET_MS ~= 120000ms). It correctly no longer
+  // appears in the live-computed isolated set, so it is dropped from this
+  // pinned expectation too, in place of being isolated by name.
+  const EXPECTED_ISOLATED_UNIT_FILES = [
+    'config.test.cjs',
+    'emitted-attribution.test.cjs',
+    'install-minimal-hooks.test.cjs',
+    'install.test.cjs',
+    'phase.test.cjs',
+    'run-tests-harness.test.cjs',
+    'state.test.cjs',
+  ].sort();
+
+  function liveTableFixtures() {
+    const { suiteOf } = require('../scripts/lib/suite-detection.cjs');
+    const { makeFileWeigher, makeMeasuredPredicate } = require('../scripts/run-tests.cjs');
+    const table = require('../tests/test-timings.json');
+    const values = Object.values(table.timings).filter(
+      (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0,
+    );
+    const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+    const timings = { timings: table.timings, mean };
+    const weightOf = makeFileWeigher(timings);
+    const isMeasured = makeMeasuredPredicate(timings);
+    const thresholdWeight = (ISOLATION_BUDGET_FRACTION * CHUNK_WORKING_BUDGET_MS) / mean;
+    // Production scoping: suite='unit' runs feed selectFiles-filtered
+    // (suiteOf(f) === null) files into partitionIsolatedFiles (see
+    // selectFiles in scripts/run-tests.cjs and its call site in main()).
+    const unitFiles = Object.keys(table.timings).filter((f) => suiteOf(f) === null);
+    return { weightOf, isMeasured, thresholdWeight, unitFiles };
+  }
+
+  test('#4603/#4733: the live-table unit-suite isolated set equals the historical 8-file set exactly', () => {
+    const { weightOf, isMeasured, thresholdWeight, unitFiles } = liveTableFixtures();
+    const { isolated } = partitionIsolatedFiles(unitFiles, { weightOf, isMeasured, thresholdWeight });
+    const basenames = isolated.map((f) => f.split(/[\\/]/).pop()).sort();
+    assert.deepStrictEqual(basenames, EXPECTED_ISOLATED_UNIT_FILES);
+  });
+
+  test('#4733: the live-table unit-suite isolated set is identical across win32, linux, darwin', () => {
+    // The threshold is computed once from the table mean and does not read
+    // process.platform anywhere in this derivation — this row is the
+    // regression guard for that: it would fail the instant the threshold (or
+    // the set it produces) becomes platform-dependent again, the way the
+    // MAX_FILES_PER_CHUNK-scaled ratio was.
+    const { weightOf, isMeasured, thresholdWeight, unitFiles } = liveTableFixtures();
+    const sets = ['win32', 'linux', 'darwin'].map(() => {
+      const { isolated } = partitionIsolatedFiles(unitFiles, { weightOf, isMeasured, thresholdWeight });
+      return isolated.map((f) => f.split(/[\\/]/).pop()).sort();
+    });
+    assert.deepStrictEqual(sets[0], EXPECTED_ISOLATED_UNIT_FILES);
+    assert.deepStrictEqual(sets[1], sets[0]);
+    assert.deepStrictEqual(sets[2], sets[0]);
+  });
+
+  test('#4733: dynamism — a file that crosses 120000ms in a synthetic table becomes isolated', () => {
+    // Synthetic table: 'was-light.test.cjs' previously measured well under
+    // the bar, now measured at 200000ms (above ISOLATION_BUDGET_FRACTION *
+    // CHUNK_WORKING_BUDGET_MS = 120000ms) — proving the threshold tracks the
+    // table, not a frozen list.
+    const timings = { 'was-light.test.cjs': 200000, 'other.test.cjs': 10000 };
+    const values = Object.values(timings);
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const table = { timings, mean };
+    const { makeFileWeigher, makeMeasuredPredicate } = require('../scripts/run-tests.cjs');
+    const weightOf = makeFileWeigher(table);
+    const isMeasured = makeMeasuredPredicate(table);
+    const thresholdWeight = (ISOLATION_BUDGET_FRACTION * CHUNK_WORKING_BUDGET_MS) / mean;
+    const { isolated } = partitionIsolatedFiles(['was-light.test.cjs', 'other.test.cjs'], {
+      weightOf,
+      isMeasured,
+      thresholdWeight,
+    });
+    assert.deepStrictEqual(isolated, ['was-light.test.cjs']);
+  });
+
+  test('#4733: dynamism inverse — a file dropping below 120000ms is no longer isolated', () => {
+    const timings = { 'now-light.test.cjs': 50000, 'other.test.cjs': 10000 };
+    const values = Object.values(timings);
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const table = { timings, mean };
+    const { makeFileWeigher, makeMeasuredPredicate } = require('../scripts/run-tests.cjs');
+    const weightOf = makeFileWeigher(table);
+    const isMeasured = makeMeasuredPredicate(table);
+    const thresholdWeight = (ISOLATION_BUDGET_FRACTION * CHUNK_WORKING_BUDGET_MS) / mean;
+    const { isolated } = partitionIsolatedFiles(['now-light.test.cjs', 'other.test.cjs'], {
+      weightOf,
+      isMeasured,
+      thresholdWeight,
+    });
+    assert.deepStrictEqual(isolated, []);
+  });
+
+  // Boundary triplet on the threshold itself. partitionIsolatedFiles uses
+  // `weightOf(f) >= thresholdWeight` (an inclusive `>=`), so `limit` (a file
+  // whose weight equals thresholdWeight exactly) IS isolated, not excluded —
+  // this triplet documents and pins that convention.
+  describe('boundary triplet on thresholdWeight (inclusive >=)', () => {
+    const thresholdWeight = 10;
+    const weights = { 'below.test.cjs': 9.999999, 'at.test.cjs': 10, 'above.test.cjs': 10.000001 };
+    const files = ['/repo/tests/below.test.cjs', '/repo/tests/at.test.cjs', '/repo/tests/above.test.cjs'];
+
+    test('limit-1 (just under thresholdWeight) is NOT isolated', () => {
+      const { isolated } = partitionIsolatedFiles(['/repo/tests/below.test.cjs'], {
+        weightOf: weigherFromMap(weights),
+        isMeasured: measuredFromMap(weights),
+        thresholdWeight,
+      });
+      assert.deepStrictEqual(isolated, []);
+    });
+
+    test('limit (exactly thresholdWeight) IS isolated (inclusive >=)', () => {
+      const { isolated } = partitionIsolatedFiles(['/repo/tests/at.test.cjs'], {
+        weightOf: weigherFromMap(weights),
+        isMeasured: measuredFromMap(weights),
+        thresholdWeight,
+      });
+      assert.deepStrictEqual(isolated, ['/repo/tests/at.test.cjs']);
+    });
+
+    test('limit+1 (just over thresholdWeight) IS isolated', () => {
+      const { isolated } = partitionIsolatedFiles(['/repo/tests/above.test.cjs'], {
+        weightOf: weigherFromMap(weights),
+        isMeasured: measuredFromMap(weights),
+        thresholdWeight,
+      });
+      assert.deepStrictEqual(isolated, ['/repo/tests/above.test.cjs']);
+    });
+
+    test('all three together, in one call, preserve packable order', () => {
+      const { isolated, packable } = partitionIsolatedFiles(files, {
+        weightOf: weigherFromMap(weights),
+        isMeasured: measuredFromMap(weights),
+        thresholdWeight,
+      });
+      assert.deepStrictEqual(isolated, ['/repo/tests/at.test.cjs', '/repo/tests/above.test.cjs']);
+      assert.deepStrictEqual(packable, ['/repo/tests/below.test.cjs']);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-14 — the win32 per-chunk cap must not permit a chunk that exceeds
+// the 600s backstop.
+//
+// Measured on `next` @ca8d9d4459: a Windows conformance chunk (shard 2/3,
+// chunk 4/6, 29 files) was KILLED at 600018ms. On PR #4726 (green, larger
+// pool, same shard/chunk position) the equivalent chunk (29 files) measured
+// 525548ms — 87.6% of the then-current cap of 40, passing by only 74s.
+// Worst packed-chunk rate: 525548 / 29 = 18122 ms/file.
+// ---------------------------------------------------------------------------
+
+const { defaultMaxFilesPerChunk } = require('../scripts/run-tests.cjs');
+
+describe('the win32 per-chunk cap must not permit a chunk that exceeds the 600s backstop', () => {
+  const CHUNK_TIMEOUT_MS = 600000;
+  const MEASURED_WORST_MS_PER_FILE = 18122; // 525548ms / 29 files, windows conformance shard 2/3
+  const TARGET_MS = 400000; // 67% of the backstop
+
+  // NOT load-bearing on its own: this passes for ANY shipped cap up to 33
+  // (600000/18122 = 33.1), so it would NOT have caught the previously-shipped
+  // cap of 40. It is kept only as a coarse sanity check ("we are nowhere near
+  // the raw backstop"); the TARGET_MS (400000ms) rows below it are what
+  // actually pin the shipped value.
+  test('the win32 cap x the measured worst per-file rate stays under the raw 600000ms backstop (coarse, non-load-bearing sanity check)', () => {
+    const cap = defaultMaxFilesPerChunk('win32');
+    const product = cap * MEASURED_WORST_MS_PER_FILE;
+    assert.ok(
+      product < CHUNK_TIMEOUT_MS,
+      `win32 cap=${cap} x ${MEASURED_WORST_MS_PER_FILE}ms/file = ${product}ms, ` +
+        `must be < the ${CHUNK_TIMEOUT_MS}ms per-chunk backstop`,
+    );
+  });
+
+  test('the win32 cap leaves the intended headroom', () => {
+    const cap = defaultMaxFilesPerChunk('win32');
+    const product = cap * MEASURED_WORST_MS_PER_FILE;
+    assert.ok(
+      product <= TARGET_MS,
+      `win32 cap=${cap} x ${MEASURED_WORST_MS_PER_FILE}ms/file = ${product}ms, ` +
+        `must be <= the ${TARGET_MS}ms target (67% of the backstop)`,
+    );
+  });
+
+  // Boundary coverage (limit / limit+1) that actually constrains the
+  // EXPORTED function, not just arithmetic on literals: the invariant is
+  // that the shipped win32 cap must be the LARGEST value satisfying
+  // `cap * MEASURED_WORST_MS_PER_FILE <= TARGET_MS`. Both rows call
+  // defaultMaxFilesPerChunk('win32') so a change to the shipped constant
+  // moves both assertions with it — lowering the cap unnecessarily fails
+  // the maximality check below, raising it fails the safety check.
+  //
+  // A limit-1 (cap-1) row is intentionally omitted: `(cap-1) * RATE <=
+  // TARGET_MS` is implied by the maximality check already passing at `cap`
+  // (if cap clears the target, cap-1 trivially does too), so it cannot add
+  // coverage the other two rows don't already provide.
+  describe('the derived cap is the largest value that still clears the target', () => {
+    test('the shipped cap stays under the target (safety)', () => {
+      const cap = defaultMaxFilesPerChunk('win32');
+      const product = cap * MEASURED_WORST_MS_PER_FILE;
+      assert.ok(
+        product <= TARGET_MS,
+        `win32 cap=${cap} x ${MEASURED_WORST_MS_PER_FILE}ms/file = ${product}ms must be <= ${TARGET_MS}ms`,
+      );
+    });
+
+    test('one file over the shipped cap WOULD exceed the target (maximality)', () => {
+      const cap = defaultMaxFilesPerChunk('win32');
+      const product = (cap + 1) * MEASURED_WORST_MS_PER_FILE;
+      assert.ok(
+        product > TARGET_MS,
+        `win32 cap+1=${cap + 1} x ${MEASURED_WORST_MS_PER_FILE}ms/file = ${product}ms must be > ${TARGET_MS}ms ` +
+          `(if this fails, the shipped cap has slack and could safely be raised)`,
+      );
+    });
+  });
+
+  test('non-win32 platforms are unchanged', () => {
+    assert.strictEqual(defaultMaxFilesPerChunk('linux'), 60);
+    assert.strictEqual(defaultMaxFilesPerChunk('darwin'), 60);
+  });
+
+  test('the cap is still overridable by RUN_TESTS_MAX_FILES_PER_CHUNK', () => {
+    const cap = defaultMaxFilesPerChunk('win32');
+    const override = positiveNumberEnv('99', cap);
+    assert.strictEqual(override, 99);
+    assert.notStrictEqual(override, cap);
+  });
+});
+
+// #4936: the per-chunk watchdog. The chunk used to run under
+// execFileSync({ timeout }), whose diagnostic lived in a catch arm reachable
+// only once the child's exit was OBSERVED — so on a Windows run where that
+// observation never came, a chunk sat 37 minutes past its 600000ms bound with
+// no kill line and no in-flight-file report. A real "kill sent, exit never
+// reported" Windows process cannot be produced on demand, so these tests drive
+// runChunk through its injected seams (a fake child that never emits 'exit',
+// a recording spawnSync, a forced platform), plus one real child that ignores
+// its first kill signal.
+const { runChunk, killChunkTree } = require('../scripts/run-tests.cjs');
+const { EventEmitter } = require('node:events');
+
+// Watchdog bounds for these tests — a distinct class from every subprocess
+// timeout in tests/helpers/timeouts.cjs. The fake-child bounds only need to
+// ORDER the timeout before the grace expiry, so they are tiny; nothing real
+// runs under them.
+const FAKE_CHUNK_TIMEOUT_MS = 20;
+const FAKE_CHUNK_GRACE_MS = 50;
+// A grace long enough that a child exiting on its first kill is always
+// observed inside it.
+const FAKE_CHUNK_LONG_GRACE_MS = 5000;
+// A bound that must never fire: the chunk under it exits on its own at once.
+const UNREACHED_CHUNK_TIMEOUT_MS = 60000;
+// The real-child test: long enough for `node -e` to install its SIGTERM trap
+// before the kill lands, so the first kill is genuinely ignored on POSIX.
+const REAL_CHILD_TIMEOUT_MS = 2000;
+const REAL_CHILD_GRACE_MS = 1000;
+
+// A stand-in ChildProcess. It never exits unless `exitOn` names the signal
+// whose delivery should make it exit.
+function fakeChunkChild({ pid = 4242, exitOn = null } = {}) {
+  const child = new EventEmitter();
+  child.pid = pid;
+  child.kills = [];
+  child.unrefCalls = 0;
+  child.kill = (signal) => {
+    child.kills.push(signal);
+    if (exitOn === signal) setImmediate(() => child.emit('exit', null, signal));
+    return true;
+  };
+  child.unref = () => {
+    child.unrefCalls += 1;
+  };
+  return child;
+}
+
+// A stand-in for the spawned tree reaper. `exitCode` undefined = it never
+// exits (a wedged reaper); `emitError` = it fails to spawn asynchronously.
+function fakeReaper({ exitCode, emitError = false } = {}) {
+  const calls = [];
+  const reapers = [];
+  const impl = (command, args) => {
+    calls.push([command, args]);
+    const reaper = new EventEmitter();
+    reaper.unrefCalls = 0;
+    reaper.unref = () => {
+      reaper.unrefCalls += 1;
+    };
+    reapers.push(reaper);
+    if (emitError) setImmediate(() => reaper.emit('error', new Error('spawn taskkill ENOENT')));
+    else if (exitCode !== undefined) setImmediate(() => reaper.emit('exit', exitCode, null));
+    return reaper;
+  };
+  return { calls, reapers, impl };
+}
+
+const nextTick = () => new Promise((r) => setImmediate(r));
+
+describe('runChunk per-chunk watchdog (#4936)', () => {
+  test('a chunk that exits on its own resolves with its code and never fires the timeout', async () => {
+    let fired = 0;
+    const r = await runChunk(process.execPath, ['-e', 'process.exit(3)'], {
+      env: process.env,
+      timeoutMs: UNREACHED_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      onTimeout: () => {
+        fired += 1;
+      },
+    });
+    assert.deepStrictEqual(
+      { code: r.code, timedOut: r.timedOut, exitObserved: r.exitObserved },
+      { code: 3, timedOut: false, exitObserved: true },
+    );
+    assert.strictEqual(fired, 0, 'onTimeout must not fire for a chunk that exits inside its bound');
+  });
+
+  test('REGRESSION: a child whose exit is never observed still gets its diagnostic at the bound and a bounded return', async () => {
+    // The #4936 shape: the kill is sent and the exit is never reported back.
+    // Pre-#4936 this was an unbounded wait with the diagnostic unreachable.
+    const child = fakeChunkChild();
+    const order = [];
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'linux',
+      spawnImpl: () => child,
+      onTimeout: () => order.push('diagnostic'),
+    });
+    order.push('resolved');
+    assert.deepStrictEqual(order, ['diagnostic', 'resolved'],
+      'the diagnostic must fire at the bound, before (not instead of) the runner moving on');
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, false);
+    assert.deepStrictEqual(child.kills, ['SIGTERM', 'SIGKILL'],
+      'first the ordinary kill, then one escalation once the grace window expires');
+    assert.strictEqual(child.unrefCalls, 1, 'an unconfirmed child must be unref\'d so the runner process can exit');
+  });
+
+  test('a child that exits after the kill reports a timeout with its exit observed, and is not abandoned', async () => {
+    const child = fakeChunkChild({ exitOn: 'SIGTERM' });
+    let fired = 0;
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_LONG_GRACE_MS,
+      platform: 'linux',
+      spawnImpl: () => child,
+      onTimeout: () => {
+        fired += 1;
+      },
+    });
+    assert.strictEqual(fired, 1);
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, true);
+    assert.deepStrictEqual(child.kills, ['SIGTERM'], 'no escalation once the exit is observed');
+    assert.strictEqual(child.unrefCalls, 0);
+  });
+
+  test('a diagnostic that throws does not stop the bound from being enforced', async () => {
+    const child = fakeChunkChild();
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'linux',
+      spawnImpl: () => child,
+      onTimeout: () => {
+        throw new Error('diagnostic blew up');
+      },
+    });
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, false);
+  });
+
+  test('a spawn failure resolves as a failed, non-timed-out chunk instead of throwing', async () => {
+    const r = await runChunk('unused', [], {
+      timeoutMs: UNREACHED_CHUNK_TIMEOUT_MS,
+      spawnImpl: () => {
+        throw new Error('spawn EMFILE');
+      },
+    });
+    assert.strictEqual(r.timedOut, false);
+    assert.strictEqual(r.code, 1);
+    assert.match(r.error.message, /EMFILE/);
+  });
+
+  test('on win32 the first kill reaps the whole tree (#4601 shape), not just the direct child', async () => {
+    const child = fakeChunkChild({ pid: 4242 });
+    const reap = fakeReaper({ exitCode: 0 });
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'win32',
+      spawnImpl: () => child,
+      reapSpawnImpl: reap.impl,
+    });
+    assert.deepStrictEqual(reap.calls, [['taskkill', ['/PID', '4242', '/T', '/F']]]);
+    assert.strictEqual(reap.reapers[0].unrefCalls, 1, 'the reaper must never keep the runner alive');
+    assert.deepStrictEqual(child.kills, ['SIGKILL'],
+      'a successful tree reap replaces the direct first kill; only the grace escalation follows');
+    assert.strictEqual(r.exitObserved, false);
+  });
+
+  test('REGRESSION: a tree reaper that never exits delays neither the diagnostic nor the bound', async () => {
+    // A synchronous reap (spawnSync) returns only once the reaper's own exit is
+    // observed, so it could re-create the #4936 stall one layer down. The
+    // reaper is spawned and never awaited.
+    const child = fakeChunkChild();
+    const reap = fakeReaper();
+    const order = [];
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'win32',
+      spawnImpl: () => child,
+      reapSpawnImpl: reap.impl,
+      onTimeout: () => order.push('diagnostic'),
+    });
+    order.push('resolved');
+    assert.deepStrictEqual(order, ['diagnostic', 'resolved']);
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, false);
+    assert.deepStrictEqual(child.kills, ['SIGKILL']);
+  });
+
+  test('on win32 a failed tree reap falls through to the direct kill', async () => {
+    const child = fakeChunkChild();
+    const reap = fakeReaper({ exitCode: 128 });
+    assert.strictEqual(killChunkTree(child, { platform: 'win32', reapSpawnImpl: reap.impl }), 'tree');
+    assert.deepStrictEqual(child.kills, [], 'the direct kill waits for the reaper\'s verdict');
+    await nextTick();
+    assert.deepStrictEqual(child.kills, ['SIGTERM']);
+  });
+
+  test('on win32 a reaper that cannot start falls through to the direct kill, once', async () => {
+    const child = fakeChunkChild();
+    const reap = fakeReaper({ emitError: true });
+    killChunkTree(child, { platform: 'win32', reapSpawnImpl: reap.impl });
+    await nextTick();
+    assert.deepStrictEqual(child.kills, ['SIGTERM']);
+
+    const child2 = fakeChunkChild();
+    const throwing = () => {
+      throw new Error('spawn EMFILE');
+    };
+    assert.strictEqual(killChunkTree(child2, { platform: 'win32', reapSpawnImpl: throwing }), 'direct');
+    assert.deepStrictEqual(child2.kills, ['SIGTERM']);
+  });
+
+  test('off win32 the kill never spawns a tree reap', () => {
+    for (const platform of ['linux', 'darwin']) {
+      const child = fakeChunkChild();
+      const reap = fakeReaper({ exitCode: 0 });
+      assert.strictEqual(killChunkTree(child, { platform, reapSpawnImpl: reap.impl }), 'direct');
+      assert.deepStrictEqual(reap.calls, [], `${platform} must not spawn a tree reap`);
+      assert.deepStrictEqual(child.kills, ['SIGTERM']);
+    }
+  });
+
+  test('a real child that ignores its first kill signal is still bounded, and its diagnostic still fires first', async (t) => {
+    // On POSIX the child traps SIGTERM, so the first kill does nothing and
+    // only the grace escalation ends the wait — the "kill sent, no exit"
+    // state with a real process. On Windows the kill is TerminateProcess,
+    // which the child cannot trap, so only the bound and ordering are asserted
+    // there. The child writes a marker once its trap is installed; the POSIX
+    // assertion applies only when the trap was armed before the kill, so a
+    // slow child start cannot turn it into a flake.
+    const dir = createTempDir('gsd-4936-real-child-');
+    t.after(() => cleanup(dir));
+    const marker = path.join(dir, 'trap-armed');
+    const script =
+      "process.on('SIGTERM', () => {}); " +
+      "require('fs').writeFileSync(process.argv[1], 'armed'); " +
+      'setInterval(() => {}, 1000);';
+    // Reaching the assertions at all is the bound: pre-#4936 (execFileSync
+    // with a timeout) the same child blocked the runner indefinitely.
+    const order = [];
+    let trapArmedAtKill = false;
+    const r = await runChunk(process.execPath, ['-e', script, marker], {
+      env: process.env,
+      timeoutMs: REAL_CHILD_TIMEOUT_MS,
+      graceMs: REAL_CHILD_GRACE_MS,
+      onTimeout: () => {
+        trapArmedAtKill = fs.existsSync(marker);
+        order.push('diagnostic');
+      },
+    });
+    order.push('resolved');
+    assert.deepStrictEqual(order, ['diagnostic', 'resolved']);
+    assert.strictEqual(r.timedOut, true);
+    if (process.platform !== 'win32') {
+      if (trapArmedAtKill) {
+        assert.strictEqual(r.exitObserved, false, 'a SIGTERM-trapping child must be abandoned after the grace window');
+      } else {
+        // Visible, never silent: the abandonment arm was not exercised this run.
+        t.diagnostic('child had not armed its SIGTERM trap before the kill; abandonment not asserted this run');
+      }
+    }
   });
 });

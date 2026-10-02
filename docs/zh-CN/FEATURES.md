@@ -253,20 +253,21 @@
 **需求：**
 - REQ-UI-01：系统必须检测现有设计系统状态（shadcn components.json、Tailwind 配置、令牌）
 - REQ-UI-02：系统必须只提问尚未回答的设计契约问题
-- REQ-UI-03：系统必须从 6 个维度进行验证（文案、视觉、颜色、排版、间距、注册表安全）
+- REQ-UI-03：系统必须从 7 个维度进行验证（文案、视觉、颜色、排版、间距、注册表安全、清单来源）
 - REQ-UI-04：当验证返回 BLOCKED 时，系统必须进入修订循环（最多 2 次迭代）
 - REQ-UI-05：对于没有 `components.json` 的 React/Next.js/Vite 项目，系统必须提供 shadcn 初始化
 - REQ-UI-06：系统必须对第三方 shadcn 注册表实施注册表安全门控
 
 **产出物：** `{padded_phase}-UI-SPEC.md` — 执行者使用的设计契约
 
-**6 个验证维度：**
+**7 个验证维度：**
 1. **文案** — CTA 标签、空状态、错误消息
 2. **视觉** — 焦点、视觉层次、图标无障碍
 3. **颜色** — 强调色使用规范、60/30/10 合规性
 4. **排版** — 字体大小/粗细约束遵守情况
 5. **间距** — 网格对齐、令牌一致性
 6. **注册表安全** — 第三方组件检查要求
+7. **清单来源** — 组件清单必须从已安装的设计系统中枚举得出，而非凭记忆写出
 
 **shadcn 集成：**
 - 检测 React/Next.js/Vite 项目中缺失的 `components.json`
@@ -1012,7 +1013,7 @@ fix(03-01): correct auth token expiry
 **目的：** 跨多个 AI 编程智能体运行时运行 GSD。
 
 **需求：**
-- REQ-RUNTIME-01：系统必须支持 Claude Code、OpenCode、Gemini CLI、Kilo、Codex、Copilot、Antigravity、Trae、Cline、Augment Code、CodeBuddy、Qwen Code
+- REQ-RUNTIME-01：系统必须支持 Claude Code、OpenCode、Kilo、Codex、Copilot、Antigravity、Trae、Cline、Augment Code、CodeBuddy、Qwen Code
 - REQ-RUNTIME-02：安装器必须按运行时转换内容（工具名称、路径、前置元数据）
 - REQ-RUNTIME-03：安装器必须支持交互式和非交互式（`--claude --global`）模式
 - REQ-RUNTIME-04：安装器必须支持全局和本地安装
@@ -1021,12 +1022,12 @@ fix(03-01): correct auth token expiry
 
 **运行时转换：**
 
-| 方面 | Claude Code | OpenCode | Gemini | Kilo | Codex | Copilot | Antigravity | Trae | Cline | Augment | CodeBuddy | Qwen Code |
-|--------|------------|----------|--------|-------|-------|---------|-------------|------|-------|---------|-----------|-----------|
-| 命令 | 斜杠命令 | 斜杠命令 | 斜杠命令 | 斜杠命令 | Skills (TOML) | 斜杠命令 | Skills | Skills | Rules | Skills | Skills | Skills |
-| 智能体格式 | Claude 原生 | `mode: subagent` | Claude 原生 | `mode: subagent` | Skills | 工具映射 | Skills | Skills | Rules | Skills | Skills | Skills |
-| 钩子事件 | `PostToolUse` | N/A | `AfterTool` | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
-| 配置 | `settings.json` | `opencode.json(c)` | `settings.json` | `kilo.json(c)` | TOML | Instructions | Config | Config | `.clinerules` | Config | Config | Config |
+| 方面 | Claude Code | OpenCode | Kilo | Codex | Copilot | Antigravity | Trae | Cline | Augment | CodeBuddy | Qwen Code |
+|--------|------------|----------|-------|-------|---------|-------------|------|-------|---------|-----------|-----------|
+| 命令 | 斜杠命令 | 斜杠命令 | 斜杠命令 | Skills (TOML) | 斜杠命令 | Skills | Skills | Rules | Skills | Skills | Skills |
+| 智能体格式 | Claude 原生 | `mode: subagent` | `mode: subagent` | Skills | 工具映射 | Skills | Skills | Rules | Skills | Skills | Skills |
+| 钩子事件 | `PostToolUse` | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| 配置 | `settings.json` | `opencode.json(c)` | `kilo.json(c)` | TOML | Instructions | Config | Config | `.clinerules` | Config | Config | Config |
 
 ---
 
@@ -1173,9 +1174,9 @@ GSD update available: 1.39.0 → 1.40.0. Run /gsd-update.
 
 ### 42. 跨 AI 同行评审
 
-**命令：** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--antigravity] [--ollama] [--lm-studio] [--llama-cpp] [--kimi-code] [--all]`
+**命令：** `/gsd-review --phase N [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--antigravity] [--ollama] [--lm-studio] [--llama-cpp] [--kimi-code] [--all]`
 
-**目的：** 调用外部 AI CLI（Gemini、Claude、Codex、CodeRabbit、OpenCode、Qwen Code、Cursor、Antigravity、Kimi Code）和本地 OpenAI 兼容服务器（Ollama、LM Studio、llama.cpp）独立审查阶段计划。生成包含每位审查者反馈的结构化 REVIEWS.md。
+**目的：** 调用外部 AI CLI（Claude、Codex、CodeRabbit、OpenCode、Qwen Code、Cursor、Antigravity、Kimi Code）和本地 OpenAI 兼容服务器（Ollama、LM Studio、llama.cpp）独立审查阶段计划。生成包含每位审查者反馈的结构化 REVIEWS.md。
 
 **需求：**
 - REQ-REVIEW-01：系统必须检测系统上可用的 AI CLI
@@ -1446,7 +1447,7 @@ PreToolUse 钩子，检测 Claude 在 GSD 工作流上下文之外尝试文件�
 **目的：** 在单个交互式安装会话中选择多个运行时。
 
 **需求：**
-- REQ-MULTI-RT-01：交互式提示必须支持多选（例如 Claude Code + Gemini）
+- REQ-MULTI-RT-01：交互式提示必须支持多选（例如 Claude Code + Antigravity）
 - REQ-MULTI-RT-02：CLI 标志必须继续适用于非交互式安装
 
 **流程：**
@@ -1687,13 +1688,13 @@ PreToolUse 钩子，检测 Claude 在 GSD 工作流上下文之外尝试文件�
 **需求：**
 - REQ-SKILLS-01：安装器必须为 Claude Code 2.1.88+ 写入 `skills/gsd-*/SKILL.md`
 - REQ-SKILLS-02：安装器必须自动清理旧版 `commands/gsd/` 目录
-- REQ-SKILLS-03：安装器必须通过 Gemini 路径维护与旧版 Claude Code 的向后兼容性
+- REQ-SKILLS-03：安装器必须通过旧版 `commands/gsd/` 路径维护与旧版 Claude Code 的向后兼容性
 
 **流程：**
 1. **检测** — 检查 Claude Code 版本以确定技能支持情况
 2. **迁移** — 为每个 GSD 命令写入 `skills/gsd-*/SKILL.md` 文件
 3. **清理** — 如果已安装技能，则删除旧版 `commands/gsd/` 目录
-4. **回退** — 为旧版 Claude Code 维护 Gemini 路径兼容性
+4. **回退** — 为旧版 Claude Code 维护旧版 `commands/gsd/` 路径兼容性
 
 ---
 
@@ -2135,6 +2136,15 @@ PreToolUse 钩子，检测 Claude 在 GSD 工作流上下文之外尝试文件�
 |---------|------|---------|-------------|
 | `workflow.code_review` | boolean | `true` | 启用代码审查命令 |
 | `workflow.code_review_depth` | string | `standard` | 默认审查深度：`quick`、`standard` 或 `deep` |
+| `workflow.code_review_depth_overrides` | array | `[]` | 按目录路径前缀匹配变更文件集合、为特定目录提升审查深度的有序 `{ paths, depth }` 规则列表（#2554）。详见下文。 |
+
+**按路径限定代码审查深度**
+
+`workflow.code_review_depth_overrides` 通过整段目录路径前缀，将规则与本次审查的变更文件集合进行匹配 —— `src/auth` 匹配 `src/auth/token.ts` 及 `src/auth` 本身，但绝不匹配 `src/authfoo/x.ts` 或 `docs/src/auth/x.ts`。匹配区分大小写，与 git 保持一致。
+
+升级是**针对整次审查，而非逐文件**的：深度是传递给审查代理的单一标量值，而非逐文件设置，因此规则集中匹配到的最强档位适用于本次审查中的每一个文件 —— 一个敏感文件不会因为与无关文件同处一次审查中而被浅层审查。
+
+v1 **仅支持目录前缀匹配，不支持 glob 语法**：本项目中不存在 glob 引擎（`minimatch`、`picomatch`、`fast-glob`），本功能也未引入。路径中包含 `*` 或 `?`（例如 `src/auth/**`）会被视为配置错误，而不是悄悄地按前缀近似处理。
 
 ---
 
@@ -2958,7 +2968,7 @@ explicit reviewer flags -> --all -> review.default_reviewers -> all detected rev
 
 **需求：**
 - REQ-QUOTA-01：配额失败不得将立即重试作为主要恢复选项。
-- REQ-QUOTA-02：分类必须涵盖 Claude、Copilot、Codex、Gemini 和通用提供商哨兵。
+- REQ-QUOTA-02：分类必须涵盖 Claude、Copilot、Codex 和通用提供商哨兵。
 - REQ-QUOTA-03：非配额失败必须继续通过正常的执行失败路径。
 
 **参考：** [提供商速率限制信号](../research/provider-rate-limit-signals.md)

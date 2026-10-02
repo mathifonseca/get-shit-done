@@ -16,6 +16,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { cleanup } = require('./helpers.cjs');
+const { scanFencedBlocks } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
 
 const {
   validateCapability,
@@ -60,6 +61,7 @@ const {
 const {
   STEP_WORKFLOWS,
   HOST_LOOP_FILES,
+  buildContract,
   scanWiredPoints,
   getWiredLoopPoints,
   CANONICAL_POINTS,
@@ -358,6 +360,263 @@ describe('validateAgainstContract adversarial cases', () => {
     const errors = validateAgainstContract(cap, 'ui');
     assert.ok(errors.length > 0);
     assert.ok(errors.some((e) => e.includes('notarole')));
+  });
+});
+
+// ─── validateStep / validateAgainstContract: step.pointFrom (#3661, matrix Section E) ──
+
+describe('capability-validator: step.pointFrom (#3661, matrix Section E)', () => {
+  /**
+   * Minimal synthetic capability, independent of UI_CAP, carrying one enum
+   * config key (usable as a pointFrom target) and one boolean key (usable as
+   * a non-enum negative fixture).
+   */
+  function makePointFromCap(overrides = {}) {
+    return {
+      id: 'test-point-from-cap',
+      role: 'feature',
+      version: '1.0.0',
+      title: 'Test PointFrom Cap',
+      description: 'Synthetic fixture for pointFrom (#3661) validator tests.',
+      tier: 'standard',
+      requires: [],
+      runtimeCompat: { supported: ['*'], unsupported: [] },
+      skills: ['test-skill'],
+      agents: [],
+      hooks: [],
+      config: {
+        'workflow.test_point': {
+          type: 'enum',
+          values: ['execute:post', 'execute:wave:post'],
+          default: 'execute:post',
+          description: 'Test enum key for pointFrom.',
+        },
+        'workflow.test_bool': {
+          type: 'boolean',
+          default: true,
+          description: 'Test non-enum key.',
+        },
+      },
+      steps: [],
+      contributions: [],
+      gates: [],
+      ...overrides,
+    };
+  }
+
+  test('E1: validateStepRejectsNonStringPointFrom', () => {
+    const cap = makePointFromCap({
+      steps: [{
+        point: 'execute:post', ref: { skill: 'test-skill' }, produces: [], consumes: [],
+        pointFrom: 42, onError: 'skip',
+      }],
+    });
+    const errors = validateCapability(cap, 'test-point-from-cap');
+    assert.ok(
+      errors.some((e) => e.includes('.pointFrom must be a string if present')),
+      'Expected a pointFrom type error, got: ' + JSON.stringify(errors),
+    );
+  });
+
+  test('E2: validateStepAcceptsMissingPointFrom — fully optional', () => {
+    const cap = makePointFromCap({
+      steps: [{
+        point: 'execute:post', ref: { skill: 'test-skill' }, produces: [], consumes: [],
+        onError: 'skip',
+      }],
+    });
+    const capErrors = validateCapability(cap, 'test-point-from-cap');
+    assert.deepEqual(capErrors, [], 'Expected no validateCapability errors: ' + JSON.stringify(capErrors));
+    const contractErrors = validateAgainstContract(cap, 'test-point-from-cap');
+    assert.deepEqual(contractErrors, [], 'Expected no validateAgainstContract errors: ' + JSON.stringify(contractErrors));
+  });
+
+  test('E3: validateAgainstContractRejectsUndefinedPointFromKey', () => {
+    const cap = makePointFromCap({
+      steps: [{
+        point: 'execute:post', ref: { skill: 'test-skill' }, produces: [], consumes: [],
+        pointFrom: 'workflow.nonexistent_key', onError: 'skip',
+      }],
+    });
+    const errors = validateAgainstContract(cap, 'test-point-from-cap');
+    assert.ok(
+      errors.some((e) => e.includes('pointFrom "workflow.nonexistent_key" is not defined in capability config keys')),
+      'Expected an undefined-key pointFrom error, got: ' + JSON.stringify(errors),
+    );
+  });
+
+  test('E4: validateAgainstContractRejectsNonEnumPointFromKey', () => {
+    const cap = makePointFromCap({
+      steps: [{
+        point: 'execute:post', ref: { skill: 'test-skill' }, produces: [], consumes: [],
+        pointFrom: 'workflow.test_bool', onError: 'skip',
+      }],
+    });
+    const errors = validateAgainstContract(cap, 'test-point-from-cap');
+    assert.ok(
+      errors.some((e) => e.includes('must reference an enum config key')),
+      'Expected a non-enum pointFrom error, got: ' + JSON.stringify(errors),
+    );
+  });
+
+  test('E5: validateAgainstContractRejectsPointFromEnumMissingOwnPoint', () => {
+    const cap = makePointFromCap({
+      steps: [{
+        point: 'verify:post', ref: { skill: 'test-skill' }, produces: [], consumes: [],
+        pointFrom: 'workflow.test_point', onError: 'skip',
+      }],
+    });
+    const errors = validateAgainstContract(cap, 'test-point-from-cap');
+    assert.ok(
+      errors.some((e) => e.includes('enum values do not include this step') && e.includes('verify:post')),
+      'Expected an enum-missing-own-point error, got: ' + JSON.stringify(errors),
+    );
+  });
+
+  test('E6: validateAgainstContractAcceptsWellFormedTwoPointDeclaration — mirrors real code-review shape', () => {
+    const cap = makePointFromCap({
+      steps: [
+        {
+          point: 'execute:post', ref: { skill: 'test-skill' }, produces: ['REVIEW.md'], consumes: [],
+          when: 'workflow.test_bool', pointFrom: 'workflow.test_point', onError: 'skip',
+        },
+        {
+          point: 'execute:wave:post', ref: { skill: 'test-skill' }, produces: ['REVIEW.md'], consumes: [],
+          when: 'workflow.test_bool', pointFrom: 'workflow.test_point', onError: 'skip',
+        },
+      ],
+    });
+    const capErrors = validateCapability(cap, 'test-point-from-cap');
+    assert.deepEqual(capErrors, [], 'Expected no validateCapability errors: ' + JSON.stringify(capErrors));
+    const contractErrors = validateAgainstContract(cap, 'test-point-from-cap');
+    assert.deepEqual(contractErrors, [], 'Expected no validateAgainstContract errors: ' + JSON.stringify(contractErrors));
+  });
+
+  test('E7: validateAgainstContractSkipsAlreadyReportedMalformedPointFrom — non-string pointFrom does not double-report or crash', () => {
+    // Uses a non-string pointFrom (not an empty string): validateStep's own type
+    // check is `typeof step.pointFrom !== 'string'`, which an empty string PASSES
+    // (typeof '' === 'string') — so an empty string is not actually "already
+    // reported" by validateStep. A non-string value (here: an array) is the
+    // fixture that genuinely exercises the `continue` / "already reported above"
+    // skip-pattern inside validateAgainstContract's own pointFrom loop, mirroring
+    // the identical pattern already used for `when`.
+    const cap = makePointFromCap({
+      steps: [{
+        point: 'execute:post', ref: { skill: 'test-skill' }, produces: [], consumes: [],
+        pointFrom: ['workflow.test_point'], onError: 'skip',
+      }],
+    });
+    const capErrors = validateCapability(cap, 'test-point-from-cap');
+    assert.ok(
+      capErrors.some((e) => e.includes('.pointFrom must be a string if present')),
+      'validateStep must flag the non-string pointFrom, got: ' + JSON.stringify(capErrors),
+    );
+
+    // validateAgainstContract must not crash and must not ALSO emit a
+    // "not defined in capability config keys" / "must reference an enum" /
+    // "enum values do not include" error for the same malformed field — it
+    // silently skips (continue) because the type error was already reported.
+    const contractErrors = validateAgainstContract(cap, 'test-point-from-cap');
+    assert.ok(
+      !contractErrors.some((e) => e.includes('pointFrom')),
+      'validateAgainstContract must not double-report an already-malformed pointFrom, got: ' + JSON.stringify(contractErrors),
+    );
+  });
+});
+
+// ─── validateStep: step.supportsReviewerLanes (#4209 DISP-02) ─────────────────
+
+describe('capability-validator: step.supportsReviewerLanes (#4209 DISP-02)', () => {
+  /**
+   * Minimal synthetic non-code-review capability, independent of UI_CAP,
+   * proving the trait is provider-neutral (not code-review-specific).
+   */
+  function makeReviewerLaneCap(overrides = {}) {
+    return {
+      id: 'test-reviewer-lane-cap',
+      role: 'feature',
+      version: '1.0.0',
+      title: 'Test Reviewer Lane Cap',
+      description: 'Synthetic fixture for supportsReviewerLanes (#4209) validator tests.',
+      tier: 'standard',
+      requires: [],
+      runtimeCompat: { supported: ['*'], unsupported: [] },
+      skills: ['test-skill'],
+      agents: [],
+      hooks: [],
+      config: {},
+      steps: [],
+      contributions: [],
+      gates: [],
+      ...overrides,
+    };
+  }
+
+  test('RL1: validateStepAcceptsMissingSupportsReviewerLanes', () => {
+    const cap = makeReviewerLaneCap({
+      steps: [{
+        point: 'execute:post', ref: { skill: 'test-skill' }, produces: [], consumes: [], onError: 'skip',
+      }],
+    });
+    const errors = validateCapability(cap, 'test-reviewer-lane-cap');
+    assert.deepEqual(errors, [], 'Expected no validateCapability errors: ' + JSON.stringify(errors));
+  });
+
+  test('RL2: validateStepAcceptsLiteralTrue', () => {
+    const cap = makeReviewerLaneCap({
+      steps: [{
+        point: 'execute:post', ref: { skill: 'test-skill' }, produces: [], consumes: [], onError: 'skip',
+        supportsReviewerLanes: true,
+      }],
+    });
+    const errors = validateCapability(cap, 'test-reviewer-lane-cap');
+    assert.deepEqual(errors, [], 'Expected no validateCapability errors: ' + JSON.stringify(errors));
+  });
+
+  test('RL3: validateStepAcceptsLiteralFalse', () => {
+    const cap = makeReviewerLaneCap({
+      steps: [{
+        point: 'execute:post', ref: { skill: 'test-skill' }, produces: [], consumes: [], onError: 'skip',
+        supportsReviewerLanes: false,
+      }],
+    });
+    const errors = validateCapability(cap, 'test-reviewer-lane-cap');
+    assert.deepEqual(errors, [], 'Expected no validateCapability errors: ' + JSON.stringify(errors));
+  });
+
+  for (const [label, badValue] of [
+    ['string', 'true'],
+    ['number', 1],
+    ['object', {}],
+    ['array', []],
+    ['null', null],
+  ]) {
+    test(`RL4-${label}: validateStepRejectsNonBoolean`, () => {
+      const cap = makeReviewerLaneCap({
+        steps: [{
+          point: 'execute:post', ref: { skill: 'test-skill' }, produces: [], consumes: [], onError: 'skip',
+          supportsReviewerLanes: badValue,
+        }],
+      });
+      const errors = validateCapability(cap, 'test-reviewer-lane-cap');
+      assert.ok(
+        errors.some((e) => e.includes('steps[0].supportsReviewerLanes must be a boolean if present')),
+        `Expected a supportsReviewerLanes type error for ${label}, got: ` + JSON.stringify(errors),
+      );
+    });
+  }
+
+  test('RL5: registryOptsInBothCodeReviewSteps (real capabilities/code-review/capability.json)', () => {
+    const codeReviewCapPath = path.join(ROOT, 'capabilities', 'code-review', 'capability.json');
+    const codeReviewCap = JSON.parse(fs.readFileSync(codeReviewCapPath, 'utf8'));
+    const errors = validateCapability(codeReviewCap, 'code-review');
+    assert.deepEqual(errors, [], 'Expected no validateCapability errors: ' + JSON.stringify(errors));
+    const postStep = codeReviewCap.steps.find((s) => s.point === 'execute:post' && s.ref && s.ref.skill === 'code-review');
+    const wavePostStep = codeReviewCap.steps.find((s) => s.point === 'execute:wave:post' && s.ref && s.ref.skill === 'code-review');
+    assert.ok(postStep, 'Expected an execute:post code-review step');
+    assert.ok(wavePostStep, 'Expected an execute:wave:post code-review step');
+    assert.strictEqual(postStep.supportsReviewerLanes, true, 'execute:post code-review step must declare supportsReviewerLanes: true');
+    assert.strictEqual(wavePostStep.supportsReviewerLanes, true, 'execute:wave:post code-review step must declare supportsReviewerLanes: true');
   });
 });
 
@@ -763,6 +1022,10 @@ describe('--check drift detection', () => {
     // helpers the CLI uses, applied to in-memory strings — giving identical coverage
     // without touching the filesystem.
     const originalContent = fs.readFileSync(REGISTRY_PATH, 'utf8');
+    // allow-test-rule: source-text-is-the-product (#3545) — checkPipeline() below is a
+    // raw-text diffing pipeline; this .replace() builds an in-memory tampered
+    // TEXT fixture to drive that real pipeline call, not a text-grep proxy for
+    // module behavior
     const tamperedContent = originalContent.replace(
       "version: '" + SCHEMA_VERSION + "'",
       "version: '0-stale'",
@@ -788,6 +1051,8 @@ describe('--check drift detection', () => {
     // Also verify the tampered content contains the stale marker (so the above
     // assertion is meaningful and not vacuously true due to other diff).
     assert.ok(
+      // allow-test-rule: source-text-is-the-product (#3545) — sanity check on the
+      // same in-memory tampered TEXT fixture, not a proxy for module behavior
       tamperedContent.includes("version: '0-stale'"),
       'precondition: tampered content must contain the stale version marker',
     );
@@ -909,6 +1174,28 @@ describe('ADR-857 phase 6 planning feature capabilities', () => {
         `${capId} must participate in plan:pre through the Capability Registry`,
       );
     }
+  });
+});
+
+describe('#3778 — plan:pre contribution set feeding the quick.md planner dispatch', () => {
+  test('Quick host registration is generator-owned without changing canonical contract shape', () => {
+    const plan = STEP_WORKFLOWS.find((workflow) => workflow.step === 'plan');
+    assert.deepEqual(plan.auxiliaryHosts, [
+      { file: 'quick.md', point: 'plan:pre', kinds: ['contribution'], into: 'planner' },
+    ]);
+    assert.ok(
+      HOST_LOOP_FILES.includes('gsd-core/workflows/quick.md'),
+      'Quick must be enumerated by the generator-owned host set',
+    );
+
+    const contract = buildContract();
+    assert.strictEqual(STEP_WORKFLOWS.length, 5, 'canonical step rows must stay at five');
+    assert.strictEqual(contract.length, 5, 'serialized contract must stay at five entries');
+    assert.deepEqual(contract, LOOP_HOST_CONTRACT, 'auxiliary metadata must not be serialized');
+
+    const points = contract.flatMap((entry) => entry.points);
+    assert.strictEqual(points.length, 12, 'serialized contract must stay at 12 points');
+    assert.strictEqual(new Set(points).size, 12, 'serialized lifecycle points must remain unique');
   });
 });
 
@@ -1916,6 +2203,82 @@ describe('C4: description and hooks validation', () => {
     const errors = validateCapability(cap, 'ui');
     const hookErrors = errors.filter((e) => e.includes('hooks[0].script'));
     assert.deepEqual(hookErrors, [], 'Expected a normal nested relative script to be accepted, got: ' + JSON.stringify(hookErrors));
+  });
+
+  // ─── #3631 (defense-in-depth): a declared hook script path must not point into the space
+  // bundleContentHash excludes from the consent digest. A file named `x.pyc` can contain valid
+  // JavaScript and would be executed by `node` regardless of extension, and a __pycache__/
+  // .pytest_cache path segment marks digest-excluded space — so a manifest-declared executable
+  // surface must never be able to reach either. ───
+  for (const [label, script] of [
+    ['__pycache__ path segment', '__pycache__/run.js'],
+    ['.pytest_cache path segment', '.pytest_cache/run.js'],
+    ['.pyc basename suffix', 'hooks/x.pyc'],
+  ]) {
+    test(`hook script pointing into digest-excluded space is rejected (${label})`, () => {
+      const cap = { ...UI_CAP, hooks: [{ event: 'PostToolUse', script }] };
+      const errors = validateCapability(cap, 'ui');
+      const hookErrors = errors.filter((e) => e.includes('hooks[0].script'));
+      assert.ok(
+        hookErrors.length > 0,
+        `Expected a hooks[0].script rejection for ${label} (script=${JSON.stringify(script)}), got: ` + JSON.stringify(errors),
+      );
+    });
+  }
+
+  test('hook script not pointing into digest-excluded space is still accepted (hooks/check.js)', () => {
+    const cap = { ...UI_CAP, hooks: [{ event: 'PostToolUse', script: 'hooks/check.js' }] };
+    const errors = validateCapability(cap, 'ui');
+    const hookErrors = errors.filter((e) => e.includes('hooks[0].script'));
+    assert.deepEqual(hookErrors, [], 'Expected a normal .js hook script to be accepted, got: ' + JSON.stringify(hookErrors));
+  });
+
+  // ─── Generative-fix-divergence parity: `isSafeHookScriptPath` is duplicated hand-maintained
+  // logic in src/capability-lifecycle.cts (via `confinedBundleScript`, the nearest exported
+  // consumer) and gsd-core/bin/lib/capability-validator.cjs (via `validateCapability`, the
+  // nearest exported consumer). There is no src/capability-validator.cts — the .cjs is hand
+  // -maintained — so this drives BOTH real copies behaviorally (never source-greps either file)
+  // and asserts they agree on every path, catching the two implementations drifting apart. #3631
+  // finding 1 removed the `.DS_Store` DIGEST exclusion, but the validator never rejected
+  // `.DS_Store` on either side — `hooks/.DS_Store` is expected to be ACCEPTED by both.
+  test('isSafeHookScriptPath parity: capability-lifecycle.cts and capability-validator.cjs agree on every path', () => {
+    const { confinedBundleScript } = require('../gsd-core/bin/lib/capability-lifecycle.cjs');
+    // A capDir that does not exist on disk: confinedBundleScript falls into its lexical
+    // (does-not-exist-yet) branch, so the verdict reflects ONLY isSafeHookScriptPath — never a
+    // realpath/confinement side effect unrelated to what is under test here.
+    const fakeCapDir = path.join(os.tmpdir(), 'gsd-parity-probe-nonexistent-cap-dir');
+
+    const cases = [
+      ['hooks/check.js', true],
+      ['__pycache__/run.js', false],
+      ['hooks/__pycache__/run.js', false],
+      ['.pytest_cache/run.js', false],
+      ['hooks/x.pyc', false],
+      ['x.pyo', false],
+      ['hooks/x.PYC', false],
+      ['hooks/.DS_Store', true],
+      ['hooks/../__pycache__/run.js', false],
+      ['hooks/__pycache__./run.js', true],
+      ['__PYCACHE__/run.js', true],
+      ['hooks\\__pycache__\\run.js', false],
+    ];
+
+    for (const [script, expectedAccept] of cases) {
+      const cap = { ...UI_CAP, hooks: [{ event: 'PostToolUse', script }] };
+      const errors = validateCapability(cap, 'ui');
+      const cjsAccept = errors.filter((e) => e.includes('hooks[0].script')).length === 0;
+      const ctsAccept = confinedBundleScript(fakeCapDir, script) !== null;
+      assert.strictEqual(
+        cjsAccept,
+        ctsAccept,
+        `capability-validator.cjs (accept=${cjsAccept}) and capability-lifecycle.cts (accept=${ctsAccept}) disagree on ${JSON.stringify(script)}`,
+      );
+      assert.strictEqual(
+        cjsAccept,
+        expectedAccept,
+        `expected accept=${expectedAccept} for ${JSON.stringify(script)}, both copies returned accept=${cjsAccept}`,
+      );
+    }
   });
 
   test('description present in UI_CAP passes validation', () => {
@@ -4041,9 +4404,18 @@ describe('ADR-1016 phase 5a: closed-vocab set exports', () => {
 // ─── 25. ADR-857 phase 5e: closed ConverterName enum (Part B) ─────────────────
 
 describe('ADR-857 phase 5e: VALID_CONVERTER_NAMES closed enum', () => {
-  test('VALID_CONVERTER_NAMES has exactly 26 entries (16 command/skill/workflow + 10 agent converters)', () => {
+  // #2875 Part 2 (the agents-bypass closure): 3 converters added —
+  // convertClaudeAgentToHermesAgent (data-driven Hermes branding converter,
+  // reads hostBehaviors.brandingRewrites) and convertClaudeToKiloFrontmatter /
+  // convertClaudeToOpencodeFrontmatter (kilo/opencode's agents-kind
+  // converters — shared by name with those runtimes' commands-kind entries,
+  // options-bag signature `(content, {isAgent, modelOverride})`). All three
+  // are genuinely new agent converters (not renamed/leftover), so the agent
+  // count grows from 11 to 14; the 16 command/skill/workflow converters are
+  // unchanged.
+  test('VALID_CONVERTER_NAMES has exactly 30 entries (16 command/skill/workflow + 14 agent converters)', () => {
     assert.ok(VALID_CONVERTER_NAMES instanceof Set, 'VALID_CONVERTER_NAMES must be a Set');
-    assert.strictEqual(VALID_CONVERTER_NAMES.size, 26, 'VALID_CONVERTER_NAMES must have exactly 26 entries, got: ' + VALID_CONVERTER_NAMES.size);
+    assert.strictEqual(VALID_CONVERTER_NAMES.size, 30, 'VALID_CONVERTER_NAMES must have exactly 30 entries, got: ' + VALID_CONVERTER_NAMES.size);
   });
 
   test('VALID_CONVERTER_NAMES contains all expected converter names', () => {
@@ -4076,6 +4448,14 @@ describe('ADR-857 phase 5e: VALID_CONVERTER_NAMES closed enum', () => {
       'convertClaudeAgentToCodexAgent',
       // ADR-1239 / #2092 Phase B Upgrade 1 — native .qwen/agents/*.md subagent projection.
       'convertClaudeAgentToQwenAgent',
+      // #3384 — ZCode agent converter (strips mcp__* grants at install time).
+      'convertClaudeAgentToZcodeAgent',
+      // #2875 Part 2 (the agents-bypass closure) — data-driven Hermes branding
+      // converter, and the kilo/opencode agent converters (shared name with
+      // those runtimes' commands-kind entries).
+      'convertClaudeAgentToHermesAgent',
+      'convertClaudeToKiloFrontmatter',
+      'convertClaudeToOpencodeFrontmatter',
     ];
     for (const name of expected) {
       assert.ok(VALID_CONVERTER_NAMES.has(name), 'VALID_CONVERTER_NAMES must contain "' + name + '"');
@@ -4800,7 +5180,12 @@ describe('#1196 — discuss loop wiring + wired-point guard', () => {
 
   // ─── Defect 2 — gen-time wired guard ────────────────────────────────────────
 
-  describe('Defect 2: validateHooksWired gen-time guard', () => {
+  // Shared #3606 fixtures: every hook kind, and a Map<point, Set<kind>> builder
+  // for validateHooksWired's wiredKinds argument.
+  const ALL = ['contribution', 'step', 'gate'];
+  const kindsMap = (spec) => new Map(Object.entries(spec).map(([pt, ks]) => [pt, new Set(ks)]));
+
+  describe('Defect 2: validateHooksWired gen-time wired guard', () => {
     /** Minimal capability fixture with one hook at a given point */
     function makeCapWithStep(point) {
       return {
@@ -4837,7 +5222,7 @@ describe('#1196 — discuss loop wiring + wired-point guard', () => {
 
     test('returns non-empty error array mentioning "not wired" when step point is not in wiredSet', () => {
       const cap = makeCapWithStep('discuss:pre');
-      const wiredSet = new Set(['plan:pre', 'plan:post']); // discuss:pre absent
+      const wiredSet = kindsMap({ 'plan:pre': ALL, 'plan:post': ALL }); // discuss:pre absent
       const errs = validateHooksWired(cap, wiredSet);
       assert.ok(Array.isArray(errs), 'must return an array');
       assert.ok(errs.length > 0, 'must return errors when point is unwired');
@@ -4849,7 +5234,7 @@ describe('#1196 — discuss loop wiring + wired-point guard', () => {
 
     test('returns non-empty error array when contribution point is not in wiredSet', () => {
       const cap = makeCapWithContribution('discuss:pre');
-      const wiredSet = new Set(['plan:pre']); // discuss:pre absent
+      const wiredSet = kindsMap({ 'plan:pre': ALL }); // discuss:pre absent
       const errs = validateHooksWired(cap, wiredSet);
       assert.ok(errs.length > 0, 'must return errors for unwired contribution point');
       assert.match(errs.join(' '), /not wired/i);
@@ -4857,7 +5242,7 @@ describe('#1196 — discuss loop wiring + wired-point guard', () => {
 
     test('returns non-empty error array when gate point is not in wiredSet', () => {
       const cap = makeCapWithGate('discuss:pre');
-      const wiredSet = new Set(['plan:pre']); // discuss:pre absent
+      const wiredSet = kindsMap({ 'plan:pre': ALL }); // discuss:pre absent
       const errs = validateHooksWired(cap, wiredSet);
       assert.ok(errs.length > 0, 'must return errors for unwired gate point');
       assert.match(errs.join(' '), /not wired/i);
@@ -4865,35 +5250,119 @@ describe('#1196 — discuss loop wiring + wired-point guard', () => {
 
     test('returns empty array when all declared points are in wiredSet', () => {
       const cap = makeCapWithStep('plan:pre');
-      const wiredSet = new Set(['plan:pre', 'plan:post', 'execute:post']);
+      const wiredSet = kindsMap({ 'plan:pre': ALL, 'plan:post': ALL, 'execute:post': ALL });
       const errs = validateHooksWired(cap, wiredSet);
-      assert.deepEqual(errs, [], 'must return empty array when all points are wired');
+      assert.deepEqual(errs, [], 'must return empty array when all points are wired and kind-covered');
     });
 
     test('boundary: cap declaring discuss:pre is rejected against wiredSet lacking it', () => {
       const cap = makeCapWithStep('discuss:pre');
-      const smallSet = new Set(['plan:pre', 'plan:post']);
+      const smallSet = kindsMap({ 'plan:pre': ALL, 'plan:post': ALL });
       const errs = validateHooksWired(cap, smallSet);
       assert.ok(errs.length > 0, 'must reject discuss:pre against a set that lacks it');
     });
 
-    test('boundary: cap declaring discuss:pre is accepted against real getWiredLoopPoints(ROOT) post-fix', () => {
+    test('boundary: cap declaring discuss:pre is accepted against real getWiredKinds(ROOT) post-fix', () => {
       const cap = makeCapWithStep('discuss:pre');
-      const realWired = getWiredLoopPoints(ROOT);
+      const { getWiredKinds } = require('../scripts/gen-loop-host-contract.cjs');
+      const realWired = getWiredKinds(ROOT);
       const errs = validateHooksWired(cap, realWired);
       assert.deepEqual(
         errs, [],
-        `discuss:pre must be wired after the fix. Errors: ${errs.join('; ')}`,
+        `discuss:pre must be wired and kind-covered after the fix. Errors: ${errs.join('; ')}`,
       );
     });
 
-    test('boundary: cap declaring discuss:post is accepted against real getWiredLoopPoints(ROOT) post-fix', () => {
+    test('boundary: cap declaring discuss:post is accepted against real getWiredKinds(ROOT) post-fix', () => {
       const cap = makeCapWithContribution('discuss:post');
-      const realWired = getWiredLoopPoints(ROOT);
+      const { getWiredKinds } = require('../scripts/gen-loop-host-contract.cjs');
+      const realWired = getWiredKinds(ROOT);
       const errs = validateHooksWired(cap, realWired);
       assert.deepEqual(
         errs, [],
-        `discuss:post must be wired after the fix. Errors: ${errs.join('; ')}`,
+        `discuss:post must be wired and kind-covered after the fix. Errors: ${errs.join('; ')}`,
+      );
+    });
+
+    test('boundary: cap declaring an execute:wave:pre step is accepted against real getWiredKinds(ROOT) (#4148)', () => {
+      const cap = makeCapWithStep('execute:wave:pre');
+      const { getWiredKinds } = require('../scripts/gen-loop-host-contract.cjs');
+      const errs = validateHooksWired(cap, getWiredKinds(ROOT));
+      assert.deepEqual(
+        errs, [],
+        `execute:wave:pre must dispatch step hooks before executor spawning. Errors: ${errs.join('; ')}`,
+      );
+
+      const workflow = fs.readFileSync(path.join(ROOT, 'gsd-core', 'workflows', 'execute-phase.md'), 'utf8');
+      const wavePre = workflow.indexOf('WAVE_PRE_HOOKS_JSON=$(gsd_run loop render-hooks execute:wave:pre --raw)');
+      const stepDispatch = workflow.indexOf('**Step dispatch:**', wavePre);
+      const executorSpawn = workflow.indexOf('3. **Spawn executor agents:**', wavePre);
+      assert.ok(
+        wavePre !== -1 && stepDispatch > wavePre && executorSpawn > stepDispatch,
+        'wave-pre step dispatch must occur after hook rendering and before executor spawning',
+      );
+
+      const stepContract = workflow.slice(stepDispatch, executorSpawn);
+      assert.match(stepContract, /kind == "step"/, 'wave-pre must select step hooks');
+      assert.match(stepContract, /loop-hook-dispatch/, 'wave-pre must use the shared dispatch contract');
+      assert.match(stepContract, /Validate `ref\.command`/, 'wave-pre must validate third-party commands');
+      assert.match(
+        stepContract,
+        /never blocks or redirects executor spawning/,
+        'wave-pre step failures must remain advisory',
+      );
+    });
+
+    // ─── #3866: the verify lane must be open to every hook kind ────────────────
+    //
+    // verify-work.md's verify_pre_hooks step historically dispatched only
+    // `kind == "gate"`, so getWiredKinds reported verify:pre → {gate} and any
+    // capability wanting to DO something before UAT (rather than block it) was
+    // rejected at registry-build time. The rows below are the machine-observable
+    // contract: what a capability may declare at verify:pre.
+
+    test('boundary: cap declaring a verify:pre step is accepted against real getWiredKinds(ROOT) (#3866)', () => {
+      const cap = makeCapWithStep('verify:pre');
+      const { getWiredKinds } = require('../scripts/gen-loop-host-contract.cjs');
+      const errs = validateHooksWired(cap, getWiredKinds(ROOT));
+      assert.deepEqual(
+        errs, [],
+        'verify:pre must dispatch step hooks — a capability can contribute to what UAT covers, ' +
+        `not only refuse to let it start. Errors: ${errs.join('; ')}`,
+      );
+    });
+
+    test('boundary: cap declaring a verify:pre contribution is accepted against real getWiredKinds(ROOT) (#3866)', () => {
+      const cap = makeCapWithContribution('verify:pre');
+      const { getWiredKinds } = require('../scripts/gen-loop-host-contract.cjs');
+      const errs = validateHooksWired(cap, getWiredKinds(ROOT));
+      assert.deepEqual(
+        errs, [],
+        `verify:pre must dispatch contribution hooks. Errors: ${errs.join('; ')}`,
+      );
+    });
+
+    test('regression: cap declaring a verify:pre gate stays accepted after the step/contribution arms land (#3866)', () => {
+      // The pre-existing gate arm is the one behavior verify:pre already had.
+      // Adding arms above it must not orphan or narrow it.
+      const cap = makeCapWithGate('verify:pre');
+      const { getWiredKinds } = require('../scripts/gen-loop-host-contract.cjs');
+      const errs = validateHooksWired(cap, getWiredKinds(ROOT));
+      assert.deepEqual(
+        errs, [],
+        `the verify:pre gate arm must survive the new kind arms. Errors: ${errs.join('; ')}`,
+      );
+    });
+
+    test('verify:pre dispatch text covers exactly the three hook kinds, no more (#3866)', () => {
+      // Asserts the VALUE, not `.has(...)`: a scanner that over-credits (or a
+      // future fourth token creeping into HOOK_KINDS) fails here too.
+      const { getWiredKinds, HOOK_KINDS } = require('../scripts/gen-loop-host-contract.cjs');
+      const covered = getWiredKinds(ROOT).get('verify:pre');
+      assert.ok(covered, 'verify:pre must have a render-hooks call site in the host loop');
+      assert.deepEqual(
+        [...covered].sort(), [...HOOK_KINDS].sort(),
+        `verify:pre must cover every hook kind; got ${JSON.stringify([...covered].sort())}`,
       );
     });
 
@@ -4906,13 +5375,235 @@ describe('#1196 — discuss loop wiring + wired-point guard', () => {
         gates: [],
         config: {},
       };
-      const wiredSet = new Set(['plan:pre']); // the invalid point is not here either
+      const wiredSet = kindsMap({ 'plan:pre': ALL }); // the invalid point is not here either
       const errs = validateHooksWired(cap, wiredSet);
       // Should NOT flag it — invalid points are the schema validator's job
       const notWiredErrors = errs.filter((e) => /not wired/i.test(e));
       assert.deepEqual(
         notWiredErrors, [],
         'validateHooksWired must not flag invalid points as "not wired" (those are caught by schema validation)',
+      );
+    });
+  });
+
+  // ─── Defect 3: hook-kind coverage (#3606) ────────────────────────────────────
+  //
+  // A point having a call site proves hooks are RENDERED, not DISPATCHED. A
+  // consumer that iterates only `kind == "gate"` (or narrows `kind == "step"`
+  // to one ref.skill) silently drops every other registered kind — mempalace's
+  // step hooks were wired, active, and never run for five days across
+  // plan:post / execute:wave:post / verify:post / execute:post consumers.
+  // The guard must validate, per registered kind, that the call site's
+  // dispatch text covers that kind.
+
+  describe('Defect 3: validateHooksWired hook-kind coverage (#3606)', () => {
+
+    test('a step hook at a point whose site covers only gate fails with a kind-coverage error', () => {
+      const cap = {
+        id: 'test-cap',
+        role: 'feature',
+        steps: [{ point: 'plan:post', ref: { skill: 'my-skill' }, produces: [], consumes: [], onError: 'skip' }],
+        contributions: [],
+        gates: [],
+        config: {},
+      };
+      const wired = kindsMap({ 'plan:post': ['gate'] }); // hand-rolled gate-only consumer
+      const errs = validateHooksWired(cap, wired);
+      assert.ok(errs.length > 0, 'a step registered at a gate-only point must fail validation');
+      const joined = errs.join(' ');
+      assert.match(joined, /plan:post/, 'error must name the point');
+      assert.match(joined, /test-cap/, 'error must name the capability id');
+      assert.match(joined, /step/, 'error must name the uncovered kind');
+      assert.doesNotMatch(joined, /not wired/i, 'the point IS wired — this is the coverage error, not the wiring error');
+    });
+
+    test('a contribution hook at a point whose site covers only gate fails', () => {
+      const cap = {
+        id: 'test-cap',
+        role: 'feature',
+        steps: [],
+        contributions: [{ point: 'execute:wave:post', into: 'orchestrator', fragment: { inline: 'hi' }, produces: [], consumes: [] }],
+        gates: [],
+        config: {},
+      };
+      const wired = kindsMap({ 'execute:wave:post': ['gate'] });
+      const errs = validateHooksWired(cap, wired);
+      assert.ok(errs.length > 0, 'a contribution registered at a gate-only point must fail validation');
+      assert.match(errs.join(' '), /contribution/);
+    });
+
+    test('a point covered for exactly the registered kinds passes (boundary: no over-reach)', () => {
+      const cap = {
+        id: 'test-cap',
+        role: 'feature',
+        steps: [{ point: 'ship:post', ref: { skill: 'my-skill' }, produces: [], consumes: [], onError: 'skip' }],
+        contributions: [],
+        gates: [],
+        config: {},
+      };
+      const wired = kindsMap({ 'ship:post': ['step'] }); // ship.md's real coverage
+      assert.deepEqual(validateHooksWired(cap, wired), [], 'step at a step-covered point must pass');
+    });
+
+    test('unwired-point errors are unchanged when the arg is a kinds Map', () => {
+      const cap = {
+        id: 'test-cap',
+        role: 'feature',
+        steps: [{ point: 'discuss:pre', ref: { skill: 'x' }, produces: [], consumes: [], onError: 'skip' }],
+        contributions: [],
+        gates: [],
+        config: {},
+      };
+      const wired = kindsMap({ 'plan:pre': ALL }); // discuss:pre absent entirely
+      const errs = validateHooksWired(cap, wired);
+      assert.ok(errs.length > 0, 'unwired point still fails');
+      assert.match(errs.join(' '), /not wired/i, 'the existing unwired error text is preserved');
+    });
+
+    test('boundary: invalid points are not kind-flagged (schema validator owns them)', () => {
+      const cap = {
+        id: 'test-cap',
+        role: 'feature',
+        steps: [{ point: 'not:a:real:point', ref: { skill: 'x' }, produces: [], consumes: [], onError: 'skip' }],
+        contributions: [],
+        gates: [],
+        config: {},
+      };
+      const errs = validateHooksWired(cap, kindsMap({}));
+      assert.deepEqual(errs, [], 'invalid points produce neither wiring nor coverage errors');
+    });
+
+    test('the real tree passes the extended guard for every in-tree registered kind', () => {
+      // Self-enforcement: the repo's own capabilities and host workflows must
+      // satisfy the new check — this is the test that forces consumer fixes.
+      const { getWiredKinds } = require('../scripts/gen-loop-host-contract.cjs');
+      const wiredKinds = getWiredKinds(ROOT);
+      const failures = [];
+      for (const capPath of fs.readdirSync(path.join(ROOT, 'capabilities'))) {
+        const manifest = path.join(ROOT, 'capabilities', capPath, 'capability.json');
+        if (!fs.existsSync(manifest)) continue;
+        let cap;
+        try { cap = JSON.parse(fs.readFileSync(manifest, 'utf8')); } catch { continue; }
+        for (const err of validateHooksWired(cap, wiredKinds)) failures.push(`${capPath}: ${err}`);
+      }
+      assert.deepEqual(
+        failures, [],
+        `in-tree capabilities must be fully kind-covered by host workflows:\n  ${failures.join('\n  ')}`,
+      );
+    });
+  });
+
+  describe('coveredKindsInRegion: dispatch-text kind coverage (#3606)', () => {
+    test('deferral line without a kind discriminator covers every kind', () => {
+      const region = 'Apply each entry in `activeHooks` per @gsd-core/references/loop-hook-dispatch.md\n';
+      const { coveredKindsInRegion } = require('../scripts/gen-loop-host-contract.cjs');
+      assert.deepEqual([...coveredKindsInRegion(region)].sort(), ['contribution', 'gate', 'step']);
+    });
+
+    test('deferral line naming one kind covers only that kind', () => {
+      const { coveredKindsInRegion } = require('../scripts/gen-loop-host-contract.cjs');
+      const region = 'Dispatch `kind == "step"` hooks per @gsd-core/references/loop-hook-dispatch.md.\n';
+      assert.deepEqual([...coveredKindsInRegion(region)], ['step']);
+    });
+
+    test('a bare §-citation of the reference covers nothing (validation guidance, not dispatch)', () => {
+      const { coveredKindsInRegion } = require('../scripts/gen-loop-host-contract.cjs');
+      const region = '⚠ **Validate `check` before shell use** — `loop-hook-dispatch.md` § `gate`.\n**For each active entry where `kind == "gate"`**\n';
+      assert.deepEqual([...coveredKindsInRegion(region)], ['gate'], 'gate dispatched unconditionally, step/contribution NOT');
+    });
+
+    test('a narrowed kind line (kind == step AND ref.skill ==) does not cover the kind', () => {
+      const { coveredKindsInRegion } = require('../scripts/gen-loop-host-contract.cjs');
+      const region = 'Resolve hooks where `kind == "step"` and `ref.skill == "secure-phase"`.\n';
+      assert.deepEqual([...coveredKindsInRegion(region)], [], 'a one-skill special case proves nothing about the kind generally');
+    });
+
+    test('quote and operator variants are tolerated (=== and single quotes)', () => {
+      const { coveredKindsInRegion } = require('../scripts/gen-loop-host-contract.cjs');
+      const region = "for h in hooks: if h.kind === 'contribution' then inject\n";
+      assert.deepEqual([...coveredKindsInRegion(region)], ['contribution']);
+    });
+
+    test('CRLF input yields the same verdicts as LF', () => {
+      const { coveredKindsInRegion } = require('../scripts/gen-loop-host-contract.cjs');
+      const lf = 'per @gsd-core/references/loop-hook-dispatch.md\n`kind == "gate"` unconditional\n';
+      const crlf = lf.replace(/\n/g, '\r\n');
+      assert.deepEqual([...coveredKindsInRegion(crlf)].sort(), [...coveredKindsInRegion(lf)].sort());
+    });
+
+    test('scanWiredKinds accumulates per-point unions across multiple call sites', () => {
+      const { scanWiredKinds } = require('../scripts/gen-loop-host-contract.cjs');
+      const text = [
+        'X=$(gsd_run loop render-hooks verify:post --raw)',
+        '**For each active entry where `kind == "gate"`**',
+        'Y=$(gsd_run loop render-hooks verify:post --raw)',
+        'Dispatch `kind == "step"` hooks per @gsd-core/references/loop-hook-dispatch.md.',
+        '',
+      ].join('\n');
+      const m = scanWiredKinds(text);
+      assert.ok(m.has('verify:post'), 'point must be present');
+      assert.deepEqual(
+        [...m.get('verify:post')].sort(),
+        ['gate', 'step'],
+        'two call sites at one point accumulate their coverage',
+      );
+    });
+
+    test('capId == and into == narrowing void contribution credit (#3606 adversarial finding)', () => {
+      const { coveredKindsInRegion } = require('../scripts/gen-loop-host-contract.cjs');
+      const capIdNarrowed = 'Resolve hooks where `kind == "contribution"` and `capId == "security"`.\n';
+      assert.deepEqual([...coveredKindsInRegion(capIdNarrowed)], [],
+        'a one-capability hand-roll is not generic contribution coverage');
+      const intoNarrowed = 'For each entry where `kind == "contribution"` and `into == "planner"`: inject.\n';
+      assert.deepEqual([...coveredKindsInRegion(intoNarrowed)], [],
+        'planner-targeted-only injection leaves orchestrator-targeted contributions dispatched by no one');
+    });
+
+    test('a negated kind mention describes an absence, not a dispatch', () => {
+      const { coveredKindsInRegion } = require('../scripts/gen-loop-host-contract.cjs');
+      const region = 'Branch 1 — no active `ship:post` step hooks (`activeHooks` has no entry with `kind == "step"`): Skip.\n';
+      assert.deepEqual([...coveredKindsInRegion(region)], [],
+        '"has no entry with kind == step" must not count as step coverage');
+    });
+
+    test('a deferral sentence keeps its credit when the NEXT sentence specializes (segment split)', () => {
+      const { coveredKindsInRegion } = require('../scripts/gen-loop-host-contract.cjs');
+      const region = 'Dispatch `kind == "step"` hooks per @gsd-core/references/loop-hook-dispatch.md. `ref.skill == "code-review"`:\n';
+      assert.deepEqual([...coveredKindsInRegion(region)], ['step'],
+        'the generic deferral and the one-hook specialization are separate sentences');
+    });
+
+    test('a deferral path with a period (loop-hook-dispatch.md) is not split into segments', () => {
+      const { coveredKindsInRegion } = require('../scripts/gen-loop-host-contract.cjs');
+      const region = 'Apply each entry per @~/.claude/gsd-core/references/loop-hook-dispatch.md\n';
+      assert.deepEqual([...coveredKindsInRegion(region)].sort(), ['contribution', 'gate', 'step'],
+        'the .md inside the deferral path is not a sentence boundary');
+    });
+
+    test('a site whose consumers are all narrowed yields the zero-coverage error, not "not wired"', () => {
+      const cap = {
+        id: 'test-cap',
+        role: 'feature',
+        steps: [{ point: 'verify:post', ref: { skill: 'x' }, produces: [], consumes: [], onError: 'skip' }],
+        contributions: [],
+        gates: [],
+        config: {},
+      };
+      const wired = new Map([['verify:post', new Set()]]); // sites exist, all narrowed
+      const errs = validateHooksWired(cap, wired);
+      assert.ok(errs.length > 0, 'all-narrowed consumers must fail');
+      const joined = errs.join(' ');
+      assert.match(joined, /covers NO hook kind/i, 'error must name the zero-coverage diagnosis');
+      assert.doesNotMatch(joined, /not wired/i, 'the site EXISTS — misdiagnosing it as unwired points at the wrong remedy');
+    });
+
+    test('HOOK_KINDS vocabulary parity: scanner kinds match the validator group->kind mapping', () => {
+      const { HOOK_KINDS } = require('../scripts/gen-loop-host-contract.cjs');
+      const { HOOK_GROUP_KINDS } = require('../gsd-core/bin/lib/capability-validator.cjs');
+      assert.deepEqual(
+        [...HOOK_KINDS].sort(),
+        Object.values(HOOK_GROUP_KINDS).sort(),
+        'the scanner vocabulary must stay in lock-step with validateHooksWired\u2019s exported group->kind mapping — a rename on either side must fail here',
       );
     });
   });
@@ -4936,12 +5627,15 @@ describe('#1196 — discuss loop wiring + wired-point guard', () => {
       }
     });
 
-    test('HOST_LOOP_FILES matches STEP_WORKFLOWS (single source of truth)', () => {
-      const expectedFromStepWorkflows = STEP_WORKFLOWS.map((w) => 'gsd-core/workflows/' + w.file);
+    test('HOST_LOOP_FILES matches STEP_WORKFLOWS rows and auxiliary hosts', () => {
+      const expectedFromStepWorkflows = STEP_WORKFLOWS.flatMap(({ file, auxiliaryHosts = [] }) => [
+        'gsd-core/workflows/' + file,
+        ...auxiliaryHosts.map((host) => 'gsd-core/workflows/' + host.file),
+      ]);
       assert.deepEqual(
         HOST_LOOP_FILES,
         expectedFromStepWorkflows,
-        'HOST_LOOP_FILES must be derived from STEP_WORKFLOWS, not a separate hardcoded list',
+        'HOST_LOOP_FILES must be derived from STEP_WORKFLOWS rows and their auxiliary hosts',
       );
     });
 
@@ -5592,7 +6286,11 @@ const WORKFLOWS_DIR = path.join(__dirname, '..', 'gsd-core', 'workflows');
  * between the ```bash / ```sh / ```shell fence markers.
  */
 function extractShellBlocks(content) {
-  const allLines = content.split('\n');
+  // #4489: CRLF-safe split (mirrors src/text-lines.cts's splitLines() and the
+  // fixed sibling copy in tests/runtime-launcher-parity.test.cjs:221) — a bare
+  // '\n' split leaves a trailing \r on every line on a CRLF checkout, which
+  // reaches lineHasBareGsdTools' whitespace tokenizer below.
+  const allLines = content.split(/\r?\n/);
   const blocks = [];
   let inBlock = false;
   let blockLang = null;
@@ -5674,6 +6372,41 @@ function lineHasBareGsdTools(line) {
 }
 
 const AGENTS_DIR = path.join(__dirname, '..', 'agents');
+
+describe('bug #4489: extractShellBlocks is CRLF-safe (sibling of #4409)', () => {
+  test('a CRLF-line-ending fenced block yields lines with no trailing \\r', () => {
+    const content = [
+      '# doc',
+      '',
+      '```bash',
+      'echo one',
+      'echo two',
+      '```',
+      '',
+    ].join('\r\n');
+    const blocks = extractShellBlocks(content);
+    assert.strictEqual(blocks.length, 1, 'expected exactly one extracted block');
+    assert.deepStrictEqual(blocks[0].lines, ['echo one', 'echo two']);
+    for (const line of blocks[0].lines) {
+      assert.ok(!line.includes('\r'), `line carried a trailing/embedded \\r: ${JSON.stringify(line)}`);
+    }
+  });
+
+  test('LF-only input is unaffected (pre-existing behavior unchanged)', () => {
+    const content = [
+      '# doc',
+      '',
+      '```sh',
+      'echo one',
+      'echo two',
+      '```',
+      '',
+    ].join('\n');
+    const blocks = extractShellBlocks(content);
+    assert.strictEqual(blocks.length, 1);
+    assert.deepStrictEqual(blocks[0].lines, ['echo one', 'echo two']);
+  });
+});
 
 describe('bug #1041: agent files must not call bare gsd-tools (all-runtime resolver)', () => {
   test('no agents/gsd-*.md file contains a bare gsd-tools command', () => {
@@ -6776,12 +7509,18 @@ describe('#1592 — drift plan:pre codebase-drift gate (registry, behavioral)', 
     assert.deepStrictEqual(
       keys,
       [
+        'workflow.context_drift_action',
+        'workflow.context_drift_precheck',
         'workflow.drift_action',
         'workflow.drift_threshold',
         'workflow.plan_drift_precheck',
         'workflow.schema_drift_gate',
       ],
-      'the plan:pre gate adds exactly the dedicated plan_drift_precheck toggle — no other new keys',
+      // #3348 (separately) adds its own plan:pre context-drift gate's two dedicated
+      // toggles (workflow.context_drift_precheck / workflow.context_drift_action) —
+      // #1592's own contribution here remains exactly the one plan_drift_precheck key.
+      'the plan:pre gate adds exactly the dedicated plan_drift_precheck toggle — no other new keys from #1592 ' +
+        '(workflow.context_drift_precheck / workflow.context_drift_action are #3348\'s separate context-drift gate keys)',
     );
   });
 });
@@ -6865,12 +7604,14 @@ const MANIFEST_REQUIRED_KEYS = new Set([
  */
 function extractManifests(mdContent) {
   const manifests = [];
-  const fenceRe = /```json\s*\r?\n([\s\S]*?)```/g;
-  let match;
-  while ((match = fenceRe.exec(mdContent)) !== null) {
+  const lines = mdContent.split(/\r?\n/);
+  for (const block of scanFencedBlocks(lines)) {
+    if (block.closeLineIdx === -1) continue;
+    if ((block.infoString || '').trim().toLowerCase() !== 'json') continue;
+    const body = lines.slice(block.openLineIdx + 1, block.closeLineIdx).join('\n');
     let parsed;
     try {
-      parsed = JSON.parse(match[1]);
+      parsed = JSON.parse(body);
     } catch {
       continue;
     }

@@ -253,20 +253,21 @@
 **要件:**
 - REQ-UI-01: システムは既存のデザインシステムの状態を検出しなければならない（shadcn の components.json、Tailwind 設定、トークン）
 - REQ-UI-02: システムは未回答のデザインコントラクトの質問のみを行わなければならない
-- REQ-UI-03: システムは6つの次元（コピーライティング、ビジュアル、カラー、タイポグラフィ、スペーシング、レジストリセーフティ）に対してバリデーションしなければならない
+- REQ-UI-03: システムは7つの次元（コピーライティング、ビジュアル、カラー、タイポグラフィ、スペーシング、レジストリセーフティ、インベントリプロビナンス）に対してバリデーションしなければならない
 - REQ-UI-04: バリデーションが BLOCKED を返した場合、システムはリビジョンループに入らなければならない（最大2回の反復）
 - REQ-UI-05: `components.json` のない React/Next.js/Vite プロジェクトに対して、システムは shadcn の初期化を提案しなければならない
 - REQ-UI-06: システムはサードパーティの shadcn レジストリに対してレジストリセーフティゲートを適用しなければならない
 
 **生成物:** `{padded_phase}-UI-SPEC.md` — エグゼキューターが参照するデザインコントラクト
 
-**6つのバリデーション次元:**
+**7つのバリデーション次元:**
 1. **コピーライティング** — CTA ラベル、空状態、エラーメッセージ
 2. **ビジュアル** — フォーカルポイント、視覚的階層構造、アイコンのアクセシビリティ
 3. **カラー** — アクセントカラーの使用規律、60/30/10 準拠
 4. **タイポグラフィ** — フォントサイズ/ウェイトの制約遵守
 5. **スペーシング** — グリッド配置、トークンの一貫性
 6. **レジストリセーフティ** — サードパーティコンポーネントの検査要件
+7. **インベントリプロビナンス** — コンポーネントインベントリがインストール済みのデザインシステムから列挙されたものであり、記憶に頼っていないこと
 
 **shadcn 連携:**
 - React/Next.js/Vite プロジェクトで `components.json` が欠落していることを検出
@@ -1012,7 +1013,7 @@ fix(03-01): correct auth token expiry
 **目的:** 複数の AI コーディングエージェントランタイムで GSD を実行します。
 
 **要件:**
-- REQ-RUNTIME-01: システムは Claude Code、OpenCode、Gemini CLI、Kilo、Codex、Copilot、Antigravity をサポートしなければならない
+- REQ-RUNTIME-01: システムは Claude Code、OpenCode、Kilo、Codex、Copilot、Antigravity をサポートしなければならない
 - REQ-RUNTIME-02: インストーラーはランタイムごとにコンテンツを変換しなければならない（ツール名、パス、フロントマター）
 - REQ-RUNTIME-03: インストーラーはインタラクティブおよび非インタラクティブ（`--claude --global`）モードをサポートしなければならない
 - REQ-RUNTIME-04: インストーラーはグローバルとローカルの両方のインストールをサポートしなければならない
@@ -1021,12 +1022,12 @@ fix(03-01): correct auth token expiry
 
 **ランタイム変換:**
 
-| 側面 | Claude Code | OpenCode | Gemini | Kilo | Codex | Copilot | Antigravity |
-|------|------------|----------|--------|-------|-------|---------|-------------|
-| コマンド | スラッシュコマンド | スラッシュコマンド | スラッシュコマンド | スラッシュコマンド | スキル（TOML） | スラッシュコマンド | スキル |
-| エージェント形式 | Claude ネイティブ | `mode: subagent` | Claude ネイティブ | `mode: subagent` | スキル | ツールマッピング | スキル |
-| フックイベント | `PostToolUse` | N/A | `AfterTool` | N/A | N/A | N/A | N/A |
-| 設定 | `settings.json` | `opencode.json(c)` | `settings.json` | `kilo.json(c)` | TOML | Instructions | Config |
+| 側面 | Claude Code | OpenCode | Kilo | Codex | Copilot | Antigravity |
+|------|------------|----------|-------|-------|---------|-------------|
+| コマンド | スラッシュコマンド | スラッシュコマンド | スラッシュコマンド | スキル（TOML） | スラッシュコマンド | スキル |
+| エージェント形式 | Claude ネイティブ | `mode: subagent` | `mode: subagent` | スキル | ツールマッピング | スキル |
+| フックイベント | `PostToolUse` | N/A | N/A | N/A | N/A | N/A |
+| 設定 | `settings.json` | `opencode.json(c)` | `kilo.json(c)` | TOML | Instructions | Config |
 
 ---
 
@@ -1163,9 +1164,9 @@ fix(03-01): correct auth token expiry
 
 ### 42. クロス AI ピアレビュー
 
-**コマンド:** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--antigravity] [--ollama] [--lm-studio] [--llama-cpp] [--kimi-code] [--all]`
+**コマンド:** `/gsd-review --phase N [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--antigravity] [--ollama] [--lm-studio] [--llama-cpp] [--kimi-code] [--all]`
 
-**目的:** 外部の AI CLI（Gemini、Claude、Codex、CodeRabbit、OpenCode、Qwen Code、Cursor、Antigravity、Kimi Code）とローカルの OpenAI 互換サーバー（Ollama、LM Studio、llama.cpp）を呼び出して、フェーズプランを独立してレビューします。レビュアーごとのフィードバックを含む構造化された REVIEWS.md を生成します。
+**目的:** 外部の AI CLI（Claude、Codex、CodeRabbit、OpenCode、Qwen Code、Cursor、Antigravity、Kimi Code）とローカルの OpenAI 互換サーバー（Ollama、LM Studio、llama.cpp）を呼び出して、フェーズプランを独立してレビューします。レビュアーごとのフィードバックを含む構造化された REVIEWS.md を生成します。
 
 **要件:**
 - REQ-REVIEW-01: システムはシステム上で利用可能な AI CLI を検出しなければならない
@@ -1429,7 +1430,7 @@ Claude が GSD ワークフローコンテキスト外でファイル編集を�
 **目的:** 1回のインタラクティブなインストールセッションで複数のランタイムを選択します。
 
 **要件:**
-- REQ-MULTI-RT-01: インタラクティブプロンプトはマルチセレクトをサポートしなければならない（例: Claude Code + Gemini）
+- REQ-MULTI-RT-01: インタラクティブプロンプトはマルチセレクトをサポートしなければならない（例: Claude Code + Antigravity）
 - REQ-MULTI-RT-02: CLI フラグは非インタラクティブインストールで引き続き動作しなければならない
 
 **プロセス:**
@@ -1671,13 +1672,13 @@ Claude が GSD ワークフローコンテキスト外でファイル編集を�
 **要件:**
 - REQ-SKILLS-01: インストーラーは Claude Code 2.1.88+ 向けに `skills/gsd-*/SKILL.md` を書き込まなければならない
 - REQ-SKILLS-02: インストーラーはレガシー `commands/gsd/` ディレクトリを自動クリーンしなければならない
-- REQ-SKILLS-03: Gemini パスを通じて古い Claude Code バージョンとの後方互換性を維持しなければならない
+- REQ-SKILLS-03: レガシー `commands/gsd/` パスを通じて古い Claude Code バージョンとの後方互換性を維持しなければならない
 
 **プロセス:**
 1. **検出** — Claude Code のバージョンをチェックしてスキルサポートを判定
 2. **マイグレーション** — 各 GSD コマンドに対して `skills/gsd-*/SKILL.md` ファイルを書き込み
 3. **クリーン** — スキルがインストールされた場合、レガシー `commands/gsd/` ディレクトリを削除
-4. **フォールバック** — 古い Claude Code バージョンのために Gemini パス互換性を維持
+4. **フォールバック** — 古い Claude Code バージョンのためにレガシー `commands/gsd/` パス互換性を維持
 
 ---
 
@@ -2119,6 +2120,15 @@ Claude が GSD ワークフローコンテキスト外でファイル編集を�
 |------|-----|-----------|------|
 | `workflow.code_review` | boolean | `true` | コードレビューコマンドを有効化 |
 | `workflow.code_review_depth` | string | `standard` | デフォルトのレビュー深度：`quick`、`standard`、または `deep` |
+| `workflow.code_review_depth_overrides` | array | `[]` | 変更ファイル集合に対するパスプレフィックス一致で特定ディレクトリのレビュー深度をエスカレートする、順序付き `{ paths, depth }` ルール（#2554）。詳細は下記参照。 |
+
+**パススコープのコードレビュー深度オーバーライド**
+
+`workflow.code_review_depth_overrides` は、レビュー対象の変更ファイル集合に対して、セグメント単位のディレクトリパスプレフィックスでルールを照合します。`src/auth` は `src/auth/token.ts` および `src/auth` 自体に一致しますが、`src/authfoo/x.ts` や `docs/src/auth/x.ts` には一致しません。照合は git と同様に大文字小文字を区別します。
+
+エスカレーションは**レビュー全体単位であり、ファイル単位ではありません**：深度はレビューエージェントに渡される単一のスカラー値であり、ファイルごとの設定ではないため、ルールセット全体で一致した最も強いティアがレビュー内のすべてのファイルに適用されます — 機密ファイルが無関係なファイルと同じレビューに含まれたために浅くレビューされることはありません。
+
+v1 は**ディレクトリプレフィックス一致のみをサポートし、glob 構文はサポートしません**：このプロジェクトには glob エンジン（`minimatch`、`picomatch`、`fast-glob`）が存在せず、この機能のために追加もされていません。`*` や `?` を含むパス（例：`src/auth/**`）は、静かな近似一致ではなく設定エラーとして扱われます。
 
 ---
 
@@ -2942,7 +2952,7 @@ Source commit: abc1234 (3 commits behind HEAD)
 
 **要件:**
 - REQ-QUOTA-01: クォータ失敗は即時再試行を主要な回復として提供してはならない。
-- REQ-QUOTA-02: 分類は Claude、Copilot、Codex、Gemini、および汎用プロバイダーセンチネルをカバーしなければならない。
+- REQ-QUOTA-02: 分類は Claude、Copilot、Codex、および汎用プロバイダーセンチネルをカバーしなければならない。
 - REQ-QUOTA-03: 非クォータ失敗は通常の実行失敗パスを継続しなければならない。
 
 **参照:** [プロバイダーレート制限シグナル](../research/provider-rate-limit-signals.md)

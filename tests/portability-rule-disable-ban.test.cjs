@@ -44,6 +44,11 @@ const PROTECTED_RULES = [
   // ADR-1703 Phase 6 rule (issue #1740) — applies to src/**/*.cts AND the build/install
   // surface (bin/install.js, scripts/build-hooks.js) brought under lint by the glob expansion
   'require-fs-op-fallback',
+  // #4244 hardening (origin #4020 / #4220 Windows CI hang) — applies to tests/**/*.test.cjs
+  'require-full-tmpdir-triad',
+  'no-unbounded-dirname-walk',
+  // #4590 (epic #4589 Phase 1)
+  'no-rendered-text-length-assert',
 ];
 
 // ── Detect disable directives via the comment text ───────────────────────────

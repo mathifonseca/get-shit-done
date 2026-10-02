@@ -24,6 +24,7 @@ const { runNode } = require('./process-seam.cjs');
 const {
   resolveRuntimeArtifactLayout,
 } = require('../../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+const { escapeRegex: escapeRegExp } = require('../../gsd-core/bin/lib/pattern.cjs');
 
 const INSTALL_SCRIPT = path.join(__dirname, '..', '..', 'bin', 'install.js');
 const MANIFEST_NAME = 'gsd-file-manifest.json';
@@ -154,6 +155,11 @@ const PKG_VERSION = require('../../package.json').version;
 // that cause hash drift between local (PKG_VERSION=1.x.x) and CI (PKG_VERSION=1.x.x-rc.N):
 // the PKG_VERSION normalization below replaces only the *current* version, but
 // CHANGELOG.md references prior-release versions, so the normalized hash diverges.
+// gsd-file-manifest.json's exclusion was revisited deliberately for #2872: the
+// manifest gained `manifestVersion`/`runtime`/`scope` fields, all of which are
+// deterministic and would not by themselves force an exclusion, but `timestamp`
+// — the original reason this file is volatile — is unchanged by #2872, so the
+// exclusion still holds for exactly the same reason it always has.
 const VOLATILE_FILES = new Set([
   'gsd-file-manifest.json',
   'gsd-install-state.json',
@@ -185,18 +191,22 @@ const HOOK_CONFIG_FILES = new Set(['settings.json', 'settings.local.json', 'hook
 // platform-stable `[features] hooks = true` flag — the real hook commands
 // live in Codex's separate hooks.json, already excluded above). Blanket-
 // excluding the 'config.toml' basename would silently blind Codex's fixture
-// to any future regression there. Kimi's config.toml instead lives OUTSIDE
-// its GSD configDir at runtime (resolveKimiHooksTomlDir resolves ~/.kimi, a
-// sibling of the configDir ~/.config/agents) — it only appears inside this
-// harness's walked tree at all because runMinimalInstall sets HOME to the
-// same temp root used as --config-dir, collapsing the two into one directory
-// for the isolated test run. So it is excluded by its exact relative path
-// under that collapsed root, not by basename.
-// Both Kimi products' native config.toml embeds a platform-varying node-runner
-// command, so neither belongs in the golden-tracked emitted manifest. kimi-code
-// resolves its own root since #2755 — listing only `.kimi/config.toml` here made
-// kimi-code's config.toml newly manifest-visible and unattributable.
-const HOOK_CONFIG_RELATIVE_PATHS = new Set(['.kimi/config.toml', '.kimi-code/config.toml']);
+// to any future regression there — and it would blind kimi-code's too: since
+// #3547 the harness installs into each runtime's REAL global subdirectory, so
+// kimi-code's hooks config.toml sits at its configDir root (rel `config.toml`)
+// and is legitimately manifest-visible. Tracking it is safe now: the
+// install-tree fixture carries paths only, and the ADR-2719 differential
+// compares base-vs-current on the same machine, so the platform-varying
+// node-runner command embedded in the TOML never crosses platforms inside a
+// gate (that was a golden-content-era hazard, and the goldens are gone).
+// Kimi CLI's config.toml (KIMI_SHARE_DIR root ~/.kimi) lives OUTSIDE its GSD
+// configDir (~/.config/agents) and never enters the walk. The pre-#3547
+// relative-path exclusions ('.kimi/config.toml', '.kimi-code/config.toml')
+// existed only for the collapsed shape — where the walked root was the HOME
+// itself and those HOME-level siblings were inside it; with no walker rooting
+// at HOME anymore they matched nothing and were removed (#3547). kimi-code
+// resolves its own root since #2755.
+const HOOK_CONFIG_RELATIVE_PATHS = new Set();
 
 // Path prefixes excluded from the parity manifest. `gsd-core/bin/lib/` holds the
 // tsc-built runtime artifacts (compiled from src/*.cts) that the install COPIES
@@ -222,9 +232,6 @@ function stripAnsi(str) {
 // A version string can itself contain regex metacharacters (`.`, and — via
 // prerelease/build metadata — `-`/`+`), so it must be escaped before being spliced
 // into a RegExp source, or e.g. the `.` in "1.9.0" would match ANY character.
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 // Loosely semver-shaped: leading `MAJOR.MINOR.PATCH`, optional `-prerelease` and/or
 // `+build` metadata (e.g. `1.9.0`, `1.9.0-rc.1`, `1.9.0+abc`). Deliberately loose
@@ -290,6 +297,32 @@ function walk(dir) {
     else results.push(full);
   }
   return results;
+}
+
+// #3738: runtimes whose GLOBAL artifact layout declares a kind `home` override
+// that resolves OUTSIDE configDir (antigravity → <HOME>/.gemini/config, the dir
+// AGY scans for machine-local discovery). The parity walk must cover those
+// roots too, or every emitted skill/agent silently leaves the manifest the
+// moment the override appears — exactly the #3547 blind-spot class this
+// harness exists to prevent (a real install shape the manifest cannot see).
+// Mirrors the capability registry's artifactLayout `home` fields the same way
+// RUNTIME_META mirrors configHome; codex's `.agents` override is deliberately
+// NOT listed here — its skills have never been manifest-covered, and widening
+// this table for codex is a coverage change unrelated to #3738.
+const EXTRA_GLOBAL_EMIT_ROOTS = {
+  antigravity: [path.join('.gemini', 'config')],
+};
+
+/**
+ * Absolute extra emit-root directories for a runtime/scope pair — the
+ * home-override install roots outside configDir — or [] when none.
+ * @param {string} runtime
+ * @param {string} scope
+ * @param {string} root  the sandboxed HOME/temp root the install ran under
+ */
+function extraEmitRootsFor(runtime, scope, root) {
+  const suffixes = (scope === 'global' && EXTRA_GLOBAL_EMIT_ROOTS[runtime]) || [];
+  return suffixes.map((suffix) => path.join(root, suffix));
 }
 
 /**
@@ -384,7 +417,29 @@ function collectNormalizedEmittedFiles(configDir, root, opts, callerName) {
       'Pass the version of the tree that produced the emitted content at configDir.'
     );
   }
-  const allFiles = walk(configDir);
+  // #3738: home-override emit roots outside configDir (see
+  // EXTRA_GLOBAL_EMIT_ROOTS). Each extra root's files are keyed rel to THAT
+  // root — the emitted key space is install-location-relative ('skills/…',
+  // 'agents/…'), so the same artifact keeps the same key whether the layout
+  // resolves it under configDir or under the override root. configDir entries
+  // win on collision (a layout would never write both, but a stale leftover
+  // under configDir must not shadow the live emit root).
+  const extraEmitRoots = Array.isArray(opts.extraEmitRoots) ? opts.extraEmitRoots : [];
+  const allFiles = walk(configDir).map((full) => ({ full, relRoot: configDir }));
+  for (const extraRoot of extraEmitRoots) {
+    if (typeof extraRoot !== 'string' || extraRoot.length === 0) {
+      throw new Error(`${callerName}: opts.extraEmitRoots entries must be non-empty absolute paths`);
+    }
+    if (path.resolve(extraRoot) === path.resolve(configDir)) continue;
+    // An absent extra root is a legitimate shape, not an error: the baseline
+    // side measures a BASE tree whose installer may predate the home override
+    // (the artifacts then live under configDir, which IS walked). Only a
+    // root that exists but cannot be read is a failure — walk() surfaces that.
+    let stat;
+    try { stat = fs.statSync(extraRoot); } catch { continue; }
+    if (!stat.isDirectory()) continue;
+    for (const full of walk(extraRoot)) allFiles.push({ full, relRoot: extraRoot });
+  }
   const unsorted = {};
 
   // The claude LOCAL install resolves its config dir via realpath, which on macOS
@@ -398,11 +453,15 @@ function collectNormalizedEmittedFiles(configDir, root, opts, callerName) {
   let realRoot = root;
   try { realRoot = fs.realpathSync(root); } catch { /* root already gone / not resolvable */ }
 
-  for (const full of allFiles) {
+  for (const { full, relRoot } of allFiles) {
     // Build POSIX-style relative path for cross-platform stability
-    const rel = path.relative(configDir, full).split(path.sep).join('/');
+    const rel = path.relative(relRoot, full).split(path.sep).join('/');
 
     if (VOLATILE_FILES.has(rel)) continue;
+    // Collision policy stated above: configDir owns the key first; a file in
+    // an extra emit root with an already-claimed rel is the stale-leftover
+    // case, not a second opinion.
+    if (relRoot !== configDir && Object.prototype.hasOwnProperty.call(unsorted, rel)) continue;
     if (HOOK_CONFIG_FILES.has(path.basename(rel))) continue;
     if (HOOK_CONFIG_RELATIVE_PATHS.has(rel)) continue;
     if (EXCLUDED_PREFIXES.some((p) => rel.startsWith(p))) continue;
@@ -493,10 +552,15 @@ function buildEmittedSizes(configDir, root, opts = {}) {
  *  normalizes to, never which paths buildParityManifest walks or excludes — so there
  *  is nothing for a caller to pass here, and forwarding one through would only let a
  *  bad version value make a pure file-set query throw for no file-set-shaped reason
- *  (#2891 review FINDING 6; verified no caller passes a third argument —
- *  tests/golden-install-tree.test.cjs, scripts/gen-install-tree-fixtures.cjs). */
-function buildInstallTree(configDir, root) {
-  return Object.keys(buildParityManifest(configDir, root)).sort();
+ *  (#2891 review FINDING 6; verified no caller passes a version argument —
+ *  tests/golden-install-tree.test.cjs, scripts/gen-install-tree-fixtures.cjs).
+ *  #3738: an OPTIONAL third argument — extraEmitRoots (array, see
+ *  extraEmitRootsFor) — is the one non-version thing a file-set query legitimately
+ *  needs: the home-override install roots outside configDir. Omitted/null keep the
+ *  legacy configDir-only walk, so buildInstallTree(cd, root, null) still equals
+ *  buildInstallTree(cd, root). */
+function buildInstallTree(configDir, root, extraEmitRoots) {
+  return Object.keys(buildParityManifest(configDir, root, { extraEmitRoots })).sort();
 }
 
 function simulateHookCopy(hooksSrc, hooksDest) {
@@ -520,7 +584,15 @@ function simulateHookCopy(hooksSrc, hooksDest) {
 /** Build a clean env for spawned installer processes.
  *  Must strip GSD_TEST_MODE so the child runs the real install, not the no-op guard. */
 function installerEnv(overrides = {}) {
-  const env = { ...process.env, ...overrides };
+  // #3156: delegate to the ONE canonical raw-installer-spawn env rather than
+  // carrying a second shape of it. The installer writes GSD's own user store to
+  // <home>/.gsd/defaults.json through os.homedir() DIRECTLY
+  // (bin/install.js writeNonClaudeDefaults, #2834), which reads no GSD variable,
+  // so no config-location scrub can reach it — only a sandboxed HOME can. Every
+  // caller that already passes an explicit { HOME, USERPROFILE } still wins:
+  // overrides spread last.
+  const { installSpawnEnv } = require('../helpers.cjs');
+  const env = installSpawnEnv(overrides);
   delete env.GSD_TEST_MODE;
   return env;
 }
@@ -544,27 +616,55 @@ function runMinimalInstall({ runtime, scope, extraArgs = [], installScript = INS
   const ownsRoot = providedRoot === null;
   const root = providedRoot ?? fs.mkdtempSync(path.join(os.tmpdir(), `gsd-${runtime}-${scope}-`));
   try {
-    const LOCAL_DIR_NAME = {
-      claude: '.claude', opencode: '.opencode', kilo: '.kilo',
-      codex: '.codex', copilot: '.github', antigravity: '.agents', cursor: '.cursor',
-      windsurf: '.windsurf', augment: '.augment', trae: '.trae', qwen: '.qwen',
-      codebuddy: '.codebuddy', cline: '.',
-      // #3023: pi was in RUNTIME_META but absent here, so `scope: 'local'` for pi
-      // resolved `path.join(root, undefined)` and threw — no local-scope pi install
-      // could ever be exercised. pi's local config dir is `.pi`
-      // (capabilities/pi/capability.json runtime.localConfigDir).
-      pi: '.pi',
-    };
     let configDir;
     let cwd = process.cwd();
     const args = [installScript, `--${runtime}`];
     if (scope === 'global') {
-      args.push('--global', '--config-dir', root);
-      configDir = root;
+      // #3547 — install into the runtime's REAL global config home: the strict
+      // subdirectory of the sandbox HOME a genuine global install resolves
+      // (RUNTIME_META.globalSuffix mirrors the registry's getGlobalConfigDir
+      // for every runtime). The previous `--config-dir <root>` collapsed
+      // configDir onto HOME, so computePathPrefix emitted bare `$HOME/`
+      // prefixes and the emitted bytes referenced `$HOME/gsd-core/…` — a path
+      // no real install produces — leaving every emitted-artifact gate
+      // (ADR-2719 differential, install-tree fixtures, the 19-family baseline)
+      // blind to drift confined to the real global shape (#3544 evidence: 54
+      // includes rewritten on live installs, zero manifest/fixture diffs). The
+      // explicit flag stays: hermeticity-by-override is immune to ambient
+      // redirect envs (CI runners export XDG_CONFIG_HOME, which redefines the
+      // opencode/kilo XDG descriptors' resolution when no explicit dir wins).
+      const globalMeta = RUNTIME_META[runtime];
+      if (!globalMeta || !globalMeta.globalSuffix) {
+        // #3023 lesson: a silent `path.join(root, undefined)` here throws a
+        // bare TypeError naming neither the runtime nor the map at fault; a
+        // runtime without a known global home must fail loudly before any
+        // install spawns.
+        throw new Error(
+          `runMinimalInstall: no RUNTIME_META.globalSuffix for runtime "${runtime}" — refusing to guess a global config dir (#3547)`,
+        );
+      }
+      configDir = path.join(root, globalMeta.globalSuffix);
+      args.push('--global', '--config-dir', configDir);
     } else {
       args.push('--local');
       cwd = root;
-      configDir = runtime === 'cline' ? root : path.join(root, LOCAL_DIR_NAME[runtime]);
+      // #3031: local scope reads RUNTIME_META.localDir — the SAME table the
+      // global branch above reads — instead of a second hand-maintained map.
+      // That duplicate map was missing four runtimes (hermes, kimi, kimi-code,
+      // zcode), so `scope: 'local'` for any of them resolved
+      // `path.join(root, undefined)` and threw a bare TypeError naming neither
+      // the runtime nor the map at fault. #3023 fixed exactly this for `pi` by
+      // adding one more entry, which left the divergence itself in place; the
+      // table is now single-source so a new runtime cannot reintroduce it.
+      // `cline` keeps its ternary: its local artifacts land at the project root
+      // itself, which is a genuine exception rather than a directory name.
+      const localMeta = RUNTIME_META[runtime];
+      if (runtime !== 'cline' && (!localMeta || !localMeta.localDir)) {
+        throw new Error(
+          `runMinimalInstall: no RUNTIME_META.localDir for runtime "${runtime}" — refusing to guess a local config dir (#3031)`,
+        );
+      }
+      configDir = runtime === 'cline' ? root : path.join(root, localMeta.localDir);
     }
     args.push(...extraArgs);
     const result = runNode(args, {
@@ -709,6 +809,7 @@ module.exports = {
   buildParityManifest,
   buildEmittedSizes,
   buildInstallTree,
+  extraEmitRootsFor,
   simulateHookCopy,
   installerEnv,
   runMinimalInstall,

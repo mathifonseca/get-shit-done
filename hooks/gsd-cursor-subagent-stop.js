@@ -20,13 +20,16 @@
 
 'use strict';
 
-let raw = '';
+const { allow } = require('./lib/hook-exit.js');
+
 const stdinTimeout = setTimeout(() => {
-  process.exit(0);
+  allow(undefined);
 }, 10000);
 
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => { raw += chunk; });
+// Drain stdin (puts the stream into flowing mode so 'end' fires); the
+// payload itself is unused — this hook responds unconditionally.
+process.stdin.on('data', () => {});
 process.stdin.on('end', () => {
   clearTimeout(stdinTimeout);
   try {

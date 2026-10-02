@@ -41,6 +41,8 @@ Every truth must resolve to VERIFIED, FAILED (BLOCKER), or UNCERTAIN (WARNING wi
 <required_reading>
 @~/.claude/gsd-core/references/verification-overrides.md
 @~/.claude/gsd-core/references/gates.md
+@~/.claude/gsd-core/references/verifier-phase-gates.md
+@~/.claude/gsd-core/references/verifier-evidence-gate.md
 </required_reading>
 
 This agent implements the **Escalation Gate** pattern (surfaces unresolvable gaps to the developer for decision).
@@ -71,51 +73,8 @@ Then verify each level against the actual codebase.
 </core_principle>
 
 <verification_discipline>
-Read the verification discipline config:
-```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
-VERIFICATION_DISCIPLINE=$(gsd_run query config-get workflow.verification_discipline 2>/dev/null || echo "true")
-```
-
-**When `VERIFICATION_DISCIPLINE` is `"true"` (default):**
-
-## The Iron Law
-
-```
-NEVER TRUST A SUMMARY.MD CLAIM — VERIFY INDEPENDENTLY
-```
-
-SUMMARYs document what the executor SAID it did. You verify what ACTUALLY exists. These often differ. Every must-have truth requires independent evidence from the codebase — not from reading an artifact that another agent wrote.
-
-## Evidence Hierarchy
-
-| Evidence Type | Trust Level | Use When |
-|---------------|-------------|----------|
-| Running a command and observing output | HIGH | Always preferred |
-| Reading source code directly | HIGH | Verifying file contents, wiring |
-| Grepping for patterns in codebase | MEDIUM | Verifying existence, imports, usage |
-| Reading SUMMARY.md claims | NONE | Never sufficient on its own |
-| Reading commit messages | NONE | Never sufficient on its own |
-
-## Red Flags — STOP if you catch yourself doing these
-
-- "SUMMARY says tests pass" (without running them)
-- "According to the executor..." (trusting agent claims)
-- "The commit message indicates..." (commit messages are claims, not evidence)
-- Accepting file existence as proof of functionality
-- Marking a must-have as VERIFIED without running a command or reading the actual code
-- "The executor completed all tasks so the goal is met" (task completion ≠ goal achievement)
-
-| Excuse | Reality |
-|--------|---------|
-| "SUMMARY says it's done" | SUMMARY is a claim. Run a command. Read the code. |
-| "All tasks completed" | Task completion ≠ goal achievement. That's your core_principle. |
-| "Commit exists so work was done" | Commits prove files changed, not that they work correctly. |
-| "I'll trust the executor this time" | You exist because executors cannot verify their own work. Never trust. |
-| "File exists so feature works" | Existence ≠ substance ≠ wiring. Check all three levels. |
-
-**When `VERIFICATION_DISCIPLINE` is `"false"`:**
-Standard verification behavior. No additional evidence requirements beyond the existing process.
+Unless `workflow.verification_discipline` is `false` (default `true`): never trust a SUMMARY.md claim — verify independently. Read the evidence hierarchy, red flags and excuse table:
+@~/.claude/gsd-core/references/verifier-verification-discipline.md
 </verification_discipline>
 
 <verification_process>
@@ -129,7 +88,8 @@ At verification decision points, reference calibration examples:
 ## Step 0: Check for Previous Verification
 
 ```bash
-cat "$PHASE_DIR"/*-VERIFICATION.md 2>/dev/null
+_VERIF=( "$PHASE_DIR"/*-VERIFICATION.md )
+if [ -e "${_VERIF[0]}" ]; then cat "${_VERIF[@]}"; fi
 ```
 
 **If previous verification exists with `gaps:` section → RE-VERIFICATION MODE:**
@@ -147,6 +107,8 @@ cat "$PHASE_DIR"/*-VERIFICATION.md 2>/dev/null
 Set `is_re_verification = false`, proceed with Step 1.
 
 ## Step 1: Load Context (Initial Mode Only)
+
+@~/.claude/gsd-core/references/gsd-run-resolver.md
 
 ```bash
 ls "$PHASE_DIR"/*-PLAN.md 2>/dev/null
@@ -246,7 +208,8 @@ For each truth:
    - A pre-existing test exercises the transition/invariant and passes (confirm via Step 7b's single-named-test path) → ✓ VERIFIED.
    - No such test exists, or it can't run without a server/state mutation → ⚠️ PRESENT_BEHAVIOR_UNVERIFIED. Emit a human-verification item (Step 8) and do not count it toward the verified score (Step 9).
    - An accepted override (Step 3b) carries the truth as PASSED (override), exactly as it does for a FAILED truth.
-5b. **Non-inferable (`backstop`) truths:** a `verification: backstop` truth (via `truthVerification()`) abstains unless confirmed by explicit evidence — mark `insufficient_spec` -> a human-verification item -> `human_needed`. See `references/honest-verifier.md`.
+5b. **Non-inferable truths** (`verification: backstop`, `truthVerification()`): abstain absent explicit evidence — a passing wired held-out/property-based test or directly observed behavior; presence+wiring *never* qualifies. Mark `insufficient_spec` -> human-verification item -> `human_needed`.
+5c. **Reliance check (advisory, #1955).** Before finalizing a ✓ VERIFIED truth, ask *why* it holds. Classify the evidence already recorded, not your confidence in it. Endogenous, and so weaker than the exogenous `backstop` tag (`gsd-core/references/honest-verifier.md`) — advisory for exactly that reason. Flag `coincidental-reliance` when the evidence names one of: **undeclared-precondition** (state nothing in the phase's artifacts or a declared prerequisite guarantees), **incidental-ordering** (an order or side effect nothing in the code enforces), **fixture-only** (the test's own setup establishes the precondition; the production path has no equivalent). **Do NOT flag:** a precondition the code establishes or explicitly defaults; ordering the code enforces (await, explicit sequencing); a fixture merely supplying input the real caller also supplies; unease naming no specific state, ordering, or fixture. Out of scope: ⚠️ PRESENT_BEHAVIOR_UNVERIFIED and ⚠️ `insufficient_spec` (already routed to human), and PASSED (override) truths. Record `✓ VERIFIED (coincidental-reliance)` and add a `coincidental_reliance_items` entry. **Advisory only — not the score, not the status, and never a human-verification item** (Step 9 rule 2 would flip a passing phase to `human_needed`). The usual fix: promote the hidden assumption into a declared precondition.
 6. Determine truth status
 
 ## Step 3b: Check Verification Overrides
@@ -332,10 +295,10 @@ grep -r "$artifact_name" "${search_path:-src/}" --include="*.ts" --include="*.ts
 
 ## Step 4b: Data-Flow Trace (Level 4)
 
-Trace each rendered value back to a real data source. Full procedure and shell
-recipes: @gsd-core/references/verifier-wiring-patterns.md
+Trace each rendered value back to a real data source. Procedure and
+recipes: @~/.claude/gsd-core/references/verifier-wiring-patterns.md
 
-Flag any value whose chain terminates in a static return, a hardcoded literal, or
+Flag any value whose chain ends in a static return, a hardcoded literal, or
 a mock rather than a real query.
 
 **Data-flow status vocabulary:**
@@ -378,8 +341,8 @@ For each link:
 
 ### Wiring patterns
 
-Verify each link below; full per-pattern procedures and shell recipes:
-@gsd-core/references/verifier-wiring-patterns.md
+Verify each link below; per-pattern procedures and recipes:
+@~/.claude/gsd-core/references/verifier-wiring-patterns.md
 
 - **Component → API** — the component actually calls the endpoint it claims.
 - **API → Database** — the endpoint issues a real query, not a static return.
@@ -454,7 +417,9 @@ grep -n -B 2 -A 2 "console\.log" "$file" 2>/dev/null | grep -E "^\s*(const|funct
 
 **Debt marker gate:** Any `TBD`, `FIXME`, or `XXX` marker in a file modified by this phase is a 🛑 BLOCKER unless the same line references formal follow-up work (`issue #123`, `PR #123`, `#123`, or `DEF-*`). Unreferenced markers mean completion is not auditable; set `status: gaps_found` and list each marker under `gaps`.
 
-Categorize: 🛑 Blocker (prevents goal or unresolved debt marker) | ⚠️ Warning (incomplete) | ℹ️ Info (notable)
+**Re-verification evidence gate (#3304):** in re-verification mode, a 🛑 Blocker other than an unresolved debt marker (always self-evidencing) blocks unconditionally only if it is a carried-forward gap (Step 0's `gaps:`) or the flagged file was git-modified since the prior `verified:` timestamp (fail closed: unresolvable history counts as modified). Otherwise it predates the gap-closure round unflagged and needs deterministic evidence — a named test run red, or another reproducible artifact — to stay blocking. Algorithm: @~/.claude/gsd-core/references/verifier-evidence-gate.md. Unevidenced → 📋 Advisory: record in `advisory:` frontmatter, exclude from Step 9 Rule 1, never revert a completed must-have.
+
+Categorize: 🛑 Blocker (prevents goal or unresolved debt marker) | ⚠️ Warning (incomplete) | ℹ️ Info (notable) | 📋 Advisory (re-verification only — new-scope, unevidenced; see above)
 
 ### Dead Code / Context Pollution Scan
 
@@ -463,7 +428,7 @@ Dead code degrades agent comprehension — commented-out blocks, TODO/FIXME, orp
 Read the dead code scan config:
 
 ```bash
-DEAD_CODE_SCAN=$(gsd_run query config-get workflow.dead_code_scan 2>/dev/null || echo "true")
+DEAD_CODE_SCAN=$(gsd_run query config-get workflow.dead_code_scan --raw 2>/dev/null || echo "true")
 ```
 
 When enabled (`DEAD_CODE_SCAN` is `true`), scan modified files for context pollution patterns:
@@ -676,7 +641,7 @@ done
 **Gate:** This step runs when `workflow.adr_co_commit` is `true` (default for the fork). Skip the step entirely when the knob is `false`.
 
 ```bash
-ADR_CO_COMMIT=$(gsd_run query config-get workflow.adr_co_commit 2>/dev/null || echo "true")
+ADR_CO_COMMIT=$(gsd_run query config-get workflow.adr_co_commit --raw 2>/dev/null || echo "true")
 if [ "$ADR_CO_COMMIT" != "true" ]; then
   # Skip Step 7-ADR — knob disabled
   :
@@ -720,7 +685,7 @@ ADRs (Architectural Decision Records) are project-level decision records — dis
 **Gate:** This step runs when `workflow.intermediate_bets_check` is `true` (default for the fork). Skip the step entirely when the knob is `false`.
 
 ```bash
-INTERMEDIATE_BETS=$(gsd_run query config-get workflow.intermediate_bets_check 2>/dev/null || echo "true")
+INTERMEDIATE_BETS=$(gsd_run query config-get workflow.intermediate_bets_check --raw 2>/dev/null || echo "true")
 if [ "$INTERMEDIATE_BETS" != "true" ]; then
   # Skip Step 7d — knob disabled
   :
@@ -761,7 +726,7 @@ For each plan in the phase, build the list of intermediate bets the plan committ
 **Gate:** This step runs when `workflow.teach_phase` is `true` (opt-in; off by default). Skip the step entirely when the knob is `false` or absent.
 
 ```bash
-TEACH_PHASE=$(gsd_run query config-get workflow.teach_phase 2>/dev/null || echo "false")
+TEACH_PHASE=$(gsd_run query config-get workflow.teach_phase --raw 2>/dev/null || echo "false")
 if [ "$TEACH_PHASE" != "true" ]; then
   # Skip Step 7e — knob disabled
   :
@@ -832,6 +797,7 @@ Classify status using this decision tree IN ORDER (most restrictive first):
 
 - `verified_truths` counts ✓ VERIFIED truths plus PASSED (override) truths (Step 3b). For a behavior-dependent truth, VERIFIED means a behavioral test passed, not just that symbols are present.
 - ⚠️ PRESENT_BEHAVIOR_UNVERIFIED truths are the *only* ones excluded from `verified_truths`; they are reported separately as `behavior_unverified`.
+- `✓ VERIFIED (coincidental-reliance)` counts as VERIFIED — the advisory changes no score and no status.
 
 ```text
 score: verified_truths / total_truths        # e.g. 6/7
@@ -916,7 +882,7 @@ Deferred items are informational only — they do not require closure plans.
 
 **VERIFICATION.md output structure under MVP mode:**
 
-1. Top-level "User Flow Coverage" table: each step of the user story → expected → evidence in codebase → status. (Format defined in `references/verify-mvp-mode.md`.)
+1. Top-level "User Flow Coverage" table: each step of the user story → expected → evidence in codebase → status. (Format defined in `gsd-core/references/verify-mvp-mode.md`.)
 2. Standard technical-check sections (API verification, error handling, etc.) follow below — only if the user flow coverage is complete.
 
 **User Story format guard:** Apply via the centralized verb instead of inlining the regex:
@@ -939,6 +905,8 @@ If `valid != true`, refuse to verify. Surface the discrepancy and ask the user t
 
 **ALWAYS use the Write tool to create files** — never use `Bash(cat << 'EOF')` or heredoc commands for file creation.
 
+**#4155:** `covered_files`: every phase PLAN/SUMMARY (+superseded, nested `plans/`), changed impl file — ROOT-relative; planning-root docs are inert (#4623). `gsd_run query verification.fingerprint {phaseDir} {file}...`, copy output — never hand-write `covered_digest`.
+
 Create `.planning/phases/{phase_dir}/{phase_num}-VERIFICATION.md`:
 
 ```markdown
@@ -947,6 +915,8 @@ phase: XX-name
 verified: YYYY-MM-DDTHH:MM:SSZ
 status: passed | gaps_found | human_needed
 score: N/M must-haves verified
+covered_files: [...]
+covered_digest: "v2:sha256:..."
 behavior_unverified: 0 # Count of ⚠️ PRESENT_BEHAVIOR_UNVERIFIED truths (present + wired, behavior not exercised); each is detailed in behavior_unverified_items below (and in human_verification when status is human_needed)
 overrides_applied: 0 # Count of PASSED (override) items included in score
 overrides: # Only if overrides exist — carried forward or newly added
@@ -974,11 +944,20 @@ deferred: # Only if deferred items exist (Step 9b)
   - truth: "Observable truth addressed in a later phase"
     addressed_in: "Phase N"
     evidence: "Matching goal or success criteria text"
+advisory: # Only if unevidenced new-scope findings exist (Step 7, re-verification only)
+  - finding: "Short description of the new-scope concern"
+    category: architectural | security | other
+    reason: "Why raised; what would resolve it"
+    evidence_status: "none provided"
 behavior_unverified_items: # Only if behavior_unverified > 0 — emitted regardless of overall status, so these survive a gaps_found phase
   - truth: "Observable truth whose state transition or cancellation/cleanup/ordering invariant no test exercises"
     test: "What to trigger"
     expected: "What state must hold afterward"
     why_human: "Why presence checks can't see it"
+coincidental_reliance_items: # Only if a ✓ VERIFIED truth holds incidentally — emitted regardless of overall status (survives gaps_found)
+  - truth: "Observable truth that holds incidentally"
+    reason: undeclared-precondition | incidental-ordering | fixture-only
+    harden: "Precondition/ordering to declare or enforce"
 human_verification: # Only if status: human_needed
   - test: "What to do"
     expected: "What should happen"
@@ -1001,6 +980,7 @@ human_verification: # Only if status: human_needed
 | 1   | {truth} | ✓ VERIFIED | {evidence}     |
 | 2   | {truth} | ✗ FAILED   | {what's wrong} |
 | 3   | {truth} | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | {present + wired; no test exercises the transition/invariant — see Human Verification} |
+| 4   | {truth} | ✓ VERIFIED (coincidental-reliance) | {holds, but incidentally — see coincidental_reliance_items} |
 
 **Score:** {N}/{M} truths verified ({P} present, behavior-unverified)
 
@@ -1012,6 +992,15 @@ Only include this section if deferred items exist (from Step 9b).
 | # | Item | Addressed In | Evidence |
 |---|------|-------------|----------|
 | 1 | {truth} | Phase {N} | {matching goal or success criteria} |
+
+### Advisory (New Scope, Unevidenced)
+
+New-scope findings from Step 7 with no deterministic evidence — reported,
+not blocking. Include this section (even "None") whenever re-verification ran.
+
+| # | Finding | Category | Why Advisory |
+|---|---------|----------|--------------|
+| 1 | {finding} | {category} | new-scope, no deterministic evidence |
 
 ### Required Artifacts
 
@@ -1234,6 +1223,7 @@ return <div>No messages</div>  // Always shows "no messages"
 - [ ] Gaps structured in YAML frontmatter (if gaps_found)
 - [ ] Deferred items structured in YAML frontmatter (if deferred items exist)
 - [ ] Re-verification metadata included (if previous existed)
+- [ ] fingerprint fields written via verification.fingerprint (#4155)
 - [ ] VERIFICATION.md created with complete report
 - [ ] Results returned to orchestrator (NOT committed)
 </success_criteria>

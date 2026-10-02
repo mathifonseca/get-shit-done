@@ -35,10 +35,20 @@
 // See docs/TESTING-SUITES.md for full grouping policy.
 'use strict';
 
-const { readdirSync, readFileSync } = require('fs');
+const { readdirSync, readFileSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } = require('fs');
 const { join, basename } = require('path');
-const { execFileSync } = require('child_process');
+const { tmpdir } = require('os');
+const { pathToFileURL } = require('url');
+const { execFileSync, spawn } = require('child_process');
 const { ExitError, runMain } = require('./lib/cli-exit.cjs');
+const { suiteOf } = require('./lib/suite-detection.cjs');
+const {
+  resolveLiveConfigRoots,
+  resolveExtraWatchTargets,
+  snapshotLiveConfig,
+  diffLiveConfig,
+  formatViolations,
+} = require('./live-config-guard.cjs');
 
 const SUITES = ['all', 'unit', 'integration', 'install', 'security', 'slow', 'qa'];
 
@@ -170,8 +180,6 @@ function ensureBuiltHooks(overrides = {}) {
     runBuild();
   }
 }
-const MARKED_SUITES = ['integration', 'install', 'security', 'slow', 'qa'];
-
 // Recursively collect *.test.cjs files under dir, returning paths relative to dir.
 // Skips node_modules to avoid accidentally picking up decoy files.
 function walkTestFiles(dir, relBase) {
@@ -212,6 +220,29 @@ function parseShardArg(value) {
   return { index, total };
 }
 
+// Parse RUN_TESTS_SHARD_RESERVE (#4070) — "<index>:<weight>", e.g. "1:77":
+// give shard `index` (1-based) a virtual head start of `weight` LPT weight
+// units before any real file is placed. This is an advisory operator knob,
+// not a CLI flag with a hard-error contract like --shard: it is set from a
+// GitHub Actions matrix expression (test.yml), so a malformed or absent value
+// must degrade to "no reserve" rather than take the whole job down — the same
+// fail-open precedent as positiveNumberEnv elsewhere in this file. Returns
+// `null` for anything malformed; the caller is responsible for checking
+// `index` against the shard total it actually has (this function has no
+// access to that).
+function parseShardReserve(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  const m = /^(\d+):(-?\d+(?:\.\d+)?)$/.exec(trimmed);
+  if (!m) return null;
+  const index = Number(m[1]);
+  const weight = Number(m[2]);
+  if (!Number.isInteger(index) || index < 1) return null;
+  if (!Number.isFinite(weight) || weight < 0) return null;
+  return { index, weight };
+}
+
 // Deterministic partition of an ALREADY-SORTED file list. Without a weigher
 // this is the original round-robin (#1212):
 // Shard `index` (1-based) receives every file whose position k in the sorted
@@ -234,7 +265,20 @@ function parseShardArg(value) {
 // This is the same algorithm packChunks uses one level down (#2456/#2463), so
 // both layers now share one cost model. Omitting `weightOf` keeps the legacy
 // round-robin byte-identical — callers with no timing data lose nothing.
-function selectShard(sortedFiles, { index, total }, weightOf) {
+//
+// `initialWeights` (#4070, optional): per-bin starting weight, indexed 0..
+// total-1 (bin 0 = shard 1). Some shards carry a FIXED cost this function has
+// no other way to see — test.yml pins four aux suites to shard 1 only, so
+// shard 1's real cost is always "its LPT-balanced unit-test slice PLUS that
+// fixed aux cost," while shards 2..N carry only their slice. Giving bin 0 a
+// virtual head start before any file is placed makes LPT route FEWER files to
+// it, converging every bin's FINAL total (assigned weight + its initial
+// weight) toward equal instead of converging raw assigned weight toward
+// equal — which is what left shard 1 structurally overloaded. Only meaningful
+// on the weighted (LPT) path: the round-robin fallback below has no notion of
+// weight to rebalance around, so `initialWeights` is a no-op there — a caller
+// with no timing table has no basis to compute a meaningful reserve either.
+function selectShard(sortedFiles, { index, total }, weightOf, initialWeights) {
   if (total === 1) return sortedFiles;
   if (typeof weightOf !== 'function') {
     return sortedFiles.filter((_, k) => k % total === index - 1);
@@ -246,7 +290,15 @@ function selectShard(sortedFiles, { index, total }, weightOf) {
     const w = weightOf(file);
     return Number.isFinite(w) && w >= 0 ? w : 0;
   };
-  const bins = Array.from({ length: total }, () => ({ weight: 0, picks: [] }));
+  // Same clamp applied to a caller-supplied reserve: a hostile value (NaN,
+  // negative, Infinity — e.g. a malformed RUN_TESTS_SHARD_RESERVE) must
+  // degrade to "no reserve" rather than poisoning every subsequent
+  // lightest-bin comparison the same way an unclamped file weight would.
+  const safeInitial = (i) => {
+    const w = Array.isArray(initialWeights) ? initialWeights[i] : undefined;
+    return Number.isFinite(w) && w >= 0 ? w : 0;
+  };
+  const bins = Array.from({ length: total }, (_, i) => ({ weight: safeInitial(i), picks: [] }));
   // LPT: heaviest first, each into the currently-lightest bin. Ties break on
   // the caller's sort position, and the lightest-bin scan takes the FIRST
   // minimum, so the partition is byte-identical across Windows/macOS/Linux —
@@ -297,6 +349,145 @@ function positiveNumberEnv(raw, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+// Per-chunk file-count budget default, by platform. See the comment above its
+// call site in main() (win32 arithmetic derivation, backstop citations, and
+// the count-floor-vs-weight-ceiling explanation for the conformance pool).
+function defaultMaxFilesPerChunk(platform) {
+  return platform === 'win32' ? 22 : 60;
+}
+
+// Per-chunk UNMEASURED-file-count budget default, by platform. See the
+// isMeasured/maxUnmeasuredPerChunk comment above packChunks's definition for
+// the incident this guards (red next @ccfed6335 2026-09-20, @af822a80
+// 2026-09-23 — both windows conformance shards, chunks killed at 600000ms+
+// with zero failing tests) and why the bound is a COUNT of unmeasured files,
+// not a weight: an unmeasured file's weight is a guess, and this cap exists
+// precisely because several guesses compounding is what blew the budget, not
+// because any individual guess was too large. win32-only — the failure has
+// only ever been observed there; every other platform stays unbounded
+// (Infinity), unchanged from today's behavior.
+function defaultMaxUnmeasuredPerChunk(platform) {
+  return platform === 'win32' ? 2 : Infinity;
+}
+
+// ── #4020: run-scoped temp root ─────────────────────────────────────────────
+//
+// Fixture trees leak under os.tmpdir() on the SUCCESS path (the untouched half
+// of #856): on a tmpfs /tmp a full run exhausts the filesystem, and the failure
+// surfaces as EDQUOT (errno -122) copyfile errors in whichever suite runs next
+// — actively misleading, twice misdiagnosed in the report. The bound is
+// runner-level, not per-fixture: 234 mkdtempSync sites are unauditable in one
+// place and every future fixture reintroduces the hazard, while a run-private
+// root + between-chunk sweep caps peak usage for every fixture at once.
+
+const RUN_TEMP_ROOT_PREFIX = 'gsd-test-run-';
+// Children the runner itself keeps alive across chunks — the sweep must spare
+// them (GSD_HOME's nested-spawn REUSE contract; the chunk-diagnostics events dir).
+const RESERVED_TEMP_PREFIXES = ['gsd-test-home-', 'gsd-run-tests-events-'];
+
+/**
+ * Create (or reuse) this run's private temp root and repoint the env at it.
+ *
+ * TMPDIR/TEMP/TMP all move, so every `mkdtempSync(os.tmpdir())` in a spawned
+ * test child lands inside the root — that is what makes a sweep scoped and
+ * safe. IDEMPOTENT exactly like the GSD_HOME sandbox below: a nested run-tests
+ * spawn (tests/run-tests-harness.test.cjs) inherits the root via env and must
+ * REUSE it, never mkdtemp a fresh root per invocation. An operator's TMPDIR
+ * redirect (the tmpfs workaround) keeps working: the root is created INSIDE the
+ * current tmpdir, so a disk-backed redirect stays disk-backed — and is now also
+ * cleaned at exit.
+ *
+ * Exported for in-process tests (tests/run-tests-temp-root.test.cjs).
+ */
+/** True when THIS process created the active run temp root (see setupRunTempRoot). */
+let createdRunTempRoot = false;
+
+function setupRunTempRoot() {
+  // Ownership (a nested run-tests spawn REUSES an inherited root and must never
+  // remove it on ITS exit — that would delete the outer run's root mid-suite,
+  // mass-ENOENTing every later fixture). PRECEDENCE: the FIRST SET var in
+  // TMPDIR > TEMP > TMP order decides — a set-but-not-a-run-root TMPDIR is an
+  // operator redirect (or a test sandboxing a child) and must WIN over leftover
+  // inherited TEMP/TMP, never be overridden by them (a CI-observed failure: the
+  // child redirected TMPDIR but inherited TEMP=<outer root>, and the any-of-three
+  // reuse check silently preferred the inherited root).
+  let inherited = '';
+  for (const key of ['TMPDIR', 'TEMP', 'TMP']) {
+    const v = process.env[key] || '';
+    if (!v) continue;
+    inherited = basename(v).startsWith(RUN_TEMP_ROOT_PREFIX) ? v : '';
+    break;
+  }
+  createdRunTempRoot = !inherited;
+  const root = inherited || mkdtempSync(join(tmpdir(), RUN_TEMP_ROOT_PREFIX));
+  for (const key of ['TMPDIR', 'TEMP', 'TMP']) process.env[key] = root;
+  return root;
+}
+
+/**
+ * Remove every non-reserved entry under the run root. Returns the removed
+ * count. `protect` is a set of absolute paths that must survive — the runner
+ * populates it with every ancestor of its SELECTED test files: a harness may
+ * stage synthetic test files under the temp root (tests/run-tests-harness.test.cjs
+ * writes 30 of them for its chunking rows), and a sweep that deleted them between
+ * chunks would make every later chunk fail with "Could not find". Best-effort per
+ * entry: a dir wedged open on Windows must not fail the run — the leak guard below
+ * is what makes persistent residue loud.
+ *
+ * Exported for in-process tests.
+ */
+function sweepRunTempRoot(root, protect = new Set()) {
+  let entries;
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of entries) {
+    if (RESERVED_TEMP_PREFIXES.some((p) => name.startsWith(p))) continue;
+    const full = join(root, name);
+    if (protect.has(full)) continue;
+    try {
+      rmSync(full, { recursive: true, force: true });
+      removed++;
+    } catch {
+      /* best-effort; the guard below reports persistent residue */
+    }
+  }
+  return removed;
+}
+
+/**
+ * Fail fast when post-sweep residue exceeds `limit` (#4020 acceptance 4):
+ * converting unbounded growth into a named-culprit runner error, BEFORE the
+ * temp filesystem fills and the failure metastasizes into unrelated
+ * EDQUOT/-122 copyfile errors. Leaked-directory COUNT is the proxy —
+ * statSync-walking multi-hundred-MB trees per chunk costs more than it
+ * protects. Override via RUN_TESTS_TMP_LEAK_LIMIT.
+ *
+ * Exported for in-process tests.
+ */
+function assertTempRootBounded(root, limit) {
+  const max = limit !== undefined ? limit
+    : positiveNumberEnv(process.env.RUN_TESTS_TMP_LEAK_LIMIT, 50);
+  let entries;
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return;
+  }
+  const leaked = entries.filter((n) => !RESERVED_TEMP_PREFIXES.some((p) => n.startsWith(p)));
+  if (leaked.length > max) {
+    throw new Error(
+      `run-tests: temp root leak — ${leaked.length} entries remain under ${root} after the ` +
+        `chunk sweep (limit ${max}). Likely culprits: ${leaked.slice(0, 5).join(', ')}. Failing ` +
+        `fast per #4020, before the temp filesystem fills and the failure surfaces as ` +
+        `unrelated EDQUOT/-122 copyfile errors in a later suite.`,
+    );
+  }
+}
+
 // Per-file measured durations, regenerated by scripts/gen-test-timings.cjs from
 // gsd-test reporter event streams. Overridable so tests can inject a synthetic
 // table instead of depending on the real suite's cost profile.
@@ -313,10 +504,13 @@ const SUPPORTED_TIMINGS_SCHEMA = 1;
 // The chunk COMPOSITION still differs — LPT balances where first-fit filled
 // greedily, so 7 uniform files at budget 3 pack {3,2,2} rather than {3,3,1}.
 //
-// `medianWeight` is the fallback for a file absent from the table (a new test,
-// or a table that has drifted). The median — not the mean — because the cost
-// distribution is heavily right-skewed (median 0.28s vs mean 4.6s across the
-// suite), so the median is the honest estimate for an unknown file.
+// `medianWeight` is retained on the returned table for callers that report on
+// table skew, but it is NOT the fallback weight for a file absent from the
+// table. It was until the #2456 follow-up (red next, 2026-09-14): the cost
+// distribution is heavily right-skewed (median 381ms vs mean 7152ms across
+// the suite), so the median modelled an unknown file as ~19x cheaper than
+// average, under-declaring its real share of the chunk budget. See
+// makeFileWeigher below for the corrected (mean) fallback.
 //
 // Returns null when the table is missing or unusable; the caller then treats
 // every file as weight 1, which reproduces the pre-#2456 count-based balance.
@@ -339,7 +533,7 @@ function loadTestTimings(timingsPath) {
   // Array.isArray guard: `typeof [] === 'object'`, so a hand-edit that turned
   // the map into a list would pass a bare typeof check and be accepted as a
   // valid table. It degrades harmlessly (no basename ever matches an array
-  // index, so every file takes medianWeight), but silently accepting a
+  // index, so every file falls back to weight 1), but silently accepting a
   // malformed table is worse than rejecting it — reject, and fall back to
   // uniform weight the same way a missing file does.
   if (!timings || typeof timings !== 'object' || Array.isArray(timings)) return null;
@@ -355,15 +549,53 @@ function loadTestTimings(timingsPath) {
   return { timings, mean, medianWeight: median / mean };
 }
 
+// #4434: the table's own `sources` are Linux-only (test-events-linux-node22/24
+// .jsonl — never a Windows event stream), and this runner's own chunk-kill
+// diagnostic already tells operators "real Windows cost runs ~2.2x the
+// recorded figure, so treat every number as a floor" (see the catch block
+// around the per-chunk timeout, below). That string was, until this fix,
+// advisory text ONLY — nothing in the weigher actually applied it. Verified
+// live: `next` @ ccfed6335 (unrelated to the chunk's own diff — see #4434)
+// killed Windows conformance shard 3/3 chunk 6/8 at 600016ms; 6 of that
+// chunk's 17 files were wholly absent from the table and were packed at the
+// table's plain mean, identically to how a Linux/macOS chunk would price
+// them. A MEASURED file does not get this multiplier: #4733 already
+// calibrates measured-file packing against a real Windows wall-clock via
+// MAX_FILES_PER_CHUNK, so inflating measured weights again here would
+// double-apply the correction. An unmeasured file has no real data at all —
+// it is exactly the "floor, not a verdict" case the diagnostic already warns
+// about, so only its fallback gets the multiplier, and only on win32.
+const WINDOWS_UNMEASURED_COST_MULTIPLIER = 2.2;
+
 // Build the packer's weight function from a loaded timing table.
 //
 // A file present in the table weighs its measured duration relative to the
-// table mean. A file ABSENT from it weighs the table's median — this is the
-// "advisory, not gated" contract: a new test or a drifted table costs chunk
-// balance, never a red build. A null table (missing or unparseable file) makes
-// every file weigh 1, reproducing the pre-#2456 count-based balance exactly.
-function makeFileWeigher(timings) {
+// table mean. A file ABSENT from it weighs 1 — the table MEAN, the same
+// value a null table (missing or unparseable file) yields for every file,
+// because both states mean the same thing: cost unknown. On win32 the
+// fallback is WINDOWS_UNMEASURED_COST_MULTIPLIER instead of 1 (see #4434,
+// above) — but ONLY for a file absent from an otherwise-loaded table; a
+// completely missing/corrupt/empty timings file (`timings` is `null`) still
+// degrades to uniform weight 1 on every platform, matching the pre-#2456
+// count-based-packing invariant many existing tests depend on. Every other
+// platform keeps the plain mean.
+//
+// This was previously `timings.medianWeight`, on the claim that an absent
+// file "costs chunk balance, never a red build." That claim is false. In a
+// right-skewed table (measured: mean 7152ms, median 381ms — an 18.8x skew)
+// the median models an unknown file as ~19x cheaper than average, which
+// under-declares its real share of the budget. That under-declaration DID
+// cause a red build: Windows conformance shard 2/3, chunk 4/6 was killed at
+// 600018ms with ZERO failing tests, because files absent from the table
+// packed as if they were nearly free and the chunk blew the 600s cap.
+// Empirically, mean is the right estimate for an unknown file on the
+// platform the table was MEASURED on: 9 unmeasured files that caused the
+// incident averaged 6659ms against a table mean of 7152ms — within 7%. That
+// equivalence does not hold on win32, where the table's own sources are
+// Linux-only (#4434).
+function makeFileWeigher(timings, platform = process.platform) {
   if (!timings) return () => 1;
+  const unmeasuredWeight = platform === 'win32' ? WINDOWS_UNMEASURED_COST_MULTIPLIER : 1;
   return (f) => {
     const key = basename(f);
     // Own-property check before the lookup. This is defense-in-depth, NOT a
@@ -378,7 +610,22 @@ function makeFileWeigher(timings) {
     const ms = Object.hasOwn(timings.timings, key) ? timings.timings[key] : undefined;
     return typeof ms === 'number' && Number.isFinite(ms) && ms >= 0
       ? ms / timings.mean
-      : timings.medianWeight;
+      : unmeasuredWeight;
+  };
+}
+
+// Build a predicate answering "does the timings table carry a genuine
+// measurement for this file?" — distinct from makeFileWeigher, which returns
+// a USABLE weight (1) for an unmeasured file too, on purpose (advisory
+// balance). Isolation (partitionIsolatedFiles) needs the stronger fact: a
+// file must never be isolated on the strength of the unknown-file fallback
+// weight alone, only on a weight it actually earned.
+function makeMeasuredPredicate(timings) {
+  if (!timings) return () => false;
+  return (f) => {
+    const key = basename(f);
+    const ms = Object.hasOwn(timings.timings, key) ? timings.timings[key] : undefined;
+    return typeof ms === 'number' && Number.isFinite(ms) && ms >= 0;
   };
 }
 
@@ -407,10 +654,31 @@ function makeFileWeigher(timings) {
 // that file; when no chunk has room, the chunk count grows and packing restarts.
 // A single file longer than the budget lands alone rather than looping forever.
 //
+// `isMeasured`/`maxUnmeasuredPerChunk` (2026-09-23, red `next` @ccfed6335 and
+// @af822a80, both windows conformance shards, chunks killed at 600000ms+) add a
+// THIRD, independent budget alongside weight and chars, for the same reason
+// #4434 gave an unmeasured file its own windows multiplier instead of trusting
+// its weight: an unmeasured file's weight is a GUESS, not a measurement, and
+// several guesses landing in the same chunk let their individual uncertainty
+// compound into a real failure no single file's weight predicted. Both
+// incidents killed a chunk holding 5-6 files absent from tests/test-timings.json
+// (new conformance-tier files added since the table was last regenerated) packed
+// alongside the chunk's measured files — each guess looked affordable alone, the
+// chunk's TOTAL weight still cleared the budget, and it still blew the 600s
+// backstop. Isolation (partitionIsolatedFiles, above) cannot help here — it only
+// pulls out a file PROVEN heavy, and an unmeasured file has no proof either way.
+// Capping how many unmeasured files ANY one chunk may hold bounds the compounding
+// directly, independent of what their guessed weight happens to be, using the
+// exact same "skip this bin, try the next; grow the chunk count if none has
+// room" mechanism already proven safe for the char budget below. `isMeasured` is
+// optional (omitted callers/tests get today's behavior unchanged — no cap), and
+// `maxUnmeasuredPerChunk` degrades to "no cap" for any non-finite or negative
+// value, matching `maxWeight`/`maxChars`'s own degrade-safely contract.
+//
 // Ordering is fully deterministic — ties break on the separator-normalized file
 // path, and each chunk's files are emitted in their original selection order —
 // so the packing is byte-identical across Windows/macOS/Linux.
-function packChunks(files, { weightOf, maxWeight, maxChars, fixedOverhead }) {
+function packChunks(files, { weightOf, maxWeight, maxChars, fixedOverhead, isMeasured, maxUnmeasuredPerChunk }) {
   if (files.length === 0) return [];
   // packChunks is exported, so it cannot assume its caller normalized these.
   // A non-finite or non-positive budget makes the chunk-count arithmetic
@@ -420,6 +688,10 @@ function packChunks(files, { weightOf, maxWeight, maxChars, fixedOverhead }) {
   const weightBudget = Number.isFinite(maxWeight) && maxWeight > 0 ? maxWeight : files.length;
   const charBudget = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : Number.MAX_SAFE_INTEGER;
   const overhead = Number.isFinite(fixedOverhead) && fixedOverhead >= 0 ? fixedOverhead : 0;
+  const unmeasuredBudget =
+    Number.isFinite(maxUnmeasuredPerChunk) && maxUnmeasuredPerChunk >= 0
+      ? maxUnmeasuredPerChunk
+      : Infinity;
   const safeWeight = (file) => {
     const w = weightOf(file);
     return Number.isFinite(w) && w >= 0 ? w : 0;
@@ -429,6 +701,7 @@ function packChunks(files, { weightOf, maxWeight, maxChars, fixedOverhead }) {
     index,
     weight: safeWeight(file),
     chars: file.length + 1, // +1 for the inter-arg separator
+    measured: isMeasured ? !!isMeasured(file) : true,
   }));
   const totalWeight = entries.reduce((sum, e) => sum + e.weight, 0);
   // Ties break on a SEPARATOR-NORMALIZED path so a subdir file orders the same
@@ -460,14 +733,18 @@ function packChunks(files, { weightOf, maxWeight, maxChars, fixedOverhead }) {
       entries: [],
       weight: 0,
       chars: overhead,
+      unmeasuredCount: 0,
     }));
     let overflowed = false;
     for (const entry of heaviestFirst) {
       let target = null;
       for (const bin of bins) {
         // An empty bin always accepts, so an over-long single file lands alone
-        // instead of growing the chunk count forever.
+        // instead of growing the chunk count forever. Same rule for the
+        // unmeasured-count budget below — it exists to spread uncertainty
+        // across chunks, not to make a lone unmeasured file unplaceable.
         if (bin.entries.length > 0 && bin.chars + entry.chars > charBudget) continue;
+        if (bin.entries.length > 0 && !entry.measured && bin.unmeasuredCount >= unmeasuredBudget) continue;
         if (target === null || bin.weight < target.weight) target = bin;
       }
       if (target === null) {
@@ -477,6 +754,7 @@ function packChunks(files, { weightOf, maxWeight, maxChars, fixedOverhead }) {
       target.entries.push(entry);
       target.weight += entry.weight;
       target.chars += entry.chars;
+      if (!entry.measured) target.unmeasuredCount += 1;
     }
     if (!overflowed) {
       return bins
@@ -485,6 +763,115 @@ function packChunks(files, { weightOf, maxWeight, maxChars, fixedOverhead }) {
     }
     chunkCount++;
   }
+}
+
+// 2026-09-07 (PR #4497 CI, Windows full test shard 2/3, chunk 3/8): the
+// Windows-only budget cut in main() (60 -> 40, 2026-09-06 / PR #4428) still
+// was not enough — codex-config.test.cjs (weight 17.87, genuinely measured)
+// was packed alongside 39 other files and the chunk still exceeded the 600s
+// backstop. Two documented incidents in as many days, at two different
+// Windows budget settings, both centered on this one file: it is not a
+// "this chunk got unlucky today" case, it is this file's weight being
+// disproportionate enough (~45% of the post-cut Windows budget alone) that
+// ANY companion files sharing its chunk are gambling with the remaining
+// headroom — and per .github/workflows/test.yml's own note on this lane,
+// "adding one test file reshuffled 115 of 268 unit files between shards", so
+// which files end up as that gamble's companions is not something a future
+// PR can predict or control.
+//
+// 2026-09-10 (epic #4589 Phase 2/#4591, #4603): the SAME failure hit
+// state.test.cjs (weight 21.35, heavier than codex-config.test.cjs) on
+// `next`'s own push-triggered Tests run, `conformance test (windows-latest,
+// 24, shard 2/3)` chunk 3/6 — 600019ms, killed. Root cause is not a new
+// outlier: state.test.cjs was already this heavy before Phase 2 existed.
+// What changed is the POOL it gets packed against. Phase 2's
+// platform-conformance-tier job packs only the ~546 conformance-tier files
+// per shard (vs. the ~950-file full suite `packChunks` used to balance
+// against), so the same absolute-weight outlier now represents a much
+// larger share of a much smaller, more homogeneous pool — the LPT packer has
+// fewer light files available to pad around it. This is a structural risk of
+// the smaller conformance-tier pool, not a one-off.
+//
+// 2026-09-14 fix (post-#4603 follow-up): the original derivation above tied
+// the isolation bar to `MAX_FILES_PER_CHUNK`, a per-PLATFORM file-COUNT cap
+// (win32 22, linux/darwin 60) — a category error (count vs. weight) that also
+// made the bar platform-dependent: at win32's cap the ratio isolated files
+// the incidents never implicated (`commands`, `init`), while at linux/darwin's
+// larger cap (0.447 * 60 = 26.82) it dropped SEVEN of the historical EIGHT
+// files the incidents above proved dangerous — only run-tests-harness.test.cjs
+// (31.23) still cleared it; `emitted-attribution`, `install-minimal-hooks`,
+// `phase`, `state`, `config`, `install`, and `codex-config` itself (17.87,
+// the file both incidents centered on) all fell back into the shared pool.
+//
+// The bar is now anchored to what actually failed: WALL-CLOCK time against
+// the 600000ms per-chunk backstop (chunkTimeoutMs above), not a file-count
+// cap. `CHUNK_WORKING_BUDGET_MS` (400000ms) is the same "healthy chunk"
+// working budget the win32 MAX_FILES_PER_CHUNK derivation targets (see that
+// comment, above `DEFAULT_MAX_FILES_PER_CHUNK`) — one file eating
+// `ISOLATION_BUDGET_FRACTION` (30%) of that budget BY ITSELF is exactly the
+// "any companion is gambling with the remaining headroom" condition both
+// incidents above describe, restated in ms instead of a per-platform count.
+// codex-config.test.cjs (measured 127783ms) clears this bar;
+// run-tests-harness.test.cjs (measured 223372ms) clears it by ~1.86x.
+//
+// `isolationThresholdWeight` below converts that ms bar into the packer's
+// weight units by dividing by the LIVE timings table's own mean duration —
+// the same normalization `makeFileWeigher` already applies to every file, so
+// isolation and packing share one scale. This is platform-independent BY
+// CONSTRUCTION: the timings table is not sharded by OS, so every platform
+// computes the identical threshold weight and therefore the identical
+// isolated set (pinned by
+// "the isolated set is identical across win32, linux, darwin" in
+// tests/run-tests-harness.test.cjs). Isolating a file into its own chunk,
+// unconditionally, on every platform, removes the gamble at its source
+// rather than tuning a shared per-platform budget again around a moving
+// target: an isolated file never enters the shared pool `packChunks`
+// balances, so no other file's packing changes.
+//
+// The set of isolated files is DERIVED PER RUN from the live timings table,
+// not hand-maintained: a newly heavy file, or a changed
+// CHUNK_WORKING_BUDGET_MS/ISOLATION_BUDGET_FRACTION, crosses the threshold
+// automatically on the next run, with no separate sweep to remember to
+// re-run.
+const CHUNK_WORKING_BUDGET_MS = 400000;
+const ISOLATION_BUDGET_FRACTION = 0.3;
+
+/**
+ * Split `files` (absolute or repo-relative paths) into `{isolated, packable}`.
+ * A file is isolated when it has a genuine measured weight AND that weight is
+ * at or above `thresholdWeight`. Eligibility is "is this file heavy?", not
+ * "which suite does it belong to" — suite scoping (unit vs. install vs. all)
+ * happens upstream, in `selectFiles`, before this function ever sees the
+ * list, so a unit-only invocation's isolated set is unaffected either way;
+ * what this DOES change is that install-suite outliers (e.g.
+ * fragment-single-edit-propagation.install.test.cjs at 575000ms, 96% of the
+ * 600000ms backstop alone) become isolatable on an `all`/`install`-suite run,
+ * where they were previously permanently ineligible regardless of weight.
+ * An unmeasured file is NEVER isolated on the strength of the unknown-file
+ * fallback weight alone — isolation is reserved for files PROVEN heavy, not
+ * files merely absent from the timings table. Pure and order-preserving
+ * within each half, so it is unit-testable without spawning `main()` as a
+ * subprocess. `isolated` files are meant to become their own single-file
+ * chunk each; `packable` files are meant to go through `packChunks` as
+ * before.
+ *
+ * `thresholdWeight` must be a finite, positive number — a non-finite or
+ * non-positive value would make every `>=` comparison below false, silently
+ * disabling isolation with no error, so this throws instead of failing open.
+ */
+function partitionIsolatedFiles(files, { weightOf, isMeasured, thresholdWeight }) {
+  if (!(Number.isFinite(thresholdWeight) && thresholdWeight > 0)) {
+    throw new Error(
+      `partitionIsolatedFiles: thresholdWeight must be a finite, positive number (got ${thresholdWeight})`,
+    );
+  }
+  const isolated = [];
+  const packable = [];
+  for (const f of files) {
+    const heavy = isMeasured(f) && weightOf(f) >= thresholdWeight;
+    (heavy ? isolated : packable).push(f);
+  }
+  return { isolated, packable };
 }
 
 function parseArgs(argv) {
@@ -582,20 +969,8 @@ function parseArgs(argv) {
   return { suite, files, filesFrom, shard };
 }
 
-// Return the marked suite name embedded in a filename, or null if it's unmarked.
-// foo.security.test.cjs -> "security"
-// foo.test.cjs          -> null (unit)
-// Accepts either a bare filename or a relative subdir path; classification is
-// based on the basename only so subdir paths classify identically to root files.
-function suiteOf(filename) {
-  const name = basename(filename);
-  if (!name.endsWith('.test.cjs')) return null;
-  const base = name.slice(0, -'.test.cjs'.length);
-  const lastDot = base.lastIndexOf('.');
-  if (lastDot === -1) return null;
-  const marker = base.slice(lastDot + 1);
-  return MARKED_SUITES.includes(marker) ? marker : null;
-}
+// suiteOf (and its backing MARKED_SUITES) is imported from
+// ./lib/suite-detection.cjs — see that module's header comment for why.
 
 function selectFiles(allFiles, suite) {
   if (suite === null || suite === 'all') {
@@ -675,7 +1050,282 @@ function selectExplicitFiles(allFiles, filesValue, filesFrom) {
   return { files: [...new Set(selected)] };
 }
 
-function main() {
+// #3889: reads back the ndjson companion reporter's destination file for one
+// chunk and reduces it to "which file(s) were in flight" — a `test:dequeue`
+// with no matching `test:pass`/`test:fail` FOR THE SAME FILE. `test:dequeue`
+// is emitted by the RUNNER the moment it begins a spawned test-file child,
+// independent of whether anything inside that file ever completes — it is
+// the correct "in flight" signal precisely BECAUSE a hang never completes.
+// `test:start`/`test:pass`/`test:fail` are per-SUBTEST events that node:test
+// only surfaces to the parent once the child reports that subtest, which
+// happens on completion — a subtest that hangs forever inside `new
+// Promise(() => {})` never reports `test:start` either, so those three event
+// types alone can NEVER see a genuine hang (this was the root cause of the
+// feature never working: the three original event types are precisely the
+// ones a hang guarantees are never emitted). `test:start` is still tracked
+// here as a SECONDARY in-flight signal (a file can legitimately produce
+// both), never as the primary one. Tracked per FILE, not per (file, nesting,
+// testNumber) — dequeue/enqueue are file-level events with no subtest
+// identity, so file is the only key both event families share.
+//
+// Tolerant of a destination file that is missing (reporter never flushed
+// anything before the kill) or whose last line is truncated mid-write (the
+// child is SIGKILLed, not given a chance to finish a buffered write) — both
+// degrade to "no in-flight file identified" rather than throwing, since this
+// is a best-effort diagnostic layered on top of, never a precondition for,
+// the timeout it explains.
+function analyzeChunkEvents(eventsPath) {
+  let raw;
+  try {
+    raw = readFileSync(eventsPath, 'utf8');
+  } catch {
+    // The events file never existed — either GSD_RUN_TESTS_EVENTS_FILE never
+    // resolved to a writable path, or the reporter module never loaded in the
+    // child at all (the `reporter:init` marker below is the reporter's very
+    // FIRST action, before any test can run, so its absence pins the failure
+    // to reporter load/resolution, not to the tests). Distinct from "file
+    // exists but only the init marker was written" (readError=false,
+    // sawInitMarker=true, anyDequeued=false) so the diagnostic below can say
+    // explicitly WHICH of the two happened, rather than silently collapsing
+    // both into "no in-flight file identified".
+    return {
+      files: [],
+      staleMs: null,
+      sawAnyEvent: false,
+      sawInitMarker: false,
+      anyDequeued: false,
+      readError: true,
+    };
+  }
+  // Map preserves insertion order; re-`set`ting an existing key moves it to
+  // the END, so iterating this map's keys yields "most recently
+  // dequeued/started" LAST — reversed below to report most-recent-first.
+  const dequeuedAt = new Map(); // file -> last dequeue/start ts seen
+  const terminated = new Set(); // files with an observed test:pass/test:fail
+  let lastTs = null;
+  let sawInitMarker = false;
+  let sawAnyEvent = false;
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue;
+    let evt;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      continue; // truncated trailing line from a mid-write kill
+    }
+    if (typeof evt.ts === 'number') lastTs = evt.ts;
+    if (evt.type === 'reporter:init') {
+      sawInitMarker = true;
+      continue; // not a test event — never tracked in inFlight, never proof a test ran
+    }
+    sawAnyEvent = true;
+    if (!evt.file) continue; // defensive: every recorded type carries `file`
+    if (evt.type === 'test:dequeue' || evt.type === 'test:start') {
+      dequeuedAt.delete(evt.file); // move to most-recent position
+      dequeuedAt.set(evt.file, evt.ts);
+      terminated.delete(evt.file); // a re-dequeue (retry) puts it back in flight
+    } else if (evt.type === 'test:pass' || evt.type === 'test:fail') {
+      terminated.add(evt.file);
+    }
+    // test:enqueue is intentionally NOT a start signal here: "enqueued" means
+    // "queued to run", not "running" — test:dequeue is the runner actually
+    // picking the file up, which is the moment that matters for "in flight".
+  }
+  const files = [...dequeuedAt.keys()].filter((f) => !terminated.has(f)).reverse();
+  return {
+    files,
+    staleMs: lastTs !== null ? Date.now() - lastTs : null,
+    sawAnyEvent,
+    sawInitMarker,
+    anyDequeued: dequeuedAt.size > 0,
+    readError: false,
+  };
+}
+
+// #3889: ranks a killed chunk's files heaviest-first using the same weigher
+// the packer used to build the chunk, and flags any file the timings table
+// has no measurement for at all (as opposed to one that IS measured but
+// happens to be cheap) — an unmeasured file is an unknown quantity, not a
+// known-light one, and the table itself is advisory/stale (see the
+// loadTestTimings header), so this is presented as a hint, never a verdict.
+function rankChunkFilesByWeight(files, weightOf, timingsTable) {
+  return [...files]
+    .map((f) => ({ base: basename(f), weight: weightOf(f) }))
+    .sort((a, b) => b.weight - a.weight)
+    .map(({ base, weight }, idx) => {
+      const measured = timingsTable ? Object.hasOwn(timingsTable.timings, base) : false;
+      return `  ${idx + 1}. ${base} (weight=${weight.toFixed(2)}${
+        measured ? '' : ', UNMEASURED — absent from tests/test-timings.json (table is advisory'
+          + ' and stale; treat this file as an unknown cost, not a cheap one)'
+      })`;
+    });
+}
+
+// #4020 / #4220: pure helper extracted from main()'s temp-sweep protection
+// block. Walks each selected file's ancestor directories, protecting every
+// one from a later temp-sweep, stopping either at runTempRoot or at the
+// filesystem root. Termination uses a FIXED-POINT check (stop when
+// dirnameImpl(cur) === cur) instead of a POSIX-only length sentinel
+// (`cur.length > 1`): path.posix.dirname('/') === '/' (length 1) correctly
+// stops, but path.win32.dirname('C:\\') === 'C:\\' (length 3) never
+// satisfies a length check, so the old logic spun forever on Windows
+// whenever a selected file lived outside runTempRoot — the common case,
+// since most selected test files live in the repo checkout, not the temp
+// root (root-caused every Windows CI shard timing out since #4207). The
+// injectable dirnameImpl lets tests exercise path.win32/path.posix behavior
+// directly without a real Windows/POSIX runner.
+function computeSweepProtectSet(selectedFiles, runTempRoot, dirnameImpl = require('path').dirname) {
+  const protectSet = new Set();
+  for (const f of selectedFiles) {
+    let cur = f;
+    while (cur && cur !== runTempRoot) {
+      const parent = dirnameImpl(cur);
+      if (parent === cur) break; // cur IS the filesystem root — never protect it, just stop
+      protectSet.add(cur);
+      cur = parent;
+    }
+    if (cur === runTempRoot) protectSet.add(f); // exact-file case
+  }
+  return protectSet;
+}
+
+// #4936: how long runChunk waits, once the per-chunk timeout has fired, for the
+// child's exit to actually be OBSERVED before it stops waiting. Operator/test
+// override via RUN_TESTS_CHUNK_KILL_GRACE_MS.
+const DEFAULT_CHUNK_KILL_GRACE_MS = 30000;
+
+// #4936: kill a timed-out chunk child WITHOUT blocking this process — the
+// watchdog runs on the event loop, and anything synchronous here would hold it
+// the way execFileSync used to. On Windows the kill must reach the whole tree:
+// `node --test` is itself the parent of per-file test processes, and
+// child.kill() there is TerminateProcess on the direct child only. Same shape
+// as #4601/#4775's run-with-timeout in gsd-core/bin/gsd-tools.cjs —
+// `taskkill /PID <pid> /T /F` on the FIRST attempt, while the root is still
+// alive (once it exits, its descendants are orphaned and /T can no longer walk
+// to them); /F because a headless process never pumps the WM_CLOSE a plain
+// taskkill posts; argv array, no shell. Unlike #4775 it is spawned, not
+// spawnSync'd: a spawnSync timeout is not a hard bound (it returns only once
+// the killed process's exit is observed), and an unobserved exit is exactly
+// the #4936 state. The reaper is unref'd so a wedged one cannot keep the
+// runner alive, and a non-zero exit or spawn error falls through to the direct
+// kill, so the attempt is never weaker than the pre-#4936 one. POSIX keeps the
+// signal execFileSync's timeout used to send (SIGTERM, direct child) — the
+// observed defect is Windows-only, and a detached process group would also
+// take the chunk out of the terminal's foreground group, so Ctrl-C would stop
+// reaching it.
+function killChunkTree(child, { platform = process.platform, reapSpawnImpl = spawn } = {}) {
+  let killedDirectly = false;
+  const killDirectly = () => {
+    if (killedDirectly) return;
+    killedDirectly = true;
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // Already exited.
+    }
+  };
+  if (platform === 'win32' && child.pid) {
+    let reaper;
+    try {
+      reaper = reapSpawnImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } catch {
+      killDirectly();
+      return 'direct';
+    }
+    reaper.once('exit', (code) => {
+      if (code !== 0) killDirectly();
+    });
+    reaper.once('error', killDirectly);
+    if (typeof reaper.unref === 'function') reaper.unref();
+    return 'tree';
+  }
+  killDirectly();
+  return 'direct';
+}
+
+// #4936: run one chunk with a wall-clock bound that does not depend on the
+// child's exit ever being observed. The chunk used to run under
+// execFileSync({ timeout }), which BLOCKS this process's event loop until the
+// OS reports the child's exit — so no watchdog could run beside it, and every
+// diagnostic sat in a catch arm reachable only once execFileSync returned. On
+// a Windows runner that report never came: a conformance chunk ran 37 minutes
+// past its 600000ms bound with no kill line and no in-flight-file diagnostic,
+// until the job's own timeout cancelled it. Here the timer is ours, and
+// nothing it runs blocks:
+//   1. at timeoutMs, arm the grace timer, send the kill (killChunkTree, which
+//      does not wait), and call onTimeout — which prints the diagnostic —
+//      WITHOUT waiting for the exit;
+//   2. wait up to graceMs for the exit to be observed;
+//   3. if it still is not, escalate once (SIGKILL; TerminateProcess again on
+//      Windows), unref the child so this process can exit, and resolve with
+//      exitObserved: false. The runner then aborts, as it does on any timeout.
+// Because the diagnostic no longer waits for the exit, a slow-dying child can
+// still write output after it.
+// Resolves (never rejects) with { code, signal, timedOut, exitObserved, error }.
+// spawnImpl / reapSpawnImpl / platform are injectable so the watchdog's arms
+// can be exercised without a real wedged Windows process.
+function runChunk(command, args, {
+  env,
+  timeoutMs,
+  graceMs = DEFAULT_CHUNK_KILL_GRACE_MS,
+  onTimeout = () => {},
+  spawnImpl = spawn,
+  reapSpawnImpl = spawn,
+  platform = process.platform,
+} = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawnImpl(command, args, { stdio: 'inherit', env });
+    } catch (error) {
+      resolve({ code: 1, signal: null, timedOut: false, exitObserved: false, error });
+      return;
+    }
+    let settled = false;
+    let timedOut = false;
+    let timeoutTimer = null;
+    let graceTimer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(graceTimer);
+      resolve(result);
+    };
+    child.once('exit', (code, signal) => {
+      finish({ code, signal, timedOut, exitObserved: true, error: null });
+    });
+    child.on('error', (error) => {
+      // After a timeout, a failed kill also surfaces here; the grace timer
+      // already owns that outcome, so only a spawn failure settles.
+      if (!timedOut) finish({ code: 1, signal: null, timedOut: false, exitObserved: false, error });
+    });
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      // Armed FIRST, so nothing below can delay the bound.
+      graceTimer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // Already exited.
+        }
+        if (typeof child.unref === 'function') child.unref();
+        finish({ code: null, signal: null, timedOut: true, exitObserved: false, error: null });
+      }, graceMs);
+      killChunkTree(child, { platform, reapSpawnImpl });
+      try {
+        onTimeout();
+      } catch {
+        // A diagnostic failure must never stop the bound from being enforced.
+      }
+    }, timeoutMs);
+  });
+}
+
+async function main() {
   const args = process.argv.slice(2);
   const parsed = parseArgs(args);
   if (parsed.error) {
@@ -741,13 +1391,27 @@ function main() {
   // matched). Memoized so the two consumers still read the table at most once.
   // Advisory in both places: a missing table yields uniform weight 1, under
   // which the shard partition degenerates to the legacy equal-count split.
+  let timingsMemo; // undefined = not loaded yet; distinct from null = loaded-but-missing
+  const loadedTimings = () => {
+    if (timingsMemo === undefined) {
+      const timingsPath = process.env.RUN_TESTS_TIMINGS_FILE || DEFAULT_TIMINGS_PATH;
+      timingsMemo = loadTestTimings(timingsPath);
+    }
+    return timingsMemo;
+  };
   let weigherMemo = null;
   const fileWeightOf = () => {
     if (weigherMemo === null) {
-      const timingsPath = process.env.RUN_TESTS_TIMINGS_FILE || DEFAULT_TIMINGS_PATH;
-      weigherMemo = makeFileWeigher(loadTestTimings(timingsPath));
+      weigherMemo = makeFileWeigher(loadedTimings(), process.platform);
     }
     return weigherMemo;
+  };
+  let measuredMemo = null;
+  const fileMeasuredOf = () => {
+    if (measuredMemo === null) {
+      measuredMemo = makeMeasuredPredicate(loadedTimings());
+    }
+    return measuredMemo;
   };
 
   const usingShard = parsed.shard !== null;
@@ -758,10 +1422,36 @@ function main() {
   if (usingShard) {
     emptyBeforeShard = selectedNames.length === 0;
     shardInput = [...selectedNames].sort();
-    selectedNames = selectShard(shardInput, parsed.shard, fileWeightOf());
+    // #4070: RUN_TESTS_SHARD_RESERVE gives one shard a virtual head start in
+    // LPT weight units (same units fileWeightOf() already produces — no ms
+    // conversion needed) BEFORE any file is placed, so the packer routes
+    // fewer files to a shard that test.yml already knows carries a fixed
+    // extra cost outside this script's model (the aux suites pinned to shard
+    // 1 only). Every shard job of a run must build the IDENTICAL
+    // initialWeights array — the partition is recomputed independently in
+    // each shard's own process, so a value that differed between them would
+    // silently desync which files land where (the same hazard the `sig`
+    // cross-job fingerprint below already guards for the file list itself).
+    // Malformed/absent/out-of-range input degrades to no reserve — advisory,
+    // never gating, matching every other knob this script reads from the
+    // environment.
+    let initialWeights;
+    const reserve = parseShardReserve(process.env.RUN_TESTS_SHARD_RESERVE);
+    if (reserve && reserve.index <= parsed.shard.total) {
+      initialWeights = Array.from({ length: parsed.shard.total }, () => 0);
+      initialWeights[reserve.index - 1] = reserve.weight;
+    } else if (process.env.RUN_TESTS_SHARD_RESERVE) {
+      console.error(
+        `run-tests: RUN_TESTS_SHARD_RESERVE="${process.env.RUN_TESTS_SHARD_RESERVE}" is not a `
+        + `valid "<index>:<weight>" reserve for --shard total ${parsed.shard.total} — ignoring `
+        + '(no reserve applied)',
+      );
+    }
+    selectedNames = selectShard(shardInput, parsed.shard, fileWeightOf(), initialWeights);
   }
 
   const selected = selectedNames.map(f => join(testDir, f));
+
 
   if (selected.length === 0) {
     // A legitimately-empty shard: --shard was given, the pre-shard selection
@@ -803,6 +1493,32 @@ function main() {
   delete process.env.GSD_PROJECT;
   delete process.env.GSD_WORKSTREAM;
   delete process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+
+  // #4020: bound the run's temp footprint BEFORE any sandbox below mkdtemps, so
+  // every child allocation (fixtures, GSD_HOME, events) lands inside one root
+  // that is swept between chunks and removed on exit. Announced on stderr so an
+  // operator (and tests/run-tests-temp-root.test.cjs) can observe it.
+  const runTempRoot = setupRunTempRoot();
+  console.error(`run-tests: tmp-root=${runTempRoot}`);
+  // OWNERSHIP-GATED (#4020 review): only the process that CREATED the root
+  // removes it — a nested run-tests spawn (the harness regression test) reuses
+  // the outer run's root and must leave it standing mid-suite.
+  if (createdRunTempRoot) {
+    process.on('exit', () => {
+      try {
+        rmSync(runTempRoot, { recursive: true, force: true });
+      } catch {
+        /* best-effort; a wedged child dir must not block exit reporting */
+      }
+    });
+  }
+
+  // #4020: the temp sweep must never remove a directory holding a file a LATER
+  // chunk still runs — a harness may stage synthetic test files under the run
+  // root (tests/run-tests-harness.test.cjs's 30-file chunking fixture). Protect
+  // every ancestor of every selected file that lies INSIDE the run root.
+  const sweepProtectSet = computeSweepProtectSet(selected, runTempRoot);
+
   // Sandbox the overlay home so the loader's global scan ($GSD_HOME/.gsd/capabilities)
   // cannot read a developer's real installed capabilities during tests (ADR-1244 D2).
   // IDEMPOTENT: a nested run-tests spawn (e.g. tests/run-tests-harness.test.cjs)
@@ -911,7 +1627,74 @@ function main() {
   // node process (also relieving per-process memory pressure from 170+ files at once).
   // Lowered from 90 to 60 after #1575 — macOS Node 22 shard 2/3 chunk 2 (~80 files
   // including state.test.cjs, perf-*, worktree-cleanup) exceeded 600s with 90.
-  const MAX_FILES_PER_CHUNK = positiveNumberEnv(process.env.RUN_TESTS_MAX_FILES_PER_CHUNK, 60);
+  //
+  // 2026-09-14: on `next` @ca8d9d4459 a Windows conformance chunk (shard 2/3,
+  // chunk 4/6, 29 files) was KILLED at 600018ms against the 600000ms backstop.
+  // The same shard/chunk position on PR #4726 (green, larger pool) measured
+  // 525548ms for 29 files — 87.6% of the then-current cap of 40, passing by
+  // only 74s. Worst packed-chunk rate: 525548/29 = 18122 ms/file. At that
+  // rate the old cap of 40 arithmetically permits 40 * 18122 = 724880ms —
+  // 121% of the 600000ms backstop, i.e. the cap allowed a chunk that could
+  // not fit its own timeout even before accounting for run-to-run variance.
+  // Target CHUNK_WORKING_BUDGET_MS (400000ms, ~67% of the backstop, leaving
+  // ~200s headroom — roughly 4x the >=14% run-to-run variance observed
+  // between the killed and passing runs of this same chunk position;
+  // CHUNK_WORKING_BUDGET_MS is defined once, above partitionIsolatedFiles,
+  // and shared with the isolation threshold so both derivations target the
+  // same "healthy chunk" budget). 400000 / 18122 = 22.07 -> 22.
+  //
+  // This cap is a WEIGHT floor here, not a count floor — an earlier version
+  // of this comment claimed the opposite, misreading a single PACKED chunk's
+  // own weight as the whole pool's total weight. Per-shard packable-file-count
+  // and total-pool-weight figures are deliberately NOT pinned here: they drift
+  // with the timings table and the conformance-tier file set on every commit,
+  // and no test asserts them (only the cap-derivation arithmetic above, and
+  // the 600000ms-backstop test cited below, are pinned). Do not restate a
+  // specific pool snapshot in this comment; if you need current figures,
+  // measure them against the live timings table rather than trusting a
+  // comment.
+  //
+  // Strongest evidence the cap is load-bearing even against a fully measured
+  // table: summing per-file durations UNDERSHOOTS real chunk wall-clock. The
+  // chunk killed above at 600018ms sums to far less than that by any
+  // per-file method — a model-to-reality gap from per-chunk overhead
+  // (process spawn, serialization, contention) that no per-file table
+  // captures. The cap therefore cannot be justified by summed per-file time
+  // alone; only the direction of the gap (summed-per-file < real wall-clock)
+  // is robust across measurement methods, not a specific magnitude.
+  //
+  // A future change raising this value must redo the arithmetic above; see
+  // tests/run-tests-harness.test.cjs ("the win32 per-chunk cap must not
+  // permit a chunk that exceeds the 600s backstop") which enforces it.
+  const DEFAULT_MAX_FILES_PER_CHUNK = defaultMaxFilesPerChunk(process.platform);
+  const MAX_FILES_PER_CHUNK = positiveNumberEnv(
+    process.env.RUN_TESTS_MAX_FILES_PER_CHUNK,
+    DEFAULT_MAX_FILES_PER_CHUNK,
+  );
+  // See packChunks' isMeasured/maxUnmeasuredPerChunk comment (above its
+  // definition) and defaultMaxUnmeasuredPerChunk (above) for the incident and
+  // rationale. RUN_TESTS_MAX_UNMEASURED_PER_CHUNK overrides for operators/tests,
+  // same pattern as every other *_PER_CHUNK knob in this file.
+  //
+  // Gated on loadedTimings() itself (not just deferring to isMeasured's
+  // per-file answer): makeMeasuredPredicate(null) — a completely missing or
+  // corrupt table — returns `false` for EVERY file, which is a different fact
+  // than "a loaded table exists but doesn't cover this file." The cap exists
+  // to bound uncertainty among files a mostly-reliable table failed to cover,
+  // not to re-litigate the no-table case, which has its own long-standing
+  // contract (makeFileWeigher's `if (!timings) return () => 1`): uniform
+  // weight 1, pure count-based packing, unaffected by this cap. Caught live
+  // (red conformance test (windows-latest, 24, shard 1/3), PR #4950): with no
+  // table loaded, every one of 7 files in
+  // "chunks by file count even when argv length is below the ceiling" was
+  // "unmeasured", and the win32 cap of 2 split them into 4 chunks instead of
+  // the 3 that test — and the uniform-weight-1 contract — require.
+  const MAX_UNMEASURED_PER_CHUNK = loadedTimings()
+    ? positiveNumberEnv(
+        process.env.RUN_TESTS_MAX_UNMEASURED_PER_CHUNK,
+        defaultMaxUnmeasuredPerChunk(process.platform),
+      )
+    : Infinity;
   // #2088 established that file COUNT is a poor proxy for a chunk's wall-clock:
   // install-heavy files (real installs) cost ~10x a unit file, and when several
   // land in the SAME chunk it blows the 600s backstop while unit-only chunks
@@ -931,7 +1714,7 @@ function main() {
   // remains the per-chunk weight budget and keeps its scale — weights are
   // normalized so an average-cost file weighs 1 — so an all-uniform suite chunks
   // exactly as it did before. Timings are ADVISORY, never gated: an unknown file
-  // falls back to the table's median weight and a missing table falls back to
+  // falls back to the mean weight of 1 and a missing table falls back to
   // uniform weight 1, so staleness degrades chunk BALANCE gracefully instead of
   // failing CI. Regenerate via `node scripts/gen-test-timings.cjs <events.jsonl>`.
   // The cost table is loaded lazily above and memoized; both the shard
@@ -942,94 +1725,376 @@ function main() {
   // makes a chunk's `node --test` child hang ~150s on Windows AFTER its last test
   // prints; two such stalls push the windows full lane past its 20m cap and the
   // job is CANCELLED with no failed step — a false-negative gate (#1051, recurrence
-  // of #869). --test-force-exit (Node >=22; engines requires >=22.0.0) exits the
-  // runner once all tests finish regardless of lingering handles. The leaking
-  // tests are also fixed at the source; this is the defensive backstop.
+  // of #869). --test-force-exit (available since Node 22; engines.node now
+  // requires >=24.0.0, so it is always available here — the nodeMajor check
+  // below is kept as a floor-independent CLI-flag-availability guard, not a
+  // statement of this repo's supported version) exits the runner once all
+  // tests finish regardless of lingering handles. The leaking tests are also
+  // fixed at the source; this is the defensive backstop.
   // RUN_TESTS_NO_FORCE_EXIT=1 disables it (used by the harness regression test to
   // observe the pre-fix hang).
   const nodeMajor = Number(process.versions.node.split('.')[0]);
   const forceExit = nodeMajor >= 22 && !process.env.RUN_TESTS_NO_FORCE_EXIT;
 
-  const FIXED_OVERHEAD = process.execPath.length + '--test'.length + concurrency.length + (forceExit ? '--test-force-exit'.length + 1 : 0) + 8;
-  const chunks = packChunks(selected, {
+  // #3889: a second, machine-readable reporter runs ALONGSIDE the normal
+  // human one so a chunk timeout can name the file that was in flight (see
+  // scripts/lib/ndjson-reporter.cjs for the full contract writeup, its
+  // Node-docs citation, and — load-bearing — why it writes via
+  // `fs.appendFileSync` to a path passed through GSD_RUN_TESTS_EVENTS_FILE
+  // instead of yielding strings for Node to pipe through
+  // `--test-reporter-destination`: that destination is backed by an
+  // `fs.WriteStream`, which BUFFERS, and the per-chunk timeout can end the
+  // child with a hard kill (TerminateProcess on Windows, the SIGKILL
+  // escalation on POSIX) — uncatchable, zero chance to flush — so a yield-based reporter can
+  // lose every event still sitting in the stream's buffer, which is exactly
+  // the case this feature exists to diagnose (confirmed live: chunk killed at
+  // 2006ms produced a timer-based "killed after 2006ms" line — which lives in
+  // this parent process — but zero usable in-flight-file events from the
+  // reporter, which lives in the child and never flushed). Passing
+  // --test-reporter at all replaces node's implicit default reporter
+  // entirely, so the human reporter must also be named explicitly,
+  // reproducing node's own default selection (spec on a TTY, tap otherwise)
+  // so visible stdout output is unchanged.
+  //
+  // Node's documented multi-reporter contract requires EVERY --test-reporter
+  // to be paired with its own --test-reporter-destination, even though the
+  // ndjson reporter yields nothing and ignores its own destination — so the
+  // pairing still needs a sink argument. Pointed at the OS null device (a
+  // FIXED-length constant, unlike the old per-chunk events path) rather than
+  // a real file: it stays empty by design, since the durable write path is
+  // now the env var below, not this destination.
+  //
+  // One tmp dir for the whole run (not per-chunk) to avoid mkdtemp churn;
+  // each chunk gets its own events file inside it so a diagnostic read never
+  // races with, or is polluted by, another chunk's events. Deleted on the
+  // success path; kept only long enough to read back on a timeout.
+  const eventsDir = mkdtempSync(join(tmpdir(), 'gsd-run-tests-events-'));
+  // #3889: Node documents `--test-reporter`'s value as "a string similar to
+  // those used in import() statements" (https://nodejs.org/api/test.html#--test-reporter),
+  // NOT a bare filesystem path — a bare absolute path is not a portable
+  // import specifier (notably on Windows, where `C:\...` is not valid
+  // import()able syntax). Converting through pathToFileURL is the fix that
+  // hardens reporter resolution against a possible root cause of #3889: the
+  // events file never being created at all because the reporter module
+  // itself never loaded in the child. This makes the resulting string
+  // LONGER than the bare path, which is why reporterOverhead/FIXED_OVERHEAD
+  // below are derived from the final reporterArgs strings, not a literal
+  // constant — they must reflect whatever this line actually produces.
+  const reporterModulePath = pathToFileURL(join(__dirname, 'lib', 'ndjson-reporter.cjs')).href;
+  const humanReporter = process.stdout.isTTY ? 'spec' : 'tap';
+  // Chunk index zero-padded to a fixed width so the events path's length is
+  // stable across chunks (kept for readability/debuggability; it no longer
+  // feeds FIXED_OVERHEAD since the path now travels via env, not argv). 3
+  // digits covers up to 999 chunks — this suite chunks into the tens, never
+  // close to that ceiling.
+  const eventsPathFor = (i) => join(eventsDir, `chunk-${String(i).padStart(3, '0')}.ndjson`);
+  // Fixed argv for every chunk: the events path moved to the environment
+  // (GSD_RUN_TESTS_EVENTS_FILE, set per-chunk below in runChunk's `env`),
+  // which does NOT count toward the Windows 32,767-char argv ceiling — only
+  // this fixed sink destination does.
+  //
+  // The ndjson reporter yields nothing and ignores its own destination — the
+  // durable write path is GSD_RUN_TESTS_EVENTS_FILE above — but Node still
+  // opens this destination as a real fs.WriteStream and fsyncs it on close,
+  // so it MUST be a regular file. os.devNull (a character device on every
+  // platform) fails that fsync with EINVAL, crashing every chunk, not just
+  // the timeout path (confirmed live: 43/43 chunk failures, "EINVAL: invalid
+  // argument, fsync" on WriteStream close). Do not re-point this at devNull —
+  // it is the ONE destination flavor this feature cannot use. Pre-created
+  // once, alongside eventsDir, so it stays empty and its path length is
+  // identical across every chunk (see FIXED_OVERHEAD below).
+  const reporterSinkPath = join(eventsDir, 'reporter-sink.txt');
+  writeFileSync(reporterSinkPath, '');
+  const reporterArgs = [
+    `--test-reporter=${humanReporter}`,
+    '--test-reporter-destination=stdout',
+    `--test-reporter=${reporterModulePath}`,
+    `--test-reporter-destination=${reporterSinkPath}`,
+  ];
+  const reporterOverhead = reporterArgs.reduce((sum, a) => sum + a.length + 1, 0);
+
+  const FIXED_OVERHEAD = process.execPath.length + '--test'.length + concurrency.length + (forceExit ? '--test-force-exit'.length + 1 : 0) + reporterOverhead + 8;
+
+  // Convert the ms-denominated isolation bar into the packer's weight units
+  // by dividing by the live table's own mean duration — see the comment
+  // above partitionIsolatedFiles/CHUNK_WORKING_BUDGET_MS for the derivation.
+  // No measured table (loadedTimings() === null) makes fileMeasuredOf()
+  // return false for every file, which already disables isolation entirely;
+  // the fallback of 1 here just keeps thresholdWeight finite/positive so
+  // partitionIsolatedFiles' own guard does not throw on that degraded path.
+  const timingsForIsolation = loadedTimings();
+  const isolationThresholdWeight = timingsForIsolation
+    ? (ISOLATION_BUDGET_FRACTION * CHUNK_WORKING_BUDGET_MS) / timingsForIsolation.mean
+    : 1;
+  const { isolated: isolatedFiles, packable: packableFiles } = partitionIsolatedFiles(selected, {
     weightOf: fileWeightOf(),
-    maxWeight: MAX_FILES_PER_CHUNK,
-    maxChars: MAX_CMDLINE_CHARS,
-    fixedOverhead: FIXED_OVERHEAD,
+    isMeasured: fileMeasuredOf(),
+    thresholdWeight: isolationThresholdWeight,
   });
+  const chunks = [
+    ...isolatedFiles.map((f) => [f]),
+    ...packChunks(packableFiles, {
+      weightOf: fileWeightOf(),
+      maxWeight: MAX_FILES_PER_CHUNK,
+      maxChars: MAX_CMDLINE_CHARS,
+      fixedOverhead: FIXED_OVERHEAD,
+      isMeasured: fileMeasuredOf(),
+      maxUnmeasuredPerChunk: MAX_UNMEASURED_PER_CHUNK,
+    }),
+  ];
 
   // A chunk that still hangs (a leak the backstop somehow misses, or a wedged
   // subprocess) must fail loudly rather than silently burn the job's wall-clock
-  // budget until the CI runner cancels the whole job. Default 10 min per chunk:
-  // well above a healthy chunk (~4-5 min on the windows lane) but below the 20m
-  // job cap. Operator/test override via RUN_TESTS_CHUNK_TIMEOUT_MS.
+  // budget. Default 10 min per chunk. Operator/test override via
+  // RUN_TESTS_CHUNK_TIMEOUT_MS.
+  //
+  // Correction: this used to be justified as "below the 20m job cap" — that is
+  // stale. The full-test lane is now SHARDED 3x with `timeout-minutes: 45` in
+  // .github/workflows/test.yml, and that budget is asserted by
+  // tests/ci-test-job-timeout-budget.test.cjs. Consequence: the 600s
+  // per-chunk cap below is now the BINDING constraint, not the job cap.
+  // Evidence (measured 2026-08-28): windows shards ran 19m+ while every macos
+  // shard had already finished — nowhere near 45m — yet chunk 1/5 was killed
+  // at 600s on two separate runs (b351c83e0, c3e667df3), presenting as
+  // "# fail 0" with exit 1. Do not reason about a modern chunk kill using the
+  // old 20m silent-cancel model; they are different failure modes with
+  // different evidence.
   const chunkTimeoutMs = positiveNumberEnv(process.env.RUN_TESTS_CHUNK_TIMEOUT_MS, 600000);
+  // #4936: once the timeout fires, how long to wait for the child's exit to be
+  // observed before the runner stops waiting (see runChunk).
+  const chunkKillGraceMs = positiveNumberEnv(
+    process.env.RUN_TESTS_CHUNK_KILL_GRACE_MS,
+    DEFAULT_CHUNK_KILL_GRACE_MS,
+  );
+
+  // #2665: snapshot GSD's install footprint in every LIVE runtime config dir
+  // before a single test runs. The suite must not write there; the check after
+  // the chunk loop is what makes a violation loud instead of silent. See
+  // scripts/live-config-guard.cjs for why the scope is narrow (it is deliberately
+  // NOT under scripts/lib/, which the installer copies to users wholesale).
+  const liveConfigGuardEnabled = process.env.GSD_SKIP_LIVE_CONFIG_GUARD !== '1';
+  let liveConfigRoots = [];
+  let liveConfigExtras = [];
+  let liveConfigBefore = null;
+  if (liveConfigGuardEnabled) {
+    liveConfigRoots = resolveLiveConfigRoots();
+    // #2665 round 3: $GSD_HOME/.gsd, and one native config.toml per non-registry
+    // config-home descriptor (Kimi CLI's and, since #2755, Kimi Code's), are live
+    // write surfaces that are not runtime config ROOTS, so they are invisible to the
+    // line above. Watched independently — and note the OR: the extras alone are
+    // reason enough to snapshot, so an unbuilt tree that yields zero roots no
+    // longer silently disables the whole guard.
+    liveConfigExtras = resolveExtraWatchTargets();
+    if (liveConfigRoots.length > 0 || liveConfigExtras.length > 0) {
+      liveConfigBefore = snapshotLiveConfig(liveConfigRoots, liveConfigExtras);
+    }
+  }
 
   let firstFailureExit = 0;
   for (let i = 0; i < chunks.length; i++) {
     if (chunks.length > 1) {
       console.error(`run-tests: chunk ${i + 1}/${chunks.length} — ${chunks[i].length} files`);
     }
-    try {
-      execFileSync(
-        process.execPath,
-        ['--test', ...(forceExit ? ['--test-force-exit'] : []), concurrency, ...chunks[i]],
-        {
-          stdio: 'inherit',
-          env: { ...process.env },
-          timeout: chunkTimeoutMs,
-        },
+    const chunkEventsPath = eventsPathFor(i);
+    const chunkStartedAt = process.hrtime.bigint();
+    // #4936: the timeout diagnostic is printed from runChunk's own timer the
+    // moment the bound is exceeded — not from the result, which only arrives
+    // once the child's exit is observed (or the kill grace runs out). On the
+    // Windows run that motivated this, that observation never came, and the
+    // pre-#4936 catch arm that held this report was never reached.
+    const reportChunkTimeout = () => {
+      const elapsedMs = Number(process.hrtime.bigint() - chunkStartedAt) / 1e6;
+      console.error(
+        `run-tests: chunk ${i + 1}/${chunks.length} was killed after ${elapsedMs.toFixed(0)}ms`,
       );
-    } catch (err) {
-      // When the per-chunk timeout fires, execFileSync kills the child and
-      // surfaces it as err.code === 'ETIMEDOUT' (POSIX) and/or err.killed === true
-      // (platform-dependent). Check both so detection holds on Windows and POSIX.
-      const timedOut = err.killed === true || err.code === 'ETIMEDOUT';
-      if (timedOut) {
+      // #3889: name the file(s) in flight when the kill fired, using the
+      // ndjson companion reporter's destination file (stdio:'inherit' means
+      // this parent never saw the child's own stdout, so it cannot know
+      // otherwise). Falls back to "no file identified" rather than
+      // throwing when the reporter file is missing/empty/truncated.
+      const {
+        files: inFlightFiles,
+        staleMs,
+        sawInitMarker,
+        anyDequeued,
+        readError,
+      } = analyzeChunkEvents(chunkEventsPath);
+      const inFlightMsg = inFlightFiles.length > 0
+        ? `In flight when killed (test:dequeue with no matching pass/fail): ` +
+          `${inFlightFiles.map((f) => basename(f)).join(', ')} — last reporter event was ` +
+          `${staleMs !== null ? `${staleMs}ms` : 'an unknown time'} before this diagnostic ` +
+          `(small = output kept flowing until the kill = slow; large = it stopped early = hang).`
+        : anyDequeued
+          ? `No file was in flight when killed — every file the runner dequeued in this ` +
+            `chunk already terminated (test:pass/test:fail seen for each), so the CHILD ` +
+            `PROCESS itself hung after its last test finished (last reporter event was ` +
+            `${staleMs !== null ? `${staleMs}ms` : 'an unknown time'} before this ` +
+            `diagnostic); suspect a leaked handle outside any single test, or an ` +
+            `after-tests hook.`
+          : readError
+            ? `THE EVENTS FILE DOES NOT EXIST for this chunk — not even the reporter's own ` +
+              `\`reporter:init\` marker, which is the reporter module's first action before ` +
+              `it reads a single test event. Two possible causes, NOT distinguished by this ` +
+              `diagnostic: the ndjson reporter module never loaded in the child at all ` +
+              `(--test-reporter resolution failure), or the child was killed before the ` +
+              `reporter function was ever invoked (process/spawn startup stall). This ` +
+              `diagnostic could not identify an in-flight file.`
+            : sawInitMarker
+              ? `THE REPORTER LOADED BUT THE RUNNER NEVER DEQUEUED A SINGLE FILE — the events ` +
+                `file contains only the reporter's own \`reporter:init\` marker (and possibly ` +
+                `\`test:enqueue\` events with no matching \`test:dequeue\`), so the reporter ` +
+                `module was invoked and ran, but node's test runner never began executing any ` +
+                `file in this chunk before the kill. This is a genuinely surprising state — ` +
+                `\`test:dequeue\` fires the instant the runner starts a file, independent of ` +
+                `whether anything inside it ever completes. Two possible causes, NOT ` +
+                `distinguished by this diagnostic: node --test itself stalled before ` +
+                `dispatching any test file, or process/spawn startup stalled. This diagnostic ` +
+                `could not identify an in-flight file.`
+              : `No reporter events were recorded before the kill — the companion reporter's ` +
+                `events file exists but is empty/unparseable (no \`reporter:init\` marker and ` +
+                `no test events), so even the reporter's first appendFileSync may not have ` +
+                `completed. This diagnostic could not identify an in-flight file.`;
+
+      const table = loadTestTimings(process.env.RUN_TESTS_TIMINGS_FILE || DEFAULT_TIMINGS_PATH);
+      const ranked = rankChunkFilesByWeight(chunks[i], fileWeightOf(), table).join('\n');
+
+      console.error(
+        `run-tests: chunk ${i + 1}/${chunks.length} exceeded the per-chunk timeout ` +
+          `of ${chunkTimeoutMs}ms and was killed. Two possible causes: (1) a test leaks ` +
+          `an open handle (un-terminated Worker, un-killed child process, or ref'd timer) ` +
+          `so node --test never exits — but --test-force-exit already guards that, so if it ` +
+          `is enabled suspect (2) the chunk is legitimately too slow for the budget (too ` +
+          `many/too-heavy files packed together).\n${inFlightMsg}\n` +
+          `Files in this chunk, heaviest-first by measured weight ` +
+          `(table last regenerated 2026-08-07; real Windows cost runs ~2.2x the recorded ` +
+          `figure, so treat every number as a floor):\n${ranked}`,
+      );
+    };
+    const result = await runChunk(
+      process.execPath,
+      [
+        '--test',
+        ...(forceExit ? ['--test-force-exit'] : []),
+        concurrency,
+        ...reporterArgs,
+        ...chunks[i],
+      ],
+      {
+        env: { ...process.env, GSD_RUN_TESTS_EVENTS_FILE: chunkEventsPath },
+        timeoutMs: chunkTimeoutMs,
+        graceMs: chunkKillGraceMs,
+        onTimeout: reportChunkTimeout,
+      },
+    );
+    const elapsedMs = Number(process.hrtime.bigint() - chunkStartedAt) / 1e6;
+    if (!result.timedOut && result.code === 0 && !result.signal && !result.error) {
+      console.error(
+        `run-tests: chunk ${i + 1}/${chunks.length} completed in ${elapsedMs.toFixed(0)}ms`,
+      );
+      // Success path only (#3889): the events file has served its purpose —
+      // delete it now rather than let it accumulate across a multi-chunk run.
+      try {
+        unlinkSync(chunkEventsPath);
+      } catch {
+        // Best-effort; a missing/already-gone file is not an error here.
+      }
+      // #4020: bound peak temp usage to ONE chunk, not the whole run — sweep
+      // the leaked fixture trees the chunk's tests left behind, then fail fast
+      // if residue persists (a fixture nothing cleans, wedged open), before the
+      // temp filesystem fills. OWNER-ONLY: a nested run-tests spawn (the harness
+      // regression test) REUSES the outer run's root and runs while the outer
+      // chunk's OTHER test files are live — its sweep would delete their
+      // fixtures mid-run (macOS CI: template.test.cjs's plan file vanished and
+      // its classifier silently fell back to 'standard'). Only the process that
+      // created the root manages its lifecycle; the inheritor leaves sweeping to
+      // the owner. PROTECTED (for the owner): ancestors of the runner's own
+      // selected files — a harness may stage synthetic test files under the temp
+      // root and later chunks still need them (tests/run-tests-harness.test.cjs
+      // #3597).
+      if (createdRunTempRoot) {
+        const swept = sweepRunTempRoot(runTempRoot, sweepProtectSet);
+        if (swept > 0) {
+          console.error(`run-tests: temp sweep after chunk ${i + 1}/${chunks.length} — removed ${swept} leaked entr${swept === 1 ? 'y' : 'ies'}`);
+        }
+        assertTempRootBounded(runTempRoot);
+      }
+      continue;
+    }
+    if (!result.timedOut) {
+      console.error(
+        `run-tests: chunk ${i + 1}/${chunks.length} failed after ${elapsedMs.toFixed(0)}ms`,
+      );
+    } else if (!result.exitObserved) {
+      // #4936: the kill was sent but the child's exit was never reported back
+      // within the grace window — the state that used to hold the runner
+      // silently until the CI job's own timeout. The diagnostic above has
+      // already named the in-flight files; say what the runner is doing now.
+      console.error(
+        `run-tests: chunk ${i + 1}/${chunks.length} did not confirm its exit within ` +
+          `${chunkKillGraceMs}ms of the kill — no longer waiting for it (processes from ` +
+          `this chunk may still be running).`,
+      );
+    }
+    const code = result.code || 1;
+    if (firstFailureExit === 0) firstFailureExit = code;
+    if (result.timedOut) {
+      // A timeout has already burned a large share of the job's budget
+      // (chunkTimeoutMs defaults to 600000ms, i.e. half the 20m CI job
+      // cap), so — unlike an ordinary test failure — letting the loop
+      // fall through to the remaining chunks risks the CI runner
+      // cancelling the whole job before they finish. That cancellation
+      // replaces the loud, specific diagnostic printed above with an
+      // opaque "The operation was canceled." buried at the very end of
+      // the log, thousands of lines past the real cause (observed live on
+      // CI run 29749380190: chunk 1/5 timed out, the loop pressed on
+      // through chunks 2-4, and the job was cancelled mid-chunk-5 — the
+      // timeout message was ~38,000 log lines from the end and
+      // `gh run view --log-failed` returned nothing). Abort the remaining
+      // chunks instead so the operator actually sees this message.
+      const skipped = chunks.length - (i + 1);
+      if (skipped > 0) {
         console.error(
-          `run-tests: chunk ${i + 1}/${chunks.length} exceeded the per-chunk timeout ` +
-            `of ${chunkTimeoutMs}ms and was killed. Two possible causes: (1) a test leaks ` +
-            `an open handle (un-terminated Worker, un-killed child process, or ref'd timer) ` +
-            `so node --test never exits — but --test-force-exit already guards that, so if it ` +
-            `is enabled suspect (2) the chunk is legitimately too slow for the budget (too ` +
-            `many/too-heavy files packed together). Check whether output kept flowing until ` +
-            `the kill (slow) vs stopped early (hang) before assuming a leak. Files: ${chunks[i]
-              .map(f => f.split(/[\\/]/).pop())
-              .join(' ')}`,
+          `run-tests: aborting — skipping the remaining ${skipped} chunk${skipped === 1 ? '' : 's'} ` +
+            `after the chunk ${i + 1}/${chunks.length} timeout rather than risk the CI runner ` +
+            `cancelling the job (and burying this diagnostic) before they finish.`,
         );
       }
-      const code = err.status || 1;
-      if (firstFailureExit === 0) firstFailureExit = code;
-      if (timedOut) {
-        // A timeout has already burned a large share of the job's budget
-        // (chunkTimeoutMs defaults to 600000ms, i.e. half the 20m CI job
-        // cap), so — unlike an ordinary test failure — letting the loop
-        // fall through to the remaining chunks risks the CI runner
-        // cancelling the whole job before they finish. That cancellation
-        // replaces the loud, specific diagnostic printed above with an
-        // opaque "The operation was canceled." buried at the very end of
-        // the log, thousands of lines past the real cause (observed live on
-        // CI run 29749380190: chunk 1/5 timed out, the loop pressed on
-        // through chunks 2-4, and the job was cancelled mid-chunk-5 — the
-        // timeout message was ~38,000 log lines from the end and
-        // `gh run view --log-failed` returned nothing). Abort the remaining
-        // chunks instead so the operator actually sees this message.
-        const skipped = chunks.length - (i + 1);
-        if (skipped > 0) {
-          console.error(
-            `run-tests: aborting — skipping the remaining ${skipped} chunk${skipped === 1 ? '' : 's'} ` +
-              `after the chunk ${i + 1}/${chunks.length} timeout rather than risk the CI runner ` +
-              `cancelling the job (and burying this diagnostic) before they finish.`,
-          );
-        }
-        break;
+      break;
+    }
+    // A non-timeout failure is cheap in wall-clock terms (the child exits
+    // promptly on its own), so — unlike the timeout case above — run every
+    // remaining chunk anyway: the operator sees all failures in one pass,
+    // and the first non-zero exit is reported at the end.
+  }
+  // #3889: sweep any events file the per-chunk success path didn't already
+  // delete (a timeout diagnostic read one but left it on disk; an aborted
+  // run may leave more that were never opened). All diagnostics that needed
+  // these files have already been printed above, so this is unconditional —
+  // best-effort, since a failure to remove a tmp dir must never mask the
+  // real chunk-loop exit code.
+  try {
+    rmSync(eventsDir, { recursive: true, force: true });
+  } catch {
+    // Non-fatal: an orphaned OS tmp dir is a cosmetic leak, not a test result.
+  }
+  // #2665: post-suite hermeticity check. Runs even when tests failed — a leaked
+  // global install is worth reporting alongside the failure that hid it, and
+  // suppressing it on red would hide it exactly when the suite is least trusted.
+  if (liveConfigBefore) {
+    const violations = diffLiveConfig(
+      liveConfigBefore,
+      snapshotLiveConfig(liveConfigRoots, liveConfigExtras),
+    );
+    if (violations.length > 0) {
+      console.error(formatViolations(violations));
+      // Reports by default; fails only under opt-in strict mode. See the
+      // SEVERITY note in scripts/live-config-guard.cjs for why.
+      if (process.env.GSD_STRICT_LIVE_CONFIG_GUARD === '1' && firstFailureExit === 0) {
+        firstFailureExit = 1;
       }
-      // A non-timeout failure is cheap in wall-clock terms (the child exits
-      // promptly on its own), so — unlike the timeout case above — run every
-      // remaining chunk anyway: the operator sees all failures in one pass,
-      // and the first non-zero exit is reported at the end.
     }
   }
+
   if (firstFailureExit !== 0) return firstFailureExit;
 }
 
@@ -1042,10 +2107,45 @@ module.exports = {
   ensureBuiltArtifacts,
   ensureBuiltHooks,
   parseShardArg,
+  parseShardReserve,
   selectShard,
   positiveNumberEnv,
+  defaultMaxFilesPerChunk,
+  defaultMaxUnmeasuredPerChunk,
   loadTestTimings,
   makeFileWeigher,
+  WINDOWS_UNMEASURED_COST_MULTIPLIER,
+  makeMeasuredPredicate,
   packChunks,
+  // 2026-09-07 (PR #4497): the codex-config.test.cjs chunk-isolation fix —
+  // see the comment above their definitions. The heavy set is now DERIVED
+  // per run from CHUNK_WORKING_BUDGET_MS/ISOLATION_BUDGET_FRACTION against
+  // the live timings table's own mean, not a hand-maintained list or a
+  // per-platform file-count cap.
+  CHUNK_WORKING_BUDGET_MS,
+  ISOLATION_BUDGET_FRACTION,
+  partitionIsolatedFiles,
+  analyzeChunkEvents,
+  // #4936: the chunk watchdog, exported so its arms are unit-testable with
+  // injected spawn/platform seams (a real wedged Windows child is not
+  // reproducible on demand).
+  runChunk,
+  killChunkTree,
+  DEFAULT_CHUNK_KILL_GRACE_MS,
   DEFAULT_TIMINGS_PATH,
+  // Exported so callers (tests/ci-test-scope.test.cjs) can assert the
+  // suite-token resolution contract in-process rather than through a timed
+  // subprocess spawn. Pure selection logic only — no behavior change.
+  parseArgs,
+  selectExplicitFiles,
+  selectFiles,
+  walkTestFiles,
+  // #4020: run-scoped temp root — see the block above their definitions.
+  setupRunTempRoot,
+  sweepRunTempRoot,
+  assertTempRootBounded,
+  // #4220: extracted for in-process unit coverage of the ancestor-walk
+  // termination logic (Windows drive-root hang fix) without a real
+  // Windows/POSIX runner.
+  computeSweepProtectSet,
 };

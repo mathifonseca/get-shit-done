@@ -8,13 +8,25 @@
  */
 
 import { splitTableRow } from './markdown-table.cjs';
+import { clampPercentFromFraction } from './phase-lifecycle.cjs';
+import { collectSection, withSection } from './markdown-sectionizer.cjs';
+import type { HeadingToken } from './markdown-sectionizer.cjs';
+import { escapeRegex } from './pattern.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- planning-scope.cjs is an export= CommonJS module
+import planningScopeMod = require('./planning-scope.cjs');
+const { SCOPE } = planningScopeMod;
+type Scope = planningScopeMod.Scope;
 
-// Internal helpers
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function toFiniteNumber(value: unknown): number | null {
+/**
+ * Coerce an arbitrary frontmatter scalar to a finite number, or `null` if it
+ * is not one. Exported per ADR-3473 §8.6: `state-transition.cts`'s
+ * progress-ratchet unmeasured-scan check ("is this derived total a real
+ * measurement?") must ask through the SAME coercion this module already uses
+ * for `existingProgressExceedsDerived`, rather than growing a second private
+ * copy. This matters because frontmatter scalars arrive as STRINGS
+ * (`"0"`, not `0`) — a raw `=== 0` test is wrong at both call sites.
+ */
+export function toFiniteNumber(value: unknown): number | null {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -211,10 +223,186 @@ function locateFieldRow(content: string, fieldName: string): { valueStart: numbe
   return null;
 }
 
+/**
+ * True only when y/m/d name a date that actually exists on the calendar.
+ *
+ * `Date.parse` validates shape but not value: it rolls an out-of-range day
+ * FORWARD rather than rejecting it (`2026-02-30` -> `2026-03-02`,
+ * `2026-04-31` -> `2026-05-01`). Shape-only validation would therefore
+ * propagate a different, wrong instant instead of failing safe — precisely
+ * what ADR-227 ("validate shape AND value; on failure of either layer coerce
+ * to the contract's safe default, never propagate") exists to prevent. A
+ * round-trip through Date.UTC detects the rollover: any component the
+ * constructor normalised comes back changed.
+ *
+ * #3696: this predicate previously lived privately inside `smart-entry.cts`,
+ * where it gated `parseActivityTimestamp`. `state validate` needed the same
+ * answer to assert the `last_activity` invariant (S008), and a second copy is
+ * the "generative fix divergence" class outright — two surfaces that disagree
+ * about whether a STATE.md is usable is the defect #3696 opens with, so a
+ * parity test over two copies would be codifying the bug rather than fixing
+ * it. It moves here because this module is already the designated owner of
+ * STATE.md field semantics (ADR-3180 §7.7) and `smart-entry.cts` imports no
+ * peer that would make the reverse direction a cycle.
+ */
+/**
+ * True when a field carries no value a writer ever supplied: absent, blank, or
+ * still holding the shipped template's bracket placeholder.
+ *
+ * `templates/state.md:35` ships `Last activity: [YYYY-MM-DD] — [What happened]`,
+ * so EVERY freshly-initialized project has this exact string until something
+ * records activity. #3696's first cut only spared the ABSENT form, which made
+ * S008 fire on the shipped template itself — caught by the pre-existing
+ * "template-equivalent phase identities remain clean without disk drift" test,
+ * which is precisely what it is there for.
+ *
+ * The placeholder test is anchored at the START rather than "contains a bracket
+ * anywhere", so a real description that happens to cite one — `2026-08-19 — fixed
+ * [#123] parsing` — is still a filled-in value. That keeps the rule from
+ * silently swallowing genuine drift.
+ *
+ * Distinct from `isStateTemplateDefault`, which answers a different question
+ * ("may a later handler overwrite this?") and deliberately returns true for a
+ * bare ISO date — a perfectly valid value here.
+ */
+export function isUnfilledFieldValue(value: string | null | undefined): boolean {
+  if (value === null || value === undefined) return true;
+  const trimmed = value.trim();
+  return trimmed === '' || trimmed.startsWith('[');
+}
+
+/**
+ * The `YYYY-MM-DD` prefix of `value`, but only when it names a date that
+ * actually exists. `null` for anything else — no leading date token at all, or
+ * a token that is shape-valid and calendar-impossible.
+ *
+ * #3696 review: this is deliberately a LEADING-TOKEN test, not the fully
+ * anchored prose grammar `parseProseLastActivityField` uses. That function
+ * requires the whole value to be `date` or `date <separator> description`, and
+ * returns `{date: <the entire raw string>}` when it does not match — a shape
+ * that reads like success. Asserting the S008 invariant through it therefore
+ * rejected values the real reader accepts: `smart-entry`'s
+ * `parseActivityTimestamp` needs only a leading date and reconstructs the
+ * instant even when the suffix carries no dash, so
+ * `Last activity: 2026-08-24 Shipped feature X` parses fine there while S008
+ * called it unreadable. That is the same two-surfaces-disagree defect #3696
+ * exists to close, merely pointing the other way.
+ *
+ * So the invariant asserted is the one the readers actually share: a leading
+ * ISO date token that is a real calendar date.
+ */
+export function leadingCalendarDate(value: string | null): string | null {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?![\d-])/.exec(value.trim());
+  if (!match) return null;
+  return isRealCalendarDate(Number(match[1]), Number(match[2]), Number(match[3]))
+    ? `${match[1]}-${match[2]}-${match[3]}`
+    : null;
+}
+
+export function isRealCalendarDate(year: number, month: number, day: number): boolean {
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  return (
+    probe.getUTCFullYear() === year &&
+    probe.getUTCMonth() === month - 1 &&
+    probe.getUTCDate() === day
+  );
+}
+
+/**
+ * Markdown structure that can legitimately follow a single-line field. A line
+ * matching any of these is the NEXT construct, never a continuation of the
+ * field above it.
+ *
+ * BREADTH IS THE POINT, and the failure direction is deliberate: a missed
+ * truncation costs a diagnostic nobody sees, while a false S009 reports drift on
+ * a well-formed STATE.md — a gate that fires on valid documents is worse than no
+ * gate. When a shape is ambiguous, it belongs here.
+ *
+ * #3696 review round 2 added the last three arms after all three were shown to
+ * produce false S009 fires on well-formed content: an indented code block, an
+ * HTML block, and a setext underline (`===`, which the `[-*_]{3,}` rule does not
+ * cover — it only knows `-`, `*` and `_`).
+ */
+const MD_STRUCTURE_LINE_RE =
+  /^(?:#{1,6}\s|\||>|```|~~~|[-*_]{3,}\s*$|=+\s*$|[-*+]\s|\d+[.)]\s|\[[^\]]+\]:|<|(?: {4}|\t))/;
+
+/**
+ * A setext heading's underline — `===` or `---` on its own line. The line ABOVE
+ * one of these is a heading TITLE, which is indistinguishable from prose on its
+ * own, so the scan must look ahead by one line rather than consume it. Without
+ * this, `Last activity: …\nMy Heading\n===` reported "My Heading ===" as dropped
+ * continuation text (#3696 review round 2).
+ */
+const SETEXT_UNDERLINE_RE = /^(?:=+|-+)\s*$/;
+
+const STATE_SIBLING_FIELD_LINE_RE = /^\*{0,2}[A-Za-z][A-Za-z0-9 _-]*\*{0,2}:{1,2}\*{0,2}(?:\s|$)/;
+
+/**
+ * Return the prose that FOLLOWS a single-line field but plainly belongs to it —
+ * i.e. the remainder `stateExtractField` silently drops when a writer emits a
+ * value long enough to wrap.
+ *
+ * `stateExtractField`'s `(.+)` is newline-excluding, so
+ *
+ *     Last activity: 2026-08-19 — Project initialized from ingest; PROJECT.md,
+ *     REQUIREMENTS.md, ROADMAP.md written
+ *
+ * yields only the first line and the rest is lost with no diagnostic (#3696).
+ * `templates/state.md` prescribes a single-line field, so the DOCUMENT is what
+ * is wrong here, not the reader — this function exists so `state validate` can
+ * SAY so, not so the reader can start guessing at a multi-line grammar the
+ * template does not sanction.
+ *
+ * That is also why the fix is not in `stateExtractField` itself: it has 20
+ * direct callers and a CRITICAL blast radius (ADR-3180 §7.7, Rejected #1), and
+ * joining continuations there would apply to every field — `Status:` would
+ * swallow the line beneath it.
+ *
+ * Returns `null` when the field is absent, is a pipe-table row (a table cell
+ * cannot wrap), or is followed by end-of-file, a blank line, Markdown
+ * structure, or a sibling field.
+ */
+export function stateFieldContinuation(content: string, fieldName: string): string | null {
+  const escaped = escapeRegex(fieldName);
+  // Same two single-line grammars stateExtractField uses, in the same order, so
+  // this locates exactly the line whose value it returned. The pipe-table rung
+  // is deliberately absent: a `| Field | value |` row is bounded by its closing
+  // pipe and cannot wrap.
+  const match =
+    new RegExp(`^[ \\t]*\\*\\*${escaped}:\\*\\*[ \\t]*(.+)`, 'im').exec(content) ??
+    new RegExp(`^${escaped}:[ \\t]*(.+)`, 'im').exec(content);
+  if (!match) return null;
+
+  // `(.+)` stops at the line terminator, so the field's line ends where the
+  // match does. JS `.` excludes \r as well as \n, so on a CRLF document the \r
+  // sits just AFTER the match rather than inside it — hence the strip below
+  // before testing for the newline.
+  const afterValue = match.index + match[0].length;
+  const rest = content.slice(afterValue).replace(/^\r/, '');
+  if (!rest.startsWith('\n')) return null; // end of file: nothing follows
+
+  const lines = rest.slice(1).split('\n').map((line) => line.replace(/\r$/, ''));
+  const continuation: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) break;
+    if (MD_STRUCTURE_LINE_RE.test(line)) break;
+    if (STATE_SIBLING_FIELD_LINE_RE.test(line)) break;
+    // Look ahead one line: a setext underline below makes THIS line a heading
+    // title, so stop before consuming it rather than after.
+    if (i + 1 < lines.length && SETEXT_UNDERLINE_RE.test(lines[i + 1])) break;
+    continuation.push(line.trim());
+  }
+  return continuation.length ? continuation.join(' ') : null;
+}
+
 export function stateExtractField(content: string, fieldName: string): string | null {
   const escaped = escapeRegex(fieldName);
-  // Bold inline format: **FieldName:** value
-  const boldPattern = new RegExp(`\\*\\*${escaped}:\\*\\*[ \\t]*(.+)`, 'i');
+  // Bold line-start format: **FieldName:** value. Leading same-line whitespace
+  // matches the writer's established indented-field tolerance.
+  const boldPattern = new RegExp(`^[ \\t]*\\*\\*${escaped}:\\*\\*[ \\t]*(.+)`, 'im');
   const boldMatch = content.match(boldPattern);
   if (boldMatch)
     return boldMatch[1].trim();
@@ -231,17 +419,164 @@ export function stateExtractField(content: string, fieldName: string): string | 
   return null;
 }
 
+/**
+ * Single owner of the #1760 STATE.md field-extraction fallback chain: "read
+ * field F, preferring the YAML frontmatter scalar, falling back to the body
+ * field." Added for #3187 (epic #3180, ADR-3180 §7.7) to collapse three
+ * independent re-derivations of this chain — `src/smart-entry.cts`'s
+ * `fmScalar` closure, and `src/state.cts`'s `cmdStateSnapshot` and
+ * `cmdStatePrune` — onto one function, per ADR-3180 Decision 1 ("keep N
+ * copies with a parity test" is rejected: a parity test proves today's
+ * agreement, not that copy N+1 won't happen).
+ *
+ * Takes ALREADY-PARSED `fm` and `body` rather than raw STATE.md content: the
+ * heaviest caller, `cmdStateSnapshot`, reads roughly ten fields off one parse
+ * and must not re-parse frontmatter per field.
+ *
+ * `stateExtractField` (above) is deliberately left untouched — it has 20
+ * direct callers and a CRITICAL blast radius (ADR-3180 §7.7's Rejected #1) —
+ * so this function is additive: it calls `stateExtractField` rather than
+ * replacing it or changing its signature.
+ *
+ * Fallback ladder (unchanged from every prior copy this replaces):
+ *   1. `fm[fmKey]` is a non-empty (post-`.trim()`) string → that trimmed
+ *      string.
+ *   2. `fm[fmKey]` is a `number` or `boolean` → `String(fm[fmKey])`, so `0`
+ *      and `false` are VALUES, not absence.
+ *   3. Anything else (`null`, `undefined`, an object, an array, or an
+ *      empty/whitespace-only string) → fall through to
+ *      `stateExtractField(body, bodyField)`.
+ *
+ * `fmKey === null` skips steps 1–2 outright: for a caller whose chain has no
+ * frontmatter side for this particular field (e.g. `state.cts`'s body-only
+ * `Last Activity` / `Last activity` case-variant pair, which sits inside a
+ * function that DOES own a ladder for its other fields, so per this phase's
+ * function-scoped guard it must still route through this owner).
+ * `bodyField === null` skips step 3: for a caller whose "no frontmatter
+ * value" case falls through to an already-computed value instead of a fresh
+ * extractor call (e.g. `cmdStateSnapshot`'s `last_activity`, which falls to
+ * its already-parsed prose date rather than re-extracting the body).
+ *
+ * `scope` reports whether the chain ran over inputs it could actually
+ * consult (ADR-3180 Decision 2/§7.7 — mirrors `scanPhasePlans`'s
+ * scope-carrying result in `plan-scan.cts`; see `planning-scope.cjs`). This
+ * function's own ladder always runs to completion on whatever `fm`/`body` it
+ * is given, INCLUDING when the answer is `null` — a genuinely absent field is
+ * a real answer, not a failure to look (§7.7 behavior table row 4). So
+ * `scope` defaults to `SCOPE.COMPLETE` and is only ever something else when
+ * the CALLER passes `opts.scope`, because only the caller knows whether an
+ * input it handed in was itself degraded — e.g. `fm` came back `{}` from an
+ * unterminated frontmatter fence (`extractFrontmatter` swallows that parse
+ * failure), or `body` is an unscoped whole-document fallback because a
+ * required `## Current Position` section was not found (#2956). This
+ * function never invents a new `SCOPE` member — the enum is frozen at
+ * COMPLETE/TRUNCATED/UNSCOPED/UNREADABLE (`planning-scope.cjs`).
+ *
+ * #1760 is the fallback chain's origin.
+ */
+export function stateFieldValue(
+  fm: Record<string, unknown>,
+  body: string,
+  fmKey: string | null,
+  bodyField: string | null,
+  opts?: { scope?: Scope },
+): { value: string | null; scope: Scope } {
+  const v = fmKey === null ? undefined : fm[fmKey];
+  let value: string | null;
+  if (typeof v === 'string' && v.trim()) {
+    value = v.trim();
+  } else if (typeof v === 'number' || typeof v === 'boolean') {
+    value = String(v);
+  } else {
+    value = bodyField === null ? null : stateExtractField(body, bodyField);
+  }
+  return { value, scope: opts?.scope ?? SCOPE.COMPLETE };
+}
+
+/**
+ * Match the "Current Position" section body from a STATE.md body. #2956: this
+ * is the Phase analogue of state.cts's matchSessionSection. `Phase` canonically
+ * lives under `## Current Position` (gsd-core/templates/state.md), so — like
+ * Stopped At / Paused At under `## Session` — it must be extracted from THAT
+ * section, not from the first `Phase:` / `**Phase:**` line anywhere in the
+ * body. Without the scope, a historical `Phase:` line in an archive section
+ * silently shadows the real one on every read/write, and because callers use
+ * this for routing (state.cts's current_phase) and for drift detection
+ * (gsd-tools.cjs's `drift-guard phase-status` CLI seam), a stale match either
+ * routes work to the wrong phase or fabricates a drift finding.
+ *
+ * Level-flexible: the canonical template uses an h2 `## Current Position`, the
+ * bootstrap template an h3 `### Current Position` (templates/state.md). Both
+ * must match — mirroring how matchSessionSection recognises `## Session` and
+ * `## Session Continuity`. Exact 'current position' text match (case-
+ * insensitive) excludes unrelated headings. Built on the `collectSection`
+ * seam, so it inherits that seam's CRLF tolerance (#2444 fix).
+ *
+ * This is the single owner of the scope — state.cts's private
+ * `matchCurrentPositionSection` delegates here rather than duplicating the
+ * logic, so the two consumers cannot drift apart.
+ *
+ * Returns the section body, or null (caller falls back to full-body search).
+ */
+export function stateCurrentPositionSlice(body: string): string | null {
+  const isCurrentPosition = (h: HeadingToken): boolean =>
+    (h.level === 2 || h.level === 3) && h.text.trim().toLowerCase() === 'current position';
+  const section = collectSection(body, isCurrentPosition, { levelBounded: true });
+  return section ? section.body : null;
+}
+
+/**
+ * Join a matched `**Field:**`/`Field:` label prefix to its new value, inserting a
+ * single space when the prefix does not already end in same-line whitespace.
+ *
+ * On an empty field the same-line `[ \t]*` gap (below) captures nothing, so the
+ * bare `prefix + value` would glue the value to the label (`**Status:**value`);
+ * this inserts the missing separator. A non-empty field whose label-to-value
+ * separator is ordinary space/tab keeps that separator in the prefix, so `[ \t]$`
+ * is true and the output stays byte-identical to prior behaviour. The one
+ * exception is a non-empty field written with NO separator at all (a hand-edited
+ * `**Status:**value`): the narrowed gap captures nothing, `[ \t]$` is false, and a
+ * single space is inserted — an intentional normalization, not byte-identical, and
+ * with no GSD-template trigger. An empty new value inserts no separator, avoiding a
+ * dangling trailing space. See #4010.
+ */
+function joinFieldReplacement(prefix: string, newValue: string): string {
+  const value = `${newValue}`;
+  const needsSeparator = value.length > 0 && !/[ \t]$/.test(prefix);
+  return `${prefix}${needsSeparator ? ' ' : ''}${value}`;
+}
+
 export function stateReplaceField(content: string, fieldName: string, newValue: string): string | null {
   const escaped = escapeRegex(fieldName);
   // Bold inline format: **FieldName:** value
-  const boldPattern = new RegExp(`(\\*\\*${escaped}:\\*\\*\\s*)(.*)`, 'i');
+  // The label-to-value gap is same-line whitespace only (`[ \t]*`, mirroring the
+  // read side at stateExtractField). `\s*` here matched `\n`, so on an empty field
+  // `(.*)` captured the following line and the rebuild discarded it — the #4010
+  // data-loss. ADR-3180 §7.7 makes stateExtractField the same-line-confined owner;
+  // this aligns the writer to it.
+  //
+  // #4243: the bold form is also ANCHORED to line start, with same-line leading
+  // whitespace only. The pre-fix pattern carried no `^` and no `m` flag, so a
+  // bold label quoted MID-SENTENCE inside prose — an Accumulated Context bullet
+  // mentioning `**Status:**` — captured the rewrite and destroyed the rest of
+  // its line, silently, whenever a whole-body caller fed this function every
+  // section (beginPhaseCore's tryField, advancePlanCore's Status/Current Plan
+  // writes). The plain branch below was always line-anchored; only the bold
+  // branch lagged. Anchoring reuses #4010's same-line confinement idiom (the
+  // leading class is `[ \t]*`, deliberately NOT the `\s*` the issue suggested —
+  // `^\s*\*\*` can consume the newlines before the label into the match and
+  // drop them on rebuild) and #4186's recognition-by-anchoring discipline: a
+  // write target must BE the whole declared line shape, never a substring
+  // guess inside prose. `$` is explicit-and-inert (`.` never crosses line
+  // terminators) and documents that the match ends at end-of-line.
+  const boldPattern = new RegExp(`^([ \\t]*\\*\\*${escaped}:\\*\\*[ \\t]*)(.*)$`, 'im');
   if (boldPattern.test(content)) {
-    return content.replace(boldPattern, (_match, prefix: string) => `${prefix}${newValue}`);
+    return content.replace(boldPattern, (_match, prefix: string) => joinFieldReplacement(prefix, newValue));
   }
-  // Plain line-start format: FieldName: value
-  const plainPattern = new RegExp(`(^${escaped}:\\s*)(.*)`, 'im');
+  // Plain line-start format: FieldName: value (same same-line confinement as above)
+  const plainPattern = new RegExp(`(^${escaped}:[ \\t]*)(.*)`, 'im');
   if (plainPattern.test(content)) {
-    return content.replace(plainPattern, (_match, prefix: string) => `${prefix}${newValue}`);
+    return content.replace(plainPattern, (_match, prefix: string) => joinFieldReplacement(prefix, newValue));
   }
   // Pipe-table format: | FieldName | value |
   // Preserve the surrounding pipe/whitespace structure; only swap the value cell.
@@ -264,39 +599,164 @@ export function stateReplaceFieldWithFallback(content: string, primary: string, 
   return content;
 }
 
-export function normalizeStateStatus(status: string | null | undefined, pausedAt: unknown): string {
-  let normalizedStatus = status || 'unknown';
-  const statusLower = (status || '').toLowerCase();
-  if (statusLower.includes('paused') || statusLower.includes('stopped') || pausedAt) {
-    normalizedStatus = 'paused';
-  }
-  else if (statusLower.includes('executing') || statusLower.includes('in progress')) {
-    normalizedStatus = 'executing';
-  }
-  else if (statusLower.includes('planning') || statusLower.includes('ready to plan')) {
-    normalizedStatus = 'planning';
-  }
-  else if (statusLower.includes('discussing')) {
-    normalizedStatus = 'discussing';
-  }
-  else if (statusLower.includes('verif')) {
-    normalizedStatus = 'verifying';
-  }
-  else if (statusLower.includes('complete') || statusLower.includes('done')) {
-    normalizedStatus = 'completed';
-  }
-  else if (statusLower.includes('ready to execute')) {
-    normalizedStatus = 'executing';
-  }
-  return normalizedStatus;
+/**
+ * #3374: session-scoped variant of stateReplaceFieldWithFallback for the
+ * `## Session` continuity fields. The post-sync harvest (state.cts's
+ * matchSessionSection → buildStateFrontmatter) reads these fields ONLY from
+ * the session section, so a writer that refreshes one must target the same
+ * scope — a whole-body replace lets a decoy `**Stopped at:**` line in an
+ * unrelated (e.g. archive) section absorb the refresh while the harvested
+ * session value stays stale.
+ *
+ * Section preference mirrors the reader exactly: the normalized `## Session`
+ * block wins over the bootstrap `## Session Continuity` heading when both
+ * exist (legacy duplicate files); the continuity heading is only consulted
+ * when no canonical `## Session` section exists. `levelBounded` heading
+ * matching also excludes `## Session Continuity Archive` (the #2444 scoping).
+ *
+ * Replace-only (no insertion): returns `content` unchanged when no session
+ * section exists or the field is absent from it, so a STATE.md layout without
+ * the line keeps its shape and the post-sync preservation pass decides the
+ * frontmatter value (see #3374).
+ */
+export function stateReplaceFieldInSession(content: string, primary: string, fallback: string | null | undefined, value: string): string {
+  const isSession = (h: HeadingToken): boolean => h.level === 2 && h.text.trim().toLowerCase() === 'session';
+  const isSessionContinuity = (h: HeadingToken): boolean => h.level === 2 && h.text.trim().toLowerCase() === 'session continuity';
+  const hasCanonicalSession = collectSection(content, isSession, { levelBounded: true }) !== null;
+  const target = hasCanonicalSession ? isSession : isSessionContinuity;
+  return withSection(content, target, (sectionBody) => stateReplaceFieldWithFallback(sectionBody, primary, fallback, value));
 }
 
+/**
+ * #4186: the DECLARED raw-status vocabulary `normalizeStateStatus` recognizes.
+ * Keys are whole-field values, compared against the caller's input after
+ * lowercasing, trimming, and collapsing internal whitespace runs to single
+ * spaces — so case and whitespace variants the vocabulary documents
+ * (`EXECUTING PHASE 5`, `  Paused  `, `In   progress`) keep normalizing.
+ * Values are members of `STATUS_LIFECYCLE_ENUM` (`src/state-md-schema.cts`)
+ * — the set the normalizer maps recognized input ONTO.
+ *
+ * The mapping preserves the PRE-#4186 branch ORDER's observable artifacts for
+ * every value the old substring chain recognized: `Planning complete` →
+ * `planning` (the `planning` branch outranked `complete`) and
+ * `Phase complete — ready for verification` → `verifying` (`verif` outranked
+ * `complete`; pinned by tests/state.test.cjs's advance-plan case-5 comment).
+ *
+ * Everything else — prose that merely CONTAINS a status word — falls through
+ * to the caller's raw value (the recorded lenient fallback, #3873 phase-3
+ * row 26). A token guessed from a substring inside a sentence is worse than
+ * a visible paragraph: the paragraph is visibly prose, the wrong token is
+ * not (a `.planning/` path in Italian prose silently produced
+ * `status: planning`; `verificata` produced `verifying`; `completezza`
+ * produced `completed`).
+ */
+export const STATUS_EXACT_TOKENS: Readonly<Record<string, string>> = Object.freeze({
+  paused: 'paused',
+  stopped: 'paused',
+  executing: 'executing',
+  'in progress': 'executing',
+  'ready to execute': 'executing',
+  planning: 'planning',
+  'ready to plan': 'planning',
+  'planning complete': 'planning',
+  discussing: 'discussing',
+  verifying: 'verifying',
+  completed: 'completed',
+  done: 'completed',
+  complete: 'completed',
+  'phase complete': 'completed',
+  // advance-plan's phase-complete write (state-transition.cts:1812) — maps
+  // to `verifying`, preserving the pre-#4186 branch order where `verif`
+  // outranked `complete`.
+  'phase complete — ready for verification': 'verifying',
+  'all phases complete': 'completed',
+  // Legacy bare terminal form. ADR-2207/#2204 removed it from every WRITER
+  // (phase verbs write `All phases complete`; milestone close writes
+  // `<version> milestone complete`) — kept here as READER recognition so a
+  // legacy STATE.md still normalizes, exactly the way KNOWN_TEMPLATE_DEFAULTS
+  // keeps the other legacy Status strings.
+  'milestone complete': 'completed',
+  unknown: 'unknown',
+} as const);
+
+/**
+ * #4186: ANCHORED patterns for handler-written raw statuses whose text
+ * carries a variable component (a phase number, a milestone version, a
+ * #1070 completion glyph). Each pattern is matched against the same
+ * normalized key as `STATUS_EXACT_TOKENS` (lowercased, trimmed,
+ * whitespace-collapsed) and must match the WHOLE value — never a substring —
+ * mirroring how `KNOWN_STATUS_PATTERNS` anchors its template-default checks.
+ * `Executing Phase 5 — final stretch` (executor-appended prose) matches
+ * NOTHING and passes through verbatim, the same discipline #1070 applies to
+ * "Complete but needs manual QA".
+ */
+export const STATUS_ANCHORED_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = Object.freeze([
+  // begin-phase / planned transitions write `Executing Phase ${N}`.
+  [/^executing phase\s+\S+$/, 'executing'],
+  [/^planning phase\s+\S+$/, 'planning'],
+  [/^verifying phase\s+\S+$/, 'verifying'],
+  // phase-complete verbs write `Phase ${N} complete` (state.cts) — the exact
+  // shape the #3578 demote guard then re-checks against the disk counters.
+  [/^phase\s+\S+\s+complete$/, 'completed'],
+  // milestoneCompleteCore writes `${version} milestone complete` (terminal,
+  // ADR-2207); the version label is a single token (milestone.cts's charset
+  // validation admits letters, digits, '.', '-', '_').
+  [/^\S+\s+milestone complete$/, 'completed'],
+  // #1070: LLM executors may write "Complete ✓" or bare "Complete" when
+  // finishing a phase.
+  [/^complete\s*[✓✔✅☑]?$/, 'completed'],
+] as const);
+
+/**
+ * Normalize a raw `Status` body-field value to the canonical status token.
+ *
+ * #4186: recognition is ANCHORED — the whole field value (lowercased,
+ * trimmed, whitespace-collapsed) must be a member of the declared vocabulary
+ * (`STATUS_EXACT_TOKENS` / `STATUS_ANCHORED_PATTERNS` above). The pre-#4186
+ * implementation ran a first-match-wins chain of SUBSTRING tests over the
+ * free-prose field, so any prose merely CONTAINING a trigger word was
+ * silently rewritten to a credible wrong token: a `.planning/...` path
+ * mentioned in a non-English status line landed on `planning` (the trigger
+ * word lives in the directory name and outranked the `verif`/`complete`
+ * branches), Italian `verifica*` landed on `verifying`, `completezza` and
+ * `fasi complete` landed on `completed`. The lenient FALLBACK is unchanged
+ * and recorded (#3873 phase-3 row 26): an unrecognized value passes through
+ * verbatim — visible prose, never a guessed token.
+ *
+ * `pausedAt` keeps its documented force (issue #4186: intended behavior): a
+ * truthy value yields `paused` regardless of the prose.
+ */
+export function normalizeStateStatus(status: string | null | undefined, pausedAt: unknown): string {
+  if (pausedAt) return 'paused';
+  if (!status) return 'unknown';
+  const key = status.trim().toLowerCase().replace(/\s+/g, ' ');
+  const exact = STATUS_EXACT_TOKENS[key];
+  if (exact) return exact;
+  for (const [pattern, token] of STATUS_ANCHORED_PATTERNS) {
+    if (pattern.test(key)) return token;
+  }
+  return status;
+}
+
+/**
+ * ADR-3180 §7.6 rule 4 (#3217): `scope` is the `listMilestonePhaseDirs`-owner
+ * discriminator for the phase/plan set these four counts were derived from.
+ * A caller that cannot vouch for `scope === SCOPE.COMPLETE` must pass the
+ * scope it actually has — this function refuses to compose a percentage
+ * from counts whose scope says they are not a trustworthy answer, returning
+ * `null` (never `0`; see the module's already-existing "no data" `null`
+ * below, which this generalizes) exactly like its pre-existing "no data"
+ * case. `scope` is REQUIRED (no default) so a caller cannot silently opt out
+ * of rule 4 by omission.
+ */
 export function computeProgressPercent(
   completedPlans: number | null,
   totalPlans: number | null,
   completedPhases: number | null,
-  totalPhases: number | null
+  totalPhases: number | null,
+  scope: Scope
 ): number | null {
+  if (scope !== SCOPE.COMPLETE) return null;
   const hasPlanData = totalPlans !== null && totalPlans > 0 && completedPlans !== null;
   const hasPhaseData = totalPhases !== null && totalPhases > 0 && completedPhases !== null;
   if (!hasPlanData && !hasPhaseData)
@@ -305,7 +765,7 @@ export function computeProgressPercent(
   // cannot track through intermediate boolean variables).
   const planFraction = hasPlanData ? (completedPlans ?? 0) / (totalPlans ?? 1) : 1;
   const phaseFraction = hasPhaseData ? (completedPhases ?? 0) / (totalPhases ?? 1) : 1;
-  return Math.min(100, Math.round(Math.min(planFraction, phaseFraction) * 100));
+  return clampPercentFromFraction(Math.min(planFraction, phaseFraction));
 }
 
 export function shouldPreserveExistingProgress(existingProgress: unknown, derivedProgress: unknown): boolean {

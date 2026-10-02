@@ -28,7 +28,6 @@ const { parseFrontmatter, createTempDir, cleanup } = require('./helpers.cjs');
 const { listAgentFiles } = require('./helpers/agent-roster.cjs');
 
 const {
-  getDirName,
   getConfigDirFromHome,
   claudeToCopilotTools,
   convertCopilotToolName,
@@ -40,8 +39,6 @@ const {
   mergeCopilotInstructions,
   stripGsdFromCopilotInstructions,
   GSD_COPILOT_HOOK_FILE,
-  buildCopilotHookConfig,
-  writeCopilotHookConfig,
   writeManifest,
   reportLocalPatches,
   runtimeMap,
@@ -51,6 +48,11 @@ const {
 } = require('../bin/install.js');
 
 const { installRuntimeArtifacts } = require('../gsd-core/bin/lib/install-engine.cjs');
+const { getDirName } = require('../gsd-core/bin/lib/runtime-name-policy.cjs');
+const {
+  buildCopilotHookConfig,
+  writeCopilotHookConfig,
+} = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
 
 const { getGlobalConfigDir } = require('../gsd-core/bin/lib/runtime-homes.cjs');
 
@@ -741,7 +743,7 @@ describe('installRuntimeArtifacts (copilot integration)', () => {
     const skillContent = fs.readFileSync(path.join(skillsDir, 'gsd-health', 'SKILL.md'), 'utf8');
     // Frontmatter format checks
     assert.ok(skillContent.startsWith('---\nname: gsd-health\n'), 'starts with name: gsd-health');
-    assert.ok(skillContent.includes('allowed-tools: Read, Bash, Write, AskUserQuestion'),
+    assert.ok(skillContent.includes('allowed-tools: Read, Bash, Grep, Write, AskUserQuestion'),
       'allowed-tools is comma-separated');
     assert.ok(!skillContent.includes('allowed-tools:\n  -'), 'NOT YAML multiline format');
     // CONV-06/07 applied
@@ -840,6 +842,7 @@ describe('Copilot agent conversion - real files', () => {
     assert.ok(toolsLine.includes("'execute'"), 'Bash mapped to execute');
     assert.ok(toolsLine.includes("'search'"), 'Grep/Glob deduplicated to search');
     // Input tools count > output tools count (deduplication occurred)
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own agents/gsd-executor.md frontmatter, bounded, not adversarial input
     const inputTools = content.match(/^tools:\s*\[([^\]]+)\]/m)?.[1].split(',').length ?? 0;
     const outputTools = toolsLine.replace(/^tools:\s*\[/, '').replace(/\].*$/, '').split(',').length;
     assert.ok(inputTools === 0 || outputTools <= inputTools, 'deduplication reduced or preserved tool count');
@@ -858,13 +861,16 @@ describe('Copilot agent conversion - real files', () => {
     assert.ok(toolsLine.includes("'read'"), 'Read mapped');
   });
 
-  test('all 18 agents convert without error', () => {
+  test('every gsd-*.md agent file (canonical and .compact.md variants alike) converts without error', () => {
     // Not the shared listAgentFiles() helper: this needs full `.md` filenames
-    // (not stripped basenames) to readFileSync each agent below.
+    // (not stripped basenames) to readFileSync each agent below, and it
+    // deliberately covers .compact.md variant siblings too (#4407) — the
+    // converter has no reason to treat them differently, and a compact
+    // variant that failed to convert would be exactly the kind of defect
+    // this test exists to catch.
     const agents = fs.readdirSync(agentsSrc)
       .filter(f => f.startsWith('gsd-') && f.endsWith('.md'));
-    const expectedAgentCount = listAgentFiles(agentsSrc).length;
-    assert.strictEqual(agents.length, expectedAgentCount, `expected ${expectedAgentCount} agents, got ${agents.length}`);
+    assert.ok(agents.length > 0, 'expected at least one agent file to convert');
 
     for (const agentFile of agents) {
       const content = fs.readFileSync(path.join(agentsSrc, agentFile), 'utf8');
@@ -1355,14 +1361,21 @@ const { throwIfFailed } = require('./helpers/git-fixture.cjs');
 const INSTALL_PATH = path.join(__dirname, '..', 'bin', 'install.js');
 const EXPECTED_SKILLS = fs.readdirSync(path.join(__dirname, '..', 'commands', 'gsd'))
   .filter(f => f.endsWith('.md')).length;
-// Source-roster count (gsd-*.md basenames) — shared helper.
-const EXPECTED_AGENTS = listAgentFiles().length;
+// Installed-FILE count (#4407): every agents/*.md file the full profile stages,
+// including .compact.md variant siblings — deliberately NOT listAgentFiles().length
+// (that counts distinct agent IDENTITIES, excluding variants by design; see its
+// docstring). This assertion is about what actually lands in the manifest.
+const EXPECTED_AGENTS = fs.readdirSync(path.join(__dirname, '..', 'agents'))
+  .filter(f => f.endsWith('.md')).length;
 
 // #3145: class-norm timeouts, not per-suite values — see helpers/timeouts.cjs.
 const { PROBE_TIMEOUT_MS, INSTALL_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 function runCopilotInstall(cwd) {
-  const env = { ...process.env };
+  // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+  // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const env = installSpawnEnv();
   delete env.GSD_TEST_MODE;
   const r = runNode([INSTALL_PATH, '--copilot', '--local', '--no-sdk'], {
     cwd,
@@ -1374,7 +1387,10 @@ function runCopilotInstall(cwd) {
 }
 
 function runCopilotUninstall(cwd) {
-  const env = { ...process.env };
+  // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+  // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const env = installSpawnEnv();
   delete env.GSD_TEST_MODE;
   const r = runNode([INSTALL_PATH, '--copilot', '--local', '--uninstall', '--no-sdk'], {
     cwd,
@@ -1428,44 +1444,22 @@ describe('E2E: Copilot full install verification', () => {
     const agentsDir = path.join(tmpDir, '.github', 'agents');
     const files = fs.readdirSync(agentsDir);
     const gsdAgents = files.filter(f => f.startsWith('gsd-') && f.endsWith('.agent.md')).sort();
-    const expected = [
-      'gsd-advisor-researcher.agent.md',
-      'gsd-ai-researcher.agent.md',
-      'gsd-assumptions-analyzer.agent.md',
-      'gsd-code-fixer.agent.md',
-      'gsd-code-reviewer.agent.md',
-      'gsd-codebase-mapper.agent.md',
-      'gsd-debug-session-manager.agent.md',
-      'gsd-debugger.agent.md',
-      'gsd-doc-classifier.agent.md',
-      'gsd-doc-synthesizer.agent.md',
-      'gsd-doc-verifier.agent.md',
-      'gsd-doc-writer.agent.md',
-      'gsd-domain-researcher.agent.md',
-      'gsd-eval-auditor.agent.md',
-      'gsd-eval-planner.agent.md',
-      'gsd-executor.agent.md',
-      'gsd-framework-selector.agent.md',
-      'gsd-integration-checker.agent.md',
-      'gsd-intel-updater.agent.md',
-      'gsd-mempalace-curator.agent.md',
-      'gsd-lens.agent.md',
-      'gsd-lens-synthesizer.agent.md',
-      'gsd-nyquist-auditor.agent.md',
-      'gsd-pattern-mapper.agent.md',
-      'gsd-phase-researcher.agent.md',
-      'gsd-plan-checker.agent.md',
-      'gsd-planner.agent.md',
-      'gsd-project-researcher.agent.md',
-      'gsd-research-synthesizer.agent.md',
-      'gsd-roadmapper.agent.md',
-      'gsd-security-auditor.agent.md',
-      'gsd-ui-auditor.agent.md',
-      'gsd-ui-checker.agent.md',
-      'gsd-ui-researcher.agent.md',
-      'gsd-user-profiler.agent.md',
-      'gsd-verifier.agent.md',
-    ].sort();
+    // #4407: each canonical agent now installs alongside its .compact.md variant
+    // sibling (both real files on disk — see agents/*.compact.md), so the
+    // expected roster is derived from listAgentFiles() (35 canonical stems)
+    // rather than hand-listed, with each stem's .compact counterpart added
+    // alongside it. A hand-typed 70-entry literal would be exactly the kind of
+    // drift this test exists to catch, one level removed.
+    // Not every agent has a .compact.md source sibling (a few exceed the
+    // hard NEW_FILE_CAP even compacted — see agents/*.compact.md and
+    // .gsd/phase/enhance-4407-agent-skill-seam/40-design.md "Coverage
+    // exception"), so check disk per stem rather than assuming universal
+    // coverage.
+    const expected = listAgentFiles()
+      .flatMap((stem) => fs.existsSync(path.join(__dirname, '..', 'agents', `${stem}.compact.md`))
+        ? [`${stem}.agent.md`, `${stem}.compact.agent.md`]
+        : [`${stem}.agent.md`])
+      .sort();
     assert.deepStrictEqual(gsdAgents, expected);
   });
 
@@ -1675,7 +1669,10 @@ describe('E2E: Copilot uninstall verification', () => {
 // ─── E2E: Copilot global scope (#786) ──────────────────────────────────────────
 
 function runCopilotInstallGlobal(cwd, configDir) {
-  const env = { ...process.env };
+  // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+  // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const env = installSpawnEnv();
   delete env.GSD_TEST_MODE;
   const r = runNode(
     [INSTALL_PATH, '--copilot', '--global', '--config-dir', configDir, '--no-sdk'],
@@ -1686,7 +1683,10 @@ function runCopilotInstallGlobal(cwd, configDir) {
 }
 
 function runCopilotUninstallGlobal(cwd, configDir) {
-  const env = { ...process.env };
+  // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+  // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const env = installSpawnEnv();
   delete env.GSD_TEST_MODE;
   const r = runNode(
     [INSTALL_PATH, '--copilot', '--global', '--config-dir', configDir, '--uninstall', '--no-sdk'],
@@ -1736,7 +1736,10 @@ describe('E2E: Copilot global install (#786)', () => {
 // ─── Claude uninstall: user file preservation (#1423) ─────────────────────────
 
 function runClaudeInstall(cwd) {
-  const env = { ...process.env };
+  // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+  // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const env = installSpawnEnv();
   delete env.GSD_TEST_MODE;
   const r = runNode([INSTALL_PATH, '--claude', '--local', '--no-sdk'], {
     cwd,
@@ -1748,7 +1751,10 @@ function runClaudeInstall(cwd) {
 }
 
 function runClaudeUninstall(cwd) {
-  const env = { ...process.env };
+  // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+  // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const env = installSpawnEnv();
   delete env.GSD_TEST_MODE;
   const r = runNode([INSTALL_PATH, '--claude', '--local', '--uninstall', '--no-sdk'], {
     cwd,

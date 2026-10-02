@@ -325,7 +325,7 @@ if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 
 ```bash
 # Arquiva milestone
-node gsd-tools.cjs milestone complete <version> [--name <name>] [--no-archive-phases]
+node gsd-tools.cjs milestone complete <version> (--confirm | --dry-run) [--name <name>] [--no-archive-phases] [--force] [--archive-quick]
 
 # Marca requisitos como concluídos
 node gsd-tools.cjs requirements mark-complete <ids>
@@ -398,7 +398,7 @@ node gsd-tools.cjs progress [json|table|bar]
 node gsd-tools.cjs progress --json
 
 # Conclui uma tarefa
-node gsd-tools.cjs todo complete <filename>
+node gsd-tools.cjs todo complete <filename> [--dry-run]
 
 # Auditoria UAT — verifica todas as fases em busca de itens não resolvidos
 node gsd-tools.cjs audit-uat
@@ -482,7 +482,7 @@ Ponto de entrada para o usuário: `/gsd-graphify` (consulte a [Referência de Co
 
 ```bash
 node gsd-tools.cjs config-set review.models.codex    "codex exec --model gpt-5"
-node gsd-tools.cjs config-set review.models.gemini   "gemini -m gemini-2.5-pro"
+node gsd-tools.cjs config-set review.models.agy      "gemini-3.1-pro-preview"
 node gsd-tools.cjs config-set review.models.opencode "opencode run --model claude-sonnet-4"
 node gsd-tools.cjs config-set review.models.claude   ""   # limpa — retorna ao modelo da sessão
 ```

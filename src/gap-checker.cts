@@ -20,15 +20,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import io = require('./io.cjs');
-const { output, error } = io;
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-import phaseId = require('./phase-id.cjs');
-const { escapeRegex } = phaseId;
+const { output, error, formatDiagnosticToken } = io;
+import { escapeRegex } from './pattern.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
 const { planningPaths, planningDir, findContextMdIn } = planningWorkspace;
 import { parseDecisions, extractDecisions } from './decisions.cjs';
 import { iterateBullets } from './markdown-sectionizer.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planScanMod = require('./plan-scan.cjs');
+const { scanPhasePlans } = planScanMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseIdMod = require('./phase-id.cjs');
+const { scopeToPhase } = phaseIdMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planningScopeMod = require('./planning-scope.cjs');
+const { SCOPE } = planningScopeMod;
+type Scope = planningScopeMod.Scope;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -63,6 +71,22 @@ interface GapResult {
   table: string;
   summary: string;
   counts: GapCounts;
+  /**
+   * #3885 (ADR-3473 §8.5): null when the phase directory is genuinely absent
+   * (guarded by `fs.existsSync` before the read, so readdirSync is never even
+   * attempted) or was read successfully. A message naming the phase directory
+   * when it EXISTS but `readdirSync` failed (EACCES/EIO/...) — never
+   * collapsed to the same `[]` an absent directory produces.
+   *
+   * #4014 (epic #3473 B4): kept additive — `phase_dir_scope` below is the
+   * new, typed sibling signal; this field is now derived from it rather than
+   * owning its own readdirSync.
+   */
+  phase_dir_read_error: string | null;
+  /** #4014 (epic #3473 B4): the SCOPE this phase dir's listing resolved to —
+   * SCOPE.UNREADABLE distinguishes a real read failure from a genuinely
+   * empty/absent phase dir (SCOPE.COMPLETE). */
+  phase_dir_scope: Scope;
 }
 
 interface RunGapAnalysisOptions {
@@ -88,6 +112,17 @@ function parseRequirements(reqMd: unknown): ReqItem[] {
   // The **ID** is extracted from the bullet text caller-side — the seam provides
   // the raw text; we parse the bold-ID prefix from it here.
   const boldIdRe = new RegExp(`^\\*\\*(${ID_PATTERN})\\*\\*\\s*(.*)$`);
+  // The shipped template (gsd-core/templates/requirements.md) writes
+  // `- [ ] **AUTH-01**: User can sign up` — a single separator delimiter
+  // between the bold ID and the description. Strip AT MOST ONE leading
+  // delimiter (plus its surrounding whitespace) before the final `.trim()`,
+  // mirroring roadmap-parser.cts's `stripLeadingDelimiter` delimiter set
+  // (em dash, en dash, colon, hyphen) — that helper is not exported, and its
+  // own `+`-quantified strip removes an entire delimiter RUN, which would
+  // also eat a second, meaningful marker (`**X-01**: -- weird` must keep the
+  // `--`), so the set is mirrored here with a single-occurrence match instead
+  // of reused verbatim.
+  const ONE_LEADING_DELIMITER_RE = /^\s*[—–:-]\s*/;
   for (const bullet of iterateBullets(reqMd)) {
     if (bullet.marker !== 'checkbox-unchecked' && bullet.marker !== 'checkbox-checked') continue;
     const m = boldIdRe.exec(bullet.text);
@@ -96,7 +131,8 @@ function parseRequirements(reqMd: unknown): ReqItem[] {
     if (!idRe.test(id)) continue;
     if (!seen.has(id)) {
       seen.add(id);
-      out.push({ id, text: (m[2] || '').trim() });
+      const rawText = m[2] || '';
+      out.push({ id, text: rawText.replace(ONE_LEADING_DELIMITER_RE, '').trim() });
     }
   }
 
@@ -194,6 +230,39 @@ const PHASE_REQ_RANGE_RE = /^(.+-)(\d+)\.\.(.+-)(\d+)$/;
 const MAX_PHASE_REQ_RANGE = 1000;
 
 /**
+ * Shape filter applied to `--phase-req-ids` tokens AFTER range expansion
+ * (#3189). ROADMAP `**Requirements:**` lines routinely carry prose trailing
+ * the real ID list — locked-decision annotations, ambiguity scores,
+ * prohibitions, dates — and the function's own contract says callers may pass
+ * that roadmap value through verbatim. Without a shape filter every prose word
+ * survives the whitespace split and is reported as an individually-missing
+ * requirement, drowning the real coverage signal.
+ *
+ * The filter is intentionally wider than `ID_PATTERN` (which mandates a hyphen
+ * and so would reject the hyphen-less `R1`..`R8` family real roadmaps use).
+ * Three load-bearing details (#3189):
+ *
+ *   1. The digit lookahead `(?=.*\d)` matters. Without it ALL-CAPS prose tokens
+ *      that appear in annotations (`LOCKED`, `TBD`-as-prose, `NONE`-as-prose)
+ *      would pass and still reach the report as fake IDs. Every real
+ *      requirement ID carries a digit (`R1`, `SEL-01`, `P1-P3`).
+ *   2. It MUST run after `expandPhaseReqIdToken`. Filtering before would
+ *      discard the range tokens themselves (`SEL-01..SEL-03` matches no
+ *      single-ID shape), silently undoing the #1269 / #1419 range expansion.
+ *   3. It is NOT reusable as `ID_PATTERN`. `ID_PATTERN` mandates a hyphen,
+ *      so it rejects `R1`..`R8` and would leave only range-shaped tokens
+ *      standing — a silently-empty report, which is worse.
+ *
+ * Accepts both hyphen-less digit-bearing IDs (`R1`, `R8`) and prefix-hyphen
+ * IDs (`REQ-01`, `SEL-01`, `BACK-07`), including multi-segment prefixes
+ * (`REQ2-01`). Rejects prose (`LOCKED`), punctuation (`—`, `##`, `+`),
+ * dates, version-likes (`0.12;`), backtick fragments, and any token still
+ * containing `.` (so invalid range tokens returned literal by
+ * `expandPhaseReqIdToken` are dropped rather than surfaced as fake IDs).
+ */
+const PHASE_REQ_ID_SHAPE_RE = /^(?=.*\d)[A-Z][A-Z0-9]*(?:[-_][A-Za-z0-9]+)*$/;
+
+/**
  * Expand a single `--phase-req-ids` token in place. If it is a valid ascending
  * same-prefix numeric range (`<PREFIX>-NN..<PREFIX>-MM`, identical prefix both
  * sides, numeric NN ≤ MM), return the individual IDs `<PREFIX>-NN … <PREFIX>-MM`
@@ -249,6 +318,15 @@ function expandPhaseReqIdToken(token: string): string[] {
  * spanning more than MAX_PHASE_REQ_RANGE IDs) stays literal — no partial
  * expansion, no guessing.
  *
+ * ID-shape filter (#3189): STRICTLY AFTER range expansion, every token is
+ * filtered through `PHASE_REQ_ID_SHAPE_RE`. ROADMAP `**Requirements:**` lines
+ * routinely carry prose trailing the real ID list (locked-decision annotations,
+ * ambiguity scores, prohibitions, dates); without the filter every prose word
+ * would be reported as an individually-missing requirement. Tokens that cannot
+ * be requirement IDs (prose, punctuation, dates, invalid range tokens left
+ * literal by `expandPhaseReqIdToken`) are dropped; an input whose every token
+ * is dropped collapses to `null` (skip semantics).
+ *
  * Tolerates JSON-array-ish input (`["REQ-01","REQ-02"]`) since callers may pass
  * the roadmap value through verbatim.
  */
@@ -263,7 +341,12 @@ function normalizePhaseReqIds(rawVal: unknown): string[] | null | undefined {
   const ids = v.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
   // Expand range tokens (#1269) per-token AFTER the split, preserving input order.
   const expanded = ids.flatMap(expandPhaseReqIdToken);
-  return expanded.length === 0 ? null : expanded;
+  // #3189: drop tokens that cannot be requirement IDs (prose, punctuation,
+  // dates, invalid range tokens left literal by expandPhaseReqIdToken). MUST
+  // run after expand so valid ranges still expand (filtering before would
+  // discard `SEL-01..SEL-03` itself, undoing #1269 / #1419).
+  const filtered = expanded.filter(t => PHASE_REQ_ID_SHAPE_RE.test(t));
+  return filtered.length === 0 ? null : filtered;
 }
 
 function runGapAnalysis(cwd: string, phaseDir: string, options: RunGapAnalysisOptions = {}): GapResult {
@@ -275,6 +358,8 @@ function runGapAnalysis(cwd: string, phaseDir: string, options: RunGapAnalysisOp
       table: '',
       summary: 'workflow.post_planning_gaps disabled — skipping post-planning gap analysis',
       counts: { total: 0, covered: 0, uncovered: 0 },
+      phase_dir_read_error: null,
+      phase_dir_scope: SCOPE.COMPLETE,
     };
   }
 
@@ -300,12 +385,28 @@ function runGapAnalysis(cwd: string, phaseDir: string, options: RunGapAnalysisOp
 
   // Read the phase directory once; reuse the listing for both context detection
   // and plan-file enumeration (avoids redundant readdirSync calls).
-  let phaseDirFiles: string[] = [];
-  try {
-    if (fs.existsSync(absPhaseDir)) phaseDirFiles = fs.readdirSync(absPhaseDir);
-  } catch { /* unreadable */ }
+  //
+  // #4014 (epic #3473 B4): findContextMdIn's directory-string form now owns
+  // the listing + ENOENT-vs-other discrimination, retiring the local
+  // existsSync-guarded readdirSync try/catch — ENOENT (genuinely absent)
+  // and a successful-but-empty read both resolve to SCOPE.COMPLETE with an
+  // empty listing, exactly like the existsSync guard's short-circuit did.
+  const { files: phaseDirFiles, scope: phaseDirScope } = findContextMdIn(absPhaseDir);
+  // #3885 (ADR-3473 §8.5): `phaseDirReadError` stays additive for the
+  // shipped `phase_dir_read_error` JSON field — derived from `phaseDirScope`
+  // rather than from its own caught error, since findContextMdIn's
+  // directory-string form reports SCOPE, not the raw errno message.
+  const phaseDirReadError = phaseDirScope === SCOPE.UNREADABLE
+    ? `Could not read phase directory ${formatDiagnosticToken(absPhaseDir)}`
+    : null;
 
-  const ctxFile = findContextMdIn(phaseDirFiles);
+  // #3511-class: scope the raw listing to this phase dir before the
+  // phase-numbered -CONTEXT.md predicate. `phaseDirFiles` itself stays raw —
+  // it is also reused below only as a `.length > 0` guard ahead of
+  // scanPhasePlans's own plan-sequence-numbered enumeration, a different
+  // grammar that must not be scoped by phase number.
+  const scopedPhaseDirFiles = scopeToPhase(phaseDirFiles, path.basename(absPhaseDir));
+  const ctxFile = findContextMdIn(scopedPhaseDirFiles);
   const ctxPath = ctxFile ? path.join(absPhaseDir, ctxFile) : null;
   const ctxMd = ctxPath ? fs.readFileSync(ctxPath, 'utf-8') : '';
 
@@ -318,7 +419,12 @@ function runGapAnalysis(cwd: string, phaseDir: string, options: RunGapAnalysisOp
   let planText = '';
   try {
     if (phaseDirFiles.length > 0) {
-      const files = phaseDirFiles.filter(f => /-PLAN\.md$/.test(f));
+      // #3183 (lint-plan-count-drift): source the live plan-file list from
+      // the single owner (scanPhasePlans) instead of a local `-PLAN\.md$`
+      // filter on the already-read listing — picks up bare PLAN.md, nested
+      // plans/, and excludes superseded plans, none of which the prior
+      // root-only exact-suffix filter did.
+      const files = scanPhasePlans(absPhaseDir).planFiles;
       planText = files.map(f => {
         try { return fs.readFileSync(path.join(absPhaseDir, f), 'utf-8'); }
         catch { return ''; }
@@ -359,6 +465,8 @@ function runGapAnalysis(cwd: string, phaseDir: string, options: RunGapAnalysisOp
         table: formatGapTable(rows) + '\n' + coverageSummary + '\n\n' + mismatchMsg,
         summary: coverageSummary + '; extracted 0 of N — possible format mismatch',
         counts: { total: rows.length, covered, uncovered },
+        phase_dir_read_error: phaseDirReadError,
+        phase_dir_scope: phaseDirScope,
       };
     }
     return {
@@ -367,6 +475,8 @@ function runGapAnalysis(cwd: string, phaseDir: string, options: RunGapAnalysisOp
       table: mismatchMsg,
       summary: 'extracted 0 of N — possible format mismatch',
       counts: { total: 0, covered: 0, uncovered: 0 },
+      phase_dir_read_error: phaseDirReadError,
+      phase_dir_scope: phaseDirScope,
     };
   }
 
@@ -384,6 +494,8 @@ function runGapAnalysis(cwd: string, phaseDir: string, options: RunGapAnalysisOp
       table: '## Post-Planning Gap Analysis\n\nNo requirements or decisions to check.\n',
       summary: 'no requirements or decisions to check',
       counts: { total: 0, covered: 0, uncovered: 0 },
+      phase_dir_read_error: phaseDirReadError,
+      phase_dir_scope: phaseDirScope,
     };
   }
 
@@ -404,6 +516,8 @@ function runGapAnalysis(cwd: string, phaseDir: string, options: RunGapAnalysisOp
     table: formatGapTable(rows) + '\n' + summary + '\n',
     summary,
     counts: { total: rows.length, covered, uncovered },
+    phase_dir_read_error: phaseDirReadError,
+    phase_dir_scope: phaseDirScope,
   };
 }
 

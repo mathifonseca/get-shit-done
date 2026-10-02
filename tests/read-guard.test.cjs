@@ -28,6 +28,12 @@ const { createTempDir, cleanup } = require('./helpers.cjs');
 
 const HOOK_PATH = path.join(__dirname, '..', 'hooks', 'gsd-read-guard.js');
 
+// Bounds a single direct invocation of the advisory-only, no-subprocess
+// gsd-read-guard.js hook; tighter than the shared QUICK_SPAWN_TIMEOUT_MS norm
+// (10000ms) despite a similar "no fan-out" class — kept as its own constant
+// since this migration never widens a bound without a fresh bench citation.
+const READ_GUARD_HOOK_TIMEOUT_MS = 5000;
+
 /**
  * Run the read guard hook with a given tool input payload.
  * Returns { exitCode, stdout, stderr }.
@@ -45,7 +51,7 @@ function runHook(payload, envOverrides = {}) {
     CLAUDE_PROJECT_DIR: '',
     ...envOverrides,
   };
-  const r = runHookSeam(HOOK_PATH, [], { input, env, timeoutMs: 5000 });
+  const r = runHookSeam(HOOK_PATH, [], { input, env, timeoutMs: READ_GUARD_HOOK_TIMEOUT_MS });
   if (r.exitCode === 0) {
     return { exitCode: 0, stdout: r.stdout.trim(), stderr: '' };
   }
@@ -84,9 +90,10 @@ describe('gsd-read-guard hook', () => {
     const output = JSON.parse(result.stdout);
     assert.ok(output.hookSpecificOutput, 'should have hookSpecificOutput');
     assert.ok(output.hookSpecificOutput.additionalContext, 'should have additionalContext');
-    assert.ok(
-      output.hookSpecificOutput.additionalContext.includes('Read'),
-      'guidance should mention Read tool'
+    assert.equal(
+      output.hookSpecificOutput.code,
+      'READ_BEFORE_EDIT',
+      'guidance should carry the READ_BEFORE_EDIT reason code'
     );
   });
 
@@ -103,7 +110,7 @@ describe('gsd-read-guard hook', () => {
     assert.ok(result.stdout.length > 0, 'should produce output');
 
     const output = JSON.parse(result.stdout);
-    assert.ok(output.hookSpecificOutput.additionalContext.includes('Read'));
+    assert.equal(output.hookSpecificOutput.code, 'READ_BEFORE_EDIT');
   });
 
   // ─── No-op cases: should NOT inject guidance ────────────────────────────
@@ -151,7 +158,7 @@ describe('gsd-read-guard hook', () => {
       const stdout = execFileSync(process.execPath, [HOOK_PATH], {
         input: 'not json',
         encoding: 'utf-8',
-        timeout: 5000,
+        timeout: READ_GUARD_HOOK_TIMEOUT_MS,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       // Should exit 0 silently
@@ -179,9 +186,10 @@ describe('gsd-read-guard hook', () => {
     });
 
     const output = JSON.parse(result.stdout);
-    assert.ok(
-      output.hookSpecificOutput.additionalContext.includes('myfile.ts'),
-      'guidance should include the filename being edited'
+    assert.equal(
+      output.hookSpecificOutput.fileName,
+      'myfile.ts',
+      'guidance should name the file being edited'
     );
   });
 
@@ -215,11 +223,12 @@ describe('gsd-read-guard hook', () => {
   });
 
   test('hook is registered in install.js uninstall hook list', () => {
-    const installPath = path.join(__dirname, '..', 'bin', 'install.js');
-    const content = fs.readFileSync(installPath, 'utf8');
+    // Check the actual exported uninstall hook list instead of grepping
+    // install.js source text.
+    const { GSD_UNINSTALL_HOOKS } = require('../bin/install.js');
     assert.ok(
-      content.includes("'gsd-read-guard.js'"),
-      'gsd-read-guard.js must be in the uninstall gsdHooks list'
+      GSD_UNINSTALL_HOOKS.includes('gsd-read-guard.js'),
+      'gsd-read-guard.js must be in the uninstall GSD_UNINSTALL_HOOKS list'
     );
   });
 
@@ -281,6 +290,12 @@ const { createTempDir, cleanup } = require('./helpers.cjs');
 
 const HOOK_PATH = path.join(__dirname, '..', 'hooks', 'gsd-read-guard.js');
 
+// Bounds a single direct invocation of the advisory-only, no-subprocess
+// gsd-read-guard.js hook; tighter than the shared QUICK_SPAWN_TIMEOUT_MS norm
+// (10000ms) despite a similar "no fan-out" class — kept as its own constant
+// since this migration never widens a bound without a fresh bench citation.
+const READ_GUARD_HOOK_TIMEOUT_MS = 5000;
+
 function runHook(payload, envOverrides = {}) {
   const input = JSON.stringify(payload);
   const env = {
@@ -292,7 +307,7 @@ function runHook(payload, envOverrides = {}) {
     CLAUDE_PROJECT_DIR: '',
     ...envOverrides,
   };
-  const r = runHookSeam(HOOK_PATH, [], { input, env, timeoutMs: 5000 });
+  const r = runHookSeam(HOOK_PATH, [], { input, env, timeoutMs: READ_GUARD_HOOK_TIMEOUT_MS });
   if (r.exitCode === 0) {
     return { exitCode: 0, stdout: r.stdout.trim(), stderr: '' };
   }
@@ -347,7 +362,7 @@ describe('bug #2344: read guard skips on CLAUDECODE env var', () => {
     assert.equal(result.exitCode, 0);
     assert.ok(result.stdout.length > 0, 'advisory should fire on non-Claude-Code runtimes');
     const output = JSON.parse(result.stdout);
-    assert.ok(output.hookSpecificOutput?.additionalContext?.includes('Read'));
+    assert.equal(output.hookSpecificOutput?.code, 'READ_BEFORE_EDIT');
   });
 });
   });
@@ -391,6 +406,12 @@ const { createTempDir, cleanup } = require('./helpers.cjs');
 
 const HOOK_PATH = path.join(__dirname, '..', 'hooks', 'gsd-read-guard.js');
 
+// Bounds a single direct invocation of the advisory-only, no-subprocess
+// gsd-read-guard.js hook; tighter than the shared QUICK_SPAWN_TIMEOUT_MS norm
+// (10000ms) despite a similar "no fan-out" class — kept as its own constant
+// since this migration never widens a bound without a fresh bench citation.
+const READ_GUARD_HOOK_TIMEOUT_MS = 5000;
+
 /**
  * Spawn the hook with an env that mirrors the actual Claude Code hook
  * subprocess env: CLAUDECODE and CLAUDE_SESSION_ID are stripped, only
@@ -416,7 +437,7 @@ function runHookInClaudeCodeSubprocess(payload, envOverrides = {}) {
     const stdout = execFileSync(process.execPath, [HOOK_PATH], {
       input,
       encoding: 'utf-8',
-      timeout: 5000,
+      timeout: READ_GUARD_HOOK_TIMEOUT_MS,
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
     });
@@ -486,7 +507,7 @@ describe('bug #2520: read guard detects Claude Code without relying on CLAUDECOD
     assert.equal(result.exitCode, 0);
     assert.ok(result.stdout.length > 0, 'advisory should fire on non-Claude-Code hosts');
     const output = JSON.parse(result.stdout);
-    assert.ok(output.hookSpecificOutput?.additionalContext?.includes('Read'));
+    assert.equal(output.hookSpecificOutput?.code, 'READ_BEFORE_EDIT');
   });
 });
   });
@@ -528,7 +549,7 @@ describe('#2304: Kimi tool vocabulary is normalized by the read guard', () => {
     assert.equal(result.exitCode, 0);
     assert.ok(result.stdout.length > 0, 'Kimi WriteFile should produce the advisory');
     const output = JSON.parse(result.stdout);
-    assert.ok(output.hookSpecificOutput?.additionalContext?.includes('Read'));
+    assert.equal(output.hookSpecificOutput?.code, 'READ_BEFORE_EDIT');
   });
 
   test('StrReplaceFile on an existing file injects guidance like Edit', () => {
@@ -543,7 +564,7 @@ describe('#2304: Kimi tool vocabulary is normalized by the read guard', () => {
     assert.equal(result.exitCode, 0);
     assert.ok(result.stdout.length > 0, 'Kimi StrReplaceFile should produce the advisory');
     const output = JSON.parse(result.stdout);
-    assert.ok(output.hookSpecificOutput?.additionalContext?.includes('Read'));
+    assert.equal(output.hookSpecificOutput?.code, 'READ_BEFORE_EDIT');
   });
 
   test('module-qualified kimi_cli.tools.file:WriteFile is recognized', () => {

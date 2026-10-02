@@ -33,6 +33,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { runNode, runGit } = require('./helpers/process-seam.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const { runMinimalInstall, BUILD_SCRIPT } = require('./helpers/install-shared.cjs');
 const { cleanup } = require('./helpers.cjs');
@@ -206,7 +207,7 @@ test('UPGRADE 3: gsd-mcp-server companion is reachable — spawn, initialize, to
   const res = spawnSync(process.execPath, [MCP_SERVER_BIN], {
     input: stdin,
     encoding: 'utf-8',
-    timeout: 15000,
+    timeout: PROBE_TIMEOUT_MS,
     env: { ...process.env, GSD_TEST_MODE: '1' },
   });
 
@@ -242,10 +243,10 @@ for (const scope of ['global', 'local']) {
     assert.ok(fs.existsSync(agentsDir), `${agentsDir} must exist`);
 
     const expectedNames = listAgentFiles();
-    // Fork: 36, not upstream's 34 — the fork ships gsd-lens and
+    // Fork: 37, not upstream's 35 — the fork ships gsd-lens and
     // gsd-lens-synthesizer (multilens retro / plan-lens-review).
-    assert.equal(expectedNames.length, 36,
-      'sanity: shipped GSD agent roster is 36 files — update this boundary if the roster changes');
+    assert.equal(expectedNames.length, 37,
+      'sanity: shipped GSD agent roster is 37 files — update this boundary if the roster changes');
 
     const installedFiles = fs.readdirSync(agentsDir)
       .filter((f) => f.startsWith('gsd-') && f.endsWith('.md'));
@@ -321,13 +322,14 @@ before(() => {
   assert.equal(build.exitCode, 0, `build:hooks failed: ${build.stderr}`);
 });
 
-// The three PreToolUse guards the plugin spawns that ship today. When a new
+// The PreToolUse guards the plugin spawns that ship today. When a new
 // guard lands on the plugin's dispatch path, add it here.
 const PLUGIN_GUARD_HOOKS = [
   'gsd-prompt-guard.js',
   'gsd-read-guard.js',
   'gsd-worktree-path-guard.js',
   'gsd-workflow-guard.js',
+  'gsd-secret-read-guard.js',
 ];
 
 for (const scope of ['global', 'local']) {

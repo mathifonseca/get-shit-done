@@ -16,26 +16,9 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { runGsdTools, createTempProject, cleanup, TOOLS_PATH } = require('./helpers.cjs');
+const { runGsdTools, createTempProject, cleanup, TOOLS_PATH, TEST_ENV_BASE } = require('./helpers.cjs');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-const TEST_ENV_BASE = {
-  GSD_SESSION_KEY: '',
-  CODEX_THREAD_ID: '',
-  CLAUDE_SESSION_ID: '',
-  CLAUDE_CODE_SSE_PORT: '',
-  OPENCODE_SESSION_ID: '',
-  GEMINI_SESSION_ID: '',
-  CURSOR_SESSION_ID: '',
-  WINDSURF_SESSION_ID: '',
-  TERM_SESSION_ID: '',
-  WT_SESSION: '',
-  TMUX_PANE: '',
-  ZELLIJ_SESSION_NAME: '',
-  GSD_WORKSTREAM: '',
-  TTY: '',
-  SSH_TTY: '',
-};
 
 /**
  * Run gsd-tools and capture BOTH stdout and stderr on success.
@@ -52,7 +35,7 @@ function runGsdToolsWithStderr(args, cwd, env) {
   };
 }
 
-const { loadTrustedGlobalRoots, validatePath } = require('../gsd-core/bin/lib/security.cjs');
+const { loadTrustedGlobalRoots, tryWithinRoot, PathAcceptance } = require('../gsd-core/bin/lib/security.cjs');
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -181,6 +164,129 @@ describe('agent-skills command', () => {
     const r = runAgentSkillsJson(['agent-skills', 'gsd-executor'], tmpDir, { GSD_RUNTIME: 'claude' });
     assert.ok(r.success, `Command failed: ${r.error}`);
     assert.strictEqual(r.ir.block, '');
+  });
+
+  // ── #4407 (ADR-4139 stream 2): compact/canonical payload selection ────────
+  // Same fixture pattern as the Codex-fallback tests immediately above — a real
+  // `<runtime>/agents/` directory under a temp project, no mocking of
+  // `checkAgentsInstalled`. See .gsd/phase/enhance-4407-agent-skill-seam/
+  // 50-test-matrix.md for the full input-class table.
+  describe('#4407 compact payload selection (the #2454 persona fallback)', () => {
+    const CANONICAL = '# Local Codex executor\nCanonical persona.\n';
+    const COMPACT = '# Codex executor (compact)\n';
+
+    test('class 1: compact on + compact file present -> compact content verbatim', () => {
+      const agentsDir = path.join(tmpDir, '.codex', 'agents');
+      fs.mkdirSync(agentsDir, { recursive: true });
+      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.md'), CANONICAL);
+      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.compact.md'), COMPACT);
+      writeConfig(tmpDir, { runtime: 'codex', workflow: { compact_content: true } });
+
+      const r = runAgentSkillsJson(['agent-skills', 'gsd-executor'], tmpDir, {
+        HOME: tmpDir, USERPROFILE: tmpDir, GSD_RUNTIME: '',
+      });
+      assert.ok(r.success, `Command failed: ${r.error}`);
+      assert.strictEqual(r.ir.block, COMPACT);
+      assert.strictEqual(r.ir.agent_payload_variant, 'compact');
+
+      // Raw (non-JSON) mode is what ${AGENT_SKILLS_*} substitution actually
+      // consumes — must match the JSON block byte-for-byte.
+      const raw = runGsdTools(['agent-skills', 'gsd-executor'], tmpDir, {
+        HOME: tmpDir, USERPROFILE: tmpDir, GSD_RUNTIME: '',
+      });
+      assert.ok(raw.success, `Raw command failed: ${raw.error}`);
+      assert.strictEqual(raw.output, COMPACT.trimEnd());
+    });
+
+    test('class 2: compact off (default) -> canonical content, unchanged from today', () => {
+      const agentsDir = path.join(tmpDir, '.codex', 'agents');
+      fs.mkdirSync(agentsDir, { recursive: true });
+      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.md'), CANONICAL);
+      writeConfig(tmpDir, { runtime: 'codex' });
+
+      const r = runAgentSkillsJson(['agent-skills', 'gsd-executor'], tmpDir, {
+        HOME: tmpDir, USERPROFILE: tmpDir, GSD_RUNTIME: '',
+      });
+      assert.ok(r.success, `Command failed: ${r.error}`);
+      assert.strictEqual(r.ir.block, CANONICAL);
+      assert.strictEqual(r.ir.agent_payload_variant, 'canonical');
+    });
+
+    test('class 3: compact on + no compact file registered -> canonical with disclosed fallback', () => {
+      const agentsDir = path.join(tmpDir, '.codex', 'agents');
+      fs.mkdirSync(agentsDir, { recursive: true });
+      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.md'), CANONICAL);
+      writeConfig(tmpDir, { runtime: 'codex', workflow: { compact_content: true } });
+
+      const r = runAgentSkillsJson(['agent-skills', 'gsd-executor'], tmpDir, {
+        HOME: tmpDir, USERPROFILE: tmpDir, GSD_RUNTIME: '',
+      });
+      assert.ok(r.success, `Command failed: ${r.error}`);
+      assert.strictEqual(
+        r.ir.block,
+        '<!-- gsd: no compact payload registered for gsd-executor; serving canonical -->\n\n' + CANONICAL,
+      );
+      assert.strictEqual(r.ir.agent_payload_variant, 'canonical');
+
+      const raw = runGsdTools(['agent-skills', 'gsd-executor'], tmpDir, {
+        HOME: tmpDir, USERPROFILE: tmpDir, GSD_RUNTIME: '',
+      });
+      assert.ok(raw.success, `Raw command failed: ${raw.error}`);
+      assert.strictEqual(raw.output, r.ir.block.trimEnd());
+    });
+
+    test('class 4 (boundary): compact file exists but is empty -> treated as not registered', () => {
+      const agentsDir = path.join(tmpDir, '.codex', 'agents');
+      fs.mkdirSync(agentsDir, { recursive: true });
+      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.md'), CANONICAL);
+      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.compact.md'), '');
+      writeConfig(tmpDir, { runtime: 'codex', workflow: { compact_content: true } });
+
+      const r = runAgentSkillsJson(['agent-skills', 'gsd-executor'], tmpDir, {
+        HOME: tmpDir, USERPROFILE: tmpDir, GSD_RUNTIME: '',
+      });
+      assert.ok(r.success, `Command failed: ${r.error}`);
+      assert.strictEqual(
+        r.ir.block,
+        '<!-- gsd: no compact payload registered for gsd-executor; serving canonical -->\n\n' + CANONICAL,
+      );
+      assert.strictEqual(r.ir.agent_payload_variant, 'canonical');
+    });
+
+    test('class 5: Claude runtime + compact on -> fallback never invoked, unchanged contract', () => {
+      const agentsDir = path.join(tmpDir, '.codex', 'agents');
+      fs.mkdirSync(agentsDir, { recursive: true });
+      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.md'), CANONICAL);
+      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.compact.md'), COMPACT);
+      writeConfig(tmpDir, { runtime: 'claude', workflow: { compact_content: true } });
+
+      const r = runAgentSkillsJson(['agent-skills', 'gsd-executor'], tmpDir, { GSD_RUNTIME: 'claude' });
+      assert.ok(r.success, `Command failed: ${r.error}`);
+      assert.strictEqual(r.ir.block, '');
+      assert.strictEqual(r.ir.agent_payload_variant, null);
+    });
+
+    test('class 6 (boundary): a user agent_skills block already resolved -> fallback path never reached', () => {
+      const skillDir = path.join(tmpDir, 'skills', 'test-skill');
+      fs.mkdirSync(skillDir, { recursive: true });
+      fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '# Test Skill\n');
+      const agentsDir = path.join(tmpDir, '.codex', 'agents');
+      fs.mkdirSync(agentsDir, { recursive: true });
+      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.md'), CANONICAL);
+      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.compact.md'), COMPACT);
+      writeConfig(tmpDir, {
+        runtime: 'codex',
+        workflow: { compact_content: true },
+        agent_skills: { 'gsd-executor': ['skills/test-skill'] },
+      });
+
+      const r = runAgentSkillsJson(['agent-skills', 'gsd-executor'], tmpDir, {
+        HOME: tmpDir, USERPROFILE: tmpDir, GSD_RUNTIME: '',
+      });
+      assert.ok(r.success, `Command failed: ${r.error}`);
+      assert.ok(r.ir.block.includes('test-skill'), 'expected the user-configured skills block, not the persona fallback');
+      assert.strictEqual(r.ir.agent_payload_variant, null);
+    });
   });
 
   test('returns block containing agent_skills XML for configured agent', () => {
@@ -784,7 +890,7 @@ describe('loadTrustedGlobalRoots', () => {
 // ─── trusted_global_roots integration guard (#52) ─────────────────────────────
 //
 // NOTE: These tests validate the trusted-root bypass logic by directly calling
-// loadTrustedGlobalRoots + validatePath rather than invoking the full CLI
+// loadTrustedGlobalRoots + tryWithinRoot rather than invoking the full CLI
 // (which would require controlling the runtime HOME path in a way that also
 // triggers a symlink escape scenario through gsd-tools subprocess invocation).
 // Full end-to-end symlink testing would require OS-level symlink setup in tmp
@@ -807,24 +913,24 @@ describe('trusted_global_roots guard logic', () => {
     cleanup(externalDir);
   });
 
-  test('validatePath rejects skill outside globalSkillsBase (baseline — no trusted roots)', () => {
+  test('tryWithinRoot rejects skill outside globalSkillsBase (baseline — no trusted roots)', () => {
     const skillMd = path.join(externalDir, 'SKILL.md');
-    const result = validatePath(skillMd, tmpDir, { allowAbsolute: true });
-    assert.ok(!result.safe, 'skill outside base must be rejected by validatePath');
+    const result = tryWithinRoot(skillMd, tmpDir, PathAcceptance.AbsoluteInsideRoot);
+    assert.equal(result, null, 'skill outside base must be rejected by tryWithinRoot');
   });
 
-  test('with trusted root matching real target dir — validatePath accepts', () => {
+  test('with trusted root matching real target dir — tryWithinRoot accepts', () => {
     // Simulate the trusted-root fallback: skill is outside base but inside trusted root
     const skillMd = path.join(externalDir, 'SKILL.md');
-    const baseCheck = validatePath(skillMd, tmpDir, { allowAbsolute: true });
-    assert.ok(!baseCheck.safe, 'base check must fail (prerequisite)');
+    const baseCheck = tryWithinRoot(skillMd, tmpDir, PathAcceptance.AbsoluteInsideRoot);
+    assert.equal(baseCheck, null, 'base check must fail (prerequisite)');
 
     // Trusted root fallback: check against externalDir
     const config = { agent_skills_security: { trusted_global_roots: [externalDir] } };
     const trustedRoots = loadTrustedGlobalRoots(config);
     const acceptedViaTrustedRoot = trustedRoots.some((root) => {
-      const rootCheck = validatePath(skillMd, root, { allowAbsolute: true });
-      return rootCheck.safe;
+      const rootCheck = tryWithinRoot(skillMd, root, PathAcceptance.AbsoluteInsideRoot);
+      return rootCheck !== null;
     });
     assert.ok(acceptedViaTrustedRoot, 'skill must be accepted when within a trusted root');
   });
@@ -836,8 +942,8 @@ describe('trusted_global_roots guard logic', () => {
       const config = { agent_skills_security: { trusted_global_roots: [unrelatedDir] } };
       const trustedRoots = loadTrustedGlobalRoots(config);
       const acceptedViaTrustedRoot = trustedRoots.some((root) => {
-        const rootCheck = validatePath(skillMd, root, { allowAbsolute: true });
-        return rootCheck.safe;
+        const rootCheck = tryWithinRoot(skillMd, root, PathAcceptance.AbsoluteInsideRoot);
+        return rootCheck !== null;
       });
       assert.ok(!acceptedViaTrustedRoot, 'skill must still be rejected when trusted root is unrelated');
     } finally {
@@ -851,8 +957,8 @@ describe('trusted_global_roots guard logic', () => {
     const trustedRoots = loadTrustedGlobalRoots(config);
     assert.strictEqual(trustedRoots.length, 0, 'no roots loaded');
     const acceptedViaTrustedRoot = trustedRoots.some((root) => {
-      const rootCheck = validatePath(skillMd, root, { allowAbsolute: true });
-      return rootCheck.safe;
+      const rootCheck = tryWithinRoot(skillMd, root, PathAcceptance.AbsoluteInsideRoot);
+      return rootCheck !== null;
     });
     assert.ok(!acceptedViaTrustedRoot, 'skill must be rejected when trusted roots is empty');
   });
@@ -1458,7 +1564,12 @@ describe('bug #1243: plugin-namespaced agent skills', () => {
 
     // allow-test-rule: source-text-is-the-product (#1243)
     const AGENTS_DIR = path.join(__dirname, '..', 'agents');
-    const agentFiles = fs.readdirSync(AGENTS_DIR).filter((f) => f.startsWith('gsd-') && f.endsWith('.md'));
+    // #4407: exclude .compact.md variant siblings — they carry the SAME
+    // frontmatter as their canonical agent by design (ADR-4139 stream 2), so
+    // counting them here would double-report every consumer as a "new" agent
+    // rather than checking the real agent roster this guard exists for.
+    const agentFiles = fs.readdirSync(AGENTS_DIR)
+      .filter((f) => f.startsWith('gsd-') && f.endsWith('.md') && !f.endsWith('.compact.md'));
 
     /**
      * Extract tool names from an agent file's frontmatter (same logic as above).

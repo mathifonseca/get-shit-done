@@ -1,3 +1,5 @@
+Apply response_language to all user-facing prose — narration between tool calls, status updates, progress notes, and findings included; preserve code, paths, and identifiers.
+
 <purpose>
 Display the complete GSD Core command reference. Output ONLY the reference content. Do NOT add project-specific analysis, git status, next-step suggestions, or any commentary beyond the reference.
 </purpose>
@@ -195,6 +197,16 @@ Result: Creates `.planning/quick/NNN-slug/PLAN.md`, `.planning/quick/NNN-slug/NN
 
 ---
 
+**`/gsd:quick-batch [--file <path>] [--jobs auto|N] [--validate] [--research] [--resume <batch-id>] [task list]`**
+Batch several `/gsd:quick`-shaped tasks together (inline list or `--file <path>`) — one coordinator plans, dispatches, and merges them as one run.
+
+Flags: `--jobs auto|N` (cap concurrency at `min(tasks, N, capacity)`) · `--validate` (plan-checker + post-merge verification) · `--research` (per-item researcher) · `--resume <batch-id>` (dispatch only eligible items). `--discuss`/`--full` are rejected.
+
+Usage: `/gsd:quick-batch --jobs 3 --validate`
+Result: Per-item artifacts under `.planning/quick/`; batch state in `.planning/quick-batches/<batch-id>/BATCH.json`
+
+---
+
 **`/gsd:fast [description]`**
 Execute a trivial task inline — no subagents, no planning files, no overhead.
 
@@ -290,7 +302,7 @@ Modes:
 - **default** — progress report + intelligent routing
 - **`--next`** — auto-advance to the next logical step (use `--next --force` to bypass safety gates)
 - **`--next --auto`** — like `--next`, but chains steps automatically until milestone completion or a blocking decision
-- **`--next --converge`** — when the next action is planning, route it through `/gsd:plan-review-convergence` instead of `/gsd:plan-phase`; requires `workflow.plan_review_convergence=true`. `--cross-ai` is an alias. Reviewer flags (`--codex`, `--gemini`, `--claude`, `--opencode`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--all`) and `--max-cycles N` forward to the convergence loop.
+- **`--next --converge`** — when the next action is planning, route it through `/gsd:plan-review-convergence` instead of `/gsd:plan-phase`; requires `workflow.plan_review_convergence=true`. `--cross-ai` is an alias. Reviewer flags (`--codex`, `--claude`, `--opencode`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--all`) and `--max-cycles N` forward to the convergence loop.
 - **`--forensic`** — append a 6-check integrity audit after the progress report
 - **`--do "<text>"`** — smart router: dispatch freeform intent to the matching `/gsd-*` command (see *Smart Router* above)
 
@@ -432,7 +444,7 @@ List and audit captured seeds (read-only).
 
 - Lists all seeds with ID, status, scope, trigger, and title
 - Optional status filter (e.g., `/gsd:capture --list-seeds dormant`)
-- Does not modify any seed — enrich with `/gsd:capture --seed --enrich SEED-NNN`
+- Does not modify any seed — enrich with `/gsd:capture --seed --enrich SEED-YYMMDD-XXX`
 
 Usage: `/gsd:capture --list-seeds`
 Usage: `/gsd:capture --list-seeds dormant`
@@ -465,10 +477,10 @@ Usage: `/gsd:ship 4` or `/gsd:ship 4 --draft`
 
 ---
 
-**`/gsd:review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--all]`**
+**`/gsd:review --phase N [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--all]`**
 Cross-AI peer review — invoke external AI CLIs to independently review phase plans.
 
-- Detects available CLIs (gemini, claude, codex, coderabbit, agy)
+- Detects available CLIs (claude, codex, coderabbit, agy)
 - Each CLI reviews plans independently with the same structured prompt
 - CodeRabbit reviews the current git diff (not a prompt) — may take up to 5 minutes
 - Produces REVIEWS.md with per-reviewer feedback and consensus summary
@@ -629,7 +641,7 @@ The commands above cover the most common day-to-day flows. Every command listed 
 
 - **`/gsd:mvp-phase <phase-number>`** — Plan a phase as a vertical MVP slice (user story + SPIDR splitting) before handing off to plan-phase. Same end-state as `/gsd:plan-phase --mvp`, with a guided MVP-shaping intro.
 - **`/gsd:ultraplan-phase [phase]`** — [BETA] Offload plan phase to Claude Code's ultraplan cloud; review in browser and import back.
-- **`/gsd:plan-review-convergence <phase> [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy/--antigravity] [--ollama] [--lm-studio] [--llama-cpp] [--kimi-code] [--all] [--text] [--ws <name>] [--max-cycles N]`** — Cross-AI plan convergence loop — replan with review feedback until no HIGH concerns remain. Supports both cloud reviewers (Gemini/Claude/Codex/CodeRabbit/OpenCode/Qwen/Cursor/Antigravity/Kimi Code) and local model runtimes (Ollama, LM Studio, llama.cpp).
+- **`/gsd:plan-review-convergence <phase> [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy/--antigravity] [--ollama] [--lm-studio] [--llama-cpp] [--kimi-code] [--all] [--text] [--ws <name>] [--max-cycles N]`** — Cross-AI plan convergence loop — replan with review feedback until no HIGH concerns remain. Supports both cloud reviewers (Claude/Codex/CodeRabbit/OpenCode/Qwen/Cursor/Antigravity/Kimi Code) and local model runtimes (Ollama, LM Studio, llama.cpp).
 - **`/gsd:autonomous [--from N] [--to N] [--only N] [--interactive] [--converge]`** — Run all remaining phases autonomously: discuss → plan → execute per phase. `--converge` routes planning through plan-review convergence; `--cross-ai` is an alias.
 - **`/gsd:parallel-phases [--phases N,M,...] [--from N] [--to N]`** — Run mutually-independent phases in parallel, each in its own isolated worktree via `autonomous --only N`, then merge back one at a time with the shared ledgers (ROADMAP/STATE/REQUIREMENTS/WINDOWS) replayed as structured commands. `--phases` names an explicit batch; phases with an intra-batch or unmet dependency are excluded and reported.
 

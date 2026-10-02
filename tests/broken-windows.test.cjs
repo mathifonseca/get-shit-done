@@ -24,10 +24,20 @@ const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 
-const { createTempDir, cleanup, runGsdTools } = require('./helpers.cjs');
+const {
+  createTempDir,
+  cleanup,
+  runGsdTools,
+  TOOLS_PATH,
+  TEST_ENV_BASE,
+} = require('./helpers.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const fc = require('./helpers/fast-check-setup.cjs');
 
+const brokenWindowsLib = require('../gsd-core/bin/lib/broken-windows.cjs');
+const lockMod = require('../gsd-core/bin/lib/capability-lock.cjs');
 const {
   REASON,
   WindowsError,
@@ -39,7 +49,8 @@ const {
   markWaived,
   markFixed,
   openCount,
-} = require('../gsd-core/bin/lib/broken-windows.cjs');
+  cmdWindowsAppend,
+} = brokenWindowsLib;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -181,6 +192,25 @@ describe('broken-windows: appendWindow', () => {
     // 10 cells = 11 cell-separator pipes per row (leading + 9 internal + trailing).
     assert.equal(unescapedPipes, 11, 'table row must have exactly 11 unescaped pipes (10 cells) — backslash-pipe in description must NOT add a split');
   });
+
+  // #4487: phase numbers are unique only within one active phases/ directory —
+  // milestone complete archives phases and frees their numbers for reuse, so
+  // two milestones can produce entries sharing the same `phase` value with
+  // nothing to distinguish them. appendWindow itself is pure (no I/O), so the
+  // milestone value is a caller-supplied input, not resolved here — this pins
+  // that it flows through untouched, and defaults to null when omitted
+  // (an entry recorded before this field existed reads the same way).
+  test('milestone input flows through to the entry (#4487)', () => {
+    const led = emptyLedger('now');
+    const { entry } = appendWindow(led, makeEntry({ milestone: 'v2.0' }), { now: 't' });
+    assert.equal(entry.milestone, 'v2.0');
+  });
+
+  test('milestone defaults to null when the caller omits it (#4487)', () => {
+    const led = emptyLedger('now');
+    const { entry } = appendWindow(led, makeEntry(), { now: 't' });
+    assert.equal(entry.milestone, null);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -199,6 +229,13 @@ describe('broken-windows: markWaived', () => {
     assert.equal(led.open_count, 0);
     assert.equal(led.waived_count, 1);
     assert.equal(openCount(led), 0); // waived does not block
+  });
+
+  test('waive preserves the entry\'s milestone (#4487 — object-spread transition must not drop it)', () => {
+    let led = emptyLedger('now');
+    ({ ledger: led } = appendWindow(led, makeEntry({ milestone: 'v2.0' }), { now: 't1' }));
+    led = markWaived(led, 1, 'reason', { now: 't2' });
+    assert.equal(led.entries[0].milestone, 'v2.0');
   });
 
   test('waive with empty reason throws (boundary: limit-1 = 0 chars)', () => {
@@ -262,6 +299,13 @@ describe('broken-windows: markFixed', () => {
     assert.equal(openCount(led), 0);
   });
 
+  test('fixed preserves the entry\'s milestone (#4487 — object-spread transition must not drop it)', () => {
+    let led = emptyLedger('now');
+    ({ ledger: led } = appendWindow(led, makeEntry({ milestone: 'v2.0' }), { now: 't1' }));
+    led = markFixed(led, 1, { now: 't2' });
+    assert.equal(led.entries[0].milestone, 'v2.0');
+  });
+
   test('fixed on unknown id throws', () => {
     const led = emptyLedger('now');
     assert.throws(
@@ -297,6 +341,12 @@ describe('broken-windows: parse/render roundtrip property', () => {
     phase: arbPhase,
     description: arbText,
     status: arbStatus,
+    // #4487: three-way split so the roundtrip property actually exercises
+    // all of "key absent" (pre-#4487 entry), "explicit null" (recorded but
+    // unresolvable), and "a real string" -- these three states must each
+    // survive parse/render identically, which is exactly the distinction
+    // validateEntryShape/renderLedger have to get right.
+    milestoneCase: fc.constantFrom('absent', 'null', 'string'),
   }).map((e) => ({
     id: e.id,
     kind: e.kind,
@@ -308,6 +358,7 @@ describe('broken-windows: parse/render roundtrip property', () => {
     reason: e.status === 'waived' ? 'justified' : '',
     recorded_at: '2026-07-19T00:00:00Z',
     resolved_at: e.status === 'open' ? null : '2026-07-19T01:00:00Z',
+    ...(e.milestoneCase === 'absent' ? {} : { milestone: e.milestoneCase === 'null' ? null : 'v2.0' }),
   }));
 
   const arbLedger = fc.array(arbEntry, { maxLength: 6 }).map((entries) => {
@@ -396,8 +447,276 @@ describe('broken-windows: parseLedger fail-closed', () => {
 });
 
 // ---------------------------------------------------------------------------
+// #4487: milestone field backward compatibility
+// ---------------------------------------------------------------------------
+
+describe('broken-windows: parseLedger backward compatibility for the #4487 milestone field', () => {
+  const rawWithNoMilestoneKey = [
+    '---',
+    'schema_version: 1',
+    'open_count: 1',
+    'waived_count: 0',
+    'fixed_count: 0',
+    'total_count: 1',
+    'last_updated: 2026-01-01T00:00:00.000Z',
+    '---',
+    '',
+    '```json',
+    JSON.stringify([
+      {
+        id: 1,
+        kind: 'stub',
+        phase: '3',
+        file: '',
+        line: null,
+        description: 'old entry',
+        status: 'open',
+        reason: '',
+        recorded_at: '2026-01-01T00:00:00.000Z',
+        resolved_at: null,
+        // deliberately no `milestone` key
+      },
+    ], null, 2),
+    '```',
+    '',
+  ].join('\n');
+
+  test('an entry with NO milestone key at all (pre-#4487 shape) parses without error, reading as undefined', () => {
+    const ledger = parseLedger(rawWithNoMilestoneKey);
+    // Not `null`: an explicit null is the "recorded, but unresolvable"
+    // signal appendWindow stamps on NEW entries. A pre-#4487 entry never
+    // recorded anything -- it must read as genuinely absent (`undefined`),
+    // the only representation JSON.stringify will also omit on re-render.
+    assert.equal(ledger.entries[0].milestone, undefined, 'an entry recorded before this field existed must read as milestone: undefined (absent), not null');
+    assert.equal('milestone' in ledger.entries[0], false, 'the key itself must not be materialized for a pre-#4487 entry');
+  });
+
+  test('re-rendering a parsed pre-#4487 entry does not stamp a milestone key into the JSON (no drive-by churn)', () => {
+    const ledger = parseLedger(rawWithNoMilestoneKey);
+    const rendered = renderLedger(ledger);
+    assert.doesNotMatch(rendered, /"milestone"/, 'parsing then re-rendering a legacy entry must not introduce milestone: null noise the entry never had');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // CLI: gsd-tools windows status (acceptance: clean-ship on empty)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// #3657: fence-width tolerant read (formatter-normalized ledgers)
+// ---------------------------------------------------------------------------
+
+// The formatter itself is never spawned here: the input class is "a ledger a
+// CommonMark formatter already normalized" (Prettier narrows the written
+// 4-backtick fence to the shortest legal width — 3 — because a canonical-JSON
+// body never contains a backtick run). Narrowing a rendered ledger's fences
+// reproduces that state deterministically.
+
+describe('broken-windows: fence-width tolerant read (#3657)', () => {
+  /** Narrow a rendered ledger text's fences to `width` backticks. */
+  function narrowFences(raw, width = 3) {
+    return raw
+      .replace(/^````json$/m, '`'.repeat(width) + 'json')
+      .replace(/^````$/m, '`'.repeat(width));
+  }
+
+  /** Rendered ledger with its fences narrowed to `width` backticks. */
+  function renderNarrowed(ledger, width = 3) {
+    return narrowFences(renderLedger(ledger), width);
+  }
+
+  /** Narrow the fences of an on-disk ledger in place (the formatter's effect). */
+  function narrowLedgerOnDisk(p, width = 3) {
+    fs.writeFileSync(p, narrowFences(fs.readFileSync(p, 'utf8'), width), 'utf8');
+  }
+
+  /** Ledger with one open stub entry, built through the pure API. */
+  function ledgerWithEntry(description) {
+    const { ledger } = appendWindow(
+      emptyLedger('2026-07-19T00:00:00Z'),
+      { kind: 'stub', phase: '2', description },
+      { now: '2026-07-19T12:00:00Z' }
+    );
+    return ledger;
+  }
+
+  test('parseLedger accepts a formatter-narrowed 3-backtick JSON fence (#3657)', () => {
+    const parsed = parseLedger(renderNarrowed(ledgerWithEntry('narrowed fence entry')));
+    assert.equal(parsed.entries.length, 1);
+    assert.equal(parsed.entries[0].description, 'narrowed fence entry');
+    assert.equal(parsed.open_count, 1);
+  });
+
+  test('windows status recovers on a formatter-normalized ledger (#3657)', (t) => {
+    const tmp = createTempDir();
+    t.after(() => cleanup(tmp));
+    const r0 = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '2', '--description', 'normalized ledger entry'],
+      tmp
+    );
+    assert.ok(r0.success, `seed append failed: ${r0.error || ''}`);
+    narrowLedgerOnDisk(path.join(tmp, '.planning', LEDGER_FILE_NAME));
+
+    const res = runGsdTools(['windows', 'status', '--raw'], tmp);
+    assert.ok(res.success, `status must recover on a normalized ledger: ${res.error || ''}`);
+    const obj = JSON.parse(res.output);
+    assert.equal(obj.ok, true);
+    assert.equal(obj.ledger.open_count, 1);
+  });
+
+  test('windows append/waive/fixed recover on a normalized ledger and re-emit the 4-fence writer form (#3657)', (t) => {
+    const tmp = createTempDir();
+    t.after(() => cleanup(tmp));
+    const ledgerPath = path.join(tmp, '.planning', LEDGER_FILE_NAME);
+    const r0 = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '2', '--description', 'first'],
+      tmp
+    );
+    assert.ok(r0.success, `seed append failed: ${r0.error || ''}`);
+    narrowLedgerOnDisk(ledgerPath);
+
+    const rAppend = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '2', '--description', 'second'],
+      tmp
+    );
+    assert.ok(rAppend.success, `append must recover on a normalized ledger: ${rAppend.error || ''}`);
+    narrowLedgerOnDisk(ledgerPath);
+
+    const rWaive = runGsdTools(['windows', 'waive', '1', 'duplicate of second'], tmp);
+    assert.ok(rWaive.success, `waive must recover on a normalized ledger: ${rWaive.error || ''}`);
+    narrowLedgerOnDisk(ledgerPath);
+
+    const rFixed = runGsdTools(['windows', 'fixed', '2'], tmp);
+    assert.ok(rFixed.success, `fixed must recover on a normalized ledger: ${rFixed.error || ''}`);
+
+    // Writer contract unchanged: after any write the ledger is back on the
+    // 4-backtick fence form renderLedger emits (#1950 review H1).
+    const after = fs.readFileSync(ledgerPath, 'utf8');
+    assert.match(after, /^````json$/m, 'rewritten ledger must re-emit the 4-backtick writer fence');
+    assert.doesNotMatch(after, /^```json$/m, 'the 3-backtick form is a formatter artifact, never written');
+
+    const status = runGsdTools(['windows', 'status', '--raw'], tmp);
+    assert.ok(status.success, `final status failed: ${status.error || ''}`);
+    assert.equal(JSON.parse(status.output).ledger.open_count, 0);
+  });
+
+  test('windows append preserves trailing prose on a normalized ledger (#2893 via #3657)', (t) => {
+    const tmp = createTempDir();
+    t.after(() => cleanup(tmp));
+    const ledgerPath = path.join(tmp, '.planning', LEDGER_FILE_NAME);
+    const r0 = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '2', '--description', 'prose carrier'],
+      tmp
+    );
+    assert.ok(r0.success, `seed append failed: ${r0.error || ''}`);
+
+    // User prose below the closing fence (#2893), then a formatter pass.
+    const withProse = fs.readFileSync(ledgerPath, 'utf8') + 'Manual notes below the ledger.\n';
+    fs.writeFileSync(ledgerPath, withProse, 'utf8');
+    narrowLedgerOnDisk(ledgerPath);
+
+    const rAppend = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '2', '--description', 'second'],
+      tmp
+    );
+    assert.ok(rAppend.success, `append on normalized ledger failed: ${rAppend.error || ''}`);
+    const after = fs.readFileSync(ledgerPath, 'utf8');
+    assert.ok(
+      after.includes('Manual notes below the ledger.'),
+      'trailing prose must survive a write to a formatter-normalized ledger'
+    );
+  });
+
+  test('renderLedger keeps the 4-backtick writer fence (#3657)', () => {
+    const out = renderLedger(emptyLedger());
+    assert.match(out, /^````json$/m, 'writer must keep the #1950 H1 4-backtick open fence');
+    assert.match(out, /^````$/m, 'writer must keep the 4-backtick close fence');
+  });
+
+  test('fence tolerance does not loosen malformed-ledger fail-closed (#3657)', () => {
+    const frontmatter = [
+      '---',
+      'schema_version: 1',
+      'open_count: 0',
+      'waived_count: 0',
+      'fixed_count: 0',
+      'total_count: 0',
+      'last_updated: 2026-07-19T00:00:00Z',
+      '---',
+    ].join('\n');
+    const noBlock = [frontmatter, '', '# Broken Windows Ledger', '', 'prose only', ''].join('\n');
+    assert.throws(() => parseLedger(noBlock), reasonIs(REASON.WINDOWS_LEDGER_MALFORMED));
+    assert.throws(() => parseLedger(noBlock), /missing JSON code block/);
+
+    const body = JSON.stringify([]);
+    const unterminated = [frontmatter, '', '```json', body, ''].join('\n');
+    assert.throws(() => parseLedger(unterminated), reasonIs(REASON.WINDOWS_LEDGER_MALFORMED));
+    assert.throws(() => parseLedger(unterminated), /not terminated/);
+  });
+
+  test('reader accepts 3+ widths and rejects a shorter closing run (#3657)', () => {
+    const ledger = ledgerWithEntry('width boundary entry');
+    const five = renderNarrowed(ledger, 5);
+    const parsedFive = parseLedger(five);
+    assert.equal(parsedFive.entries.length, 1, 'a 5-backtick fence is valid CommonMark and must parse');
+
+    // CommonMark: the closing run must be at least as long as the opening run.
+    const shortClose = renderLedger(ledger).replace(/^````$/m, '```');
+    assert.throws(
+      () => parseLedger(shortClose),
+      reasonIs(REASON.WINDOWS_LEDGER_MALFORMED),
+      'a 3-backtick line must not close a 4-backtick block'
+    );
+  });
+
+  test('3-backtick run inside a description never terminates the block (#1950 H1 under #3657 tolerance)', () => {
+    const description = 'see ```js x``` inline';
+    const ledger = ledgerWithEntry(description);
+    const parsed4 = parseLedger(renderLedger(ledger));
+    assert.equal(parsed4.entries[0].description, description, '4-fence roundtrip keeps the inline run');
+    // A hand-narrowed 3-fence file: the inline ``` sits inside a JSON string on
+    // a content line, so the line-anchored close scan must skip it.
+    const parsed3 = parseLedger(renderNarrowed(ledger));
+    assert.equal(parsed3.entries[0].description, description);
+  });
+
+  test('fence tolerance is CRLF-safe (#3116 sibling)', () => {
+    const crlf = renderNarrowed(ledgerWithEntry('crlf narrowed entry')).replace(/\n/g, '\r\n');
+    const parsed = parseLedger(crlf);
+    assert.equal(parsed.entries.length, 1);
+    assert.equal(parsed.entries[0].description, 'crlf narrowed entry');
+  });
+
+  test('a json fence planted in a description never hijacks or bricks the ledger (#3657 security)', () => {
+    // renderTable renders descriptions into the prose ABOVE the JSON block,
+    // and append validation rejects only 4+ backtick runs (#1950 H1) — so a
+    // hostile or accidental description can plant a second json fence above
+    // the real one. The reader must resolve to the REAL block: renderLedger
+    // always emits it as the final fenced section, and the counts cross-check
+    // pins it. Both the smuggled-entries variant and the empty-array (brick)
+    // variant must fail to influence the parse.
+    const plantedBodies = [
+      '[{"id":99,"kind":"stub","phase":"9","file":"","line":null,"description":"SMUGGLED","status":"open","reason":"","recorded_at":"t","resolved_at":null}]',
+      '[]',
+    ];
+    for (const body of plantedBodies) {
+      const hostile = `see old snapshot:\n\`\`\`json\n${body}\n\`\`\`\nend`;
+      const ledger = ledgerWithEntry(hostile);
+      const rendered = renderLedger(ledger);
+
+      const parsed = parseLedger(rendered);
+      assert.equal(parsed.entries.length, 1, `planted fence must not replace the entries: ${body.slice(0, 12)}`);
+      assert.equal(parsed.entries[0].id, 1);
+      assert.notEqual(parsed.entries[0].description, 'SMUGGLED');
+      assert.ok(parsed.entries[0].description.includes('see old snapshot'));
+
+      // Same file after a formatter narrows every fence to three backticks.
+      const parsedNarrowed = parseLedger(narrowFences(rendered));
+      assert.equal(parsedNarrowed.entries[0].id, 1, 'narrowed planted ledger still resolves the real block');
+      assert.notEqual(parsedNarrowed.entries[0].description, 'SMUGGLED');
+    }
+  });
+});
 
 describe('broken-windows CLI: windows status', () => {
   test('status on a project with no ledger returns open_count=0 (backward-compat baseline)', (t) => {
@@ -504,6 +823,57 @@ describe('broken-windows CLI: windows append', () => {
     const obj2 = JSON.parse(res2.output);
     assert.equal(obj2.ledger.open_count, 1);
     assert.equal(obj2.ledger.entries[0].id, 1);
+  });
+
+  // #4487: cmdWindowsAppend (unlike the pure appendWindow) resolves the
+  // milestone itself from disk, reusing workstream-inventory.cts's existing
+  // readCurrentMilestoneVersion (STATE.md `milestone:` frontmatter first,
+  // ROADMAP.md in-progress marker as fallback) rather than a new parallel
+  // implementation.
+  test('append stamps the milestone resolved from STATE.md frontmatter (#4487)', (t) => {
+    const tmp = createTempDir('bw-append-milestone-state-');
+    t.after(() => cleanup(tmp));
+    fs.mkdirSync(path.join(tmp, '.planning'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmp, '.planning', 'STATE.md'),
+      '---\nmilestone: v2.0\n---\n# Project State\n',
+      'utf-8',
+    );
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '5', '--description', 'x'],
+      tmp,
+    );
+    assert.equal(res.success, true, `stderr: ${res.error || ''}`);
+    assert.equal(JSON.parse(res.output).entry.milestone, 'v2.0');
+  });
+
+  test('append stamps null when no milestone is resolvable (#4487)', (t) => {
+    const tmp = createTempDir('bw-append-milestone-none-');
+    t.after(() => cleanup(tmp));
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '5', '--description', 'x'],
+      tmp,
+    );
+    assert.equal(res.success, true, `stderr: ${res.error || ''}`);
+    assert.equal(JSON.parse(res.output).entry.milestone, null);
+  });
+
+  test('append falls back to the ROADMAP in-progress marker when STATE.md has no milestone field (#4487)', (t) => {
+    const tmp = createTempDir('bw-append-milestone-roadmap-fallback-');
+    t.after(() => cleanup(tmp));
+    fs.mkdirSync(path.join(tmp, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.planning', 'STATE.md'), '---\nstatus: executing\n---\n# Project State\n', 'utf-8');
+    fs.writeFileSync(
+      path.join(tmp, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n## 🚧 **v3.1** — In Progress\n',
+      'utf-8',
+    );
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '5', '--description', 'x'],
+      tmp,
+    );
+    assert.equal(res.success, true, `stderr: ${res.error || ''}`);
+    assert.equal(JSON.parse(res.output).entry.milestone, 'v3.1');
   });
 
   test('append a second entry gets id=2', (t) => {
@@ -835,5 +1205,800 @@ describe('#3116: parseLedger handles CRLF ledgers', () => {
     const crlfParsed = parseLedger(lfLedger.replace(/\n/g, '\r\n'));
 
     assert.deepEqual(crlfParsed, lfParsed);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3689: writeLedgerAtomic table-vs-JSON drift guard
+//
+// `.planning/WINDOWS.md`'s markdown table is a rendered VIEW of the JSON
+// fence (the sole source of truth). writeLedgerAtomic re-reads the file only
+// to preserve trailing prose (#2893) and then writes renderLedger(ledger)
+// unconditionally, with no check that the on-disk table agreed with the JSON
+// beforehand — so a hand-edited table cell is silently reverted, and a
+// table-only row silently vanishes, on the next append/waive/fixed. See
+// .gsd/bug/fix-3689-windows-ledger-table-drift-guard/repro.cjs.
+// ---------------------------------------------------------------------------
+
+describe('#3689: windows ledger table-vs-JSON drift guard', () => {
+  /** Build a pristine, real-CLI-written two-entry ledger; return its raw text. */
+  function seedPristineLedger(t) {
+    const seedCwd = createTempDir('bw-3689-seed-');
+    t.after(() => cleanup(seedCwd));
+    const r1 = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '1', '--description', 'first entry', '--file', 'a/one.sh'],
+      seedCwd,
+    );
+    assert.ok(r1.success, `seed append 1 failed: ${r1.error || ''}`);
+    const r2 = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '2', '--description', 'second entry', '--file', 'b/two.sh'],
+      seedCwd,
+    );
+    assert.ok(r2.success, `seed append 2 failed: ${r2.error || ''}`);
+    return fs.readFileSync(path.join(seedCwd, '.planning', LEDGER_FILE_NAME), 'utf8');
+  }
+
+  /** Index of the line opening the JSON fence (the fenced ```json line), or -1. */
+  function jsonFenceLineIndex(lines) {
+    return lines.findIndex((l) => /^`{3,}json[ \t]*$/.test(l.trim()));
+  }
+
+  /** Flip a table row's `| from |` cell to `| to |`, touching only the table region. */
+  function flipTableStatus(raw, rowId, from, to) {
+    const lines = raw.split('\n');
+    const fenceIdx = jsonFenceLineIndex(lines);
+    let flipped = false;
+    const out = lines.map((line, idx) => {
+      if (flipped || (fenceIdx !== -1 && idx >= fenceIdx)) return line;
+      const rowRe = new RegExp(`^\\|\\s*${rowId}\\s*\\|`);
+      if (rowRe.test(line) && line.includes(`| ${from} |`)) {
+        flipped = true;
+        return line.replace(`| ${from} |`, `| ${to} |`);
+      }
+      return line;
+    });
+    assert.ok(flipped, `must have found row ${rowId} with status "${from}" to flip`);
+    return out.join('\n');
+  }
+
+  /** Insert an extra data row (present only in the table, not the JSON) before the fence. */
+  function insertTableOnlyRow(raw, rowLine) {
+    const lines = raw.split('\n');
+    const fenceIdx = jsonFenceLineIndex(lines);
+    assert.ok(fenceIdx > 0, 'must locate the JSON fence to insert before');
+    let insertAt = fenceIdx;
+    while (insertAt > 0 && lines[insertAt - 1].trim() === '') insertAt -= 1;
+    lines.splice(insertAt, 0, rowLine);
+    return lines.join('\n');
+  }
+
+  function writeLedgerFile(tmp, content) {
+    fs.mkdirSync(path.join(tmp, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.planning', LEDGER_FILE_NAME), content, 'utf8');
+  }
+
+  function readLedgerFile(tmp) {
+    return fs.readFileSync(path.join(tmp, '.planning', LEDGER_FILE_NAME), 'utf8');
+  }
+
+  test('windows append refuses when the rendered table has drifted from the JSON (#3689)', (t) => {
+    const pristine = seedPristineLedger(t);
+    const tmp = createTempDir('bw-3689-drift-append-');
+    t.after(() => cleanup(tmp));
+    const drifted = flipTableStatus(pristine, 1, 'open', 'fixed');
+    writeLedgerFile(tmp, drifted);
+    const before = readLedgerFile(tmp);
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '99', '--description', 'third entry', '--file', 'c/three.sh'],
+      tmp,
+      { GSD_JSON_ERRORS: '1' },
+    );
+
+    assert.equal(res.success, false, 'append must refuse on table drift');
+    const parsed = JSON.parse(res.error);
+    assert.equal(parsed.ok, false, `structured error must carry ok:false: ${res.error}`);
+    // #3689: the typed reason distinguishes table drift from a generic
+    // WINDOWS_LEDGER_MALFORMED parse failure. String literal (not
+    // REASON.WINDOWS_LEDGER_TABLE_DRIFT) because that constant does not
+    // exist on the shipped module today — referencing it would compare
+    // undefined === undefined and pass vacuously before the fix lands.
+    assert.equal(parsed.reason, 'windows_ledger_table_drift', `expected typed drift reason, got: ${res.error}`);
+    assert.match(parsed.message, /\b1\b/, 'failure message must name the drifted row id');
+    assert.equal(readLedgerFile(tmp), before, 'the file must be byte-identical to the pre-image after a refusal');
+  });
+
+  test('windows append refuses a table-only row instead of erasing it (#3689)', (t) => {
+    const pristine = seedPristineLedger(t);
+    const tmp = createTempDir('bw-3689-tableonly-');
+    t.after(() => cleanup(tmp));
+    const extraRow = '| 99 | 42 | deviation | z/table-only.sh | - | table only row | open | - | - | - |';
+    const withExtraRow = insertTableOnlyRow(pristine, extraRow);
+    writeLedgerFile(tmp, withExtraRow);
+    const before = readLedgerFile(tmp);
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '7', '--description', 'fourth entry', '--file', 'd/four.sh'],
+      tmp,
+      { GSD_JSON_ERRORS: '1' },
+    );
+
+    assert.equal(res.success, false, 'append must refuse rather than silently drop the table-only row');
+    const parsed = JSON.parse(res.error);
+    assert.equal(parsed.ok, false, `structured error must carry ok:false: ${res.error}`);
+    assert.equal(parsed.reason, 'windows_ledger_table_drift', `expected typed drift reason, got: ${res.error}`);
+    assert.match(parsed.message, /\b99\b/, 'failure message must name the drifted (table-only) row id');
+    assert.ok(readLedgerFile(tmp).includes('table only row'), 'the table-only row must still be present after refusal');
+    assert.equal(readLedgerFile(tmp), before, 'the file must be byte-identical to the pre-image after a refusal');
+  });
+
+  test('windows waive refuses on table drift (#3689)', (t) => {
+    const pristine = seedPristineLedger(t);
+    const tmp = createTempDir('bw-3689-drift-waive-');
+    t.after(() => cleanup(tmp));
+    const drifted = flipTableStatus(pristine, 1, 'open', 'fixed');
+    writeLedgerFile(tmp, drifted);
+    const before = readLedgerFile(tmp);
+
+    const res = runGsdTools(['windows', 'waive', '2', 'covered by manual QA'], tmp, { GSD_JSON_ERRORS: '1' });
+
+    assert.equal(res.success, false, 'waive must refuse on table drift');
+    const parsed = JSON.parse(res.error);
+    assert.equal(parsed.ok, false, `structured error must carry ok:false: ${res.error}`);
+    assert.equal(parsed.reason, 'windows_ledger_table_drift', `expected typed drift reason, got: ${res.error}`);
+    assert.match(parsed.message, /\b1\b/, 'failure message must name the drifted row id');
+    assert.equal(readLedgerFile(tmp), before, 'the file must be byte-identical to the pre-image after a refusal');
+  });
+
+  test('windows fixed refuses on table drift (#3689)', (t) => {
+    const pristine = seedPristineLedger(t);
+    const tmp = createTempDir('bw-3689-drift-fixed-');
+    t.after(() => cleanup(tmp));
+    const drifted = flipTableStatus(pristine, 1, 'open', 'fixed');
+    writeLedgerFile(tmp, drifted);
+    const before = readLedgerFile(tmp);
+
+    const res = runGsdTools(['windows', 'fixed', '2'], tmp, { GSD_JSON_ERRORS: '1' });
+
+    assert.equal(res.success, false, 'fixed must refuse on table drift');
+    const parsed = JSON.parse(res.error);
+    assert.equal(parsed.ok, false, `structured error must carry ok:false: ${res.error}`);
+    assert.equal(parsed.reason, 'windows_ledger_table_drift', `expected typed drift reason, got: ${res.error}`);
+    assert.match(parsed.message, /\b1\b/, 'failure message must name the drifted row id');
+    assert.equal(readLedgerFile(tmp), before, 'the file must be byte-identical to the pre-image after a refusal');
+  });
+
+  test('windows append detects drift on a non-first row (#3689)', (t) => {
+    const pristine = seedPristineLedger(t);
+    const tmp = createTempDir('bw-3689-drift-second-row-');
+    t.after(() => cleanup(tmp));
+    const drifted = flipTableStatus(pristine, 2, 'open', 'fixed');
+    writeLedgerFile(tmp, drifted);
+    const before = readLedgerFile(tmp);
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '5', '--description', 'fifth entry', '--file', 'e/five.sh'],
+      tmp,
+      { GSD_JSON_ERRORS: '1' },
+    );
+
+    assert.equal(res.success, false, 'append must detect drift on the second data row, not just the first');
+    const parsed = JSON.parse(res.error);
+    assert.equal(parsed.ok, false, `structured error must carry ok:false: ${res.error}`);
+    assert.equal(parsed.reason, 'windows_ledger_table_drift', `expected typed drift reason, got: ${res.error}`);
+    assert.match(parsed.message, /\b2\b/, 'failure message must name the drifted row id (2), not just row 1');
+    assert.equal(readLedgerFile(tmp), before, 'the file must be byte-identical to the pre-image after a refusal');
+  });
+
+  // --- Anti-tightening / negative-space pins: must stay green before AND after the fix ---
+
+  test('windows append still succeeds when the table agrees with the JSON (#3689)', (t) => {
+    const tmp = createTempDir('bw-3689-agree-');
+    t.after(() => cleanup(tmp));
+    const r1 = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '1', '--description', 'first entry'],
+      tmp,
+    );
+    assert.ok(r1.success, `seed append failed: ${r1.error || ''}`);
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '2', '--description', 'second entry'],
+      tmp,
+    );
+    assert.equal(res.success, true, `append must succeed on an agreeing table: ${res.error || ''}`);
+    const obj = JSON.parse(res.output);
+    assert.equal(obj.entry.id, 2);
+    assert.equal(obj.ledger.total_count, 2);
+  });
+
+  test('windows append still creates the ledger when none exists (#3689)', (t) => {
+    const tmp = createTempDir('bw-3689-nofile-');
+    t.after(() => cleanup(tmp));
+    assert.equal(fs.existsSync(path.join(tmp, '.planning', LEDGER_FILE_NAME)), false);
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '1', '--description', 'first ever entry'],
+      tmp,
+    );
+    assert.equal(res.success, true, `append must create the ledger with no pre-image to disagree with: ${res.error || ''}`);
+    assert.equal(fs.existsSync(path.join(tmp, '.planning', LEDGER_FILE_NAME)), true);
+  });
+
+  test('windows append preserves trailing prose when the guard passes (#2893 + #3689)', (t) => {
+    const tmp = createTempDir('bw-3689-prose-');
+    t.after(() => cleanup(tmp));
+    const r1 = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '1', '--description', 'prose carrier'],
+      tmp,
+    );
+    assert.ok(r1.success, `seed append failed: ${r1.error || ''}`);
+    const ledgerPath = path.join(tmp, '.planning', LEDGER_FILE_NAME);
+    fs.writeFileSync(ledgerPath, fs.readFileSync(ledgerPath, 'utf8') + 'Operator notes below the ledger.\n', 'utf8');
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '2', '--description', 'second entry'],
+      tmp,
+    );
+    assert.equal(res.success, true, `append must succeed when the table agrees: ${res.error || ''}`);
+    assert.ok(
+      fs.readFileSync(ledgerPath, 'utf8').includes('Operator notes below the ledger.'),
+      'trailing prose must survive an append that passes the drift guard',
+    );
+  });
+
+  test('windows append tolerates a 3-backtick fence when locating the table (#3657 + #3689)', (t) => {
+    const tmp = createTempDir('bw-3689-narrowfence-');
+    t.after(() => cleanup(tmp));
+    const r1 = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '1', '--description', 'narrowed fence entry'],
+      tmp,
+    );
+    assert.ok(r1.success, `seed append failed: ${r1.error || ''}`);
+    const ledgerPath = path.join(tmp, '.planning', LEDGER_FILE_NAME);
+    fs.writeFileSync(
+      ledgerPath,
+      fs.readFileSync(ledgerPath, 'utf8')
+        .replace(/^````json$/m, '```json')
+        .replace(/^````$/m, '```'),
+      'utf8',
+    );
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '2', '--description', 'second entry'],
+      tmp,
+    );
+    assert.equal(res.success, true, `append must tolerate a 3-backtick fence when the table agrees: ${res.error || ''}`);
+  });
+
+  test('windows append does not trip the guard on escaped pipes and backslashes (#3689)', (t) => {
+    const tmp = createTempDir('bw-3689-escaping-');
+    t.after(() => cleanup(tmp));
+    const r1 = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '1',
+       '--description', 'path with \\| separator and | pipe and \\ backslash'],
+      tmp,
+    );
+    assert.ok(r1.success, `seed append with escaped content failed: ${r1.error || ''}`);
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '2', '--description', 'second entry'],
+      tmp,
+    );
+    assert.equal(res.success, true, `append must not false-positive on escaped pipes/backslashes: ${res.error || ''}`);
+  });
+
+  test('windows append tolerates the empty-ledger table rendering (#3689)', (t) => {
+    const tmp = createTempDir('bw-3689-emptytable-');
+    t.after(() => cleanup(tmp));
+    writeLedgerFile(tmp, renderLedger(emptyLedger('2026-08-24T00:00:00Z')));
+    assert.ok(
+      readLedgerFile(tmp).includes('_(none)_'),
+      'precondition: seeded ledger renders the empty-table placeholder row',
+    );
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '1', '--description', 'first real entry'],
+      tmp,
+    );
+    assert.equal(res.success, true, `append must succeed against the empty-ledger placeholder table: ${res.error || ''}`);
+    assert.equal(JSON.parse(res.output).entry.id, 1);
+  });
+
+  test('windows append tolerates trailing prose that itself contains a fenced JSON array (#2893 + #3689)', (t) => {
+    const pristine = seedPristineLedger(t);
+    const tmp = createTempDir('bw-3689-prose-jsonarray-');
+    t.after(() => cleanup(tmp));
+    // The pristine ledger has 2 entries. The trailing prose's fenced JSON
+    // array below has a DIFFERENT length (3) than the real entries list, so
+    // a wrong binding (matching the prose block instead of the ledger block)
+    // is unambiguous: it would make onDiskEntries.length disagree with the
+    // real 2-entry table, tripping the drift guard on a ledger that never
+    // drifted.
+    const withProse = `${pristine}Operator notes below the ledger.\n\n` +
+      '```json\n[{"note": "a"}, {"note": "b"}, {"note": "c"}]\n```\n';
+    writeLedgerFile(tmp, withProse);
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '3', '--description', 'third entry', '--file', 'c/three.sh'],
+      tmp,
+      { GSD_JSON_ERRORS: '1' },
+    );
+
+    assert.equal(res.success, true, `append must succeed — the ledger table agrees with the real JSON entries, not the unrelated prose array: ${res.error || ''}`);
+    const obj = JSON.parse(res.output);
+    assert.equal(obj.entry.description, 'third entry');
+    assert.equal(obj.ledger.total_count, 3);
+    const written = readLedgerFile(tmp);
+    assert.ok(written.includes('third entry'), 'new entry must be present in the written ledger');
+
+    // #3689 bug discovery: the trailing prose text ABOVE the fenced array
+    // must survive byte-for-byte. A wrong binding (locateJsonBlock resolving
+    // to the prose's own fenced array instead of the real ledger block)
+    // computes `trailingProse` from the PROSE fence's afterClose, silently
+    // dropping everything between the real ledger block and the prose
+    // block — including "Operator notes below the ledger." itself. Asserting
+    // only append-succeeds (as this test did before) cannot catch that: the
+    // write still succeeds, it just discards the operator's prose.
+    const trailingProse = 'Operator notes below the ledger.\n\n' +
+      '```json\n[{"note": "a"}, {"note": "b"}, {"note": "c"}]\n```\n';
+    assert.ok(
+      written.includes(trailingProse),
+      'trailing prose above and including the fenced JSON array must survive byte-for-byte',
+    );
+  });
+
+  test('windows append tolerates a description containing a newline (#3689)', (t) => {
+    const tmp = createTempDir('bw-3689-newline-desc-');
+    t.after(() => cleanup(tmp));
+    // validateDescription (src/broken-windows.cts:198) rejects only empty
+    // strings and 4-backtick runs, not \n — and renderTable's cell() escapes
+    // `\` and `|` but not newlines, so this row physically spans two file
+    // lines. A `|`-prefix scan of the pre-fence text stops dead at that
+    // continuation line; the header-anchored fix must not.
+    const r1 = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '1', '--description', 'line one\nline two', '--file', 'a/one.sh'],
+      tmp,
+    );
+    assert.ok(r1.success, `seed append with newline description failed: ${r1.error || ''}`);
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '2', '--description', 'second entry', '--file', 'b/two.sh'],
+      tmp,
+    );
+    assert.equal(
+      res.success,
+      true,
+      `append must succeed on a ledger whose only row has an embedded newline, not brick with windows_ledger_table_drift: ${res.error || ''}`,
+    );
+    const obj = JSON.parse(res.output);
+    assert.equal(obj.ledger.total_count, 2);
+    assert.equal(obj.ledger.entries[0].description, 'line one\nline two');
+    assert.equal(obj.ledger.entries[1].description, 'second entry');
+  });
+
+  test('windows append still detects drift on a ledger whose description contains a newline (#3689)', (t) => {
+    const tmp = createTempDir('bw-3689-newline-desc-drift-');
+    t.after(() => cleanup(tmp));
+    const r1 = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '1', '--description', 'line one\nline two', '--file', 'a/one.sh'],
+      tmp,
+    );
+    assert.ok(r1.success, `seed append 1 failed: ${r1.error || ''}`);
+    const r2 = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '2', '--description', 'second entry', '--file', 'b/two.sh'],
+      tmp,
+    );
+    assert.ok(r2.success, `seed append 2 failed: ${r2.error || ''}`);
+
+    // Hand-edit a DIFFERENT row's (row 2, single-line) status cell. Proves the
+    // wider header-anchored region does not blind the guard: row 1's embedded
+    // newline must not swallow row 2's drift.
+    const pristine = readLedgerFile(tmp);
+    const drifted = flipTableStatus(pristine, 2, 'open', 'fixed');
+    writeLedgerFile(tmp, drifted);
+    const before = readLedgerFile(tmp);
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'deviation', '--phase', '3', '--description', 'third entry', '--file', 'c/three.sh'],
+      tmp,
+      { GSD_JSON_ERRORS: '1' },
+    );
+
+    assert.equal(res.success, false, 'append must still detect drift on row 2 even though row 1 spans multiple physical lines');
+    const parsed = JSON.parse(res.error);
+    assert.equal(parsed.ok, false, `structured error must carry ok:false: ${res.error}`);
+    assert.equal(parsed.reason, 'windows_ledger_table_drift', `expected typed drift reason, got: ${res.error}`);
+    assert.match(parsed.message, /\b2\b/, 'failure message must name the drifted row id (2)');
+    assert.equal(readLedgerFile(tmp), before, 'the file must be byte-identical to the pre-image after a refusal');
+  });
+
+  test('extractTableRegion terminates when the header literal starts the candidate region (#3689)', () => {
+    // #3689: the backward header search's fallback bound `searchFrom = idx - 1`
+    // becomes -1 when the ONLY candidate match sits at index 0 and fails the
+    // atLineEnd check. String.prototype.lastIndexOf clamps a negative position
+    // to 0 per spec, so the next iteration re-finds the same rejected match at
+    // idx 0 forever — a candidate that STARTS with the header literal followed
+    // by a non-newline character reproduces this exactly. This must return
+    // promptly (a regression here hangs the test process, not fail it).
+    const TABLE_HEADER_LINE =
+      '| id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |';
+    const raw = `${TABLE_HEADER_LINE}X\n\`\`\`\`json\n[]\n\`\`\`\`\n`;
+    const result = brokenWindowsLib.extractTableRegion(raw);
+    // No line-anchored header match exists (the only occurrence is followed by
+    // "X", not a newline/EOF), so the corrected backward search must exhaust
+    // its bound and report "no header found" rather than hang.
+    assert.equal(result, null, 'extractTableRegion must return null when no line-anchored header match exists');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3689 property: table region extraction round-trips to renderTable
+//
+// CONTRACT PIN (not a guess — the fix MUST match this exactly):
+// The #3689 fix must export from src/broken-windows.cts:
+//   - `renderTable(entries: WindowEntry[]): string` — the existing private
+//     renderer, promoted to an export.
+//   - `extractTableRegion(raw: string): string | null` — returns the exact
+//     table text of a rendered ledger, or null when no table region can be
+//     located.
+// The property below asserts
+//   extractTableRegion(renderLedger(ledger)) === renderTable(ledger.entries)
+// for every generated ledger. Neither symbol is exported by the shipped
+// module today, so this property fails immediately on the `typeof`
+// assertions below — that is a correct failure (the contract this test
+// encodes does not exist yet), not a flake.
+// ---------------------------------------------------------------------------
+
+describe('#3689 property: table region extraction round-trip', () => {
+  const arbPropKind = fc.constantFrom(
+    'stub', 'todo', 'fixme', 'skipped-test', 'lint-warning', 'unmet-truth', 'unrun-verify', 'deviation',
+  );
+  // #3689: descriptions CAN contain an embedded newline — validateDescription
+  // rejects only empty strings and 4-backtick runs (src/broken-windows.cts:198)
+  // — which is exactly why the prior `|`-prefix table-region scan could brick
+  // a clean ledger. Strip only `\r` (CRLF-normalize) so `\n` survives into the
+  // generated description and this property exercises the multi-physical-line
+  // row case the header-anchored fix must round-trip.
+  const arbPropDescription = fc.oneof(
+    fc.constant(''),
+    fc.string({ maxLength: 40 }),
+    fc.constant('has | a pipe'),
+    fc.constant('has \\ a backslash'),
+    fc.constant('both \\| combined'),
+    fc.constant('line one\nline two'),
+  ).map((s) => s.replace(/\r/g, ''));
+
+  const arbPropEntry = fc.record({
+    id: fc.integer({ min: 1, max: 500 }),
+    kind: arbPropKind,
+    phase: fc.integer({ min: 0, max: 99 }).map(String),
+    file: fc.oneof(fc.constant(''), fc.constant('src/x.ts')),
+    line: fc.oneof(fc.constant(null), fc.integer({ min: 1, max: 9999 })),
+    description: arbPropDescription,
+    status: fc.constantFrom('open', 'waived', 'fixed'),
+    reason: fc.oneof(fc.constant(''), fc.constant('justified')),
+    recorded_at: fc.constant('2026-08-24T00:00:00Z'),
+    resolved_at: fc.oneof(fc.constant(null), fc.constant('2026-08-24T01:00:00Z')),
+  });
+
+  test('property: the table region extracted from a rendered ledger round-trips to renderTable (#3689)', () => {
+    fc.assert(fc.property(fc.array(arbPropEntry, { maxLength: 5 }), (entries) => {
+      assert.equal(
+        typeof brokenWindowsLib.extractTableRegion,
+        'function',
+        'extractTableRegion must be exported by the #3689 fix — writeLedgerAtomic\'s ' +
+          'drift guard needs it to parse the on-disk table region independently of the ' +
+          'JSON block; not yet exported, so this property fails today for the right reason.',
+      );
+      assert.equal(
+        typeof brokenWindowsLib.renderTable,
+        'function',
+        'renderTable must be exported so this property can compare against the real ' +
+          'renderer instead of a test-side reimplementation; not yet exported (module-private today).',
+      );
+
+      const ledger = {
+        schema_version: 1,
+        open_count: entries.filter((e) => e.status === 'open').length,
+        waived_count: entries.filter((e) => e.status === 'waived').length,
+        fixed_count: entries.filter((e) => e.status === 'fixed').length,
+        total_count: entries.length,
+        last_updated: '2026-08-24T00:00:00Z',
+        entries,
+      };
+      const rendered = renderLedger(ledger);
+      const extracted = brokenWindowsLib.extractTableRegion(rendered);
+      const expected = brokenWindowsLib.renderTable(entries);
+      assert.equal(extracted, expected, 'extracted table region must match renderTable(entries) exactly');
+    }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1950-H2 / #3689 review finding: writeLedgerAtomic's pre-image read must
+// not treat every fs error as "no ledger yet". A bare catch there would let
+// EACCES/EIO/etc. fall through as if the file were absent, silently skipping
+// the drift guard and overwriting an unreadable pre-image — a guard that can
+// be bypassed by making the file unreadable is not a guard. This had no
+// coverage.
+//
+// Injection method: monkeypatch `fs.readFileSync` and restore it in a
+// `finally` (CONTRIBUTING.md fault-injection convention; mirrors
+// tests/verify-command-grounding.test.cjs "row 24 — unreadable phase
+// degrades, never throws"). `fs.chmodSync(path, 0o000)` is not used: root
+// (how CI/Docker run) bypasses mode bits entirely, so that approach would
+// pass with zero real coverage. This must go in-process (not through
+// runGsdTools) because a monkeypatch in the parent process is invisible to a
+// child process.
+// ---------------------------------------------------------------------------
+
+describe('#1950-H2 / #3689: writeLedgerAtomic pre-image read failure', () => {
+  test('windows append refuses when the pre-image is unreadable rather than silently overwriting it (#1950-H2 + #3689)', (t) => {
+    const tmp = createTempDir('bw-3689-unreadable-preimage-');
+    t.after(() => cleanup(tmp));
+
+    // Seed a real, on-disk ledger via a genuine (unmocked) append. The
+    // branch under test is reached only when readFileSync throws something
+    // OTHER than ENOENT, which requires a pre-image to actually exist.
+    cmdWindowsAppend(tmp, ['--kind', 'stub', '--phase', '1', '--description', 'seed entry'], {});
+    const ledgerPath = path.join(tmp, '.planning', LEDGER_FILE_NAME);
+    assert.ok(fs.existsSync(ledgerPath), 'guard: seed append must have written a ledger file');
+    const pristine = fs.readFileSync(ledgerPath, 'utf8');
+
+    const originalReadFileSync = fs.readFileSync;
+    let caught;
+    try {
+      fs.readFileSync = (p, ...rest) => {
+        if (typeof p === 'string' && path.resolve(p) === path.resolve(ledgerPath)) {
+          throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        }
+        return originalReadFileSync.call(fs, p, ...rest);
+      };
+
+      try {
+        cmdWindowsAppend(tmp, ['--kind', 'stub', '--phase', '2', '--description', 'second entry'], {});
+      } catch (e) {
+        caught = e;
+      }
+    } finally {
+      fs.readFileSync = originalReadFileSync;
+    }
+
+    assert.ok(caught, 'an unreadable pre-image must throw, not proceed to overwrite the file');
+    assert.ok(caught instanceof WindowsError, 'must surface as a typed WindowsError, not a bare fs error');
+    assert.equal(caught.reason, REASON.WINDOWS_LEDGER_MALFORMED);
+    assert.match(caught.message, /EACCES/, 'message must name the errno that made the pre-image unreadable');
+    assert.ok(
+      caught.message.includes(ledgerPath),
+      `message must name the unreadable path (${ledgerPath}): ${caught.message}`,
+    );
+
+    // Fail-closed: the on-disk ledger must be byte-identical to the
+    // pre-image seeded above — no partial or silent overwrite occurred.
+    assert.equal(
+      fs.readFileSync(ledgerPath, 'utf8'),
+      pristine,
+      'an unreadable pre-image must not be overwritten',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3780: parallel writers must not silently lose ledger mutations
+//
+// cmdWindowsAppend/Waive/MarkFixed each ran an unlocked read-compute-write
+// cycle ending in an atomic rename: two parallel invocations read the same
+// snapshot, computed the same nextId, and the second rename won — the first
+// mutation was silently lost while its invocation still reported ok:true
+// (a false-green /gsd-ship gate, since the ship decision reads open_count).
+// The fix serializes the mutating commands on a `.planning/.WINDOWS.lock`
+// ledger lock backed by the shared capability-lock primitive (the
+// capability-consent precedent: waitForFresh + raised budget, typed throw
+// when the lock cannot be acquired). Readers stay lock-free.
+// ---------------------------------------------------------------------------
+
+describe('#3780: parallel writers serialize on the ledger lock', () => {
+  const lockRelPath = path.join('.planning', '.WINDOWS.lock');
+
+  /**
+   * The sync process seam cannot interleave two writers in one thread, and a
+   * concurrency regression needs genuinely concurrent children. Async spawn,
+   * bounded by the CLI-probe class timeout, env built exactly the way
+   * runGsdTools builds it (process env + TEST_ENV_BASE).
+   */
+  function spawnAppend(tmp, description) {
+    return new Promise((resolve) => {
+      const child = spawn(
+        process.execPath,
+        [TOOLS_PATH, 'windows', 'append', '--kind', 'todo', '--phase', '1', '--description', description],
+        { cwd: tmp, env: { ...process.env, ...TEST_ENV_BASE } },
+      );
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d) => { stdout += d; });
+      child.stderr.on('data', (d) => { stderr += d; });
+      const timer = setTimeout(() => child.kill('SIGKILL'), PROBE_TIMEOUT_MS);
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        resolve({ code, stdout, stderr });
+      });
+    });
+  }
+
+  function readEntries(tmp) {
+    const raw = fs.readFileSync(path.join(tmp, '.planning', LEDGER_FILE_NAME), 'utf8');
+    return parseLedger(raw).entries;
+  }
+
+  /** Acquire the ledger lock as a stand-in live writer (same-host, never stolen). */
+  function acquireHeldLock(tmp) {
+    const handle = lockMod.acquireLock(path.join(tmp, lockRelPath), { maxAttempts: 1 });
+    assert.ok(handle, 'test setup: the test process must be able to acquire the ledger lock');
+    return handle;
+  }
+
+  test('two concurrent gsd-tools append processes both land their entries', async (t) => {
+    const tmp = createTempDir('bw-3780-race-');
+    t.after(() => cleanup(tmp));
+
+    const [a, b] = await Promise.all([
+      spawnAppend(tmp, 'writer-A'),
+      spawnAppend(tmp, 'writer-B'),
+    ]);
+
+    assert.equal(a.code, 0, `writer-A must exit 0, stderr: ${a.stderr}`);
+    assert.equal(b.code, 0, `writer-B must exit 0, stderr: ${b.stderr}`);
+    assert.equal(JSON.parse(a.stdout).ok, true, 'writer-A must observe success');
+    assert.equal(JSON.parse(b.stdout).ok, true, 'writer-B must observe success');
+
+    const entries = readEntries(tmp);
+    assert.equal(entries.length, 2, 'both appends must be present in the ledger');
+    assert.deepEqual(entries.map((e) => e.id).sort(), [1, 2], 'ids must be distinct — no shared nextId');
+    assert.deepEqual(
+      entries.map((e) => e.description).sort(),
+      ['writer-A', 'writer-B'],
+      'neither description may be lost',
+    );
+  });
+
+  test('append refuses typed while another writer holds the ledger lock, and proceeds after release', (t) => {
+    const tmp = createTempDir('bw-3780-held-append-');
+    t.after(() => cleanup(tmp));
+    const handle = acquireHeldLock(tmp);
+    t.after(() => lockMod.releaseLock(handle));
+
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '1', '--description', 'blocked writer'],
+      tmp,
+      { GSD_JSON_ERRORS: '1' },
+    );
+    assert.equal(res.success, false, 'append must refuse while the ledger lock is held by a live writer');
+    const parsed = JSON.parse(res.error);
+    // String literal, not REASON.WINDOWS_LEDGER_LOCK — the constant does not
+    // exist on the pre-fix module and `undefined === undefined` would pass
+    // vacuously (the #3689 precedent at the table-drift assertion).
+    assert.equal(parsed.reason, 'windows_ledger_lock', `expected typed lock reason, got: ${res.error}`);
+    assert.equal(
+      fs.existsSync(path.join(tmp, '.planning', LEDGER_FILE_NAME)),
+      false,
+      'a refused append must not write the ledger',
+    );
+
+    // After release the same mutation proceeds — the refusal was contention,
+    // not corruption.
+    lockMod.releaseLock(handle);
+    const res2 = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '1', '--description', 'after release'],
+      tmp,
+    );
+    assert.equal(res2.success, true, `post-release append must succeed: ${res2.error || ''}`);
+    assert.equal(JSON.parse(res2.output).entry.description, 'after release');
+  });
+
+  test('append releases the ledger lock after success', (t) => {
+    const tmp = createTempDir('bw-3780-release-ok-');
+    t.after(() => cleanup(tmp));
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '1', '--description', 'solo'],
+      tmp,
+    );
+    assert.equal(res.success, true, `stderr: ${res.error || ''}`);
+    assert.equal(
+      fs.existsSync(path.join(tmp, lockRelPath)),
+      false,
+      'no lock file may survive a successful append',
+    );
+  });
+
+  test('append releases the ledger lock even when the append itself fails', (t) => {
+    const tmp = createTempDir('bw-3780-release-fail-');
+    t.after(() => cleanup(tmp));
+    const bad = runGsdTools(
+      ['windows', 'append', '--kind', 'no-such-kind', '--phase', '1', '--description', 'x'],
+      tmp,
+    );
+    assert.equal(bad.success, false, 'invalid kind must fail as before');
+    assert.equal(
+      fs.existsSync(path.join(tmp, lockRelPath)),
+      false,
+      'no lock file may survive a failed append',
+    );
+    const good = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '1', '--description', 'retry'],
+      tmp,
+    );
+    assert.equal(good.success, true, `a valid append after a failed one must proceed: ${good.error || ''}`);
+  });
+
+  test('waive refuses typed while the ledger lock is held and proceeds after release', (t) => {
+    const tmp = createTempDir('bw-3780-held-waive-');
+    t.after(() => cleanup(tmp));
+    const seed = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '1', '--description', 'entry'],
+      tmp,
+    );
+    assert.equal(seed.success, true, `seed append failed: ${seed.error || ''}`);
+    const handle = acquireHeldLock(tmp);
+    t.after(() => lockMod.releaseLock(handle));
+
+    const res = runGsdTools(['windows', 'waive', '1', 'waiver reason'], tmp, { GSD_JSON_ERRORS: '1' });
+    assert.equal(res.success, false, 'waive must refuse while the ledger lock is held');
+    const parsed = JSON.parse(res.error);
+    assert.equal(parsed.reason, 'windows_ledger_lock', `expected typed lock reason, got: ${res.error}`);
+
+    lockMod.releaseLock(handle);
+    const res2 = runGsdTools(['windows', 'waive', '1', 'waiver reason'], tmp);
+    assert.equal(res2.success, true, `post-release waive must succeed: ${res2.error || ''}`);
+  });
+
+  test('fixed refuses typed while the ledger lock is held', (t) => {
+    const tmp = createTempDir('bw-3780-held-fixed-');
+    t.after(() => cleanup(tmp));
+    const seed = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '1', '--description', 'entry'],
+      tmp,
+    );
+    assert.equal(seed.success, true, `seed append failed: ${seed.error || ''}`);
+    const handle = acquireHeldLock(tmp);
+    t.after(() => lockMod.releaseLock(handle));
+
+    const res = runGsdTools(['windows', 'fixed', '1'], tmp, { GSD_JSON_ERRORS: '1' });
+    assert.equal(res.success, false, 'fixed must refuse while the ledger lock is held');
+    const parsed = JSON.parse(res.error);
+    assert.equal(parsed.reason, 'windows_ledger_lock', `expected typed lock reason, got: ${res.error}`);
+  });
+
+  test('status stays lock-free — reads do not block on the writer lock', (t) => {
+    const tmp = createTempDir('bw-3780-status-free-');
+    t.after(() => cleanup(tmp));
+    const handle = acquireHeldLock(tmp);
+    t.after(() => lockMod.releaseLock(handle));
+    const res = runGsdTools(['windows', 'status', '--raw'], tmp);
+    assert.equal(res.success, true, `status must not take the writer lock: ${res.error || ''}`);
+    assert.equal(JSON.parse(res.output).ledger.open_count, 0);
+  });
+
+  test('REASON enum gains WINDOWS_LEDGER_LOCK and stays frozen+closed', () => {
+    assert.equal(Object.isFrozen(REASON), true);
+    // Assert on the VALUES (the wire codes --json-errors can emit), not
+    // Object.keys — the keys are the UPPER_CASE identifiers. Closure over
+    // all 14 codes is the contract: adding/removing a code must update this
+    // list in the same commit (the three-coordinated-changes rule).
+    assert.deepEqual(Object.values(REASON).sort(), [
+      'windows_already_resolved',
+      'windows_append_missing_field',
+      'windows_id_not_found',
+      'windows_invalid_file',
+      'windows_invalid_id',
+      'windows_invalid_kind',
+      'windows_invalid_text',
+      'windows_ledger_lock',
+      'windows_ledger_malformed',
+      'windows_ledger_missing',
+      'windows_ledger_table_drift',
+      'windows_ok',
+      'windows_usage',
+      'windows_waive_reason_empty',
+    ]);
   });
 });

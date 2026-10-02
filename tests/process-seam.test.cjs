@@ -24,6 +24,29 @@ const path = require('node:path');
 const { createTempDir, cleanup, runGsdTools, TOOLS_PATH } = require('./helpers.cjs');
 const processSeam = require('./helpers/process-seam.cjs');
 const { runNode, runGit, runHook, OUTCOME, toSeamResult } = processSeam;
+const {
+  SEAM_DEFAULT_TIMEOUT_MS,
+} = require('./helpers/timeouts.cjs');
+
+/**
+ * `FIXTURE_SLEEPER` in this file sleeps 5000ms by default. Both constants
+ * below are comfortably under that, chosen only to reliably fire TIMED_OUT
+ * with margin — the exact numbers are not independently meaningful beyond
+ * "far under 5000ms", and are kept as two distinct pre-existing values (not
+ * consolidated to one) so this migration does not silently change any
+ * test's timing behavior. `SEAM_TIGHT_TIMEOUT_MS` (200) is the SMALLER /
+ * tighter of the two; `SEAM_SHORT_TIMEOUT_MS` (300) is the LARGER of the
+ * two — the names alone don't convey that ordering, hence spelling it out
+ * here.
+ */
+const SEAM_TIGHT_TIMEOUT_MS = 200;
+const SEAM_SHORT_TIMEOUT_MS = 300;
+
+/**
+ * Generous headroom for a fixture in this file that exits quickly or
+ * synchronously (not exercising the timeout boundary itself).
+ */
+const SEAM_GENEROUS_TIMEOUT_MS = 5000;
 
 // ---- fixture sources -------------------------------------------------
 
@@ -155,7 +178,7 @@ describe('process-seam', () => {
 
   test('a child that overruns is TIMED_OUT as data, not a throw', () => {
     const fixture = writeFixture(tmpDir, 'sleeper.cjs', FIXTURE_SLEEPER);
-    const result = runNode([fixture, '5000'], { timeoutMs: 300 });
+    const result = runNode([fixture, '5000'], { timeoutMs: SEAM_SHORT_TIMEOUT_MS });
     assert.equal(result.outcome, OUTCOME.TIMED_OUT);
     assert.equal(result.timedOut, true);
     assert.equal(result.killed, true);
@@ -164,7 +187,7 @@ describe('process-seam', () => {
 
   test('timedOut does not depend on signal presence (Windows)', () => {
     const fixture = writeFixture(tmpDir, 'sleeper.cjs', FIXTURE_SLEEPER);
-    const result = runNode([fixture, '5000'], { timeoutMs: 300 });
+    const result = runNode([fixture, '5000'], { timeoutMs: SEAM_SHORT_TIMEOUT_MS });
     // The assertion below is intentionally the whole point of this test: it
     // proves timedOut alone, without ever branching on result.signal. See
     // 40-design.md row 6 — signal is null on Windows and must not be
@@ -175,7 +198,7 @@ describe('process-seam', () => {
   test('a timeout still returns string stdout/stderr (partial content is platform-dependent)', () => {
     const fixture = writeFixture(tmpDir, 'sleeper.cjs', FIXTURE_SLEEPER);
     const marker = JSON.stringify({ partial: true });
-    const result = runNode([fixture, '5000', marker], { timeoutMs: 300 });
+    const result = runNode([fixture, '5000', marker], { timeoutMs: SEAM_SHORT_TIMEOUT_MS });
     assert.equal(result.outcome, OUTCOME.TIMED_OUT);
     assert.equal(result.timedOut, true);
     assert.equal(typeof result.stdout, 'string');
@@ -230,7 +253,7 @@ describe('process-seam', () => {
   test('omitting timeoutMs still bounds the call', () => {
     const fixture = writeFixture(tmpDir, 'exit.cjs', FIXTURE_EXIT);
     const withDefault = runNode([fixture, '0']);
-    const withExplicitDefault = runNode([fixture, '0'], { timeoutMs: 60000 });
+    const withExplicitDefault = runNode([fixture, '0'], { timeoutMs: SEAM_DEFAULT_TIMEOUT_MS });
     // Omitting timeoutMs must resolve to the same bounded code path as
     // explicitly passing the documented default — never a distinct
     // "unbounded" branch.
@@ -242,14 +265,14 @@ describe('process-seam', () => {
 
   test('child finishing just under the bound is EXITED', () => {
     const fixture = writeFixture(tmpDir, 'sleeper.cjs', FIXTURE_SLEEPER);
-    const result = runNode([fixture, '50'], { timeoutMs: 5000 });
+    const result = runNode([fixture, '50'], { timeoutMs: SEAM_GENEROUS_TIMEOUT_MS });
     assert.equal(result.outcome, OUTCOME.EXITED);
     assert.equal(result.timedOut, false);
   });
 
   test('at-the-bound child yields one deterministic outcome', () => {
     const fixture = writeFixture(tmpDir, 'sleeper.cjs', FIXTURE_SLEEPER);
-    const result = runNode([fixture, '300'], { timeoutMs: 300 });
+    const result = runNode([fixture, '300'], { timeoutMs: SEAM_SHORT_TIMEOUT_MS });
     // Either outcome is acceptable at the exact bound (OS/scheduler
     // jitter decides which side of the race wins) — what must never happen
     // is an outcome outside the pair, or fields inconsistent with whichever
@@ -284,7 +307,7 @@ describe('process-seam', () => {
 
   test('child overrunning the bound is TIMED_OUT', () => {
     const fixture = writeFixture(tmpDir, 'sleeper.cjs', FIXTURE_SLEEPER);
-    const result = runNode([fixture, '5000'], { timeoutMs: 200 });
+    const result = runNode([fixture, '5000'], { timeoutMs: SEAM_TIGHT_TIMEOUT_MS });
     assert.equal(result.outcome, OUTCOME.TIMED_OUT);
   });
 
@@ -346,7 +369,7 @@ describe('process-seam', () => {
 
   test('a custom killSignal is reported, not normalized', () => {
     const fixture = writeFixture(tmpDir, 'sleeper.cjs', FIXTURE_SLEEPER);
-    const result = runNode([fixture, '5000'], { timeoutMs: 200, killSignal: 'SIGINT' });
+    const result = runNode([fixture, '5000'], { timeoutMs: SEAM_TIGHT_TIMEOUT_MS, killSignal: 'SIGINT' });
     assert.equal(result.outcome, OUTCOME.TIMED_OUT);
     if (process.platform !== 'win32') {
       assert.equal(result.signal, 'SIGINT');
@@ -355,7 +378,7 @@ describe('process-seam', () => {
 
   test('timeout with stderr reports one outcome, keeps both fields', () => {
     const fixture = writeFixture(tmpDir, 'sleeper.cjs', FIXTURE_SLEEPER);
-    const result = runNode([fixture, '5000', '', 'err-marker'], { timeoutMs: 300 });
+    const result = runNode([fixture, '5000', '', 'err-marker'], { timeoutMs: SEAM_SHORT_TIMEOUT_MS });
     assert.equal(result.outcome, OUTCOME.TIMED_OUT);
     assert.equal(typeof result.stdout, 'string');
     assert.equal(typeof result.stderr, 'string');
@@ -377,8 +400,8 @@ describe('process-seam', () => {
 
   test('consecutive timeouts do not share state', () => {
     const fixture = writeFixture(tmpDir, 'sleeper.cjs', FIXTURE_SLEEPER);
-    const first = runNode([fixture, '5000'], { timeoutMs: 200 });
-    const second = runNode([fixture, '5000'], { timeoutMs: 200 });
+    const first = runNode([fixture, '5000'], { timeoutMs: SEAM_TIGHT_TIMEOUT_MS });
+    const second = runNode([fixture, '5000'], { timeoutMs: SEAM_TIGHT_TIMEOUT_MS });
     assert.equal(first.outcome, OUTCOME.TIMED_OUT);
     assert.equal(second.outcome, OUTCOME.TIMED_OUT);
   });
@@ -410,7 +433,7 @@ describe('process-seam', () => {
       return;
     }
     const fixture = writeFixture(tmpDir, 'suicide.cjs', FIXTURE_SUICIDE);
-    const result = runNode([fixture], { timeoutMs: 5000 });
+    const result = runNode([fixture], { timeoutMs: SEAM_GENEROUS_TIMEOUT_MS });
     assert.equal(result.outcome, OUTCOME.KILLED);
     assert.equal(result.killed, true);
     assert.equal(result.timedOut, false);
@@ -432,7 +455,7 @@ describe('process-seam', () => {
       CLAUDE_CODE_SSE_PORT: '',
       CLAUDE_PROJECT_DIR: '',
     };
-    const result = runHook(hookPath, [], { input: payload, env, timeoutMs: 5000 });
+    const result = runHook(hookPath, [], { input: payload, env, timeoutMs: SEAM_GENEROUS_TIMEOUT_MS });
     assert.equal(result.outcome, OUTCOME.EXITED);
     assert.equal(typeof result.stdout, 'string');
   });
@@ -492,7 +515,7 @@ describe('runHook interpreter option', () => {
     // unexpected string-valued option alongside a valid timeoutMs; the
     // seam's contract-validation for timeoutMs must still pass through
     // untouched and the call must complete without throwing.
-    const result = runHook(hookPath, ['0'], { interpreter: process.execPath, timeoutMs: 5000 });
+    const result = runHook(hookPath, ['0'], { interpreter: process.execPath, timeoutMs: SEAM_GENEROUS_TIMEOUT_MS });
     assert.equal(result.outcome, OUTCOME.EXITED);
     assert.equal(result.exitCode, 0);
   });
@@ -510,7 +533,7 @@ describe('runHook interpreter option', () => {
         'sleep 5',
       ].join('\n')
     );
-    const result = runHook(scriptPath, [], { interpreter: 'bash', timeoutMs: 300 });
+    const result = runHook(scriptPath, [], { interpreter: 'bash', timeoutMs: SEAM_SHORT_TIMEOUT_MS });
     assert.equal(result.outcome, OUTCOME.TIMED_OUT);
     assert.equal(result.timedOut, true);
     assert.equal(result.exitCode, null);
@@ -791,6 +814,35 @@ describe('runGsdTools adapter (process-seam parity)', () => {
         assert.equal(typeof result.exitCode, 'number');
         assert.equal(result.exitCode, 1);
       }
+    );
+  });
+});
+
+describe('#3271: hook fan-out timeout class', () => {
+  const {
+    PROBE_TIMEOUT_MS: PROBE,
+    HOOK_FANOUT_TIMEOUT_MS: HOOK_FANOUT,
+    INSTALL_TIMEOUT_MS: INSTALL,
+  } = require('./helpers/timeouts.cjs');
+
+  test('a hook fan-out is bounded above a bare probe and below a full install', () => {
+    // The ordering IS the claim: a hook that shells out several times is heavier
+    // than reading back a version string and lighter than running bin/install.js.
+    // CI recorded a Windows timeout at exactly the probe bound (PR #3285,
+    // windows-latest node 22 shard 2/3) while every other lane passed the same
+    // commit — the bound was sized for the wrong class.
+    assert.ok(PROBE < HOOK_FANOUT, `probe ${PROBE}ms must be under hook fan-out ${HOOK_FANOUT}ms`);
+    assert.ok(HOOK_FANOUT < INSTALL, `hook fan-out ${HOOK_FANOUT}ms must be under install ${INSTALL}ms`);
+  });
+
+  test('the fan-out bound clears the duration that actually timed out', () => {
+    // Observed: 15040ms, censored at the 15000ms probe bound, so the real need is
+    // unknown and above it. A bound that merely matched the observation would be
+    // the same defect again.
+    const OBSERVED_TIMEOUT_MS = 15040;
+    assert.ok(
+      HOOK_FANOUT >= OBSERVED_TIMEOUT_MS * 3,
+      `hook fan-out ${HOOK_FANOUT}ms must clear the censored ${OBSERVED_TIMEOUT_MS}ms observation with real margin`,
     );
   });
 });

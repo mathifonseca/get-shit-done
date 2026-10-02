@@ -94,9 +94,10 @@ After completion, create SUMMARY.md with:
 **RED - Write failing test:**
 1. Create test file following project conventions
 2. Write test describing expected behavior (from `<behavior>` element)
-3. Run test - it MUST fail
-4. If test passes: feature exists or test is wrong. Investigate.
-5. Commit: `test({phase}-{plan}): add failing test for [feature]`
+3. Run test - it MUST fail **intentionally** (#3770): the TARGET test you named must be the test that fails, on an assertion for the planned behavior. A nonzero exit alone is NOT RED — syntax errors, zero-test discovery, fixture crashes, parser errors, and unrelated assertions are INVALID_RED and must not authorize GREEN.
+4. Persist the RED evidence record (command, exit code, failing test, expected result, actual result) and verify it: `gsd_run check tdd-red-evidence <record.json>`. Only verdict `RED_EVIDENCE_OK` satisfies the RED gate; `INVALID_RED` blocks GREEN until the RED phase is fixed.
+5. If test passes: feature exists or test is wrong. Investigate.
+6. Commit: `test({phase}-{plan}): add failing test for [feature]`
 
 **GREEN - Implement to pass:**
 1. Write minimal code to make test pass
@@ -177,10 +178,32 @@ cargo test    # Rust
 ```
 
 **5. Create first test file:**
-Follow project conventions for test location:
-- `*.test.ts` / `*.spec.ts` next to source
+Follow project conventions for test location. The RED-commit gate
+(`workflows/execute-phase.md`) recognises the patterns below at any depth, repo root
+included. Note the gate's pathspec is deliberately **wider than the project types the
+detection step above enumerates** — it costs nothing to recognise a convention the
+onboarding flow does not yet auto-detect, and a project using one should not have its
+RED commits go unseen:
+- `*.test.*` / `*.spec.*` next to source — JS/TS and anything sharing the convention
 - `__tests__/` directory
 - `tests/` directory at root
+- `*_test.go` — Go
+- `test_*.py` / `*_test.py` — Python (in addition to `tests/`)
+- `*_test.exs` — Elixir
+- `*_spec.rb` / `*_test.rb` — Ruby
+
+**Cost of the broad pathspec (#4379).** `*.spec.*` can match a non-test file that happens to carry
+the word — `api.spec.json`, `openapi.spec.yaml` — which lets the RED gate pass on a commit touching
+only that. This is not new: the previous `**/*.spec.*` already matched those at any nested path, so
+dropping the `**/` prefix only extends the same false-positive class to the repo root. It is
+accepted rather than narrowed, because narrowing it is a behaviour change to the
+currently-supported case and not part of making other languages visible.
+
+**Known gap — Rust (#4379).** `#[test]` conventionally lives inside the implementation file, so a
+Rust RED commit touches `src/*.rs` and no path-based gate can distinguish it from ordinary source.
+Widening the pathspec to cover it would match all source and make the gate meaningless. `cargo test`
+works; the RED-*commit* gate cannot see it, so a Rust project using `workflow.tdd_mode` should
+expect the gate to trip.
 
 Framework setup is a one-time cost included in the first TDD plan's RED phase.
 </framework_setup>
@@ -256,26 +279,34 @@ When `workflow.tdd_mode` is enabled in config, the RED/GREEN/REFACTOR gate seque
 
 | Gate | Required | Commit Pattern | Validation |
 |------|----------|---------------|------------|
-| RED | Yes | `test({phase}-{plan}): ...` | Test exists AND fails before implementation |
+| RED | Yes | `test({phase}-{plan}): ...` | Test exists AND fails before implementation — intentionally: `check tdd-red-evidence` returns `RED_EVIDENCE_OK` (target test failed on an assertion for the behavior; anything else is INVALID_RED) |
 | GREEN | Yes | `feat({phase}-{plan}): ...` | Test passes after implementation |
 | REFACTOR | No | `refactor({phase}-{plan}): ...` | Tests still pass after cleanup |
 
 ### Fail-Fast Rules
 
 1. **Unexpected GREEN in RED phase:** If the test passes before any implementation code is written, STOP. The feature may already exist or the test is wrong. Investigate before proceeding.
-2. **Missing RED commit:** If no `test(...)` commit precedes the `feat(...)` commit, the TDD discipline was violated. Flag in SUMMARY.md.
-3. **REFACTOR breaks tests:** Undo the refactor immediately. Commit was premature — refactor in smaller steps.
+2. **INVALID_RED in RED phase (#3770):** A nonzero exit is not RED by itself. Zero-test discovery, fixture/load crashes, nonzero exits with no failing test, unrelated failing tests, and unexpected greens all classify as INVALID_RED (`gsd_run check tdd-red-evidence`). STOP and fix the RED phase — do NOT proceed to GREEN.
+3. **Missing RED commit:** If no `test(...)` commit precedes the `feat(...)` commit, the TDD discipline was violated. Flag in SUMMARY.md.
+4. **REFACTOR breaks tests:** Undo the refactor immediately. Commit was premature — refactor in smaller steps.
 
 ### Executor Gate Validation
 
 After completing a `type: tdd` plan, the executor validates the git log:
 ```bash
+# The commit protocol promises no zero-padding for ${PHASE}/${PLAN} — strip both and
+# match the commit-scope position anchored (#4003). #4619: PHASE may be decimal/
+# N-segment; zero-strip only the leading integer segment, escape the rest.
+# #4748: it may also carry a letter suffix (03A), so split at the first non-digit.
+PHASE_INT=${PHASE%%[!0-9]*}; PHASE_REST=${PHASE#"$PHASE_INT"}
+PHASE_N="$((10#$PHASE_INT))${PHASE_REST//./\\.}"
+PLAN_N=$((10#${PLAN}))
 # Check for RED gate commit
-git log --oneline --grep="^test(${PHASE}-${PLAN})" | head -1
+git log --oneline -E --grep="^test\((0*${PHASE_N})-(0*${PLAN_N})\):" | head -1
 # Check for GREEN gate commit  
-git log --oneline --grep="^feat(${PHASE}-${PLAN})" | head -1
+git log --oneline -E --grep="^feat\((0*${PHASE_N})-(0*${PLAN_N})\):" | head -1
 # Check for optional REFACTOR gate commit
-git log --oneline --grep="^refactor(${PHASE}-${PLAN})" | head -1
+git log --oneline -E --grep="^refactor\((0*${PHASE_N})-(0*${PLAN_N})\):" | head -1
 ```
 
 If RED or GREEN gate commits are missing, add a `## TDD Gate Compliance` section to SUMMARY.md with the violation details.
@@ -289,9 +320,7 @@ When `workflow.tdd_mode` is enabled, the execute-phase orchestrator inserts a co
 ### Review Checkpoint Format
 
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- TDD REVIEW — Phase {X}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+### TDD REVIEW — Phase {X}
 
 TDD Plans: {count} | Gate violations: {count}
 

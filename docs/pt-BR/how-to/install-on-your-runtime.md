@@ -8,7 +8,7 @@ Instale o GSD Core (`@opengsd/gsd-core`) no ambiente de codificação com IA que
 
 ## Por que o instalador é necessário
 
-O GSD Core distribui arquivos de agente e comando no formato nativo de frontmatter do Claude Code. Cada ambiente suportado espera um schema, layout de diretório e sintaxe de invocação de comandos diferente. O instalador realiza as transformações necessárias — por exemplo, convertendo listas de ferramentas e valores de cor para o OpenCode, escrevendo entradas TOML de agente para o Codex e reescrevendo o corpo de cada comando do formato com hífen (`/gsd-update`) para o formato com dois-pontos (`/gsd-update`) para o Gemini CLI.
+O GSD Core distribui arquivos de agente e comando no formato nativo de frontmatter do Claude Code. Cada ambiente suportado espera um schema, layout de diretório e sintaxe de invocação de comandos diferente. O instalador realiza as transformações necessárias — por exemplo, convertendo listas de ferramentas e valores de cor para o OpenCode e escrevendo entradas TOML de agente para o Codex.
 
 **Não copie arquivos de `agents/` ou `commands/` diretamente.** Fazer isso ignora as transformações e produz erros de validação de schema ou comandos ausentes.
 
@@ -36,26 +36,12 @@ npx @opengsd/gsd-core@latest --claude --global
 
 As habilidades são instaladas em `~/.claude/`. Os comandos aparecem como slash commands `/gsd-*` na sua próxima sessão do Claude Code. Reinicie o Claude Code para carregá-los.
 
+**Instalação em ambos os escopos `--global` e `--local`.** Essa é uma configuração suportada, mas as próprias regras de resolução de gatilhos do Claude Code — escopo pessoal sobrepõe escopo de projeto, e uma skill sobrepõe um comando de mesmo nome — apontam para a mesma direção: a skill global sempre vence o gatilho `/gsd-<nome>` sobre o comando local. O GSD Core detecta isso e imprime qual escopo está vencendo logo após a instalação (e reporta o mesmo fato pelo `/gsd-health` como o diagnóstico `W028`); é um aviso, não uma falha — a instalação em si continua bem-sucedida. No escopo **global**, a referência da spec de workflow da skill vencedora é resolvida em tempo de execução em relação ao seu diretório de trabalho primeiro, então um projeto com seu próprio `.claude/gsd-core/` ainda obtém suas próprias specs mesmo que a skill global seja o que o Claude Code invoca.
+
 **Substituir o diretório de instalação:**
 
 ```bash
 CLAUDE_CONFIG_DIR=~/.claude-alt npx @opengsd/gsd-core@latest --claude --global
-```
-
----
-
-### Gemini CLI
-
-```bash
-npx @opengsd/gsd-core@latest --gemini --global
-```
-
-As habilidades são instaladas em `~/.gemini/`. O instalador reescreve todos os corpos de comando para o namespace de dois-pontos do Gemini (`/gsd-update`, `/gsd-config`, etc.). Reinicie o Gemini CLI após a instalação.
-
-**Substituir o diretório de instalação:**
-
-```bash
-GEMINI_CONFIG_DIR=~/.gemini-alt npx @opengsd/gsd-core@latest --gemini --global
 ```
 
 ---

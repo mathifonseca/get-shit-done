@@ -1,3 +1,4 @@
+// docs-guard-exempt: antigravity.google/docs/... is an external URL citation in comments, not a repo path.
 // allow-test-rule: structural-regression-guard — AC2 requires asserting no `runtime === 'antigravity'` string-equality branch (nor an `isAntigravity` helper, nor a `canonical === 'antigravity'` branch) remains in bin/install.js, src/runtime-artifact-conversion.cts, src/shell-command-projection.cts, and src/runtime-name-policy.cts — the descriptor-migration contract is a property of the source text, so a source-grep is the only faithful check (#2096)
 'use strict';
 
@@ -174,7 +175,10 @@ test('capabilities/antigravity/capability.json validates — subagentToolkit "fu
 test('antigravity descriptor declares runtime.hostBehaviors (the folded-in behaviors) + the subagentToolkit upgrade', () => {
   const hb = ANTIGRAVITY_CAP.runtime.hostBehaviors;
   assert.ok(hb && typeof hb === 'object');
-  assert.equal(hb.reviewerCli, true);
+  // `reviewerCli` was one of the folded-in behaviors originally; ADR-2782
+  // Phase 7 (#2801) removed the alias — antigravity's reviewer lane is declared
+  // by its `reviewer` body now, not by a boolean in the open hostBehaviors bag.
+  assert.equal(Object.prototype.hasOwnProperty.call(hb, 'reviewerCli'), false);
   assert.equal(hb.projectInstructionFile, 'GEMINI.md');
   assert.equal(hb.noPathRewrite, true);
   assert.equal(hb.hookPathStyle, 'raw');
@@ -429,12 +433,14 @@ describe('/gsd:update detects local Antigravity (.agent / .agents) installs (#50
 
   test('execution_context classifier maps /.agents/ and /.agent/ paths to antigravity (update.md)', () => {
     const hasAgentsClassifierRule =
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored update.md workflow, bounded prose, not adversarial input
       /\/\.agents\/[^\r\n]*->[^\r\n]*antigravity/.test(UPDATE_MD);
     assert.ok(
       hasAgentsClassifierRule,
       'update.md classifier must map a `/.agents/` path to the `antigravity` runtime',
     );
     const hasAgentClassifierRule =
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored update.md workflow, bounded prose, not adversarial input
       /\/\.agent\/[^\r\n]*->[^\r\n]*antigravity/.test(UPDATE_MD);
     assert.ok(
       hasAgentClassifierRule,

@@ -23,7 +23,7 @@ describe('CANONICAL_EXACT', () => {
     const expected = [
       'PROJECT.md', 'ROADMAP.md', 'STATE.md', 'REQUIREMENTS.md',
       'MILESTONES.md', 'BACKLOG.md', 'LEARNINGS.md', 'THREADS.md',
-      'config.json', 'CLAUDE.md', 'RETROSPECTIVE.md',
+      'config.json', 'CLAUDE.md', 'RETROSPECTIVE.md', 'WINDOWS.md', 'state.json',
     ];
     for (const name of expected) {
       assert.ok(CANONICAL_EXACT.has(name), `expected ${name} in CANONICAL_EXACT`);
@@ -58,6 +58,35 @@ describe('isCanonicalPlanningFile', () => {
     assert.strictEqual(isCanonicalPlanningFile('config.json'), true);
   });
 
+  test('#3227: state.json (machine-readable state contract) is a canonical .planning/ artifact', () => {
+    // gsd-core writes .planning/state.json at every step boundary
+    // (src/state-contract.cts). Before #3227 it was absent from the
+    // registry, so validate health would falsely flag it W019
+    // "Unrecognized" on every GSD project.
+    assert.ok(CANONICAL_EXACT.has('state.json'), 'state.json must be in CANONICAL_EXACT');
+    assert.strictEqual(isCanonicalPlanningFile('state.json'), true);
+  });
+
+  test('#3224: WINDOWS.md (broken-windows ledger) is a canonical .planning/ artifact', () => {
+    // gsd-core itself writes .planning/WINDOWS.md (src/broken-windows.cts,
+    // LEDGER_FILE_NAME = 'WINDOWS.md'). Before #3224 it was absent from the
+    // registry, so validate health flagged it W019 "Unrecognized" with advice to
+    // delete a ledger that can gate /gsd-ship under workflow.windows_enforce.
+    assert.ok(CANONICAL_EXACT.has('WINDOWS.md'), 'WINDOWS.md must be in CANONICAL_EXACT');
+    assert.strictEqual(isCanonicalPlanningFile('WINDOWS.md'), true);
+  });
+
+  test('#4282: PATTERNS.md (graduated cross-phase patterns) is a canonical .planning/ artifact', () => {
+    // workflows/graduation.md's own graduation-target table instructs the agent to
+    // append to .planning/PATTERNS.md for the `patterns` category. Before #4282 it
+    // was absent from the registry, so validate health flagged it W019
+    // "Unrecognized" with advice to archive/delete a file gsd-core itself produces.
+    // Distinct from the per-phase NN-PATTERNS.md (templates/README.md), which lives
+    // under a phase subdirectory and was never subject to W019 in the first place.
+    assert.ok(CANONICAL_EXACT.has('PATTERNS.md'), 'PATTERNS.md must be in CANONICAL_EXACT');
+    assert.strictEqual(isCanonicalPlanningFile('PATTERNS.md'), true);
+  });
+
   test('returns false for unrecognized file', () => {
     assert.strictEqual(isCanonicalPlanningFile('random-file.md'), false);
   });
@@ -88,7 +117,6 @@ describe('isCanonicalPlanningFile', () => {
   __foldDescribe("folded:enh-2448-artifact-registry (consolidation epic #1969 B3 #1972)", () => {
 'use strict';
 
-// allow-test-rule: source-text-is-the-product (see #2448)
 // Reads .md/.json/.yml product files whose deployed text IS what the
 // runtime loads — testing text content tests the deployed contract.
 
@@ -178,6 +206,18 @@ describe('gsd-health W019 — unrecognized .planning/ root files', () => {
 
     const w019 = result.warnings.find(w => w.code === 'W019');
     assert.strictEqual(w019, undefined, 'no W019 for canonical files');
+  });
+
+  test('#3227: no W019 for .planning/state.json (state contract published at step boundaries)', () => {
+    const dir = makeTempProject({
+      ...BASE_FILES,
+      '.planning/state.json': '{}',
+    });
+
+    const result = cmdValidateHealth(dir, { repair: false }, false);
+
+    const w019 = result.warnings.find(w => w.code === 'W019');
+    assert.strictEqual(w019, undefined, 'state.json must not be flagged as unrecognized');
   });
 
   test('no W019 for phase subdirectory files (only root is checked)', () => {

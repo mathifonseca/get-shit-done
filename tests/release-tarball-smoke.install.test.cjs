@@ -10,16 +10,45 @@ process.env.GSD_TEST_MODE = '1';
 const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 
 const { cleanup, createTempDir, runNpm, isolatedNpmEnv } = require('./helpers.cjs');
-const { SMOKE, runSmoke, CHILD_TIMEOUT_MS } = require('../scripts/release-tarball-smoke.cjs');
+const { ensureHooksDist } = require('./helpers/hooks-dist.cjs');
+const { SMOKE, runSmoke, entrypointFixtureHome, CHILD_TIMEOUT_MS, configuredEntrypointsIn } = require('../scripts/release-tarball-smoke.cjs');
 
 const smokeMsg = (label, result) =>
   `${label}: code=${result.code} details=${JSON.stringify(result.details)}`;
 
 const PKG_PATH = path.join(__dirname, '..', 'package.json');
 const pkg = JSON.parse(fs.readFileSync(PKG_PATH, 'utf-8'));
+
+function installedPackageRoot(prefix) {
+  const parts = pkg.name.split('/');
+  const posix = path.join(prefix, 'lib', 'node_modules', ...parts);
+  const windows = path.join(prefix, 'node_modules', ...parts);
+  return fs.existsSync(posix) ? posix : windows;
+}
+
+function hashTree(root) {
+  const result = new Map();
+  const visit = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) visit(absolute);
+      else if (entry.isFile()) {
+        result.set(
+          path.relative(root, absolute).replace(/\\/g, '/'),
+          crypto.createHash('sha256').update(fs.readFileSync(absolute)).digest('hex'),
+        );
+      }
+    }
+  };
+  visit(root);
+  return result;
+}
 
 // ─── runSmoke install timeout must clear a slow-host cold install (#2335) ────
 // Regression: runSmoke()'s internal `npm install -g` used CHILD_TIMEOUT_MS,
@@ -58,6 +87,11 @@ describe('release-tarball-smoke', () => {
   let fixtureDir;
 
   before(async () => {
+    // hooks/dist is gitignored and only produced by `npm run build:hooks`; the
+    // pack below must ship it or Cycle 4's entrypoint scan runs against a
+    // tarball with no hook scripts at all (SMOKE.INIT_FAILED on a clean tree).
+    ensureHooksDist();
+
     // Pack once into a temp dir.
     packDir = createTempDir('gsd-smoke-pack-');
     installPrefix = createTempDir('gsd-smoke-prefix-');
@@ -207,6 +241,339 @@ describe('release-tarball-smoke', () => {
       smokeMsg('E', result),
     );
   });
+
+  test('F: packed package carries the complete canonical Runtime Surface corpus', () => {
+    const packageRoot = installedPackageRoot(installPrefix);
+    assert.deepStrictEqual(
+      hashTree(path.join(packageRoot, 'commands', 'gsd')),
+      hashTree(path.join(__dirname, '..', 'commands', 'gsd')),
+    );
+    assert.deepStrictEqual(
+      hashTree(path.join(packageRoot, 'agents')),
+      hashTree(path.join(__dirname, '..', 'agents')),
+    );
+  });
+
+  test('G: deployed Codex and Claude modules materially change a surface after package source is unreachable', (t) => {
+    const runtimeRoot = createTempDir('gsd-smoke-offline-runtime-');
+    const packageRoot = installedPackageRoot(installPrefix);
+    const hiddenPackageRoot = `${packageRoot}.offline-${process.pid}`;
+    t.after(() => {
+      if (fs.existsSync(hiddenPackageRoot) && !fs.existsSync(packageRoot)) fs.renameSync(hiddenPackageRoot, packageRoot);
+      cleanup(runtimeRoot);
+    });
+      const installs = [];
+      for (const runtime of ['codex', 'claude']) {
+        const configDir = path.join(runtimeRoot, `.${runtime}`);
+        const result = spawnSync(process.execPath, [
+          path.join(packageRoot, 'bin', 'install.js'),
+          `--${runtime}`,
+          '--global',
+          '--config-dir',
+          configDir,
+        ], {
+          cwd: runtimeRoot,
+          env: {
+            ...process.env,
+            ...isolatedNpmEnv(),
+            HOME: runtimeRoot,
+            USERPROFILE: runtimeRoot,
+            GSD_TEST_MODE: '',
+            NO_UPDATE_NOTIFIER: '1',
+            npm_config_update_notifier: 'false',
+          },
+          encoding: 'utf8',
+          timeout: CHILD_TIMEOUT_MS,
+        });
+        assert.equal(result.status, 0, `${runtime} packed install failed:\n${result.stdout}\n${result.stderr}`);
+        installs.push({ runtime, configDir });
+      }
+
+      // Synthetic untouched 1.12-style deployed tree: converted outputs and a
+      // hash manifest exist, but the raw corpus/marker do not. It must not use
+      // those outputs as source when the executing package disappears.
+      const legacyConfigDir = path.join(runtimeRoot, '.legacy-codex');
+      fs.cpSync(installs.find((entry) => entry.runtime === 'codex').configDir, legacyConfigDir, { recursive: true });
+      cleanup(path.join(legacyConfigDir, 'gsd-core', 'commands'));
+      cleanup(path.join(legacyConfigDir, 'gsd-core', 'agents'));
+      const legacyMarker = path.join(legacyConfigDir, '.gsd-source');
+      if (fs.existsSync(legacyMarker)) fs.unlinkSync(legacyMarker);
+
+      // S04: upgrade a synthetic source-less legacy tree while the fixed
+      // package is available. Preserve its exact committed selection and an
+      // unrelated file, converge artifacts to that selection, and later prove
+      // an offline expansion works from the provisioned corpus alone.
+      const upgradedHome = path.join(runtimeRoot, 'legacy-codex-upgrade-home');
+      const upgradeCwd = path.join(runtimeRoot, 'legacy-codex-upgrade-worktree');
+      const upgradedConfigDir = path.join(upgradedHome, '.codex');
+      fs.mkdirSync(upgradeCwd, { recursive: true });
+      fs.cpSync(installs.find((entry) => entry.runtime === 'codex').configDir, upgradedConfigDir, { recursive: true });
+      fs.cpSync(path.join(runtimeRoot, '.agents', 'skills'), path.join(upgradedHome, '.agents', 'skills'), { recursive: true });
+      fs.mkdirSync(path.join(upgradedHome, '.agents', 'skills', 'user-owned-skill'), { recursive: true });
+      fs.writeFileSync(path.join(upgradedHome, '.agents', 'skills', 'user-owned-skill', 'SKILL.md'), '# preserve me\n');
+      cleanup(path.join(upgradedConfigDir, 'gsd-core', 'commands'));
+      cleanup(path.join(upgradedConfigDir, 'gsd-core', 'agents'));
+      const upgradedMarker = path.join(upgradedConfigDir, '.gsd-source');
+      if (fs.existsSync(upgradedMarker)) fs.unlinkSync(upgradedMarker);
+      const selectedState = JSON.stringify({ baseProfile: 'core', disabledClusters: [], explicitAdds: [], explicitRemoves: [] }, null, 2) + '\n';
+      const priorGates = JSON.stringify({ workflow: { code_review: false, research: true } }, null, 2) + '\n';
+      fs.writeFileSync(path.join(upgradedConfigDir, '.gsd-surface.json'), selectedState);
+      fs.writeFileSync(path.join(upgradedConfigDir, 'user-owned.txt'), 'preserve me\n');
+      fs.mkdirSync(path.join(upgradeCwd, '.planning'), { recursive: true });
+      fs.writeFileSync(path.join(upgradeCwd, '.planning', 'config.json'), priorGates);
+      const upgradeResult = spawnSync(process.execPath, [
+        path.join(packageRoot, 'bin', 'install.js'),
+        '--codex',
+        '--global',
+        '--config-dir',
+        upgradedConfigDir,
+      ], {
+        cwd: upgradeCwd,
+        env: {
+          ...process.env,
+          ...isolatedNpmEnv(),
+          HOME: upgradedHome,
+          USERPROFILE: upgradedHome,
+          GSD_TEST_MODE: '',
+          NO_UPDATE_NOTIFIER: '1',
+          npm_config_update_notifier: 'false',
+        },
+        encoding: 'utf8',
+        timeout: CHILD_TIMEOUT_MS,
+      });
+      assert.equal(upgradeResult.status, 0, `legacy upgrade failed:\n${upgradeResult.stdout}\n${upgradeResult.stderr}`);
+      assert.equal(fs.readFileSync(path.join(upgradedConfigDir, '.gsd-surface.json'), 'utf8'), selectedState);
+      assert.equal(fs.readFileSync(path.join(upgradedConfigDir, 'user-owned.txt'), 'utf8'), 'preserve me\n');
+      assert.equal(fs.readFileSync(path.join(upgradeCwd, '.planning', 'config.json'), 'utf8'), priorGates);
+      // #4667 (sanctioned baseline change): the deployed codex corpus is a
+      // CONVERTED projection of the package source — @ includes are rewritten
+      // to the codex install root — so the no-drift baseline for an upgrade is
+      // the previously-DEPLOYED tree (the fresh codex install from the same
+      // package), not the raw package bytes. Comparing against packageRoot
+      // would pin the pre-#4667 leak (codex artifacts carrying Claude-rooted
+      // @ includes) as required output.
+      const deployedCodexCommands = path.join(
+        installs.find((entry) => entry.runtime === 'codex').configDir, 'gsd-core', 'commands', 'gsd',
+      );
+      const deployedCodexAgents = path.join(
+        installs.find((entry) => entry.runtime === 'codex').configDir, 'gsd-core', 'agents',
+      );
+      assert.deepStrictEqual(
+        hashTree(path.join(upgradedConfigDir, 'gsd-core', 'commands', 'gsd')),
+        hashTree(deployedCodexCommands),
+      );
+      assert.deepStrictEqual(
+        hashTree(path.join(upgradedConfigDir, 'gsd-core', 'agents')),
+        hashTree(deployedCodexAgents),
+      );
+      const upgradedSkillRoot = path.join(upgradedHome, '.agents', 'skills');
+      const upgradedSkillCount = fs.readdirSync(upgradedSkillRoot).filter((name) => name.startsWith('gsd-')).length;
+      assert.ok(upgradedSkillCount > 0 && upgradedSkillCount < 71, `upgrade must converge the selected core surface, got ${upgradedSkillCount}`);
+      assert.equal(fs.readFileSync(path.join(upgradedSkillRoot, 'user-owned-skill', 'SKILL.md'), 'utf8'), '# preserve me\n');
+
+      fs.renameSync(packageRoot, hiddenPackageRoot);
+
+      const upgradedOfflineScript = [
+        "const fs=require('node:fs'),path=require('node:path');",
+        `const configDir=${JSON.stringify(upgradedConfigDir)};`,
+        "const lib=path.join(configDir,'gsd-core','bin','lib');",
+        "const surface=require(path.join(lib,'surface.cjs'));",
+        "const layoutModule=require(path.join(lib,'runtime-artifact-layout.cjs'));",
+        "const profiles=require(path.join(lib,'install-profiles.cjs'));",
+        "const clusters=require(path.join(lib,'clusters.cjs'));",
+        "const manifest=profiles.loadSkillsManifest(path.join(configDir,'gsd-core','commands','gsd'));",
+        "const layout=layoutModule.resolveRuntimeArtifactLayout('codex',configDir,'global');",
+        "const skillKind=layout.kinds.find(kind=>kind.kind==='skills');",
+        "const skillRoot=path.join(skillKind.home||configDir,skillKind.destSubpath);",
+        "const before=fs.readdirSync(skillRoot).filter(n=>n.startsWith('gsd-')).length;",
+        "surface.applySurface(configDir,layout,manifest,clusters.CLUSTERS,undefined,{surfaceState:{baseProfile:'full',disabledClusters:[],explicitAdds:[],explicitRemoves:[]}});",
+        "const after=fs.readdirSync(skillRoot).filter(n=>n.startsWith('gsd-')).length;",
+        "if(!(after>before))throw new Error(`offline upgraded expansion failed: ${before} -> ${after}`);",
+      ].join('');
+      const upgradedOfflineResult = spawnSync(process.execPath, ['-e', upgradedOfflineScript], {
+        cwd: runtimeRoot,
+        env: { ...process.env, HOME: upgradedHome, USERPROFILE: upgradedHome, GSD_TEST_MODE: '' },
+        encoding: 'utf8',
+        timeout: CHILD_TIMEOUT_MS,
+      });
+      assert.equal(upgradedOfflineResult.status, 0, `upgraded offline surface failed:\n${upgradedOfflineResult.stdout}\n${upgradedOfflineResult.stderr}`);
+
+      const legacyChildScript = [
+        "const fs=require('node:fs'),path=require('node:path');",
+        `const configDir=${JSON.stringify(legacyConfigDir)};`,
+        "const lib=path.join(configDir,'gsd-core','bin','lib');",
+        "const surface=require(path.join(lib,'surface.cjs'));",
+        "const layoutModule=require(path.join(lib,'runtime-artifact-layout.cjs'));",
+        "const profiles=require(path.join(lib,'install-profiles.cjs'));",
+        "const clusters=require(path.join(lib,'clusters.cjs'));",
+        "const surfacePath=path.join(configDir,'.gsd-surface.json');",
+        "const agentPath=path.join(configDir,'agents','gsd-planner.md');",
+        "const beforeSurface=fs.existsSync(surfacePath)?fs.readFileSync(surfacePath):null;",
+        "const beforeAgent=fs.readFileSync(agentPath);",
+        "const layout=layoutModule.resolveRuntimeArtifactLayout('codex',configDir,'global');",
+        "let error=null;try{surface.applySurface(configDir,layout,new Map(),clusters.CLUSTERS,undefined,{surfaceState:{baseProfile:'core',disabledClusters:[],explicitAdds:[],explicitRemoves:[]}})}catch(value){error=value}",
+        "if(!error||!/install or upgrade gsd-core/.test(error.message))throw new Error(`expected actionable source failure, got ${error&&error.message}`);",
+        "const afterSurface=fs.existsSync(surfacePath)?fs.readFileSync(surfacePath):null;",
+        "if(!Buffer.isBuffer(beforeAgent)||!beforeAgent.equals(fs.readFileSync(agentPath)))throw new Error('legacy output changed');",
+        "if(beforeSurface===null?afterSurface!==null:!beforeSurface.equals(afterSurface))throw new Error('legacy surface state changed');",
+      ].join('');
+      const legacyResult = spawnSync(process.execPath, ['-e', legacyChildScript], {
+        cwd: runtimeRoot,
+        env: { ...process.env, HOME: runtimeRoot, USERPROFILE: runtimeRoot, GSD_TEST_MODE: '' },
+        encoding: 'utf8',
+        timeout: CHILD_TIMEOUT_MS,
+      });
+      assert.equal(legacyResult.status, 0, `legacy source-less refusal failed:\n${legacyResult.stdout}\n${legacyResult.stderr}`);
+
+      for (const { runtime, configDir } of installs) {
+        const childScript = [
+          "const path=require('node:path');",
+          `const configDir=${JSON.stringify(configDir)};`,
+          `const runtime=${JSON.stringify(runtime)};`,
+          "const lib=path.join(configDir,'gsd-core','bin','lib');",
+          "const surface=require(path.join(lib,'surface.cjs'));",
+          "const layoutModule=require(path.join(lib,'runtime-artifact-layout.cjs'));",
+          "const profiles=require(path.join(lib,'install-profiles.cjs'));",
+          "const clusters=require(path.join(lib,'clusters.cjs'));",
+          "const corpus=path.join(configDir,'gsd-core','commands','gsd');",
+          "const manifest=profiles.loadSkillsManifest(corpus);",
+          "const layout=layoutModule.resolveRuntimeArtifactLayout(runtime,configDir,'global');",
+          "const before=layout.kinds.map(k=>{const root=path.join(k.home||configDir,k.destSubpath);try{return require('node:fs').readdirSync(root).length}catch{return 0}}).reduce((a,b)=>a+b,0);",
+          "const state={baseProfile:'core',disabledClusters:[],explicitAdds:[],explicitRemoves:[]};",
+          "surface.applySurface(configDir,layout,manifest,clusters.CLUSTERS,undefined,{surfaceState:state});",
+          "const after=layout.kinds.map(k=>{const root=path.join(k.home||configDir,k.destSubpath);try{return require('node:fs').readdirSync(root).length}catch{return 0}}).reduce((a,b)=>a+b,0);",
+          "if(!(after>0&&after<before))throw new Error(`surface did not materially shrink: ${before} -> ${after}`);",
+          "process.stdout.write(JSON.stringify({before,after}));",
+        ].join('');
+        const result = spawnSync(process.execPath, ['-e', childScript], {
+          cwd: runtimeRoot,
+          env: { ...process.env, HOME: runtimeRoot, USERPROFILE: runtimeRoot, GSD_TEST_MODE: '' },
+          encoding: 'utf8',
+          timeout: CHILD_TIMEOUT_MS,
+        });
+        assert.equal(result.status, 0, `${runtime} offline materialization failed:\n${result.stdout}\n${result.stderr}`);
+        const counts = JSON.parse(result.stdout);
+        assert.ok(counts.after > 0 && counts.after < counts.before);
+      }
+  });
+
+  // ── H: configured entrypoints resolve for supported runtime profiles ──────
+  //
+  // #4154's scope bullet: the installer's in-process assertConfiguredEntrypoints
+  // gate is unit-covered in tests/configured-entrypoint-validation.test.cjs.
+  // This asserts the same property survives the packaged path — install the
+  // real tarball, run its installer for a runtime, and re-read that runtime's
+  // own config back off disk.
+  test('H: packed install leaves every configured entrypoint resolvable', () => {
+    const result = runSmoke({
+      tarballPath,
+      installPrefix,
+      expectedVersion: pkg.version,
+      fixtureDir,
+      // The lifecycle-command and workflow-body cycles are covered by A/C/E;
+      // skipping them here keeps this test to the entrypoint cycle.
+      lifecycleCommands: [],
+      entrypointRuntimes: ['claude', 'codex'],
+      npmEnv: isolatedNpmEnv(),
+    });
+
+    assert.equal(result.code, SMOKE.OK, smokeMsg('H', result));
+    assert.deepEqual(
+      result.details.entrypointProfiles.map((profile) => profile.runtime),
+      ['claude', 'codex'],
+      smokeMsg('H', result),
+    );
+    for (const profile of result.details.entrypointProfiles) {
+      // Structural: a profile whose scan found nothing would satisfy the
+      // "no unresolved entrypoints" verdict vacuously.
+      assert.ok(
+        profile.entrypointsChecked > 0,
+        `${profile.runtime} configured no entrypoints: ${smokeMsg('H', result)}`,
+      );
+    }
+  });
+
+  // ── I: an unresolvable configured entrypoint fails the packed install ─────
+  //
+  // Red proof for ENTRYPOINT_UNRESOLVED, end to end through the packed tarball,
+  // and the reason this smoke check is not redundant with the installer's own
+  // gate: the fixture pre-registers a hook no install will ever write, the
+  // packed installer merges its own entries around it and exits 0 — its
+  // in-process assertConfiguredEntrypoints only validates paths the config
+  // writers registered with it during that run, so a registration it never
+  // touched is invisible to it — and reading settings.json back off disk is
+  // what catches the dangling launch path.
+  test('I: a registered hook that no install writes fails the smoke', (t) => {
+    const runtimeHome = entrypointFixtureHome(fixtureDir, 'claude');
+    // fixtureDir is shared with A/C/E/H, which install into this same home.
+    t.after(() => cleanup(runtimeHome));
+
+    const configDir = path.join(runtimeHome, '.claude');
+    const ghostHook = path.join(configDir, 'hooks', 'gsd-ghost-hook.js');
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(path.join(configDir, 'settings.json'), JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: `node "${ghostHook}"` }] },
+        ],
+      },
+    }, null, 2));
+
+    const result = runSmoke({
+      tarballPath,
+      installPrefix,
+      expectedVersion: pkg.version,
+      fixtureDir,
+      lifecycleCommands: [],
+      entrypointRuntimes: ['claude'],
+      npmEnv: isolatedNpmEnv(),
+    });
+
+    assert.equal(result.code, SMOKE.ENTRYPOINT_UNRESOLVED, smokeMsg('I', result));
+    assert.equal(result.details.runtime, 'claude', smokeMsg('I', result));
+    assert.deepEqual(
+      result.details.unresolved,
+      [{ configPath: path.join(configDir, 'settings.json'), scriptPath: ghostHook }],
+      smokeMsg('I', result),
+    );
+  });
+
+  // ── J: configuredEntrypointsIn tolerates whitespace in configDir ──────────
+  //
+  // #4249 (antigravity review): the prior SCRIPT_PATH_RE excluded `\s` from
+  // the path match to avoid swallowing a shell command's trailing args, which
+  // also truncated any legitimate path containing a space — e.g. a real
+  // `/Users/John Doe/.claude` home — so the scan silently returned zero
+  // checked paths there. A direct unit test on the exported pure function:
+  // no packed install needed to prove this property.
+  test('J: configuredEntrypointsIn resolves a script path even when configDir contains a space', () => {
+    const configDir = path.join(os.tmpdir(), 'John Doe', '.claude');
+    const scriptPath = path.join(configDir, 'hooks', 'gsd-write-guard.js');
+    const text = JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: `node "${scriptPath}"` }] },
+        ],
+      },
+    });
+
+    assert.deepEqual(configuredEntrypointsIn(text, configDir), [path.resolve(scriptPath)]);
+  });
+
+  // ── K: configuredEntrypointsIn does not swallow a preceding interpreter path ──
+  //
+  // #4249 (antigravity review): anchoring on the literal configDir prefix (a
+  // fix for J) must not regress the original "don't swallow the rest of a
+  // shell command" property — a command string that concatenates an
+  // interpreter path ahead of the real script path must resolve to the
+  // script path alone, not a combined interpreter+script string.
+  test('K: configuredEntrypointsIn does not include a preceding interpreter path', () => {
+    const configDir = path.join(os.tmpdir(), '.claude');
+    const scriptPath = path.join(configDir, 'hooks', 'gsd-write-guard.js');
+    const text = `"command": "/usr/local/bin/node ${scriptPath} --flag"`;
+
+    assert.deepEqual(configuredEntrypointsIn(text, configDir), [path.resolve(scriptPath)]);
+  });
 });
 
 
@@ -245,6 +612,11 @@ const { execFileSync } = require('node:child_process');
 // The helpers under test.
 const { isolatedNpmEnv, cleanup } = require('./helpers.cjs');
 
+// Bounds the `node -e` npm-harness spawn pattern shared by the three
+// execFileSync(process.execPath, ['-e', script], ...) sites in this file,
+// each of which requires helpers.cjs and calls runNpm(...).
+const NPM_HARNESS_SPAWN_TIMEOUT_MS = 30_000;
+
 // Resolve a filesystem path to its canonical (symlink-free) form even if the
 // leaf does not exist yet (e.g. ~/.npm before npm has written its cache).
 // Walks up to the nearest existing ancestor, resolves that, then re-appends
@@ -277,25 +649,42 @@ function safeRealpath(p) {
 
 describe('bug-131: runNpm isolates HOME from the caller environment', () => {
   // ── Test 1 — runNpm works with an unwritable HOME ────────────────────────
-  // Spawn a child Node process that sets HOME to a chmod-0500 directory, then
-  // invokes runNpm(['--version']). Without the fix, npm tries to read/write
-  // HOME/.npmrc and HOME/.npm, fails with EACCES, and runNpm throws.
-  // With the fix, runNpm injects its own isolated HOME and npm succeeds.
+  // Spawn a child Node process that sets HOME to an unwritable directory, then
+  // invokes runNpm(['cache', 'verify']). `npm --version` performs zero
+  // filesystem I/O against HOME/.npm or HOME/.npmrc on modern npm, and even
+  // `npm config get cache` only *resolves* the cache path as a string without
+  // touching disk — both stay green even without HOME isolation, making the
+  // assertion vacuous. `npm cache verify` genuinely creates/reads/writes the
+  // cache directory under HOME (mkdir _cacache, write logs), so without the
+  // fix it fails with ENOTDIR against the unwritable HOME, and with the fix
+  // runNpm's injected isolated HOME lets it succeed. (Proven empirically: with
+  // this exact probe, neutralising runNpm()'s isolation flips this test from
+  // green to red, whereas `npm config get cache` stayed green either way.)
   test('runNpm succeeds even when process HOME is unwritable', () => {
-    // Create an unwritable dir to serve as a poisoned HOME.
-    const poisonedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-bug131-poison-'));
+    // Simulate an unwritable HOME with a mechanism that holds for every uid,
+    // including root (as gsd-test Docker benches run). chmod 0o500 is
+    // insufficient because root bypasses mode bits entirely, silently making
+    // this assertion vacuous under root — see CLAUDE.md section 4. Instead,
+    // make the PARENT of "HOME" a regular file rather than a directory: any
+    // attempt to create or write an entry under a non-directory parent fails
+    // with ENOTDIR at the filesystem/VFS level, a property that has nothing
+    // to do with permission bits and therefore cannot be bypassed by root.
+    const poisonedHomeBlocker = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-bug131-poison-'));
+    const blockerFile = path.join(poisonedHomeBlocker, 'blocker');
+    fs.writeFileSync(blockerFile, ''); // regular file, not a directory
+    const poisonedHome = path.join(blockerFile, 'home'); // parent is a file → ENOTDIR
     try {
-      fs.chmodSync(poisonedHome, 0o500); // r-x only — not writable
 
       // We exercise the real runNpm() path by running a tiny inline Node script
-      // that requires helpers.cjs and calls runNpm(['--version']) with HOME set
-      // to the unwritable dir. The script exits 0 on success, non-zero on throw.
+      // that requires helpers.cjs and calls runNpm(['cache', 'verify']) with
+      // HOME set to the unwritable dir. The script exits 0 on success, non-zero
+      // on throw.
       const script = `
         process.env.HOME = ${JSON.stringify(poisonedHome)};
         process.env.USERPROFILE = ${JSON.stringify(poisonedHome)};
         const { runNpm } = require(${JSON.stringify(path.join(__dirname, 'helpers.cjs'))});
         try {
-          const out = runNpm(['--version']);
+          const out = runNpm(['cache', 'verify']);
           if (!out || out.trim() === '') process.exit(2); // vacuous success guard
           process.stdout.write(out);
           process.exit(0);
@@ -311,7 +700,7 @@ describe('bug-131: runNpm isolates HOME from the caller environment', () => {
       try {
         stdout = execFileSync(process.execPath, ['-e', script], {
           encoding: 'utf-8',
-          timeout: 30_000,
+          timeout: NPM_HARNESS_SPAWN_TIMEOUT_MS,
         });
       } catch (err) {
         stdout = err.stdout || '';
@@ -324,16 +713,16 @@ describe('bug-131: runNpm isolates HOME from the caller environment', () => {
         0,
         `runNpm should succeed with an unwritable HOME but exited ${exitCode}. stderr: ${stderr}`,
       );
-      // npm --version returns something like "10.x.y"
+      // npm cache verify reports what it found/fixed in the cache directory.
       assert.match(
-        stdout.trim(),
-        /^\d+\.\d+/,
-        `expected semver output from npm --version, got: ${stdout}`,
+        stdout,
+        /cache verified|content verified/i,
+        `expected npm cache verify output, got: ${stdout}`,
       );
     } finally {
-      // Restore write permission before cleanup so the directory can be deleted.
-      try { fs.chmodSync(poisonedHome, 0o700); } catch (_) { /* best-effort */ }
-      cleanup(poisonedHome);
+      // poisonedHome itself was never created (its parent is a file), so only
+      // the directory holding the blocker file needs cleanup.
+      cleanup(poisonedHomeBlocker);
     }
   });
 
@@ -365,7 +754,7 @@ describe('bug-131: runNpm isolates HOME from the caller environment', () => {
     try {
       stdout = execFileSync(process.execPath, ['-e', script], {
         encoding: 'utf-8',
-        timeout: 30_000,
+        timeout: NPM_HARNESS_SPAWN_TIMEOUT_MS,
       });
     } catch (err) {
       stdout = err.stdout || '';
@@ -499,7 +888,7 @@ describe('bug-131: runNpm isolates HOME from the caller environment', () => {
     try {
       stdout = execFileSync(process.execPath, ['-e', script], {
         encoding: 'utf-8',
-        timeout: 30_000,
+        timeout: NPM_HARNESS_SPAWN_TIMEOUT_MS,
       });
     } catch (err) {
       stdout = err.stdout || '';

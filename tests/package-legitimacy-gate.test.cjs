@@ -18,6 +18,14 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
+// ADR-2143 seam (#3239): both hand-rolled table parsers this file used to
+// carry have been rerouted onto the canonical parser. See parseAllMarkdownTables
+// below for the one piece that stays local (grouping contiguous `|`-line runs
+// into separate table fixtures) — grouping has no ADR-2143 equivalent and is
+// test-fixture-specific, not a GFM parsing concern; every actual PARSE is
+// delegated to the seam.
+const { parseMarkdownTable: parseTable } = require('../gsd-core/bin/lib/markdown-table.cjs');
+
 const AGENTS = path.join(__dirname, '..', 'agents');
 const RESEARCHER = path.join(AGENTS, 'gsd-phase-researcher.md');
 const PLANNER = path.join(AGENTS, 'gsd-planner.md');
@@ -110,6 +118,28 @@ function extractXmlElement(text, tag) {
   return text.slice(start, end + tag.length + 3);
 }
 
+// Structural RULE locator (#3426): anchor on the `**RULE N:**` heading inside
+// <deviation_rules> — never on incidental word proximity elsewhere in the file,
+// which let unrelated edits re-anchor the old first-token-scan-hit window.
+// Returns { heading, lines } for the section spanning the heading up to (not
+// including) the next `**RULE N:**` heading, or null when <deviation_rules> is
+// missing or the requested rule has zero or duplicated headings.
+function extractRuleSection(text, ruleNumber) {
+  const block = extractXmlElement(text, 'deviation_rules');
+  if (!block) return null;
+  const lines = block.split(/\r?\n/);
+  const headingRe = /^\*\*RULE (\d+):/;
+  const headings = lines
+    .map((line, i) => ({ rule: Number((line.match(headingRe) || [])[1]), lineIndex: i }))
+    .filter((h) => Number.isInteger(h.rule));
+  const starts = headings.filter((h) => h.rule === ruleNumber);
+  if (starts.length !== 1) return null;
+  const start = starts[0].lineIndex;
+  const next = headings.find((h) => h.lineIndex > start);
+  const end = next ? next.lineIndex : lines.length;
+  return { heading: lines[start], lines: lines.slice(start, end) };
+}
+
 function normalizeTokens(text) {
   return text
     .toLowerCase()
@@ -130,31 +160,12 @@ function anyLineHasAll(lines, required) {
   return lines.some((line) => hasAllTokens(line, required));
 }
 
-function parseMarkdownTable(lines) {
-  const tableLines = lines.filter((line) => /^\s*\|/.test(line));
-  if (tableLines.length < 2) return null;
-
-  const toCells = (line) => line
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split('|')
-    .map((cell) => cell.trim());
-
-  const headers = toCells(tableLines[0]);
-  const rows = tableLines
-    .slice(2)
-    .map(toCells)
-    .filter((cells) => cells.length === headers.length)
-    .map((cells) => ({
-      cells,
-      fields: Object.fromEntries(headers.map((h, i) => [h, cells[i]])),
-    }));
-
-  return { headers, rows };
-}
-
-function parseMarkdownTables(lines) {
+// Groups contiguous `|`-prefixed lines into separate table-fixture blocks and
+// delegates each group's actual parse to the ADR-2143 seam (parseMarkdownTable
+// above). A malformed group (ragged row, missing delimiter row, etc.) throws
+// loudly instead of being silently filtered out — the exact "silent drop"
+// failure mode #3239 closes.
+function parseAllMarkdownTables(lines) {
   const groups = [];
   let current = [];
 
@@ -170,10 +181,66 @@ function parseMarkdownTables(lines) {
   }
   if (current.length > 0) groups.push(current);
 
-  return groups
-    .map((group) => parseMarkdownTable(group))
-    .filter(Boolean);
+  return groups.map((group) => {
+    const result = parseTable(group.join('\n'));
+    if (!result.ok) {
+      throw new Error(`malformed markdown table in fixture: ${result.reason}`);
+    }
+    return result.value;
+  });
 }
+
+describe('markdown-table seam reroute (#3239) — ragged rows and escaped pipes', () => {
+  test('ragged data row surfaces as a typed parse error, not a silent drop', () => {
+    const text = [
+      '| Package | Verdict |',
+      '|---------|---------|',
+      '| left-pad | OK |',
+      '| too-many-cells | OK | EXTRA |',
+    ].join('\n');
+
+    const result = parseTable(text);
+    assert.equal(result.ok, false, 'a ragged row must fail loudly, not parse as a truncated table');
+    assert.match(result.reason, /row 2 has 3 cells, expected 2/);
+  });
+
+  test('a cell containing an escaped pipe parses as one cell with a literal |, not two cells', () => {
+    const text = [
+      '| Package | Notes |',
+      '|---------|-------|',
+      String.raw`| left-pad | a\|b |`,
+    ].join('\n');
+
+    const result = parseTable(text);
+    assert.ok(result.ok, 'well-formed table with an escaped-pipe cell must parse');
+    assert.equal(result.value.rows[0].Notes, 'a|b');
+  });
+
+  test('parseAllMarkdownTables delegates each group to the seam and groups by blank-line boundaries', () => {
+    const lines = [
+      '| A | B |',
+      '|---|---|',
+      '| 1 | 2 |',
+      '',
+      '| C | D |',
+      '|---|---|',
+      '| 3 | 4 |',
+    ];
+    const tables = parseAllMarkdownTables(lines);
+    assert.equal(tables.length, 2);
+    assert.deepEqual(tables[0].columns, ['A', 'B']);
+    assert.deepEqual(tables[1].columns, ['C', 'D']);
+  });
+
+  test('parseAllMarkdownTables throws loudly when a group contains a ragged row', () => {
+    const lines = [
+      '| A | B |',
+      '|---|---|',
+      '| 1 | 2 | 3 |',
+    ];
+    assert.throws(() => parseAllMarkdownTables(lines), /malformed markdown table/);
+  });
+});
 
 function lineIndexes(lines, predicate) {
   const indexes = [];
@@ -260,13 +327,13 @@ describe('gsd-phase-researcher.md — Package Legitimacy Audit section in templa
     const section = templateSections.find((s) => s.heading === 'Package Legitimacy Audit');
     assert.ok(section, 'Package Legitimacy Audit section must exist');
 
-    const table = parseMarkdownTable(section.body);
-    assert.ok(table, 'Package Legitimacy Audit section must include a markdown table');
+    const result = parseTable(section.body.join('\n'));
+    assert.ok(result.ok, 'Package Legitimacy Audit section must include a valid markdown table');
 
     // 'slopcheck' column renamed to 'Verdict' to reflect the code seam (gsd-tools query package-legitimacy)
     const expected = ['Package', 'Registry', 'Age', 'Downloads', 'Verdict', 'Disposition'];
     for (const column of expected) {
-      assert.ok(table.headers.includes(column), `audit table must have "${column}" column`);
+      assert.ok(result.value.columns.includes(column), `audit table must have "${column}" column`);
     }
   });
 
@@ -274,10 +341,10 @@ describe('gsd-phase-researcher.md — Package Legitimacy Audit section in templa
     const section = templateSections.find((s) => s.heading === 'Package Legitimacy Audit');
     assert.ok(section, 'Package Legitimacy Audit section must exist');
 
-    const table = parseMarkdownTable(section.body);
-    assert.ok(table, 'Package Legitimacy Audit section must include a markdown table');
+    const result = parseTable(section.body.join('\n'));
+    assert.ok(result.ok, 'Package Legitimacy Audit section must include a valid markdown table');
 
-    const rowTexts = table.rows.map((row) => row.cells.join(' '));
+    const rowTexts = result.value.rows.map((row) => Object.values(row).join(' '));
     const slop = rowTexts.some((value) => hasAllTokens(value, ['slop']));
     const sus = rowTexts.some((value) => hasAllTokens(value, ['sus']));
     const ok = rowTexts.some((value) => hasAllTokens(value, ['ok']));
@@ -397,16 +464,16 @@ describe('gsd-planner.md — supply-chain row in threat_model template', () => {
   });
 
   test('threat_model template includes supply-chain row with mitigate disposition', () => {
-    const tables = parseMarkdownTables(threatModelBlock.split(/\r?\n/));
-    const strideTable = tables.find((table) => table.headers.includes('Threat ID'));
+    const tables = parseAllMarkdownTables(threatModelBlock.split(/\r?\n/));
+    const strideTable = tables.find((table) => table.columns.includes('Threat ID'));
     assert.ok(strideTable, 'threat_model must include STRIDE threat register table');
 
-    const supplyChainRow = strideTable.rows.find((row) => hasAllTokens(row.cells[0] || '', ['t-{phase}-sc']));
+    const supplyChainRow = strideTable.rows.find((row) => hasAllTokens(row['Threat ID'] || '', ['t-{phase}-sc']));
     assert.ok(supplyChainRow, 'threat_model must include T-{phase}-SC supply-chain row');
 
-    const dispoIdx = strideTable.headers.findIndex((h) => /disposition/i.test(String(h)));
-    assert.ok(dispoIdx >= 0, 'STRIDE table must have a Disposition column');
-    const disposition = supplyChainRow.cells[dispoIdx] || '';
+    const dispositionCol = strideTable.columns.find((h) => /disposition/i.test(h));
+    assert.ok(dispositionCol, 'STRIDE table must have a Disposition column');
+    const disposition = supplyChainRow[dispositionCol] || '';
     assert.ok(hasAllTokens(disposition, ['mitigate']), 'supply-chain threat disposition must be mitigate');
   });
 });
@@ -432,10 +499,10 @@ describe('gsd-executor.md — package installs excluded from RULE 3 auto-fix', (
   });
 
   test('RULE 3 section explicitly excludes package-manager installs', () => {
-    const rule3Line = lineIndexes(model.lines, (line) => hasAllTokens(line, ['rule', '3']))[0];
-    assert.notEqual(rule3Line, undefined, 'executor must contain RULE 3 section');
+    const section = extractRuleSection(model.text, 3);
+    assert.ok(section, 'executor must contain exactly one RULE 3 section inside <deviation_rules>');
 
-    const window = model.lines.slice(rule3Line, rule3Line + 35);
+    const window = section.lines;
 
     const hasInstallCommands =
       anyLineHasAll(window, ['npm', 'install']) ||
@@ -451,10 +518,10 @@ describe('gsd-executor.md — package installs excluded from RULE 3 auto-fix', (
   });
 
   test('failed package installs surface checkpoint:human-verify', () => {
-    const rule3Line = lineIndexes(model.lines, (line) => hasAllTokens(line, ['rule', '3']))[0];
-    assert.notEqual(rule3Line, undefined, 'executor must contain RULE 3 section');
+    const section = extractRuleSection(model.text, 3);
+    assert.ok(section, 'executor must contain exactly one RULE 3 section inside <deviation_rules>');
 
-    const window = model.lines.slice(rule3Line, rule3Line + 50);
+    const window = section.lines;
     const hasFailureLanguage =
       anyLineHasAll(window, ['failed', 'install']) ||
       anyLineHasAll(window, ['install', 'fails']) ||
@@ -466,6 +533,66 @@ describe('gsd-executor.md — package installs excluded from RULE 3 auto-fix', (
       hasFailureLanguage && hasCheckpoint,
       'executor must emit checkpoint:human-verify when package install fails'
     );
+  });
+
+  // #3426: the RULE 3 tests must anchor on the `**RULE N:**` heading inside
+  // <deviation_rules>, never on incidental word proximity — a decoy line
+  // elsewhere in the file used to silently re-anchor the old token scan
+  // (first line containing both `rule` and `3` tokens), so unrelated edits
+  // could redirect or defeat the guardrail assertions.
+  test('RULE 3 locator anchors on the heading, not word proximity (#3426)', () => {
+    const fixture = [
+      '## Unrelated guidance',
+      'Apply each Rule in order: (1) fix bugs, (2) add tests, (3) verify.',
+      '',
+      '<deviation_rules>',
+      'Deviation Rule 3 applies only after steps (1) and (2) are exhausted.',
+      '',
+      '**RULE 1: Auto-fix bugs**',
+      '',
+      '---',
+      '',
+      '**RULE 3: Auto-fix blocking issues**',
+      '',
+      '**EXCLUDED from RULE 3 — package manager installs:**',
+      'Running `npm install <pkg>` is **NOT** auto-fixable.',
+      'If a referenced package fails to install, return a `checkpoint:human-verify` task.',
+      '',
+      '---',
+      '',
+      '**RULE 4: Ask about architectural changes**',
+      '',
+      '</deviation_rules>',
+    ].join('\n');
+    const fixtureLines = fixture.split('\n');
+
+    // Documents the #3390 failure mode: the pre-#3426 token scan anchors on
+    // the decoy numbered list above the real heading (index 1, not 10).
+    const legacyAnchor = lineIndexes(fixtureLines, (line) => hasAllTokens(line, ['rule', '3']))[0];
+    assert.equal(legacyAnchor, 1, 'token-scan locator is expected to hit the decoy line');
+
+    const section = extractRuleSection(fixture, 3);
+    assert.ok(section, 'structural locator must find RULE 3 inside <deviation_rules> despite decoys');
+    assert.match(section.heading, /^\*\*RULE 3:/);
+    assert.equal(
+      section.lines.includes(fixtureLines[1]),
+      false,
+      'structural window must not include the out-of-block decoy line'
+    );
+    assert.ok(
+      anyLineHasAll(section.lines, ['checkpoint:human-verify']),
+      'structural window must cover the real RULE 3 content'
+    );
+
+    // Missing rule (0 heading matches) and duplicated rule (2 matches) must
+    // both fail loudly rather than anchor on a guess.
+    assert.equal(extractRuleSection(fixture, 2), null, 'missing rule must return null');
+    assert.equal(
+      extractRuleSection(fixture.replace('</deviation_rules>', '**RULE 3: Duplicate**\n\n</deviation_rules>'), 3),
+      null,
+      'duplicated rule heading must return null'
+    );
+    assert.equal(extractRuleSection(fixture.replace('<deviation_rules>', '<other>'), 3), null, 'missing <deviation_rules> must return null');
   });
 
   test('auto mode does not auto-approve package-legitimacy checkpoints', () => {
@@ -591,7 +718,7 @@ describe('execute-phase.md — orchestrator honors the blocking-human gate', () 
 
   test('auto-select rule for decision is conditional, not unconditional', () => {
     const autoSelectLines = lineIndexes(model.lines, (line) =>
-      hasAllTokens(line, ['decision', 'auto-spawn', 'first', 'option'])
+      hasAllTokens(line, ['decision', 'auto-spawn'])
     );
 
     assert.ok(

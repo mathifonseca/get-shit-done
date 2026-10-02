@@ -16,7 +16,7 @@ Defina `model_profile` em `.planning/config.json` ou via `/gsd-config --profile 
 | `adaptive` | Opus | Sonnet | Sonnet | Sonnet | Resolve da mesma forma que os outros níveis em perfis cientes de runtime; use ao alternar entre runtimes com frequência |
 | `inherit` | (modelo da sessão) | (modelo da sessão) | (modelo da sessão) | (modelo da sessão) | Provedores não-Anthropic (OpenRouter, modelos locais) — todos os agentes seguem o modelo atual da sessão |
 
-A tabela acima mostra um subconjunto representativo. Todos os 33 agentes incluídos possuem atribuições de nível explícitas por perfil em `sdk/shared/model-catalog.json`. Para a tabela completa, consulte [Perfis de Modelo](../CONFIGURATION.md#model-profiles) na referência de configuração.
+A tabela acima mostra um subconjunto representativo. Todos os 33 agentes incluídos possuem atribuições de nível explícitas por perfil em `gsd-core/bin/shared/model-catalog.json`. Para a tabela completa, consulte [Perfis de Modelo](../CONFIGURATION.md#model-profiles) na referência de configuração.
 
 **Troca rápida via comando:**
 
@@ -154,7 +154,7 @@ Cada tentativa usa `tier_models[default_tier]` independentemente do resultado �
 
 ## Usando o GSD em runtimes não-Anthropic
 
-Se você instalou o GSD para Codex, OpenCode, Gemini CLI ou Kilo, o instalador já definiu `resolve_model_ids: "omit"` na sua configuração. Isso instrui o GSD a pular a resolução de IDs de modelo Anthropic e deixar o runtime escolher seu próprio modelo padrão. Nenhuma configuração manual é necessária para o caso básico.
+Se você instalou o GSD para Codex, OpenCode, Antigravity CLI ou Kilo, o instalador já definiu `resolve_model_ids: "omit"` na sua configuração. Isso instrui o GSD a pular a resolução de IDs de modelo Anthropic e deixar o runtime escolher seu próprio modelo padrão. Nenhuma configuração manual é necessária para o caso básico.
 
 **Se você quiser modelos por nível no Codex:**
 

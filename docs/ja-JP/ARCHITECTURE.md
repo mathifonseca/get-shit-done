@@ -21,7 +21,7 @@
 
 ## システム概要
 
-GSD Core は、ユーザーと AI コーディングエージェント（Claude Code、Gemini CLI、OpenCode、Kilo、Codex、Copilot、Antigravity、Trae、Cline、Augment Code）の間に位置する **メタプロンプティングフレームワーク** です。以下の機能を提供します：
+GSD Core は、ユーザーと AI コーディングエージェント（Claude Code、Kimi CLI、OpenCode、Kilo、Codex、Copilot、Antigravity、Trae、Cline、Augment Code）の間に位置する **メタプロンプティングフレームワーク** です。以下の機能を提供します：
 
 1. **コンテキストエンジニアリング** — タスクごとに AI が必要とするすべてを提供する構造化アーティファクト（[コンテキストエンジニアリング](explanation/context-engineering.md) 参照）
 2. **マルチエージェントオーケストレーション** — フレッシュなコンテキストウィンドウで専門化されたエージェントを生成する薄いオーケストレーター（[マルチエージェントオーケストレーション](explanation/multi-agent-orchestration.md) 参照）
@@ -112,7 +112,6 @@ GSD Core は、ユーザーと AI コーディングエージェント（Claude 
 - **OpenCode / Kilo:** スラッシュコマンド（ハイフン形式、`/gsd-command-name`）
 - **Codex:** スキル（`$gsd-command-name`）
 - **Copilot:** スラッシュコマンド（ハイフン形式、`/gsd-command-name`）
-- **Gemini CLI:** `gsd:` 名前空間下のスラッシュコマンド（コロン形式、`/gsd:command-name`）——Gemini はすべてのカスタムコマンドをプラグイン ID の下で名前空間化するため、インストールパスがすべての本文テキスト参照をコロン形式に書き換える
 - **Antigravity:** スキル
 
 **コマンド総数:** 信頼できる数と完全なロスターについては [`docs/INVENTORY.md`](INVENTORY.md#commands) を参照。
@@ -217,6 +216,7 @@ eager なスキルリストはターンごとの 2 つの主要コストの一�
 | `gsd-check-update.js` | `SessionStart` | GSDの新バージョンをバックグラウンドで確認 |
 | `gsd-prompt-guard.js` | `PreToolUse` | `.planning/` への書き込みにプロンプトインジェクションパターンがないかスキャン（アドバイザリー） |
 | `gsd-workflow-guard.js` | `PreToolUse` | GSDワークフローコンテキスト外でのファイル編集を検出（アドバイザリー、`hooks.workflow_guard` によるオプトイン） |
+| `gsd-secret-read-guard.js` | `PreToolUse` | Read / Grep / Bash による `.env`、`.env.<suffix>`（`.env.example` などのテンプレートは除外）、`.secrets` の読み取りをハードブロック。インストーラが書き込んでいた `Read(.env*)` の deny ルールを置き換える（#4221） |
 
 ### コマンドルーティングハブ（`gsd-core/bin/lib/command-routing-hub.cjs`）
 
@@ -445,7 +445,6 @@ UI-SPEC.md (per phase) ───────────────────
 
 - **OpenCode:** `~/.config/opencode/` global または `./.opencode/` local
 - **Kilo:** `~/.config/kilo/` global または `./.kilo/` local
-- **Gemini CLI:** `~/.gemini/` global または `./.gemini/` local
 - **Codex:** `~/.codex/` global または `./.codex/` local
 - **Copilot:** `~/.copilot/` global または `./.github/` local
 - **Antigravity:** auto-detected global root（`~/.gemini/antigravity/`、`~/.gemini/antigravity-ide/`、または `~/.gemini/antigravity-cli/`）または `./.agent/` local
@@ -517,7 +516,7 @@ UI-SPEC.md (per phase) ───────────────────
 
 インストーラー（`bin/install.js`、約 10,700 行）は以下を処理します：
 
-1. **ランタイム検出** — インタラクティブプロンプトまたは CLI フラグ（`--claude`、`--opencode`、`--gemini`、`--kilo`、`--codex`、`--copilot`、`--antigravity`、`--cursor`、`--windsurf`、`--augment`、`--trae`、`--qwen`、`--hermes`、`--codebuddy`、`--cline`、`--all`）
+1. **ランタイム検出** — インタラクティブプロンプトまたは CLI フラグ（`--claude`、`--opencode`、`--kimi`、`--kilo`、`--codex`、`--copilot`、`--antigravity`、`--cursor`、`--windsurf`、`--augment`、`--trae`、`--qwen`、`--hermes`、`--codebuddy`、`--cline`、`--all`）
 2. **インストール先の選択** — グローバル（`--global`）またはローカル（`--local`）
 3. **ファイルデプロイ** — コマンド、スキル、ワークフロー、リファレンス、テンプレート、エージェント、フックをコピー
 4. **ランタイム適応** — ランタイムごとにファイル内容を変換：
@@ -526,8 +525,7 @@ UI-SPEC.md (per phase) ───────────────────
    - Kilo: OpenCode 変換パイプラインを Kilo の設定パスで再利用
    - Codex: コマンドから TOML 設定 + スキルを生成
    - Copilot: ツール名をマッピング（Read→read、Bash→execute など）
-   - Gemini: フックイベント名を調整（`PostToolUse` の代わりに `AfterTool`）
-   - Antigravity: Google モデル同等品によるスキルファースト
+   - Antigravity: Google モデル同等品によるスキルファースト；フックイベント名を調整（`PostToolUse` の代わりに `AfterTool`）
    - Cursor: ルール参照付きスキルファースト
    - Windsurf: ルール参照付きスキルファースト
    - Trae: `~/.trae` / `./.trae` へのスキルファーストインストール、`settings.json` またはフック統合なし
@@ -557,7 +555,7 @@ UI-SPEC.md (per phase) ───────────────────
 ### アーキテクチャ
 
 ```
-Runtime Engine (Claude Code / Gemini CLI)
+Runtime Engine (Claude Code / Antigravity CLI)
     │
     ├── statusLine event ──► gsd-statusline.js
     │   Reads: stdin (session JSON)
@@ -633,7 +631,6 @@ GSD Core は統一されたコマンド/ワークフローアーキテクチャ�
 | Claude Code | `~/.claude` | `./.claude` | グローバル `skills/gsd-*/SKILL.md`；ローカル `commands/gsd/*.md` | `agents/gsd-*.md` | `settings.json` フックと statusLine エントリ |
 | OpenCode | `~/.config/opencode` | `./.opencode` | `command/gsd-*.md` | `agents/gsd-*.md` | `opencode.json` または `opencode.jsonc`；GSD フックなし |
 | Kilo | `~/.config/kilo` | `./.kilo` | `command/gsd-*.md` | `agents/gsd-*.md` | `kilo.json` または `kilo.jsonc`；GSD フックなし |
-| Gemini CLI | `~/.gemini` | `./.gemini` | `commands/gsd/*.toml` | `agents/gsd-*.md` | `settings.json` フィーチャーフラグ、フック、statusline |
 | Codex | `~/.codex` | `./.codex` | `skills/gsd-*/SKILL.md` | エージェントソース markdown + エージェントごとの TOML | `config.toml` `[agents.gsd-*]`、`[features].hooks`、フックテーブル |
 | GitHub Copilot | `~/.copilot` | `./.github` | `skills/gsd-*/SKILL.md` と `copilot-instructions.md` | `.agent.md` ファイル | GSD フックまたは statusline なし |
 | Antigravity | auto-detected：`~/.gemini/antigravity`、`~/.gemini/antigravity-ide`、または `~/.gemini/antigravity-cli` | `./.agent` | `skills/gsd-*/SKILL.md` | `agents/gsd-*.md` | GSD がインストールした場合の Gemini スタイル `settings.json` フックエントリ |
@@ -649,7 +646,7 @@ GSD Core は統一されたコマンド/ワークフローアーキテクチャ�
 ### 抽象化ポイント
 
 1. **ツール名マッピング** — 各ランタイムは独自のツール名を持つ（例：Claude の `Bash` → Copilot の `execute`）
-2. **フックイベント名** — Claude Code は `PostToolUse`、Gemini は `AfterTool` を使用
+2. **フックイベント名** — Claude Code は `PostToolUse`、Antigravity は `AfterTool` を使用
 3. **エージェントフロントマター** — 各ランタイムは独自のエージェント定義形式を持つ
 4. **パス規約** — 各ランタイムは異なるディレクトリに設定を保存
 5. **モデル参照** — `inherit` プロファイルにより、GSD はランタイムのモデル選択に委譲

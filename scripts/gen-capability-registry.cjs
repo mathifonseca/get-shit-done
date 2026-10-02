@@ -19,6 +19,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { ExitError, runMain } = require('./lib/cli-exit.cjs');
+const { normalizeEol } = require('../gsd-core/bin/lib/text-lines.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const CAPABILITIES_DIR = path.join(ROOT, 'capabilities');
@@ -32,8 +33,8 @@ const CONFIG_SCHEMA_PATH = path.join(ROOT, 'gsd-core', 'bin', 'shared', 'config-
 // registry generator and the loop-host-contract generator share one source of truth.
 const { LOOP_HOST_CONTRACT } = require('../gsd-core/bin/lib/loop-host-contract.cjs');
 
-// Wired-points helper — tells us which points actually have render-hooks call sites.
-const { getWiredLoopPoints } = require('./gen-loop-host-contract.cjs');
+// Wired-kinds helper — per point, which hook kinds the render-hooks call sites' dispatch text covers.
+const { getWiredKinds } = require('./gen-loop-host-contract.cjs');
 
 // Capability validator — shared runtime-callable module extracted per ADR-1244 D2.
 const capValidator = require('../gsd-core/bin/lib/capability-validator.cjs');
@@ -418,9 +419,11 @@ function loadAndValidate(centralKeys, capabilitiesDir, centralPatterns) {
     return { capMap, errors, warnings };
   }
 
-  // Compute wired points ONCE before iterating capabilities so the filesystem
-  // scan is not repeated per-capability. ROOT is the repo root (defined at top of file).
-  const wiredSet = getWiredLoopPoints(ROOT);
+  // Compute wired points + covered kinds ONCE before iterating capabilities so
+  // the filesystem scan is not repeated per-capability. ROOT is the repo root
+  // (defined at top of file). #3606: the kinds map carries, per point, which
+  // hook kinds the call sites' dispatch text actually covers.
+  const wiredKinds = getWiredKinds(ROOT);
 
   const folderEntries = fs.readdirSync(resolvedCapDir, { withFileTypes: true })
     .filter((e) => e.isDirectory())
@@ -458,7 +461,7 @@ function loadAndValidate(centralKeys, capabilitiesDir, centralPatterns) {
     }
 
     // Gen-time wired guard: reject hooks that declare a valid point with no call site.
-    const wiredErrors = validateHooksWired(cap, wiredSet);
+    const wiredErrors = validateHooksWired(cap, wiredKinds);
     if (wiredErrors.length > 0) {
       for (const e of wiredErrors) errors.push(folderId + '/capability.json: ' + e);
       continue;
@@ -808,19 +811,6 @@ function stripGeneratedComment(content) {
     .join('\n');
 }
 
-/**
- * Normalize line endings to LF.
- * The generator always writes LF, but Windows git (autocrlf) checks out committed files with
- * CRLF. The --check comparison must be line-ending-agnostic so it only fails on REAL content
- * differences, not on checkout-introduced whitespace differences.
- *
- * @param {string} content
- * @returns {string}
- */
-function normalizeLineEndings(content) {
-  return content.replace(/\r/g, '');
-}
-
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -859,7 +849,7 @@ function main() {
     }
 
     const committed = fs.readFileSync(REGISTRY_PATH, 'utf8');
-    if (normalizeLineEndings(stripGeneratedComment(committed)) !== normalizeLineEndings(stripGeneratedComment(live))) {
+    if (normalizeEol(stripGeneratedComment(committed)) !== normalizeEol(stripGeneratedComment(live))) {
       process.stderr.write(
         'gsd-core/bin/lib/capability-registry.cjs is stale. Run:\n' +
         '  node scripts/gen-capability-registry.cjs --write\n',
@@ -931,7 +921,7 @@ module.exports = {
   serializeRegistry,
   computeRequiresClosure,
   topoSortSteps,
-  normalizeLineEndings,
+  normalizeLineEndings: normalizeEol,
   stripGeneratedComment,
   validateConfigSliceEntry,
   VALID_CONFIG_SLICE_TYPES,

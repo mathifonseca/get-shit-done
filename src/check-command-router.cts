@@ -11,7 +11,13 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import io = require('./io.cjs');
-const { output, error, ERROR_REASON } = io;
+const { output, ERROR_REASON } = io;
+// Explicitly annotated so TypeScript applies never-return control-flow narrowing.
+// A destructured `const { error } = io` is a const WITHOUT a type annotation, and TS
+// only narrows after a never-returning call when the callee is a function declaration
+// or an annotated const. Without the annotation every `error(...)` guard below would
+// need a dead `throw` after it to convince the checker that the value is non-null.
+const error: typeof io.error = io.error;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspaceMod = require('./planning-workspace.cjs');
 const { planningDir } = planningWorkspaceMod;
@@ -24,11 +30,12 @@ import type { Decision } from './decisions.cjs';
 import frontmatterMod = require('./frontmatter.cjs');
 const { extractFrontmatter } = frontmatterMod;
 import { stripFencedCode, collectSections } from './markdown-sectionizer.cjs';
-import { validatePath } from './security.cjs';
+import { tryWithinRoot, tryWithinRootLexical, PathAcceptance } from './security.cjs';
 import { checkUiPresence } from './ui-safety-gate.cjs';
+import { hasStaticFrontendEvidence } from './ui-frontend-evidence.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import verifyModule = require('./verify.cjs');
-const { cmdVerifySchemaDrift, cmdVerifyCodebaseDrift } = verifyModule;
+const { cmdVerifySchemaDrift, cmdVerifyCodebaseDrift, cmdVerifyContextDrift } = verifyModule;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import roadmapModule = require('./roadmap.cjs');
 const { getRoadmapPhaseWithFallback } = roadmapModule;
@@ -36,6 +43,7 @@ const { getRoadmapPhaseWithFallback } = roadmapModule;
 import gapCheckerModule = require('./gap-checker.cjs');
 const { runGapAnalysis } = gapCheckerModule;
 import { routeProhibitionEnforcement } from './prohibition-enforcement.cjs';
+import { classifyRedEvidence, buildRedEvidenceRecord } from './tdd-red-evidence.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import gatePredicateEval = require('./gate-predicate-evaluator.cjs');
 const { evaluatePredicate } = gatePredicateEval;
@@ -43,6 +51,15 @@ const { evaluatePredicate } = gatePredicateEval;
 import apiCoverageMod = require('./api-coverage.cjs');
 const { detectApiIntegration, validateCoverageMatrix } = apiCoverageMod;
 import { execTool, platformReadSync, posixNormalize } from './shell-command-projection.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planScanMod = require('./plan-scan.cjs');
+const { scanPhasePlans } = planScanMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planningScopeMod = require('./planning-scope.cjs');
+const { SCOPE } = planningScopeMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import verifyCommandGroundingMod = require('./verify-command-grounding.cjs');
+const { probePhaseVerifyCommands, probePhaseFailingDirections } = verifyCommandGroundingMod;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -79,7 +96,12 @@ function readIfExists(filePath: string): string {
 }
 
 function resolvePath(inputPath: string, projectDir: string): string {
-  return path.isAbsolute(inputPath) ? inputPath : path.join(projectDir, inputPath);
+  const candidate = path.isAbsolute(inputPath) ? inputPath : path.join(projectDir, inputPath);
+  const contained = tryWithinRoot(candidate, projectDir, PathAcceptance.AbsoluteInsideRoot);
+  if (contained === null) {
+    error(`path escapes its allowed directory: ${inputPath}`, ERROR_REASON.USAGE);
+  }
+  return contained;
 }
 
 interface WorkflowConfig {
@@ -133,13 +155,13 @@ function gateEnabled(projectDir: string): boolean {
 
 function loadPlanContents(phaseDir: string): string[] {
   if (!fs.existsSync(phaseDir)) return [];
-  try {
-    return fs.readdirSync(phaseDir)
-      .filter((entry) => /-PLAN\.md$/.test(entry))
-      .map((entry) => readIfExists(path.join(phaseDir, entry)));
-  } catch {
-    return [];
-  }
+  // #3183 (lint-plan-count-drift): source live plan files from the single
+  // owner (scanPhasePlans) instead of a local `-PLAN.md` readdirSync filter
+  // — picks up bare PLAN.md and nested plans/, and excludes plans marked
+  // `status: superseded`, which the prior root-only exact-suffix filter did
+  // neither for.
+  return scanPhasePlans(phaseDir).planFiles
+    .map((entry) => readIfExists(path.join(phaseDir, entry)));
 }
 
 const DESIGNATED_HEADINGS_RE = /^#{1,6}\s+(?:must[_ ]haves?|truths?|tasks?|objective)\b/i;
@@ -270,17 +292,43 @@ function buildVerifyMessage(notHonored: UncoveredItem[]): string {
   ].join('\n');
 }
 
-function loadDecisionExtraction(contextPath: string): { trackable: Decision[]; outcome: 'parsed' | 'none-present' | 'could-not-parse' } {
+function loadDecisionExtraction(contextPath: string): { trackable: Decision[]; outcome: 'parsed' | 'none-present' | 'could-not-parse'; unreadableIds: string[] } {
   const extraction = extractDecisions(readIfExists(contextPath));
   return {
     trackable: extraction.decisions.filter((d) => d.trackable),
     outcome: extraction.outcome,
+    unreadableIds: extraction.unreadableIds ?? [],
   };
 }
 
+/**
+ * `check decision-coverage-plan` — blocking plan-phase decision-coverage gate
+ * (#2492, #1365 fail-loud, #2770 empty-arg fail-closed).
+ *
+ * Invocation (the context path may be supplied EITHER way; #4130 follow-up):
+ *   gsd_run check decision-coverage-plan <phase-dir> <context-path>   (positional, the workflow caller's form)
+ *   gsd_run check decision-coverage-plan --context <path> [<phase-dir>]
+ *
+ * `--context <path>` follows the sibling flag convention (`check predicate`,
+ * #2008): `--flag value` pairs parsed by the shared partitionPredicateArgs
+ * pass, the flag WINNING over a same-purpose positional when both appear,
+ * and a valueless `--context` counting as no context at all (it falls
+ * through to the #2770 caller-error branch, not to the "CONTEXT.md missing"
+ * green skip). The positional form keeps working unchanged — no sibling
+ * check verb deprecates positionals and the plan-phase workflow passes them.
+ */
 function cmdDecisionCoveragePlan(projectDir: string, args: string[], raw: boolean): void {
-  const phaseDir = args[2] ? resolvePath(args[2], projectDir) : '';
-  const contextArg = args[3];
+  // args[0]='check', args[1]=subcommand — partition the REST so flag tokens
+  // and their values never land in a positional slot.
+  const { flags, positionals } = partitionPredicateArgs(args.slice(2));
+  const phaseDir = positionals[0] ? resolvePath(positionals[0], projectDir) : '';
+  // A VALUELESS `--context` stays a bare token in the positionals (sibling
+  // parser semantics); it must not then be read as the context PATH — a
+  // `--`-prefixed "path" is a caller mistake, and #2770's law says a missing
+  // context argument fails CLOSED, never a silent "CONTEXT.md missing" green
+  // skip. So only a non-flag positional may serve as the context.
+  const positionalContext = positionals[1] && !positionals[1].startsWith('--') ? positionals[1] : '';
+  const contextArg = flags['context'] ?? positionalContext ?? '';
   const contextPath = contextArg ? resolvePath(contextArg, projectDir) : '';
 
   if (!gateEnabled(projectDir)) {
@@ -300,30 +348,59 @@ function cmdDecisionCoveragePlan(projectDir: string, args: string[], raw: boolea
     output({ passed: true, skipped: true, reason: 'CONTEXT.md missing', total: 0, covered: 0, uncovered: [], message: 'No CONTEXT.md - nothing to check.' }, raw, undefined);
     return;
   }
+  // #4794: a NON-FILE path (a directory — the adjacent same-looking positional
+  // swapped, the issue's repro 2) is a caller error like #2770's empty argument:
+  // fs.existsSync is true, the read yields nothing, and the gate used to
+  // certify passed:true on a phase full of decisions. Fail closed, naming it.
+  // The stat is wrapped: a path that vanishes between existsSync and statSync
+  // (or any stat failure) must answer the SAME fail-closed JSON, never a throw.
+  let contextIsFile = false;
+  let contextKind = 'non-file entry';
+  try {
+    const st = fs.statSync(contextPath);
+    contextIsFile = st.isFile();
+    if (st.isDirectory()) contextKind = 'directory';
+  } catch {
+    contextIsFile = false;
+    contextKind = 'unreadable path';
+  }
+  if (!contextIsFile) {
+    output({ passed: false, skipped: false, reason: 'context path is not a file', total: null, covered: null, message: `Decision coverage gate: the context path "${contextArg}" is not a readable file (${contextKind}). Swap the adjacent positionals or pass --context <path-to-CONTEXT.md>.` }, raw, undefined);
+    return;
+  }
 
-  const { trackable: decisions, outcome } = loadDecisionExtraction(contextPath);
+  const { trackable: decisions, outcome, unreadableIds } = loadDecisionExtraction(contextPath);
 
   // #1365 fail-loud gate: any could-not-parse outcome must NOT silently pass —
   // even when some decisions were extracted (e.g. D-01 valid but D-02 malformed).
   // A parse-miss on ANY bullet means the gate cannot certify full coverage.
   // Fire independent of decisions.length so a partial-parse still blocks.
   if (outcome === 'could-not-parse') {
+    // #4794: nothing was measured — the answer must not carry the fields of a
+    // gate that did. total/covered are null (a type change is the point:
+    // 0 reads as data, null does not), `uncovered` is OMITTED (the list was
+    // never built), and the ids that failed to parse are carried so a caller
+    // capturing stdout knows which decision to fix.
     const partialParse = decisions.length > 0;
     output({
       passed: false,
       skipped: false,
       reason: 'could-not-parse',
-      total: decisions.length,
-      covered: 0,
-      uncovered: [],
-      message: partialParse
+      total: null,
+      covered: null,
+      unreadable: unreadableIds,
+      message: (partialParse
         ? 'Decision coverage gate: decisions could not be fully parsed — one or more ' +
-          '`- **D-NN ...**` bullets appear malformed (missing `:` or ` — ` separator). ' +
-          'Fix the bullet format so all D-NN decisions can be read before re-running the gate.'
+          '`- **D-NN ...**` bullets appear malformed (missing `:` or ` — ` separator, or a phase ' +
+          'prefix that is not a digit run, e.g. `D4x-01`). Fix the bullet format so all decisions ' +
+          'can be read before re-running the gate.'
         : 'Decision coverage gate: could not parse decisions — possible format mismatch. ' +
           'The CONTEXT.md appears to be decision-shaped (has a <decisions> block, a decisions heading, ' +
-          'or D- tokens) but no D-NN bullets could be extracted. Check the formatting of the decisions ' +
-          'block and ensure bullets follow the `- **D-NN:** text` or `- **D-NN — title** body` form.',
+          'or D- tokens) but no decision bullets could be extracted. Check the formatting of the decisions ' +
+          'block and ensure bullets follow the `- **D-NN:** text`, `- **D4-NN:** text` (phase-prefixed), ' +
+          'or `- **D-NN — title** body` form. An ID grammar the parser does not support (e.g. `DEC-01`) ' +
+          'also lands here.')
+        + (unreadableIds.length > 0 ? ' Unreadable ids: ' + unreadableIds.join(', ') + '.' : ''),
     }, raw, undefined);
     return;
   }
@@ -358,16 +435,11 @@ function recentCommitMessages(projectDir: string): string {
       encoding: 'utf-8',
       maxBuffer: 4 * 1024 * 1024,
       windowsHide: true,
+      timeout: 15_000,
     });
   } catch {
     return '';
   }
-}
-
-function isInsideRoot(candidatePath: string, rootDir: string): boolean {
-  const root = path.resolve(rootDir);
-  const target = path.resolve(root, candidatePath);
-  return target === root || target.startsWith(`${root}${path.sep}`);
 }
 
 function readModifiedFilesContent(projectDir: string, summaries: string[]): string {
@@ -380,8 +452,15 @@ function readModifiedFilesContent(projectDir: string, summaries: string[]): stri
         .map((match) => match[1].trim().replace(/^["']|["']$/g, ''));
       for (const file of files) {
         if (total >= 50) break;
-        if (!file || !isInsideRoot(file, projectDir)) continue;
-        const raw = readIfExists(resolvePath(file, projectDir));
+        if (!file) continue;
+        // Migrated off the hand-rolled prefix check (ADR-4650): resolve+contain in one
+        // step via the canonical realpath predicate — the eventual read below follows
+        // symlinks, so containment must be decided on the resolved target, not a lexical
+        // prefix. Read the value the predicate RETURNED; do not re-derive the path.
+        const candidate = path.isAbsolute(file) ? file : path.join(projectDir, file);
+        const contained = tryWithinRoot(candidate, projectDir, PathAcceptance.AbsoluteInsideRoot);
+        if (contained === null) continue;
+        const raw = readIfExists(contained);
         out.push(raw.length > 256 * 1024 ? raw.slice(0, 256 * 1024) : raw);
         total++;
       }
@@ -421,9 +500,11 @@ function cmdDecisionCoverageVerify(projectDir: string, args: string[], raw: bool
       not_honored: [],
       message: partialParse
         ? 'Decision coverage verify (warning): decisions could not be fully parsed — one or more ' +
-          '`- **D-NN ...**` bullets appear malformed. Fix the bullet format in the CONTEXT.md decisions block.'
+          '`- **D-NN ...**` bullets appear malformed (missing `:` or ` — ` separator, or a phase ' +
+          'prefix that is not a digit run). Fix the bullet format in the CONTEXT.md decisions block.'
         : 'Decision coverage verify (warning): could not parse decisions — possible format mismatch. ' +
-          'Check the formatting of the CONTEXT.md decisions block.',
+          'Check the formatting of the CONTEXT.md decisions block (accepted forms: `- **D-NN:** text`, ' +
+          '`- **D4-NN:** text` (phase-prefixed), `- **D-NN — title** body`).',
     }, raw, undefined);
     return;
   }
@@ -434,8 +515,11 @@ function cmdDecisionCoverageVerify(projectDir: string, args: string[], raw: bool
   }
 
   const planContents = loadPlanContents(phaseDir);
+  // #3183 (lint-plan-count-drift): same single-owner sourcing as
+  // loadPlanContents above — scanPhasePlans's summaryFiles instead of a
+  // local `-SUMMARY.md` readdirSync filter.
   const summaryParts = fs.existsSync(phaseDir)
-    ? fs.readdirSync(phaseDir).filter((entry) => /-SUMMARY\.md$/.test(entry)).map((entry) => readIfExists(path.join(phaseDir, entry)))
+    ? scanPhasePlans(phaseDir).summaryFiles.map((entry) => readIfExists(path.join(phaseDir, entry)))
     : [];
   const haystack = [
     planContents.join('\n\n'),
@@ -467,8 +551,9 @@ function cmdDecisionCoverageVerify(projectDir: string, args: string[], raw: bool
  * ui-plan-gate: given a phase number, checks whether the phase has frontend
  * indicators and whether a *-UI-SPEC.md already exists in the phase directory.
  *
- * Returns JSON: { frontend: boolean, hasUiSpec: boolean, block: boolean }
- *   block = frontend && !hasUiSpec (gate fires when UI work is detected but no spec exists)
+ * Returns JSON: { frontend, hasFrontendEvidence, hasUiSpec, block, uiSpecPath, matchedToken, matchedLine }
+ *   block = frontend && hasFrontendEvidence && !hasUiSpec (#3312: gate fires when
+ *   UI work is detected AND the repo has static frontend evidence but no spec exists)
  *
  * Invocable as: gsd_run check ui-plan-gate <phase>
  *
@@ -501,16 +586,32 @@ function findUiSpecInDir(phaseDir: string): string {
  *   (b) Runs checkUiPresence (frontend detection) — no reimplementation.
  *   (c) Resolves the phase directory via findPhaseInternal (phase-locator.cjs); checks for *-UI-SPEC.md.
  *
- * Returns: { frontend, hasUiSpec, block, uiSpecPath, phaseLookupFailed }
- *   block = frontend && !hasUiSpec
+ * Returns: { frontend, hasFrontendEvidence, hasUiSpec, block, uiSpecPath, matchedToken, matchedLine, phaseLookupFailed }
+ *   block = frontend && hasFrontendEvidence && !hasUiSpec   (#3312)
  *   phaseLookupFailed = ROADMAP.md present but phase header not found (surfaced for
  *                       onError:halt gates so a missing phase doesn't silently bypass)
+ *
+ * #3312 — structural corroboration: `frontend` is a vocabulary signal only. A
+ * hyphen is a word boundary, so a phase naming the repo `dashboard-financeiro`
+ * matches the token `dashboard` exactly like the real compound `micro-frontend`
+ * (the boundary rule of #3718 is intentional and untouched). The gate therefore
+ * blocks only when the token match is corroborated by static frontend evidence
+ * in the repo tree (hasStaticFrontendEvidence: package.json UI-framework dep, a
+ * component-framework file, or native UI evidence — a `.xaml` file or a
+ * `.swift`/`.kt`/`.dart` file carrying its ecosystem's UI import marker,
+ * #4658). This mirrors the sibling post-wave gate
+ * computeUiSafetyGate, which requires `hasUiFiles` (git diff) before blocking.
+ * matchedToken/matchedLine surface what tripped the sniffer so an operator can
+ * judge the flag in one second instead of reaching for --skip-ui.
  */
 function computeUiPlanGate(projectDir: string, phase: string): {
   frontend: boolean;
+  hasFrontendEvidence: boolean;
   hasUiSpec: boolean;
   block: boolean;
   uiSpecPath: string | null;
+  matchedToken: string | null;
+  matchedLine: string | null;
   phaseLookupFailed?: boolean;
 } {
   // (a) Read the phase section text using the same two-pass lookup as roadmap.get-phase.
@@ -539,6 +640,10 @@ function computeUiPlanGate(projectDir: string, phase: string): {
   const presenceResult = checkUiPresence(phaseSection);
   const frontend = presenceResult.hasUI;
 
+  // (b') #3312 — static structural corroboration. Only probed when the sniffer
+  // matched (evidence is irrelevant otherwise); failures degrade to false.
+  const hasFrontendEvidence = frontend ? hasStaticFrontendEvidence(projectDir) : false;
+
   // (c) Resolve phase directory via findPhaseInternal and check for *-UI-SPEC.md
   let phaseDir = '';
   try {
@@ -558,11 +663,23 @@ function computeUiPlanGate(projectDir: string, phase: string): {
   const uiSpecPath = findUiSpecInDir(phaseDir);
   const hasUiSpec = uiSpecPath !== '';
 
-  // block = frontend phase with no UI-SPEC
-  const block = frontend && !hasUiSpec;
+  // block = frontend phase with structural frontend evidence and no UI-SPEC (#3312)
+  const block = frontend && hasFrontendEvidence && !hasUiSpec;
 
-  const result: { frontend: boolean; hasUiSpec: boolean; block: boolean; uiSpecPath: string | null; phaseLookupFailed?: boolean } = {
-    frontend, hasUiSpec, block, uiSpecPath: hasUiSpec ? uiSpecPath : null,
+  const result: {
+    frontend: boolean;
+    hasFrontendEvidence: boolean;
+    hasUiSpec: boolean;
+    block: boolean;
+    uiSpecPath: string | null;
+    matchedToken: string | null;
+    matchedLine: string | null;
+    phaseLookupFailed?: boolean;
+  } = {
+    frontend, hasFrontendEvidence, hasUiSpec, block,
+    uiSpecPath: hasUiSpec ? uiSpecPath : null,
+    matchedToken: presenceResult.matchedToken,
+    matchedLine: presenceResult.matchedLine,
   };
   if (phaseLookupFailed) result.phaseLookupFailed = true;
   return result;
@@ -654,6 +771,7 @@ function computeUiSafetyGate(projectDir: string, phase: string): {
       encoding: 'utf-8',
       maxBuffer: 2 * 1024 * 1024,
       windowsHide: true,
+      timeout: 10_000,
     });
     hasUiFiles = changed.split('\n').some((f) =>
       f.trim() && (UI_FILE_EXTENSIONS_RE.test(f) || UI_PATH_PATTERNS_RE.test(f)),
@@ -757,7 +875,9 @@ function cmdTddReviewCheckpoint(projectDir: string, args: string[], raw: boolean
   const tddPlanFiles: string[] = [];
   if (phaseDir) {
     try {
-      const files = fs.readdirSync(phaseDir).filter(f => f.endsWith('-PLAN.md'));
+      // #3183: canonical plan set (root+nested, superseded-excluded) from the
+      // single owner, rather than a root-only hand-rolled readdirSync filter.
+      const files = scanPhasePlans(phaseDir).planFiles;
       for (const file of files) {
         const planPath = path.join(phaseDir, file);
         const content = readIfExists(planPath);
@@ -810,7 +930,7 @@ function cmdTddReviewCheckpoint(projectDir: string, args: string[], raw: boolean
     try {
       const redCommit = execFileSync(
         'git', ['log', '--oneline', `--grep=^test(${planId}):`, '--', '.'],
-        { cwd: projectDir, encoding: 'utf-8', maxBuffer: 1024 * 1024, windowsHide: true },
+        { cwd: projectDir, encoding: 'utf-8', maxBuffer: 1024 * 1024, windowsHide: true, timeout: 10_000 },
       );
       red = redCommit.trim().length > 0;
     } catch { /* git unavailable or no match */ }
@@ -818,7 +938,7 @@ function cmdTddReviewCheckpoint(projectDir: string, args: string[], raw: boolean
     try {
       const greenCommit = execFileSync(
         'git', ['log', '--oneline', `--grep=^feat(${planId}):`, '--', '.'],
-        { cwd: projectDir, encoding: 'utf-8', maxBuffer: 1024 * 1024, windowsHide: true },
+        { cwd: projectDir, encoding: 'utf-8', maxBuffer: 1024 * 1024, windowsHide: true, timeout: 10_000 },
       );
       green = greenCommit.trim().length > 0;
     } catch { /* git unavailable or no match */ }
@@ -826,7 +946,7 @@ function cmdTddReviewCheckpoint(projectDir: string, args: string[], raw: boolean
     try {
       const refactorCommit = execFileSync(
         'git', ['log', '--oneline', `--grep=^refactor(${planId}):`, '--', '.'],
-        { cwd: projectDir, encoding: 'utf-8', maxBuffer: 1024 * 1024, windowsHide: true },
+        { cwd: projectDir, encoding: 'utf-8', maxBuffer: 1024 * 1024, windowsHide: true, timeout: 10_000 },
       );
       refactor = refactorCommit.trim().length > 0;
     } catch { /* git unavailable or no match */ }
@@ -842,7 +962,6 @@ function cmdTddReviewCheckpoint(projectDir: string, args: string[], raw: boolean
   const violations = rows.filter(r => r.status === 'FAIL').length;
 
   // Build review table
-  const sep = '━'.repeat(53);
   const tableHeader = '| Plan | RED | GREEN | REFACTOR | Status |';
   const tableDivider = '|------|-----|-------|----------|--------|';
   const tableRows = rows.map(r =>
@@ -850,9 +969,7 @@ function cmdTddReviewCheckpoint(projectDir: string, args: string[], raw: boolean
   );
 
   let table = [
-    sep,
-    ` TDD REVIEW — Phase ${phase}`,
-    sep,
+    `### TDD REVIEW — Phase ${phase}`,
     '',
     `TDD Plans: ${tddPlanFiles.length} | Gate violations: ${violations}`,
     '',
@@ -890,6 +1007,272 @@ function cmdTddReviewCheckpoint(projectDir: string, args: string[], raw: boolean
   output(result, raw, undefined);
 }
 
+// ─── tdd-red-evidence (#3770) ──────────────────────────────────────────────────
+
+/**
+ * tdd-red-evidence: validates a persisted RED-phase test-run record for a
+ * `type: tdd` plan (#3770). Only an INTENTIONAL failure of the target test
+ * (verdict RED_EVIDENCE_OK) may authorize GREEN; zero-test discovery, fixture/
+ * load crashes, nonzero exits without a failing test, unrelated failures, and
+ * unexpected greens are INVALID_RED and block GREEN.
+ *
+ * The record is the JSON the executor persists after running the RED command:
+ *   { command, exitCode, output, targetTest, targetFile?, expected?, actual? }
+ * Fail-closed: a missing/unreadable/unparseable record is INVALID_RED
+ * (reason unreadable_record), never a pass.
+ *
+ * Args: check tdd-red-evidence <record.json>
+ */
+function cmdTddRedEvidence(_projectDir: string, args: string[], raw: boolean): void {
+  const recordPath = typeof args[2] === 'string' ? args[2] : '';
+  if (!recordPath) {
+    error('tdd-red-evidence requires a record path: check tdd-red-evidence <record.json>', ERROR_REASON.SDK_MISSING_ARG);
+    return;
+  }
+  const resolved = path.resolve(recordPath);
+  const text = readIfExists(resolved);
+  const input = ((): Record<string, unknown> | null => {
+    if (!text) return null;
+    try {
+      return (JSON.parse(text) ?? {}) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  })();
+  if (!input) {
+    output(
+      {
+        passed: false,
+        block: true,
+        verdict: 'INVALID_RED',
+        reason: 'unreadable_record',
+        record: resolved,
+        readError: text ? `record is not valid JSON: ${resolved}` : `record not found or unreadable: ${resolved}`,
+      },
+      raw,
+      undefined,
+    );
+    return;
+  }
+  const evidenceInput = {
+    command: input['command'],
+    exitCode: input['exitCode'],
+    output: input['output'],
+    targetTest: input['targetTest'],
+    targetFile: input['targetFile'],
+    expected: input['expected'],
+    actual: input['actual'],
+  };
+  const result = classifyRedEvidence(evidenceInput);
+  const record = buildRedEvidenceRecord(evidenceInput, result);
+  output(
+    {
+      // Uniform gate contract: block = !passed. INVALID_RED blocks GREEN.
+      passed: result.verdict === 'RED_EVIDENCE_OK',
+      block: result.verdict !== 'RED_EVIDENCE_OK',
+      verdict: result.verdict,
+      reason: result.reason,
+      evidence: result.evidence,
+      record,
+      message:
+        result.verdict === 'RED_EVIDENCE_OK'
+          ? `RED evidence verified: target test "${result.evidence.target_test}" failed as expected (exit ${result.evidence.exit_code}). GREEN authorized.`
+          : `INVALID_RED (${result.reason}): GREEN blocked. Fix the RED phase — only an intentional failure of target test "${result.evidence.target_test}" authorizes production edits.`,
+    },
+    raw,
+    undefined,
+  );
+}
+
+/**
+ * Resolve a phase argument to an absolute phase directory, or '' when it
+ * cannot be resolved. Shared by every `check` arm that probes a phase's
+ * PLAN.md files, so the two never drift (DEFECT.GENERATIVE-FIX-DIVERGENCE).
+ * Never throws — the callers emit a degraded JSON payload instead, because
+ * a consumer must be able to tell "nothing to report" from "could not look".
+ */
+function resolvePhaseDirOrEmpty(projectDir: string, phase: string): string {
+  try {
+    const result = findPhaseInternal(projectDir, phase);
+    if (result && typeof result === 'object') {
+      // findPhaseInternal returns { directory: '<relative-posix-path>', ... }
+      // directory is relative to cwd — resolve it to absolute.
+      const relDir = typeof result['directory'] === 'string' ? result['directory'] : '';
+      if (relDir) {
+        return path.resolve(projectDir, relDir);
+      }
+    } else if (typeof result === 'string') {
+      return result;
+    }
+  } catch { /* phase dir lookup failure → caller emits degraded payload */ }
+  return '';
+}
+
+// ─── verify-command-paths (#2401) ──────────────────────────────────────────────
+
+/**
+ * verify-command-paths: probes every `<automated>` verify command declared in a
+ * phase's `-PLAN.md` files against the filesystem WITHOUT executing anything —
+ * see verify-command-grounding.cjs for the recognizer contract.
+ *
+ * Args: check verify-command-paths <phase> | check verify-command-paths --dir <plan-dir>
+ * Invocable as: gsd_run check verify-command-paths <phase>
+ *               gsd_run check verify-command-paths --dir <plan-dir>
+ *
+ * `--dir` (#4767) names a directory holding `-PLAN.md` files directly, for
+ * plans that live outside `.planning/phases/` — quick mode's
+ * `.planning/quick/<id>/` is the motivating caller, which until #4767 never ran
+ * this probe at all. The directory is resolved against the project root AND
+ * CONTAINED WITHIN IT — an absolute or climbing `--dir` that lands outside the
+ * root is `unresolvable`, never read — then probed exactly as a phase directory
+ * is; `projectRoot` stays the project root in both forms. `--dir <value>` is the
+ * only accepted spelling: `--dir=<value>` yields no `dir` flag and falls through to
+ * the no-argument arm, as does an empty value. Both are `partitionPredicateArgs`
+ * behaviour, inherited and unchanged. (How that parser resolves a REPEATED `--dir`
+ * is deliberately not characterised here — a malformed later occurrence does not
+ * displace an earlier valid one, so the obvious "last one wins" gloss is wrong.)
+ *
+ * When the phase cannot be resolved to a directory, this emits a non-throwing
+ * degraded JSON payload (status/commands/counts all zeroed, `readError`
+ * populated) rather than calling `error()` — the plan-checker parses this
+ * result and must be able to distinguish "nothing to report" from "could not
+ * look", which a non-zero exit / thrown error would collapse.
+ */
+function cmdVerifyCommandPaths(projectDir: string, args: string[], raw: boolean): void {
+  // args[0] = 'check', args[1] = 'verify-command-paths', then either a phase
+  // positional or `--dir <plan-dir>` (#4767).
+  const { flags, positionals } = partitionPredicateArgs(args.slice(2));
+  const dirFlag = typeof flags['dir'] === 'string' ? flags['dir'] : '';
+  // First non-flag positional: `--raw` (valueless) lands in positionals too, and its position
+  // relative to the phase argument is the caller's choice.
+  const phase = positionals.find(p => !p.startsWith('--')) ?? '';
+  if (!phase && !dirFlag) {
+    output(
+      {
+        status: 'unresolvable',
+        commands: [],
+        counts: { blocker: 0, warning: 0, total: 0 },
+        readError: 'verify-command-paths requires a phase argument or --dir: check verify-command-paths <phase> | --dir <plan-dir>',
+      },
+      raw,
+      undefined,
+    );
+    return;
+  }
+
+  // `--dir` is CALLER-SUPPLIED, so it is contained before it reaches the
+  // `readdirSync`/`readFileSync` calls in probePhaseVerifyCommands (#4785 review).
+  // Same predicate and policy as `resolvePath` above, and for the reason ADR-4650
+  // gives at the other read site: the reads below FOLLOW SYMLINKS, so containment
+  // must be decided on the resolved target, not a lexical prefix — a link inside
+  // the root pointing outside it passes `tryWithinRootLexical` and is then read.
+  // Read the value the predicate RETURNED; never re-derive the path. An escape
+  // degrades to the same non-throwing payload the unresolvable-phase arm emits,
+  // because a consumer must be able to tell "could not look" from "nothing to
+  // report" (and `error()` would collapse them).
+  //
+  // RESIDUAL, stated rather than left to be rediscovered: this is check-then-use, so
+  // a symlink planted at the resolved path BETWEEN this call and the reads inside
+  // probePhaseVerifyCommands would be followed. A link already in place when the
+  // command runs IS refused — the predicate resolves it and returns null (driven) —
+  // so the window is the in-process gap, not the ordinary case. It is a property of
+  // every `tryWithinRoot` call site in this repo, including `resolvePath` above and
+  // the artifact scan below, not of this arm; closing it needs O_NOFOLLOW/dirfd
+  // semantics inside the ADR-4650 predicate, which is a wider change than the bug
+  // this fixes.
+  let phaseDir: string;
+  if (dirFlag) {
+    const candidate = path.isAbsolute(dirFlag) ? dirFlag : path.join(projectDir, dirFlag);
+    const contained = tryWithinRoot(candidate, projectDir, PathAcceptance.AbsoluteInsideRoot);
+    if (contained === null) {
+      output(
+        {
+          status: 'unresolvable',
+          commands: [],
+          counts: { blocker: 0, warning: 0, total: 0 },
+          readError: `--dir resolves outside the project root: ${dirFlag}`,
+        },
+        raw,
+        undefined,
+      );
+      return;
+    }
+    phaseDir = contained;
+  } else {
+    phaseDir = resolvePhaseDirOrEmpty(projectDir, phase);
+  }
+
+  if (!phaseDir) {
+    output(
+      {
+        status: 'unresolvable',
+        commands: [],
+        counts: { blocker: 0, warning: 0, total: 0 },
+        readError: `could not resolve phase directory for phase ${phase}`,
+      },
+      raw,
+      undefined,
+    );
+    return;
+  }
+
+  const probed = probePhaseVerifyCommands({ phaseDir, projectRoot: projectDir });
+  output(probed, raw, undefined);
+}
+
+// ─── verify-failure-directions (#3172) ─────────────────────────────────────────
+
+/**
+ * verify-failure-directions: probes every `<automated>` verify command
+ * declared in a phase's `-PLAN.md` files for a stated `<fails_when>` failing
+ * direction — see verify-command-grounding.cjs for the recognizer contract.
+ *
+ * Args: check verify-failure-directions <phase>
+ * Invocable as: gsd_run check verify-failure-directions <phase>
+ *
+ * When the phase cannot be resolved to a directory, this emits a non-throwing
+ * degraded JSON payload (status/commands/counts all zeroed, `readError`
+ * populated) rather than calling `error()` — the plan-checker parses this
+ * result and must be able to distinguish "nothing to report" from "could not
+ * look", which a non-zero exit / thrown error would collapse.
+ */
+function cmdVerifyFailureDirections(projectDir: string, args: string[], raw: boolean): void {
+  // args[0] = 'check', args[1] = 'verify-failure-directions', args[2] = phase
+  const phase = args[2] || '';
+  if (!phase) {
+    output(
+      {
+        status: 'unresolvable',
+        commands: [],
+        counts: { blocker: 0, warning: 0, total: 0 },
+        readError: 'verify-failure-directions requires a phase argument: check verify-failure-directions <phase>',
+      },
+      raw,
+      undefined,
+    );
+    return;
+  }
+
+  const phaseDir = resolvePhaseDirOrEmpty(projectDir, phase);
+
+  if (!phaseDir) {
+    output(
+      {
+        status: 'unresolvable',
+        commands: [],
+        counts: { blocker: 0, warning: 0, total: 0 },
+        readError: `could not resolve phase directory for phase ${phase}`,
+      },
+      raw,
+      undefined,
+    );
+    return;
+  }
+
+  const result = probePhaseFailingDirections({ phaseDir });
+  output(result, raw, undefined);
+}
+
 // ─── gap-analysis-plan-post ───────────────────────────────────────────────────
 
 /**
@@ -911,8 +1294,9 @@ function cmdGapAnalysisPlanPost(projectDir: string, args: string[], raw: boolean
     error('gap-analysis.plan-post requires a phase-dir argument: check gap-analysis.plan-post <phase-dir> [phase-req-ids]', ERROR_REASON.SDK_MISSING_ARG);
     return;
   }
+  const resolvedPhaseDir = resolvePath(phaseDir, projectDir);
   const phaseReqIds = args[3] ?? undefined;
-  const result = runGapAnalysis(projectDir, phaseDir, { phaseReqIds });
+  const result = runGapAnalysis(projectDir, resolvedPhaseDir, { phaseReqIds });
   // Uniform gate contract: block = false (gap-analysis is always advisory, never blocks).
   // `message` carries the human-readable gap analysis report so the dispatch's
   // advisory branch can surface it. --raw emits JSON (rawValue=undefined), not
@@ -982,20 +1366,20 @@ function buildPredicateDeps() {
       ) {
         return null;
       }
-      const directPath = validatePath(artifactSuffix, phaseDir);
-      if (directPath.safe && fs.existsSync(directPath.resolved) && fs.statSync(directPath.resolved).isFile()) {
-        return directPath.resolved;
+      const directContained = tryWithinRoot(artifactSuffix, phaseDir);
+      if (directContained !== null && fs.existsSync(directContained) && fs.statSync(directContained).isFile()) {
+        return directContained;
       }
-      const planningPath = validatePath(path.join('.planning', artifactSuffix), phaseDir);
-      if (planningPath.safe && fs.existsSync(planningPath.resolved) && fs.statSync(planningPath.resolved).isFile()) {
-        return planningPath.resolved;
+      const planningContained = tryWithinRoot(path.join('.planning', artifactSuffix), phaseDir);
+      if (planningContained !== null && fs.existsSync(planningContained) && fs.statSync(planningContained).isFile()) {
+        return planningContained;
       }
       try {
         const files = fs.readdirSync(phaseDir);
         for (const f of files) {
           if (f.endsWith('-' + artifactSuffix) || f === artifactSuffix) {
-            const candidate = validatePath(f, phaseDir);
-            if (candidate.safe && fs.statSync(candidate.resolved).isFile()) return candidate.resolved;
+            const candidateContained = tryWithinRoot(f, phaseDir);
+            if (candidateContained !== null && fs.statSync(candidateContained).isFile()) return candidateContained;
           }
         }
       } catch { /* ignore */ }
@@ -1010,21 +1394,41 @@ function buildPredicateDeps() {
   };
 }
 
-/** Parse `--flag value` pairs from an args array into a map (last write wins). */
-function parsePredicateFlags(args: string[]): Record<string, string> {
-  const out: Record<string, string> = {};
+/**
+ * Split an args array into `--flag value` pairs and the leftover positional
+ * tokens, in ONE pass, with the semantics `check predicate` established
+ * (#2008): a `--flag` followed by a non-`--` token consumes it as the value
+ * (last write wins); a `--flag` with no value stays a bare token and moves to
+ * the positionals; everything else is positional. `parsePredicateFlags` is
+ * the flags half of this same pass — there is exactly one parser, so the
+ * flag-taking check verbs cannot drift apart (#4130 follow-up: `check
+ * decision-coverage-plan --context <path>` shares it).
+ */
+function partitionPredicateArgs(args: string[]): { flags: Record<string, string>; positionals: string[] } {
+  const flags: Record<string, string> = {};
+  const positionals: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (typeof a !== 'string') continue;
-    if (!a.startsWith('--')) continue;
+    if (!a.startsWith('--')) {
+      positionals.push(a);
+      continue;
+    }
     const key = a.slice(2);
     const next = args[i + 1];
     if (key.length > 0 && typeof next === 'string' && !next.startsWith('--')) {
-      out[key] = next;
+      flags[key] = next;
       i++;
+    } else {
+      positionals.push(a);
     }
   }
-  return out;
+  return { flags, positionals };
+}
+
+/** Parse `--flag value` pairs from an args array into a map (last write wins). */
+function parsePredicateFlags(args: string[]): Record<string, string> {
+  return partitionPredicateArgs(args).flags;
 }
 
 /**
@@ -1059,10 +1463,15 @@ function cmdCheckPredicate(projectDir: string, args: string[], raw: boolean): vo
     error('predicate --predicate value must be valid JSON', ERROR_REASON.USAGE);
     return;
   }
+  const rawPhaseDir = flags['phase-dir'];
+  let resolvedPhaseDir: string | undefined = rawPhaseDir;
+  if (typeof rawPhaseDir === 'string' && rawPhaseDir !== '') {
+    resolvedPhaseDir = resolvePath(rawPhaseDir, projectDir);
+  }
   const ctx = {
     cwd: projectDir,
     phaseNumber: flags['phase-number'],
-    phaseDir: flags['phase-dir'],
+    phaseDir: resolvedPhaseDir,
     phaseReqIds: flags['phase-req-ids'],
   };
   let result;
@@ -1174,7 +1583,14 @@ function cmdApiCoverageVerifyPre(projectDir: string, args: string[], raw: boolea
   // Defense-in-depth: the resolved dir must be inside the phases root (or a
   // milestone archive under .planning/milestones).
   const milestonesRoot = path.join(pDir, 'milestones');
-  if (!isInsideRoot(resolvedDir, phasesRoot) && !isInsideRoot(resolvedDir, milestonesRoot)) {
+  // Lexical containment (ADR-4650): resolvedDir is a directory path, not read
+  // through here — mirrors the prior path.resolve(root, candidate)-based check
+  // without introducing a filesystem/realpath dependency this defense-in-depth
+  // recheck never had.
+  if (
+    tryWithinRootLexical(resolvedDir, phasesRoot) === null &&
+    tryWithinRootLexical(resolvedDir, milestonesRoot) === null
+  ) {
     output(
       {
         block: true,
@@ -1330,6 +1746,33 @@ function cmdApiCoverageVerifyPre(projectDir: string, args: string[], raw: boolea
     );
     return;
   }
+  // An EMPTY scope is not a negative verdict. This gate's neighbouring arms
+  // already fail closed (unresolvable phase → block; unreadable plan → block),
+  // but a phase with no plan body AND no roadmap section fell through to
+  // detection over zero bytes and CERTIFIED "no external-API integration" —
+  // clearing a blocking seal gate on a probe that examined nothing
+  // (ADR-3889 failure class (c), #3909). The discriminator is BYTES EXAMINED,
+  // never SIGNALS FOUND: a phase with real plans and no API vocabulary still
+  // reaches the pass below unchanged.
+  if (scope.text.trim() === '') {
+    output(
+      {
+        block: true,
+        passed: false,
+        coverage_present: false,
+        detected: false,
+        scope_unavailable: true,
+        message:
+          'api-coverage: the phase scope is empty — no plan body and no roadmap section were ' +
+          'found, so nothing was examined. Refusing to certify no external-API integration ' +
+          'from an unestablished scope. Add the phase plan, or add a COVERAGE.md declaration.',
+      },
+      raw,
+      undefined,
+    );
+    return;
+  }
+
   const detection = detectApiIntegration(scope.text);
   if (detection.detected) {
     // Surface only verb/noun (typed, bounded) — NOT raw prose snippets — so the
@@ -1394,12 +1837,26 @@ function isRealReadFailure(err: unknown): boolean {
 function readPhaseScope(projectDir: string, phaseDir: string, phaseNumber: string): PhaseScopeRead {
   const chunks: string[] = [];
   let readError: string | null = null;
-  try {
-    const entries = fs.readdirSync(phaseDir, { withFileTypes: true });
-    const plans = entries
-      .filter((e) => e.isFile() && /-PLAN\.md$/i.test(e.name))
-      .map((e) => e.name)
-      .sort();
+  // A MISSING phase directory is fine (no plans yet → fall through to the
+  // roadmap). Checked up front (rather than via a readdirSync catch) because
+  // #3183 (lint-plan-count-drift) now sources the plan-file list from the
+  // single owner (scanPhasePlans) instead of a local `-PLAN\.md$` readdirSync
+  // filter — picks up bare PLAN.md and nested plans/, and excludes
+  // superseded plans, none of which the prior root-only exact-suffix filter
+  // did.
+  if (fs.existsSync(phaseDir)) {
+    const scan = scanPhasePlans(phaseDir);
+    if (scan.scope === SCOPE.UNREADABLE) {
+      // Directory exists but scanPhasePlans's own readdirSync(phaseDir) call
+      // failed (EACCES/EIO race) — a real read failure the gate must not
+      // silently pass (#2365 review), mirroring the prior isRealReadFailure
+      // branch below for the readdirSync-throws case.
+      return {
+        text: '',
+        readError: 'could not read the phase directory: scanPhasePlans reported scope UNREADABLE',
+      };
+    }
+    const plans = [...scan.planFiles].sort();
     for (const p of plans) {
       try {
         chunks.push(fs.readFileSync(path.join(phaseDir, p), 'utf8'));
@@ -1410,16 +1867,6 @@ function readPhaseScope(projectDir: string, phaseDir: string, phaseNumber: strin
           readError = `could not read ${p}: ${err instanceof Error ? err.message : String(err)}`;
         }
       }
-    }
-  } catch (err) {
-    // A MISSING phase directory is fine (no plans yet → fall through to the
-    // roadmap). A directory that exists but cannot be enumerated (EACCES/EIO)
-    // is a real read failure the gate must not silently pass (#2365 review).
-    if (isRealReadFailure(err)) {
-      return {
-        text: '',
-        readError: `could not read the phase directory: ${err instanceof Error ? err.message : String(err)}`,
-      };
     }
   }
   if (readError) return { text: chunks.join('\n\n'), readError };
@@ -1473,6 +1920,18 @@ function routeCheckCommand({ args, cwd, raw }: RouteCheckCommandOptions): void {
     cmdGapAnalysisPlanPost(cwd, args, raw);
     return;
   }
+  if (subcommand === 'verify-command-paths') {
+    // Deterministic filesystem probe for <automated> verify commands (#2401) —
+    // never executes anything; see verify-command-grounding.cjs.
+    cmdVerifyCommandPaths(cwd, args, raw);
+    return;
+  }
+  if (subcommand === 'verify-failure-directions') {
+    // Presence probe for a stated <fails_when> per <automated> command
+    // (#3172) — never executes anything; see verify-command-grounding.cjs.
+    cmdVerifyFailureDirections(cwd, args, raw);
+    return;
+  }
   if (subcommand === 'api-coverage-verify-pre') {
     // ai-integration capability blocking gate at verify:pre (#1562). Dot-to-
     // hyphen normalization means query "api-coverage.verify-pre" routes here.
@@ -1481,6 +1940,12 @@ function routeCheckCommand({ args, cwd, raw }: RouteCheckCommandOptions): void {
   }
   if (subcommand === 'tdd-review-checkpoint') {
     cmdTddReviewCheckpoint(cwd, args, raw);
+    return;
+  }
+  if (subcommand === 'tdd-red-evidence') {
+    // #3770: intentional-RED evidence gate — only a target-test failure may
+    // authorize GREEN. Validates the persisted record; never executes anything.
+    cmdTddRedEvidence(cwd, args, raw);
     return;
   }
   if (subcommand === 'ui-safety-gate') {
@@ -1502,12 +1967,21 @@ function routeCheckCommand({ args, cwd, raw }: RouteCheckCommandOptions): void {
     cmdVerifyCodebaseDrift(cwd, raw);
     return;
   }
+  if (subcommand === 'verify-context-drift') {
+    // Delegates to verify.context-drift — drift capability gate at plan:pre (non-blocking).
+    // Dot-to-hyphen normalization means query "verify.context-drift" routes here.
+    const phaseArg = typeof args[2] === 'string' ? args[2] : '';
+    cmdVerifyContextDrift(cwd, phaseArg, raw);
+    return;
+  }
   if (subcommand === 'predicate') {
     // Generic gate-predicate evaluator (#2008). The workflow gate-dispatch calls
     // this for any gate whose `check` carries a `predicate` (instead of a `query`),
     // passing the predicate object as --predicate '<json>'. NOTE: unlike the
     // `check.query` subcommands above (which take positional phase args), this
-    // subcommand parses --flag value pairs.
+    // subcommand is flag-driven. `decision-coverage-plan` above now ALSO accepts
+    // `--context <path>` (its positionals still work) — both share
+    // partitionPredicateArgs, the one flag parser.
     cmdCheckPredicate(cwd, args, raw);
     return;
   }
@@ -1519,7 +1993,7 @@ function routeCheckCommand({ args, cwd, raw }: RouteCheckCommandOptions): void {
     routeProhibitionEnforcement(args, raw);
     return;
   }
-  error('Unknown check subcommand. Available: api-coverage-verify-pre, auto-mode, decision-coverage-plan, decision-coverage-verify, gap-analysis-plan-post, predicate, prohibition-enforcement, tdd-review-checkpoint, ui-plan-gate, ui-safety-gate, verify-schema-drift, verify-codebase-drift', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+  error('Unknown check subcommand. Available: api-coverage-verify-pre, auto-mode, decision-coverage-plan, decision-coverage-verify, gap-analysis-plan-post, predicate, prohibition-enforcement, tdd-red-evidence, tdd-review-checkpoint, ui-plan-gate, ui-safety-gate, verify-command-paths, verify-failure-directions, verify-schema-drift, verify-codebase-drift, verify-context-drift', ERROR_REASON.SDK_UNKNOWN_COMMAND);
 }
 
 export = {
@@ -1529,10 +2003,14 @@ export = {
   computeUiPlanGate,
   computeUiSafetyGate,
   cmdGapAnalysisPlanPost,
+  cmdVerifyCommandPaths,
+  cmdVerifyFailureDirections,
   cmdTddReviewCheckpoint,
+  cmdTddRedEvidence,
   cmdCheckPredicate,
   buildPredicateDeps,
   parsePredicateFlags,
+  partitionPredicateArgs,
   // Fail-closed phase-scope reader for the api-coverage gate — exported for
   // in-process failure-injection tests (#2365 review).
   readPhaseScope,

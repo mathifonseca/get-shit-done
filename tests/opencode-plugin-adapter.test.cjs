@@ -26,6 +26,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('os');
 const { cleanup } = require('./helpers.cjs');
+const { INSTALL_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const ADAPTER_SRC = path.join(__dirname, '..', '.opencode', 'plugins', 'gsd-core.js');
 
@@ -84,6 +85,7 @@ test('mapToolName maps OpenCode tool names to Claude names', () => {
   assert.equal(_internals.mapToolName('write'), 'Write');
   assert.equal(_internals.mapToolName('edit'), 'Edit');
   assert.equal(_internals.mapToolName('bash'), 'Bash');
+  assert.equal(_internals.mapToolName('grep'), 'Grep');
   assert.equal(_internals.mapToolName('apply_patch'), 'MultiEdit');
   assert.equal(_internals.mapToolName('webfetch'), 'WebFetch');
   // Unknown tools pass through unchanged; empty is empty.
@@ -108,6 +110,11 @@ test('mapToolInput normalizes camelCase + snake_case arg keys', () => {
   });
   // path/file_path aliases also resolve to file_path.
   assert.equal(_internals.mapToolInput({ path: '/p' }).file_path, '/p');
+  // #4221: OpenCode's grep `include` (and a literal `glob`) reach the secret
+  // read guard as Claude's `glob`.
+  assert.equal(_internals.mapToolInput({ include: '.env*' }).glob, '.env*');
+  assert.equal(_internals.mapToolInput({ glob: '**/*.ts' }).glob, '**/*.ts');
+  assert.equal('glob' in _internals.mapToolInput({ command: 'ls' }), false);
   assert.deepEqual(_internals.mapToolInput(null), {});
 });
 
@@ -256,6 +263,48 @@ test('tool.execute.before: a silent hook allows the tool call (no throw)', async
   );
 });
 
+test('tool.execute.before: the secret read guard blocks a Bash read of .env (#4221)', async (t) => {
+  const { mod } = buildInstalledLayout(t, {
+    'gsd-workflow-guard.js': stubHook(''),
+    'gsd-secret-read-guard.js': stubHook(JSON.stringify({ decision: 'block', code: 'secret-read', reason: 'secret read denied' }), 2),
+  });
+  const handlers = await mod.server({ directory: process.cwd() });
+  await assert.rejects(
+    () => handlers['tool.execute.before']({ tool: 'bash' }, { args: { command: 'cat .env' } }),
+    /secret read denied/,
+  );
+});
+
+test('tool.execute.before: the secret read guard blocks a grep with a secret path (#4221)', async (t) => {
+  const { mod } = buildInstalledLayout(t, {
+    'gsd-secret-read-guard.js': stubHook(JSON.stringify({ decision: 'block', code: 'secret-read', reason: 'secret grep denied' }), 2),
+  });
+  const handlers = await mod.server({ directory: process.cwd() });
+  await assert.rejects(
+    () => handlers['tool.execute.before']({ tool: 'grep' }, { args: { pattern: 'KEY', path: '/p/.env' } }),
+    /secret grep denied/,
+  );
+});
+
+test('tool.execute.before: the secret read guard is dispatched for read, not for write (#4221)', async (t) => {
+  const { mod } = buildInstalledLayout(t, {
+    'gsd-prompt-guard.js': stubHook(''),
+    'gsd-read-guard.js': stubHook(''),
+    'gsd-worktree-path-guard.js': stubHook(''),
+    'gsd-workflow-guard.js': stubHook(''),
+    'gsd-write-guard.js': stubHook(''),
+    'gsd-secret-read-guard.js': stubHook(JSON.stringify({ decision: 'block', code: 'secret-read', reason: 'secret read denied' }), 2),
+  });
+  const handlers = await mod.server({ directory: process.cwd() });
+  await assert.rejects(
+    () => handlers['tool.execute.before']({ tool: 'read' }, { args: { filePath: '/p/.env' } }),
+    /secret read denied/,
+  );
+  await assert.doesNotReject(() =>
+    handlers['tool.execute.before']({ tool: 'write' }, { args: { filePath: '/p/.env', content: 'X=1' } }),
+  );
+});
+
 test('tool.execute.after: Read content rewriting maps ~/.claude/gsd-core paths', async (t) => {
   const { root, mod } = buildInstalledLayout(t, {
     'gsd-read-injection-scanner.js': stubHook(''),
@@ -388,7 +437,10 @@ test('installer copies plugin as .js, records it in the manifest, and removes it
 
   const run = (args) => {
     const result = runNode([installer, '--opencode', '--global', '--config-dir', cfg, ...args], {
-      timeoutMs: 120000,
+      timeoutMs: INSTALL_TIMEOUT_MS,
+      // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+      // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+      env: require('./helpers.cjs').installSpawnEnv(),
     });
     result.status = result.exitCode;
     return result;

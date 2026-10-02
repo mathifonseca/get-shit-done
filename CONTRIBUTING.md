@@ -102,6 +102,8 @@ An ADR (Architecture Decision Record) documents a significant architectural deci
 
 **Rejection reasons:** Issue not approved before file was created, filename uses local-compute sequential number instead of issue#, multiple decisions bundled in one PR, file placed in wrong directory (`docs/adr/` vs `docs/prd/`).
 
+**This process is for a *new* ADR file.** An accepted ADR is never rewritten from scratch — check `docs/adr/` first for a broader ADR that already owns the area. Amending one is a separate, lighter-weight path: see **[`docs/contributor-standards.md` — "Amending an accepted ADR"](docs/contributor-standards.md#amending-an-accepted-adr)** for the two established patterns (an in-place dated section, or a new ADR that declares `Amends`/gets the reciprocal `Amended by` back-link).
+
 ---
 
 ## The Issue-First Rule — No Exceptions
@@ -147,12 +149,21 @@ If you target the wrong branch by accident, the `PR Target Validator`
 workflow will post a comment with the one-line fix (click "Edit" by the PR
 title and change the base branch — no need to recreate the PR).
 
-**Why this matters:** Under the old single-branch model, every PR required
-rebasing onto `main` because branch protection required "up-to-date before
-merging" and `main` moved on every merge. With `next` as the integration
-branch and that flag disabled on `next`, concurrent PRs can merge in any
-order as long as they don't conflict on the same lines. The rebase
-treadmill is gone for the 95% case.
+**Why this matters:** Under the old single-branch model, every PR rebased onto
+`main`, which moved on every merge. `next` moves far less often — only when
+another PR to `next` lands — so in practice you rebase much less.
+
+**But `next` does still require "up-to-date before merging".** Branch
+protection has `required_status_checks.strict = true`; check it yourself with
+`gh api repos/open-gsd/gsd-core/branches/next/protection --jq '.required_status_checks.strict'`.
+If another PR lands while yours is open, yours goes `BEHIND` and must be
+rebased before it can merge.
+
+Budget for that, because the rebase is not free here: **it changes your HEAD
+sha, which invalidates the sha-bound pass marker the push gate reads**, so a
+rebase means re-running the full remote verification and another CI cycle
+before the gate clears again. Rebase *last* — immediately before you push for
+review — rather than paying for a verification you are about to discard.
 
 ---
 
@@ -180,10 +191,13 @@ Contributor requirements (summary):
 - **No draft PRs** — draft PRs are automatically closed. Only open a PR when it is complete, tested, and ready for review. If your work is not finished, keep it on your local branch until it is.
 - **Use the correct PR template** — there are separate templates for [Fix](.github/PULL_REQUEST_TEMPLATE/fix.md), [Enhancement](.github/PULL_REQUEST_TEMPLATE/enhancement.md), and [Feature](.github/PULL_REQUEST_TEMPLATE/feature.md). Using the wrong template or using the default template for a feature is a rejection reason.
 - **Link with a closing keyword** — use `Closes #123`, `Fixes #123`, or `Resolves #123` in the PR body. The CI check will fail and the PR will be auto-closed if no valid issue reference is found.
+  - **Test-only and docs-only follow-up PRs may reference without closing.** If your PR is documentation or regression coverage only — say, a repo-wide guard for a fix that already shipped — and there is no open issue for it to close, use a non-closing reference instead: `Refs #123`. `Ref`, `Refs`, `References`, `Relates to`, `Related to`, and `Follow-up to` are all accepted in that position. Do **not** write a closing keyword against an already-closed issue to satisfy the check; on merge it closes nothing, and it trains readers to treat closing keywords as decorative.
+  - **Qualifying diff shape:** every changed file must be under `tests/`, under `docs/`, or a root-level `*.md` (`README.md`, `CONTRIBUTING.md`, …). This mirrors the doc-only classification the push gate already uses, and it is deliberately root-only — markdown under a subdirectory (`gsd-core/workflows/*.md`, `agents/*.md`, `commands/**/*.md`) is runtime-loaded text, not documentation, so it still requires a closing keyword. `CHANGELOG.md` is excluded too: edit it through a `.changeset/` fragment, never directly.
+  - This weaker form is accepted **only** for that diff shape. A PR touching anything else still needs a closing keyword, and a PR with no issue reference at all still fails. On a very large PR (more than 100 changed files) the check cannot confirm the diff shape and falls back to requiring a closing keyword.
 - **One concern per PR** — bug fixes, enhancements, and features must be separate PRs
 - **No drive-by formatting** — don't reformat code unrelated to your change
 - **Don't bundle test-fixture updates into `docs:` or unrelated commits** — when a production change makes an existing test assertion stale, the test correction MUST land as its own `test:` (or `fix:`) commit, not bundled into a `docs:` commit that also updates the explanation. The release-sdk hotfix cherry-pick filter routes by commit-subject prefix (`fix:`, `chore:`, `test:`); a test-fixture correction packed under a `docs:` prefix is invisible to the picker and ships a half-state to the hotfix branch — production code changed, test assertion stale. v1.42.3 hit this exact mode (#3621). The fix is upstream: keep the test-fixture commit separate.
-- **CI must pass** — all configured matrix jobs must be green. Node 22 remains the compatibility floor; Node 24 is the primary target; Node 26 compatibility must be preserved for code and tests even when a Node 26 CI lane is not yet available.
+- **CI must pass** — all configured matrix jobs must be green. Node 24 is the compatibility floor and primary target; Node 26 compatibility must be preserved for code and tests even when a Node 26 CI lane is not yet available.
 - **Scope matches the approved issue** — if your PR does more than what the issue describes, the extra changes will be asked to be removed or moved to a new issue
 
 ## CHANGELOG Entries — Drop a Fragment
@@ -290,6 +304,81 @@ When a change genuinely has no user-facing documentation impact (infrastructure 
 - **Per-fragment marker:** add `<!-- docs-exempt: <reason> -->` **on its own line** inside the body of each triggering changeset fragment (typically at the end). The reason is **required and must be non-empty** — a bare `<!-- docs-exempt -->` or `<!-- docs-exempt: -->` is rejected (no audit trail = no exemption). The marker is extracted at parse time by `scripts/changeset/parse.cjs` and stripped from the body before the CHANGELOG.md and GitHub release-notes serializers see it — it leaves a paper trail in the source fragment without leaking into published release notes. Inline mentions of the marker syntax (e.g. inside backticks) are intentionally ignored; the parser only acts on a marker that occupies its own line. Both routes leave a paper trail; the label is global, the marker is per-fragment for mixed PRs.
 
 When unsure whether a change is user-facing, **update the docs**.
+
+### Adding a feature to `docs/FEATURES.md`
+
+**`docs/FEATURES.md` is generated. Do not edit it by hand.** Add one fragment
+under `docs/features/` and regenerate:
+
+```
+docs/features/<kebab-slug>.md
+```
+
+```markdown
+---
+id: 3840
+title: Runtime Identity
+group: v1.7.0 Features
+---
+
+**Purpose:** …
+```
+
+Then run `npm run regen:derived` (or just `npm run gen:features -- --write`) and
+commit both the fragment and the regenerated `docs/FEATURES.md`.
+`npm run lint:generated-sync` runs the `--check` twin, so a stale index cannot
+merge. `--write` is fail-closed: it refuses to emit `docs/FEATURES.md` while any
+fragment violation stands, so a `--write && git commit` chain cannot commit a
+corrupt file. Pass `--force` only to see what a broken corpus would render as.
+
+**Why fragments.** The old practice hand-allocated a monotonically increasing
+integer at authoring time, and every feature PR wrote into *two* shared mutable
+cells: the `### N.` heading and the hand-maintained table of contents. With
+several PRs in flight everyone picked the same next integer, and two PRs adding
+*differently numbered* features still collided on the TOC. #3831 was renumbered
+165 → 166 → 167 → 168 across successive rebases — the last collision landing
+*during* a verification run — and because every rebase invalidates the sha-keyed
+pass marker, each collision also cost a full remote matrix run. This is the same
+fix `.changeset/` already applies to `CHANGELOG.md`: one file per
+contribution, consolidated by a generator. You add a new file and touch no
+shared file, so there is nothing to collide on.
+
+**The rules:**
+
+1. **Any unique `id` is legal.** It does not have to be contiguous or maximal —
+   58, 113 and 131 are already absent, and `6.5`, `27a` and `27b` are live
+   non-integer ids. **Use your issue number** and you never have to revisit the
+   choice after a rebase. `--check` rejects a duplicate with an `id_duplicate`
+   violation naming both fragments, so a collision is a loud one-line fix in
+   your own file, not a merge conflict.
+2. **Never renumber a merged feature.** `id` is frozen once it ships: other docs
+   link to `FEATURES.md#<id>-<slug>`, and `--check` now verifies every one of
+   those inbound anchors resolves (`inbound_anchor_unresolved`). Renaming the
+   *title* moves the anchor too — fix the inbound links in the same commit.
+3. **Groups are derived, not registered.** `group` is the `##` heading text.
+   Groups are ordered by their lowest-ordered member, so adding a release bucket
+   is just the first fragment that names it. Optional per-group prose lives in
+   `docs/features/_groups/<slug>.md`, which a feature PR never touches.
+4. **`order` is optional.** It defaults to the numeric part of `id`, which is
+   right for almost everything. Declare it only to place a section somewhere its
+   number would not put it (`27b` precedes `27a` for historical reasons). When
+   declared it must be an optionally-signed integer or decimal — `27`, `0`,
+   `-1`, `+3`, `27.2`. Anything else is an `order_invalid` violation, including
+   an empty value, a hex/binary/octal literal and exponential notation: all of
+   those coerce to a finite number under JavaScript's `Number()`, so before
+   #3840 a bare `order:` sorted the section to position 0 — ahead of every real
+   feature — with no violation and a clean `--check`.
+5. **Bodies start at `####`.** A `##` or `###` inside a fragment body would
+   forge a group or a sibling section with no id and no TOC entry; `--check`
+   rejects it (`body_heading_too_shallow`).
+
+**Fork contributors:** there is nothing to coordinate and nothing to chase. Pick
+your issue number, add your file, regenerate. If `docs/FEATURES.md` conflicts on
+a rebase, discard your side and re-run `--write` — it is a derived artifact.
+
+**Agents:** no Fleet allocation lease is needed for a feature number any more.
+The lease that used to serialize `docs/FEATURES.md::section-number-allocation`
+protected an invariant that no longer exists.
 
 ## Testing Standards
 
@@ -600,6 +689,8 @@ Happy-path tests are not enough for code that accepts user input, reads project 
 
 See [`TEST-EXAMPLES.md`](TEST-EXAMPLES.md) for concrete demo tests that show these requirements in practice.
 
+**Standing rule for error/fallback branches:** feeding an adversarial input is not sufficient on its own — if the code degrades permissively instead of throwing, the test must assert the *specific* degraded verdict, not just that the call survived. See [`TESTING-STANDARDS.md` — "Standing rule: assert the degraded verdict"](TESTING-STANDARDS.md#standing-rule-assert-the-degraded-verdict-not-just-did-not-throw).
+
 Use this matrix when it applies to the changed surface:
 
 1. Happy path
@@ -781,19 +872,49 @@ Some tests legitimately read source files. There are six recognized categories:
 | `structural-implementation-guard` | A feature's interception or wiring point is not reachable end-to-end via `runGsdTools`. Used temporarily until a behavioral path exists. |
 | `pending-migration-to-typed-ir` | **Tracked for correction, not exempted.** Test was identified by the lint as carrying a raw-text-matching pattern that contradicts the rule above. Each annotated file MUST cite the open migration issue (e.g. `// allow-test-rule: pending-migration-to-typed-ir [#NNNN]`) so the tracking is auditable. New tests cannot use this category — they must refactor production to expose typed IR. The annotation is removed when the test is corrected. |
 
-Annotate with a standalone `//` comment before the file's opening block comment:
+**Suppression is site-scoped, not file-wide.** A marker suppresses only the violation it sits next
+to. Put it immediately above the flagged line — or trailing on that line — with nothing but blank
+lines and other comment lines in between, and no more than **8 lines** above it
+(`MAX_MARKER_LOOKAHEAD_LINES` in `eslint-rules/no-source-grep.cjs`). A single line of real code
+between the marker and the call ends the window, even when the two are physically close.
 
 ```javascript
-// allow-test-rule: architectural-invariant
-// state.cjs locking must use Atomics.wait(), not a spin-loop. Behavioral tests
-// cannot observe which sleep primitive was chosen — only source inspection can.
-
-/**
- * Regression tests for locking bugs #1909...
- */
+test('locking uses Atomics.wait, not a spin-loop', () => {
+  // allow-test-rule: architectural-invariant (#1909)
+  // state.cjs locking must use Atomics.wait(). Behavioral tests cannot observe
+  // which sleep primitive was chosen — only source inspection can.
+  const src = fs.readFileSync(STATE_PATH, 'utf8');
+  assert.ok(src.includes('Atomics.wait'));
+});
 ```
 
-The annotation **must** be a standalone `// allow-test-rule:` line, not inside a `/** */` block comment — the CI linter scans for the pattern `// allow-test-rule:`.
+A violation is a **read + search pair**, and a marker adjacent to *either* half suppresses it — so
+annotating the `readFileSync` directly (the intuitive placement) works just as well as annotating
+the `.includes()`.
+
+> **A marker parked at the top of the file no longer suppresses anything below it.** Before #3508
+> suppression was file-wide, so one justified exemption silently absolved every other source-grep
+> in that file — including ones added later by someone else. If you are copying the old
+> file-header placement from an existing test, it is almost certainly inert: the file's `require`
+> block sits between it and the code, and real code closes the window.
+
+The annotation **must** be a standalone `// allow-test-rule:` line — the marker text must be the
+first thing on its comment line (a leading JSDoc `*` is fine), not buried mid-sentence in prose.
+The reason **must** cite a tracking issue (`#NNN`) or an `https://` URL, per
+[ADR-456](docs/adr/456-test-rigor-architecture.md); `scripts/lint-allow-test-rule-refs.cjs` fails
+the build on an uncited one.
+
+That gate reports two separate numbers, and they mean different things:
+
+| Number | Meaning | Gated? |
+|---|---|---|
+| **Effective exemptions** | markers that actually suppress a violation the rule detects | tightly ratcheted — it may only go down |
+| **Unverified markers** | marker-bearing files where the rule detects nothing to suppress | tracked with a loose ceiling; growth fails, shrinkage never does |
+
+A marker landing in the *unverified* bucket does **not** mean it is vestigial and safe to delete —
+it usually means the rule cannot yet see the read (identifier indirection, a dynamic path, a `.sh`
+file). Shrinking that pool is a rule-coverage job backed by measurement, not a delete-the-markers
+job.
 
 ### Prohibited: Raw Text Matching on Test Outputs (file content, stdout, stderr)
 
@@ -857,17 +978,16 @@ For everything else, if a test reaches for `.includes()` / `.startsWith()` / `as
 
 ### Node.js Version Compatibility
 
-**Node 22 is the minimum supported version.** Node 24 is the primary CI target. Node 26 is the forward-compatibility target: do not add tests or production code that depend on deprecated behavior likely to fail there.
+**Node 24 is the minimum supported version.** Node 24 is also the primary CI target. Node 26 is the forward-compatibility target: do not add tests or production code that depend on deprecated behavior likely to fail there.
 
 | Version | Status |
 |---------|--------|
-| **Node 22** | Minimum required — Active LTS until October 2026, Maintenance LTS until April 2027 |
-| **Node 24** | Primary CI target — current Active LTS, all tests must pass |
+| **Node 24** | Minimum required and primary CI target — Active LTS, all tests must pass |
 | Node 26 | Forward-compatible target — avoid deprecated APIs and exact runtime-error prose |
 
 Do not use:
 - Deprecated APIs
-- APIs not available in Node 22
+- APIs not available in Node 24
 
 Safe to use:
 - `node:test` — stable since Node 18, fully featured in 24
@@ -918,13 +1038,18 @@ This gives maintainers a faster, higher-confidence signal than CI-only validatio
 
 ### Pre-PR Seam Checks (Manifest/Alias Routing)
 
-If you touched any of the command-manifest or generated alias files, run:
+If you touched `src/command-aliases.cts` or any of the eight `src/*-command-router.cts`
+sources it feeds, run:
 
 ```bash
 npm run check:alias-drift
 ```
 
-This verifies generated alias artifacts are in sync with manifest source-of-truth.
+This verifies the built alias artifacts under `gsd-core/bin/lib/` agree with their
+source of truth — each family's `*_SUBCOMMANDS` list must match the `subcommand`
+values derived from its `*_COMMAND_ALIASES` table, in order, and each router must
+reference its own list. The surface is enumerated once in
+`scripts/lib/alias-drift-families.cjs`.
 
 ### Editing shipped content (gsd-core/workflows, references, templates, contexts, agents/, commands/gsd/)
 
@@ -936,50 +1061,75 @@ what your PR changed against `next` and requires every emitted-artifact hash tha
 to be attributable to your diff. If it is not, the check fails and names the paths.
 
 Legitimate cases where emitted bytes move for a reason your diff cannot show directly —
-a converter change, for example — go through a **per-PR fragment** under
-`tests/emitted-drift-acks/` (#2914; name the path, say why); see `CONTEXT.md`'s
-`### Emitted Artifact Provenance` entry for the full model. Growth in a
+a converter change, for example — go through a **commit trailer on one of your own
+commits** (ADR-3942; name the key, say why):
+
+```
+Emitted-Drift-Ack-Hash: skills/gsd-add-tests/SKILL.md — the converter rewrote every skill header
+Emitted-Drift-Ack-Growth: explore.md — new dispatch section, reasoning ships with the block
+```
+
+See `CONTEXT.md`'s `### Emitted Artifact Provenance` entry for the full model. Growth in a
 `gsd-core/workflows/*.md` or `agents/gsd-*.md` file is reported with its exact byte delta
 and needs the same acknowledgment; the outer tier hard caps in
 `tests/workflow-size-budget.test.cjs` / `tests/agent-size-budget.test.cjs` are unaffected
-and still apply. The legacy single `tests/emitted-drift-ack.json` is still read and
-unioned in for any branch that still carries it, but new acknowledgments go in a NEW
-fragment, never that file.
+and still apply.
+
+**Why a trailer and not a file (ADR-3942).** An acknowledgment explains one PR's ripple.
+The moment that PR merges the ripple is in the base, so the acknowledgment can never clear
+anything again — its useful life is exactly your PR's open window. Storing it in the
+working tree meant storing PR-lifetime data in permanent shared state, and every
+consequence of that mismatch had to be built and then maintained: a guard to detect spent
+files on `next`, a scheduled bot to delete them, a hold so the bot did not conflict
+in-flight PRs, and a shared key namespace that walled off the next PR to touch the same
+path. A trailer has no file, so it has no merge-conflict surface, never becomes spent, and
+needs no garbage collector. The trailer is read from `git log $(git merge-base <base>
+HEAD)..HEAD` — your commits and no others — which is the same merge-base the differential
+check already uses to compute what your PR changed.
+
+This is **not** a verdict on `.changeset/` or `tests/qa/smell-acks/`, which use the
+fragment idiom correctly: a changeset and a smell acknowledgment stay meaningful after
+merge, so durable state is the right home for them. Only the emitted-drift ack was spent
+on arrival.
 
 You do not need to memorize any of this. **The failure output names its own remedy** — it
-tells you to create a new fragment under `tests/emitted-drift-acks/` (with a name nobody
-else is using — include your issue or PR number), which key to use, and prints a minimal
-valid document you can paste. Note the two key spaces, because the message says which one
-applies: an unattributable **hash** ripple is keyed on the emitted path
+tells you which key to add and prints a minimal trailer line you can paste onto one of your
+commits. Note the two key spaces, because the message says which one applies: an
+unattributable **hash** ripple is keyed on the emitted path
 (`skills/gsd-add-tests/SKILL.md`), while **growth** is keyed on the bare filename as it
-appears under `gsd-core/workflows/` or `agents/` (`explore.md`). When you remove the last
-entry from your fragment, delete the fragment file too — its presence is the alarm, so an
-empty one signals nothing. Nothing here is regenerated: if you find yourself looking for a
-baseline file to re-run a generator over, that file was deleted by #2724 and is not coming
-back.
+appears under `gsd-core/workflows/` or `agents/` (`explore.md`). The two spaces are
+structurally distinct — a `Growth` trailer never excuses a `Hash` ripple, even when the key
+text happens to match.
 
-**Why fragments, not one file (#2914):** every PR needing an acknowledgment used to
-rewrite `tests/emitted-drift-ack.json`'s `paths` map wholesale — a single shared mutable
-file every such PR touches guarantees a merge conflict between any two of them (5 of 6
-conflicting PRs in one open queue collided on this file and nothing else), and it means
-spent, already-merged entries pile up on `next`. A fragment per PR — the same shape
-`.changeset/` already uses for the identical problem — means two PRs can never conflict on
-this seam again, and a fragment left on `next` after merge is inert rather than a shared
-cell. Two ack sources (two fragments, or a fragment and the legacy file) may **never** name
-the same path; that is a hard, loudly-reported error, not a silent last-wins.
+**Declaring the same key twice is fine if you say the same thing twice.** Identical
+declarations — same key, same reason — are de-duplicated silently, because a trailer
+legitimately survives a rebase and reappears on every rebased commit; failing there would
+red a branch for doing nothing wrong. Two declarations of the same key with *different*
+reasons are a hard, loudly-reported error: that is a genuine ambiguity about which
+explanation holds, and only you can say which. There is no "which source owns the key"
+question underneath it, because there is no shared file for two sources to own — to change
+an acknowledgment, amend the commit carrying it.
 
-`tests/emitted-drift-ack.json` (the legacy single file, specifically — NOT the fragment
-directory) must never persist on `next` (#2914): every entry is scoped to the diff that
-introduced it, so once merged it is, by definition, already at the base — spent and inert,
-regardless of shape, and its persistence is what makes it a shared merge-conflict cell. A
-fragment persisting on `next` is harmless, since fragments are independently named and
-cannot conflict with anything, so this guard is deliberately scoped to the legacy file
-alone. This is enforced only on `next` itself, by the `guard-no-ack-on-next` job in
-`.github/workflows/test.yml` (push-to-`next` trigger,
-`scripts/lint-emitted-drift-ack.cjs --guard-next`), never as a PR-lane check — a PR-lane
-"base ack must be absent" check would red every open PR the moment one landed (the #2768
-shape #2789 exists to prevent). If you ever see the legacy file present on `next`, delete
-it; do not try to make it well-formed.
+**Splitting a workflow file into a spine + `detail/*.md` parts (ADR-4139, `workflow.compact_content`)**
+follows the same trailer idiom for one more case. See `docs/PARTITION-RULES.md` for the
+full rule set — the short version: a split moves text, it never restates it, so there is
+no drift-parity check to satisfy, only a guard (`tests/compact-content-partition-guard.test.cjs`)
+that a moved sentence stay moved and a protected sentence never move at all. When the guard
+reports an ordinary (non-protected) line that moved from a spine into its own detail part
+without a declaration, add:
+
+```
+Boundary-Move-Declared: gsd-core/workflows/plan-phase.md — condensed the filesystem-fallback banner into one summary paragraph
+```
+
+Same range (`git log $(git merge-base <base> HEAD)..HEAD`), same fail-closed behavior on an
+uncomputable range, same silent dedupe of identical declarations across a rebase, same hard
+error on two conflicting reasons for the same spine — it is a second key space alongside
+`Emitted-Drift-Ack-Hash`/`-Growth` above, not a different mechanism. Content on the
+protected-content list (guardrails, output-format contracts, few-shot examples the
+workflow's own steps depend on, security language, machine-parsed structural headings) has
+no trailer escape hatch: it may not leave the spine, moved or not, and the guard fails
+regardless of what the trailer says.
 
 `npm run regen:derived` still exists for the artifacts that ARE committed and derived —
 `sync-manifest-versions`, the ADR index, the capability matrix, the inventory manifest,
@@ -993,60 +1143,183 @@ npm run regen:derived
 
 Optional local pre-commit hook entry (Git-native):
 
+`.githooks/pre-commit` is **committed** — you do not write it, you only point git at
+it. It runs `check:alias-drift` when you stage one of the tracked sources that check
+reads, and stays silent otherwise.
+
 ```bash
 # one-time setup
-mkdir -p .githooks
-cat > .githooks/pre-commit <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-if git diff --cached --name-only | grep -Eq "^sdk/src/query/command-manifest\.|^sdk/src/query/command-aliases\.generated\.ts$|^gsd-core/bin/lib/command-aliases\.generated\.cjs$|^sdk/scripts/gen-command-aliases\.ts$"; then
-  npm run check:alias-drift
-fi
-EOF
-chmod +x .githooks/pre-commit
 git config core.hooksPath .githooks
 ```
 
+This is opt-in and stays that way: nothing in `npm install` sets `core.hooksPath` for
+you, so a fresh clone acquires no hooks. To stop using them, `git config --unset
+core.hooksPath`.
+
+Do not paste a copy of the hook body into your own `.githooks/pre-commit`. Bash cannot
+`require()` a CommonJS module, so the hook does carry the watched paths as literals —
+but `tests/precommit-alias-drift-hook.test.cjs` runs the real hook against every source
+derived from `scripts/lib/alias-drift-families.cjs` and fails in **both** directions: if
+the hook stops watching a source the checker reads, and if it keeps watching a router the
+checker dropped. A copy in your own tree has no such test behind it, and a hand-maintained
+copy is exactly what silently rotted the previous version of this recipe (#2725) — every
+path in it named the retired `sdk/` tree or a gitignored build output, so the guard
+matched nothing for months.
+
 Optional local pre-push hook to block a private author-email pattern:
+
+`.githooks/pre-push` is committed too, and is covered by the same
+`core.hooksPath` opt-in above. It is a no-op until you set the regex, so enabling
+hooks does not enable this check:
 
 ```bash
 # set locally in your shell profile (example)
-export GSD_BLOCKED_AUTHOR_REGEX='@example-corp\\.com$'
-
-cat > .githooks/pre-push <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-zero_sha='0000000000000000000000000000000000000000'
-blocked_regex="${GSD_BLOCKED_AUTHOR_REGEX:-}"
-[[ -z "$blocked_regex" ]] && exit 0
-violations=()
-
-while read -r local_ref local_sha remote_ref remote_sha; do
-  [[ "$local_sha" == "$zero_sha" ]] && continue
-  if [[ "$remote_sha" == "$zero_sha" ]]; then
-    commits=$(git rev-list "$local_sha" --not --remotes)
-  else
-    commits=$(git rev-list "$remote_sha..$local_sha")
-  fi
-  while read -r commit; do
-    [[ -z "$commit" ]] && continue
-    email=$(git show -s --format='%ae' "$commit" | tr '[:upper:]' '[:lower:]')
-    if printf '%s' "$email" | grep -Eq "$blocked_regex"; then
-      violations+=("$commit <$email>")
-    fi
-  done <<< "$commits"
-done
-
-if [[ ${#violations[@]} -gt 0 ]]; then
-  echo "Push blocked: commit author email matched local blocked regex ($blocked_regex)." >&2
-  printf '  - %s\n' "${violations[@]}" >&2
-  exit 1
-fi
-EOF
-chmod +x .githooks/pre-push
+export GSD_BLOCKED_AUTHOR_REGEX='@example-corp\.com$'
 ```
+
+With that exported, a push carrying a commit whose author email matches is blocked,
+and the hook names the offending commits. Unset the variable to disable it.
+
+### Every `commit` invocation in shipped content must declare `--files`
+
+`tests/commit-files-pathspec.test.cjs` scans every `.md` under `gsd-core/workflows/`,
+`gsd-core/references/`, `agents/`, `commands/`, `skills/` and `docs/` for invocations of
+the `commit` seam, and fails if any of them reaches the runtime without a `--files`
+scope. An unscoped invocation lands on the blanket-stage default and sweeps the whole
+`.planning/` index into a commit whose message names one artifact — that is [#2269](https://github.com/open-gsd/gsd-core/issues/2269),
+and `cmdCommit` is a CRITICAL-blast-radius seam, so the guard is repo-wide rather than
+keyed to the three sites that were reported.
+
+The scan decides what is an invocation by **command shape**, not by the markup around
+it — a fenced block, an indented block, a `cd … &&` prefix and a bare line are all
+scanned alike, because 96 of the live invocations sit inside fences and exempting them
+would blind the guard to every site the issue was filed about. Two consequences you may
+hit while editing shipped content, and the failure output names both:
+
+**A prose mention that runs into its sentence is flagged.** Nothing distinguishes
+`gsd_run query commit` followed by ordinary words from an invocation with arguments
+without guessing at English, so the scan does not try. Write the command reference in
+backticks — the repo's own convention — and it is correctly read as a mention.
+
+**A deliberate wrong-example must declare itself.** An example that *shows* the unscoped
+form is byte-identical to a regression, so no property of the surrounding markup can
+stand in for your intent. Declare it on the invocation's own line, in shell-comment
+position:
+
+```
+gsd_run query commit "docs: message"   # gsd-scan-ignore: #2269 counter-example for the docs
+```
+
+That block is a live example of itself: the invocation above really is unscoped, and it
+is the declaration — not the fence around it — that keeps the scan quiet.
+
+The reason **must** name a tracking issue (`#NNN`) or an `http(s)://` URL, exactly as
+[ADR-456](docs/adr/456-test-rigor-architecture.md) requires of the sibling
+`allow-test-rule:` marker — an exemption with no ledger never gets revisited. A marker
+with a free-text reason is reported as a malformed declaration rather than as an unscoped
+commit, so you are told which of the two problems you actually have. A marker that
+survives shell tokenization as an *argument* declares nothing: it reached argv, which
+means the runtime executed the line.
+
+### Every `git add` in shipped content that can reach `.planning/` must sit inside an *executable* `commit_docs` check
+
+`tests/commit-docs-bypass.test.cjs` scans every `.md` under `gsd-core/workflows/`,
+`gsd-core/references/`, `agents/`, `commands/` and `skills/` and fails if a `git add` that could
+stage `.planning/` is not enclosed by a `commit_docs` check that actually runs.
+
+This is the sibling of the `--files` guard above, and it exists for the complementary hole.
+That one keeps a *seam* invocation honest; this one catches the steps that never reach the seam
+at all. `commit_docs` is resolved and enforced inside `cmdCommit`, so a step that types
+`git add` into its own shell bypasses it completely — no code change can intercept that, only a
+guard over the shipped text.
+
+**Prose is not a guard.** This is the failure the scan was written for. All three of these
+*looked* gated and none of them were:
+
+````markdown
+**If `commit_docs` is true:**
+```bash
+git add "${EVAL_REVIEW_FILE}"          ← runs unconditionally; the bold line is markdown
+```
+````
+
+The bash block executes whatever the sentence above it says. Write the check in shell, which is
+the form `gsd-core/workflows/quick/steps/worktree-pre-dispatch-commit.md` already uses:
+
+```bash
+COMMIT_DOCS=$(gsd_run query config-get commit_docs 2>/dev/null || echo "true")
+if [ "$COMMIT_DOCS" != "false" ]; then
+  git add "${ARTIFACT}"
+fi
+```
+
+Both polarities are accepted (`!= "false"` and `= "true"`). The `|| echo "true"` fallback is
+deliberate: a tooling failure must fail *open*, or a broken `gsd-tools` silently stops committing
+planning docs for someone who wants them.
+
+Three consequences worth knowing before you edit shipped content:
+
+**Guard state does not cross a fenced block.** Each fenced block is its own shell, so an `if`
+opened in one block does not protect a `git add` in the next — the same reason
+`new-milestone.md` warns that a `GSD_WS` guard set in an earlier step reads as unset later. Put
+the check and the `git add` in the same block.
+
+**An unresolvable path is treated as reaching `.planning/`.** `git add "${ARTIFACT}"` is flagged,
+because whether `$ARTIFACT` expands under `.planning/` is not knowable statically and the scan
+fails closed. A `{placeholder}` in braces with no `$` is documentation notation and does not
+trigger it. If your `git add` genuinely cannot touch `.planning/`, name the path literally.
+
+**Only fenced lines are scanned.** Inline-backtick prose — including the anti-pattern
+documentation that tells you never to run `git add -A` — is not executable and is not flagged.
+
+The same `# gsd-scan-ignore: #NNN` declaration as the `--files` guard exempts a deliberate
+counter-example, on the invocation's own line, in shell-comment position, with a reason naming a
+tracking issue or URL. Both guards share one tokenizer and one marker implementation
+(`tests/helpers/shipped-command-scan.cjs`) so the two conventions can never drift into two rules
+wearing one name.
+
+**Known limits.** The scan (`tests/helpers/planning-add-guard.cjs`) is a token-oriented text scan,
+not a shell interpreter, and it targets accidental reintroduction of an unguarded stage by a
+contributor editing shipped content — not a determined bypass. Four shapes are confirmed (#3585)
+to stage `.planning/` at runtime while scoring zero offenders, and none is a shape GSD content
+actually uses: `eval "git add -A"`, `find .planning -type f | xargs git add`, a one-line shell
+function body (`f() { git add -A; }`), and a backslash line-continuation split across two physical
+lines. The scan also only models `git add` and `git commit -a`/`--all` as staging commands — it
+does not recognize `git stash`, `git rm --cached`, `git restore --staged`, or
+`git update-index --add`, any of which can also move `.planning/` content into a state a later
+commit picks up.
+
+### A conflicted PR runs no CI
+
+Every `pull_request` compute lane waits on one shared gate, `PR mergeability`.
+If GitHub reports your PR as having a merge conflict, **nothing runs** — no test
+matrix, no install smoke, no mutation shards, no docs or changeset lint — until
+you resolve it. The check annotates the base branch and the fix:
+
+```bash
+git fetch origin && git rebase origin/next && git push --force-with-lease
+```
+
+The gate fails **open**: if GitHub cannot tell us whether the PR is mergeable,
+the pipeline runs exactly as it did before, and the per-job
+`scripts/ci-rebase-check.cjs` still catches the conflict. Full reference,
+including which lanes are deliberately *not* gated, is in
+[docs/TESTING-SUITES.md → The mergeability preflight](docs/TESTING-SUITES.md#the-mergeability-preflight).
+
+### A PR cannot merge onto a red base branch
+
+The `Base branch health` required check queries GitHub for the base branch's
+own last push-triggered Tests run and blocks your merge if that run is red —
+independent of whether your own PR's changes pass. This needs no
+branch-protection reconfiguration: it rides the existing "Required tests"
+check, the same status GitHub already requires before merge.
+
+If your PR is itself the fix-forward and you need to land it while the base
+branch is still red, a maintainer applies the `fix-next` label directly to
+your PR to explicitly bypass this one check. Applying a label requires
+GitHub write access to the repo, so a PR author cannot self-apply it to
+bypass the gate — only a maintainer or another collaborator with label-write
+permission can. Full decision logic is in `scripts/ci-next-health.cjs`.
 
 ### CI Test Quality Checks
 
@@ -1056,6 +1329,8 @@ The following checks run on every PR in addition to the test suite:
 |-----|----------------|-------------|
 | `Lint — ESLint` | No source-grep tests (see above), via the `local/no-source-grep` rule | Replace with `runGsdTools()` behavioral tests, or add `// allow-test-rule: <reason>` |
 | `Lint — cross-platform portability` | Windows-portability defects in tests, via `local/no-path-literal-in-assert` (more rules land per [ADR-1703](docs/adr/1703-portability-enforcement-architecture.md)) — e.g. a path-returning call asserted against a hardcoded `/`-literal | Normalize the actual: `String(pathFn(...)).replace(/\\/g, '/')`, or structure platform-specific code behind a `process.platform !== 'win32'` guard. **No `eslint-disable`** — see [cross-platform-portability-rules.md](docs/contributing/cross-platform-portability-rules.md) |
+| `lint-docs-guard-registration.cjs` (via `npm run lint:ci`) | A test that reads shipped `docs/` content must be registered so it runs on the PR that changes those docs — otherwise it can only fail after merge | Register it in `scripts/docs-guard-registry.cjs`, mapping the test to the docs paths it reads, or mark it `// docs-guard-exempt: <reason>` and list it in `scripts/lint-docs-guard-registration.exempt-baseline.cjs` — see [docs-guard-registration.md](docs/contributing/docs-guard-registration.md) |
+| `lint-response-language-coverage.cjs` (via `npm run lint:ci`) | Every workflow file instructs the model to honour `response_language` in user-facing prose, and the directive names inter-tool narration rather than questions alone — a directive that omits the narration class leaves running commentary in English beside translated answers (#2529) | Give the file one of the four coverage forms: the eager `@`-reference, its own inline directive, the pinned line, or proven inheritance from the parent that dispatches it — see [response-language-coverage.md](docs/contributing/response-language-coverage.md) |
 
 Run locally before pushing: `npm run lint` (or `npx eslint .`)
 
@@ -1119,9 +1394,8 @@ gsd-core/
                           Per-file growth is caught by the differential
                           attribution check (tests/emitted-attribution.test.cjs,
                           ADR-2719) — it reports the exact byte delta and
-                          requires a per-PR fragment in
-                          tests/emitted-drift-acks/ (#2914), no committed
-                          snapshot to regenerate. Loose tier
+                          requires an Emitted-Drift-Ack-Growth commit trailer
+                          (ADR-3942), no committed snapshot to regenerate. Loose tier
                           hard caps remain in tests/workflow-size-budget.test.cjs.
                           The same applies to agent files (agents/gsd-*.md,
                           tests/agent-size-budget.test.cjs). Full how-to +

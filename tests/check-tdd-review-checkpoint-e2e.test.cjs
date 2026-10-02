@@ -30,8 +30,9 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
-const { cleanup } = require('./helpers.cjs');
+const { cleanup, TEST_ENV_BASE } = require('./helpers.cjs');
 const { gitOrThrow } = require('./helpers/git-fixture.cjs');
+const { LOOP_HOOK_POINT_CLI_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const TOOLS_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 
@@ -136,23 +137,6 @@ function commitFile(git, tmpDir, filename, commitMessage) {
 
 // ─── Helpers for subprocess invocation ────────────────────────────────────────
 
-const TEST_ENV_BASE = {
-  GSD_SESSION_KEY: '',
-  CODEX_THREAD_ID: '',
-  CLAUDE_SESSION_ID: '',
-  CLAUDE_CODE_SSE_PORT: '',
-  OPENCODE_SESSION_ID: '',
-  GEMINI_SESSION_ID: '',
-  CURSOR_SESSION_ID: '',
-  WINDSURF_SESSION_ID: '',
-  TERM_SESSION_ID: '',
-  WT_SESSION: '',
-  TMUX_PANE: '',
-  ZELLIJ_SESSION_NAME: '',
-  TTY: '',
-  SSH_TTY: '',
-};
-
 function runTools(args, cwd) {
   const argv = Array.isArray(args)
     ? args
@@ -164,7 +148,7 @@ function runTools(args, cwd) {
       cwd,
       encoding: 'utf-8',
       env: { ...process.env, ...TEST_ENV_BASE },
-      timeout: 60000,
+      timeout: LOOP_HOOK_POINT_CLI_TIMEOUT_MS,
     });
     return { success: true, output: stdout.trim(), exitCode: 0, error: '' };
   } catch (err) {

@@ -20,9 +20,11 @@ const { describe, test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { spawnSync } = require('child_process');
 
-const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
+const { runGsdTools, createTempProject, cleanup, installSpawnEnv, withAmbientCapabilityHome } = require('./helpers.cjs');
+const { LOOP_HOOK_POINT_CLI_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const GSD_TOOLS = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 
@@ -74,8 +76,8 @@ function spawnRenderHooks(point, cwd) {
   const result = spawnSync(process.execPath, [GSD_TOOLS, 'loop', 'render-hooks', point, '--raw'], {
     cwd,
     encoding: 'utf8',
-    timeout: 60000,
-    env: { ...process.env, GSD_SESSION_KEY: '', CODEX_THREAD_ID: '', CLAUDE_SESSION_ID: '' },
+    timeout: LOOP_HOOK_POINT_CLI_TIMEOUT_MS,
+    env: installSpawnEnv({ GSD_SESSION_KEY: '', CODEX_THREAD_ID: '', CLAUDE_SESSION_ID: '' }),
   });
   return {
     status: result.status,
@@ -133,6 +135,15 @@ describe('render-hooks plan:post — gate discovery', () => {
     assert.ok(typeof envelope.rendered === 'string', 'rendered must be string');
     assert.ok(envelope.rendered.includes('gap-analysis'), 'rendered must mention gap-analysis');
     assert.ok(envelope.rendered.includes('gap-analysis.plan-post'), 'rendered must include check query');
+  });
+
+  test('#4485: render-hooks ignores capabilities installed in ambient user locations', (t) => {
+    withAmbientCapabilityHome(t, 'gsd-ambient-plan-post-', 'ambient-plan-post', 'plan:post');
+
+    const result = spawnRenderHooks('plan:post', tmpDir);
+    assert.strictEqual(result.status, 0, `exit non-zero: ${result.stderr}`);
+    const activeHooks = JSON.parse(result.stdout).activeHooks;
+    assert.deepStrictEqual(activeHooks.map((hook) => [hook.capId, hook.check?.query]), [['gap-analysis', 'gap-analysis.plan-post']]);
   });
 
   test('[negative] render-hooks plan:post returns empty activeHooks when workflow.post_planning_gaps=false (gate deactivated)', () => {
@@ -336,6 +347,109 @@ describe('check gap-analysis.plan-post — gate content E2E', () => {
       `table must contain "Missing from REQUIREMENTS.md" for REQ-99, got table: ${out.table}`);
     // REQ-01 must still be covered
     assert.ok(out.table.includes('✓ Covered'), 'REQ-01 must show as covered');
+  });
+
+  // ── #3189: prose trailing a real ID list must not be reported as missing ──
+  //
+  // ROADMAP `**Requirements:**` lines carry prose after the ID list (locked-
+  // decision annotations, ambiguity scores, prohibitions, dates). The workflow
+  // passes that value verbatim into --phase-req-ids. Pre-fix, every prose word
+  // was reported as an individually-missing requirement (8 real IDs became 21
+  // reported uncovered in the issue). Post-fix, only ID-shaped tokens reach the
+  // comparison.
+  //
+  // NOTE: the issue's exact reproduction uses hyphen-less `R1`..`R8`, but the
+  // codebase's REQUIREMENTS.md parser (`parseRequirements`, `ID_PATTERN =
+  // [A-Z][A-Z0-9]*-[A-Za-z0-9_-]+`) REQUIRES a hyphen, so `R1` is not a valid
+  // REQUIREMENTS.md ID in this codebase. The `R1`..`R8` shape is covered
+  // directly against `normalizePhaseReqIds` in tests/gap-checker.property.test.cjs
+  // (the filter accepts hyphen-less digit-bearing IDs per the issue spec). These
+  // E2E fixtures use the hyphenated `REQ-01`..`REQ-08` family so the full
+  // pipeline (parseRequirements → normalizePhaseReqIds → coverage compare) is
+  // exercised end-to-end; the prose annotations are the issue's verbatim.
+
+  test('[#3189] check gap-analysis.plan-post with prose-annotated phase-req-ids drops every prose fragment, keeps only ID-shaped tokens', () => {
+    // REQUIREMENTS.md defines exactly REQ-01..REQ-08 — the real requirement set.
+    writeRequirements(path.join(tmpDir, '.planning'),
+      ['REQ-01', 'REQ-02', 'REQ-03', 'REQ-04', 'REQ-05', 'REQ-06', 'REQ-07', 'REQ-08']);
+    // The plan addresses all eight real IDs.
+    writePlan(phaseDir, '01',
+      '# Plan\n\nImplements REQ-01, REQ-02, REQ-03, REQ-04, REQ-05, REQ-06, REQ-07, and REQ-08.\n');
+
+    // The issue's prose-annotated shape, with REQ-01..REQ-08 as the ID list.
+    // The trailing clause is the issue's verbatim prose (locked-decision
+    // annotation, ambiguity score, prohibition range).
+    const rawReqIds = 'REQ-01, REQ-02, REQ-03, REQ-04, REQ-05, REQ-06, REQ-07, REQ-08 (locked <date> — canonical source `NN-SPEC.md ## Requirements`; ambiguity 0.12; + prohibitions P1-P3)';
+
+    const r = runGapCheck([phaseDir, rawReqIds], tmpDir);
+    assert.ok(r.success, `check failed: ${r.error}`);
+
+    const out = JSON.parse(r.output);
+    // After the #3189 shape filter, the ID-shaped tokens that survive are
+    // REQ-01..REQ-08 PLUS `P1-P3` (from "prohibitions P1-P3"). `P1-P3` is
+    // syntactically ID-shaped — it matches `PHASE_REQ_ID_SHAPE_RE` exactly as
+    // `SEL-01` does, and the codebase's `ID_PATTERN` accepts it too, so dropping
+    // it would create a false mismatch for projects using `P1-P3`-shape IDs. It
+    // is NOT in REQUIREMENTS.md, so it correctly surfaces as a single "Missing
+    // from REQUIREMENTS.md" ghost row.
+    //
+    // Pre-fix, this same input produced a report where every prose word was a
+    // separate "Missing from REQUIREMENTS.md" row. Post-fix the prose noise is
+    // gone: 8 covered REQ-IDs + 1 ID-shaped ghost (P1-P3).
+    assert.strictEqual(out.counts.total, 9,
+      `total must be 9 (REQ-01..REQ-08 + the ID-shaped P1-P3); got ${out.counts.total}. Full table:\n${out.table}`);
+    assert.strictEqual(out.counts.covered, 8, 'all 8 REQ-IDs are covered by the plan');
+    assert.strictEqual(out.counts.uncovered, 1, 'the one uncovered item is P1-P3 (ID-shaped ghost, not prose)');
+
+    // Every surviving ID-shaped token must appear in the table. (The check
+    // query exposes `table`/`counts` but not the raw `rows` array, so assert
+    // via the rendered table.)
+    for (const id of ['REQ-01', 'REQ-02', 'REQ-03', 'REQ-04', 'REQ-05', 'REQ-06', 'REQ-07', 'REQ-08', 'P1-P3']) {
+      assert.ok(out.table.includes(id),
+        `${id} must appear in the table. Full table:\n${out.table}`);
+    }
+    // P1-P3 (the ID-shaped ghost) must be flagged Missing from REQUIREMENTS.md.
+    assert.ok(out.table.includes('Missing from REQUIREMENTS.md'),
+      `P1-P3 must be flagged Missing from REQUIREMENTS.md. Full table:\n${out.table}`);
+
+    // No prose fragment may appear as a table row — these are the exact
+    // fragments the issue reported as fake missing requirements. Only table
+    // ROW lines (starting with `|`) are checked: the table string itself begins
+    // with the `## Post-Planning Gap Analysis` markdown heading, so a raw
+    // `out.table.includes('##')` would trivially be true.
+    const tableRows = out.table.split('\n').filter(line => line.startsWith('|'));
+    const proseFragments = ['—', '##', '`NN-SPEC.md', '+', '0.12;', '<date>',
+      'ambiguity', 'locked', 'prohibitions', 'Requirements;', 'canonical', 'source;'];
+    for (const frag of proseFragments) {
+      assert.ok(!tableRows.some(line => line.includes(frag)),
+        `prose fragment ${JSON.stringify(frag)} must NOT appear in any table row. Full table:\n${out.table}`);
+    }
+  });
+
+  test('[#3189] a genuinely-missing real requirement ID is still reported (no narrowing) — prose-annotated mixed list', () => {
+    // REQUIREMENTS.md defines REQ-01..REQ-03 only; REQ-99 is cited in
+    // phase-req-ids but absent (a real missing-requirement signal). The trailing
+    // prose must be dropped, but REQ-99 (a real ID shape) must still be reported
+    // as Missing — the fix must not narrow real coverage detection.
+    writeRequirements(path.join(tmpDir, '.planning'), ['REQ-01', 'REQ-02', 'REQ-03']);
+    writePlan(phaseDir, '01', '# Plan\n\nImplements REQ-01, REQ-02, REQ-03.\n');
+
+    const rawReqIds = 'REQ-01, REQ-02, REQ-03, REQ-99 (locked 2026-08-07 — ambiguity 0.12)';
+    const r = runGapCheck([phaseDir, rawReqIds], tmpDir);
+    assert.ok(r.success, `check failed: ${r.error}`);
+
+    const out = JSON.parse(r.output);
+    // GENUINE: total must be 4 — REQ-01..REQ-03 (covered) + REQ-99 (ghost). The
+    // prose is dropped, but the real missing ID REQ-99 is preserved.
+    assert.strictEqual(out.counts.total, 4,
+      `total must be 4 (REQ-01..REQ-03 + REQ-99; prose dropped, REQ-99 preserved); got ${out.counts.total}`);
+    assert.strictEqual(out.counts.uncovered, 1, 'REQ-99 is the one uncovered item');
+    assert.ok(out.table.includes('REQ-99'), 'REQ-99 (real missing ID) must appear in the table');
+    assert.ok(out.table.includes('Missing from REQUIREMENTS.md'),
+      'REQ-99 must be flagged Missing from REQUIREMENTS.md');
+    // Prose fragments still dropped.
+    assert.ok(!out.table.includes('locked'), 'prose "locked" must NOT appear');
+    assert.ok(!out.table.includes('ambiguity'), 'prose "ambiguity" must NOT appear');
   });
 });
 
@@ -611,5 +725,138 @@ describe('resolveLoopHooks plan:post — pure function against real registry', (
       `plan:post contributions must be external-job + claude-orchestration; got ${capIds.join(',')}`);
     assert.strictEqual(entry.gates.length, 1, 'plan:post must have exactly one gate');
     assert.strictEqual(entry.gates[0].capId, 'gap-analysis');
+  });
+});
+
+// ─── #4652: containment boundaries — resolvePath (check-command-router.cts:92)
+// and `check gap-analysis.plan-post <phase-dir>` ───────────────────────────────
+//
+// Boundary 3: `check decision-coverage-plan <phase-dir>` resolves the phase-dir
+// positional via `resolvePath()`, which just does
+// `path.isAbsolute(p) ? p : path.join(projectDir, p)` — no containment check.
+// Boundary 4: `check gap-analysis.plan-post <phase-dir>` takes `args[2]`
+// unconfined and joins it directly in `runGapAnalysis` (gap-checker.cts).
+
+function runDecisionCoveragePlan(extraFlags, phaseDir, contextPath, cwd) {
+  return runGsdTools(['query', 'check.decision-coverage-plan', ...extraFlags, phaseDir, contextPath], cwd);
+}
+
+describe('resolvePath / check decision-coverage-plan — containment boundary (#4652)', () => {
+  let tmpDir;
+  let phaseDir;
+  let outsideDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+    phaseDir = path.join(tmpDir, '.planning', 'phases', '01-test');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-decision-outside-'));
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+    cleanup(outsideDir);
+  });
+
+  test('[RED #4652] an outside phase-dir is rejected (currently resolves and proceeds unconfined)', () => {
+    const contextPath = path.join(phaseDir, 'CONTEXT.md');
+    fs.writeFileSync(
+      contextPath,
+      '# Phase Context\n\n<decisions>\n## Implementation Decisions\n\n- **D-01:** Use pattern X\n</decisions>\n',
+    );
+    fs.writeFileSync(path.join(outsideDir, '01-PLAN.md'), '# Plan\n\nImplements D-01.\n');
+    const relOutside = path.relative(tmpDir, outsideDir);
+
+    const result = runGsdTools(
+      ['--json-errors', 'query', 'check.decision-coverage-plan', relOutside, contextPath],
+      tmpDir,
+    );
+
+    assert.strictEqual(
+      result.success,
+      false,
+      `an outside phase-dir must be rejected before evaluating plan coverage ` +
+        `(currently: ${result.success ? `SUCCEEDED with output ${result.output}` : 'failed for an unrelated reason'})`,
+    );
+  });
+
+  test('[regression] a valid in-project relative phase-dir still proceeds', () => {
+    const contextPath = path.join(phaseDir, 'CONTEXT.md');
+    fs.writeFileSync(
+      contextPath,
+      '# Phase Context\n\n<decisions>\n## Implementation Decisions\n\n- **D-01:** Use pattern X\n</decisions>\n',
+    );
+    fs.writeFileSync(path.join(phaseDir, '01-PLAN.md'), '# Plan\n\n## tasks\n\n- D-01: Use pattern X\n');
+    const relPhaseDir = path.relative(tmpDir, phaseDir);
+
+    const result = runDecisionCoveragePlan([], relPhaseDir, contextPath, tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const out = JSON.parse(result.output);
+    assert.strictEqual(out.passed, true, 'in-project phase-dir with covered decision must pass');
+  });
+
+  test('[regression] an absolute path INSIDE the project is accepted', () => {
+    const contextPath = path.join(phaseDir, 'CONTEXT.md');
+    fs.writeFileSync(
+      contextPath,
+      '# Phase Context\n\n<decisions>\n## Implementation Decisions\n\n- **D-01:** Use pattern X\n</decisions>\n',
+    );
+    fs.writeFileSync(path.join(phaseDir, '01-PLAN.md'), '# Plan\n\n## tasks\n\n- D-01: Use pattern X\n');
+
+    const result = runDecisionCoveragePlan([], phaseDir, contextPath, tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const out = JSON.parse(result.output);
+    assert.strictEqual(out.passed, true, 'absolute in-project phase-dir must be accepted');
+  });
+});
+
+describe('check gap-analysis.plan-post — containment boundary (#4652)', () => {
+  let tmpDir;
+  let phaseDir;
+  let outsideDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+    phaseDir = path.join(tmpDir, '.planning', 'phases', '01-test');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    const init = runGsdTools('config-ensure-section', tmpDir);
+    assert.ok(init.success, `config-ensure-section failed: ${init.error}`);
+    outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-gap-outside-'));
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+    cleanup(outsideDir);
+  });
+
+  test('[RED #4652] an outside phase-dir is rejected (currently resolves and proceeds unconfined)', () => {
+    fs.writeFileSync(path.join(outsideDir, '01-PLAN.md'), '# Plan\n\nSome content.\n');
+    const relOutside = path.relative(tmpDir, outsideDir);
+
+    const result = runGsdTools(['--json-errors', 'check', 'gap-analysis.plan-post', relOutside, '--raw'], tmpDir);
+
+    assert.strictEqual(
+      result.success,
+      false,
+      `an outside phase-dir must be rejected ` +
+        `(currently: ${result.success ? `SUCCEEDED with output ${result.output}` : 'failed for an unrelated reason'})`,
+    );
+  });
+
+  test('[regression] a valid phase-dir still proceeds (advisory, block:false)', () => {
+    writeRequirements(path.join(tmpDir, '.planning'), ['REQ-01']);
+    writePlan(phaseDir, '01', '# Plan\n\nImplements REQ-01.\n');
+
+    const r = runGapCheck([phaseDir], tmpDir);
+    assert.ok(r.success, `check failed: ${r.error}`);
+    const out = JSON.parse(r.output);
+    assert.strictEqual(out.block, false, 'gap-analysis is always advisory');
+  });
+
+  test('[regression] a missing phase-dir argument still gives the existing SDK_MISSING_ARG error', () => {
+    const result = runGsdTools(['--json-errors', 'check', 'gap-analysis.plan-post', '--raw'], tmpDir);
+    assert.strictEqual(result.success, false, 'must fail when phaseDir omitted');
+    const parsed = JSON.parse(result.error);
+    assert.strictEqual(parsed.reason, 'sdk_missing_arg', 'must keep the existing SDK_MISSING_ARG reason');
   });
 });

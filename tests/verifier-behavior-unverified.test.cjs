@@ -81,12 +81,18 @@ test('PARITY: per-truth state never leaks into the overall-status vocabulary', (
 });
 
 test('overall-status enum in verification.cts is unchanged (no per-truth leak)', () => {
-  const cts = fs.readFileSync(path.join(ROOT, 'src', 'verification.cts'), 'utf-8');
-  const m = cts.match(/VERIFIER_STATUSES[^=]*=\s*\[([^\]]*)\]/);
-  assert.ok(m, 'VERIFIER_STATUSES array must be present');
-  assert.doesNotMatch(m[1], /present_behavior_unverified/i);
+  // Assert on the real exported runtime value rather than regexing the
+  // source text — strictly stronger (exercises the built module) and
+  // immune to source formatting changes.
+  const verificationLib = require(path.join(ROOT, 'gsd-core', 'bin', 'lib', 'verification.cjs'));
+  const { VERIFIER_STATUSES } = verificationLib;
+  assert.ok(Array.isArray(VERIFIER_STATUSES), 'VERIFIER_STATUSES array must be present');
+  assert.ok(
+    !VERIFIER_STATUSES.includes('present_behavior_unverified'),
+    'VERIFIER_STATUSES must not leak the per-truth present_behavior_unverified state',
+  );
   for (const s of ['passed', 'gaps_found', 'human_needed']) {
-    assert.match(m[1], new RegExp(`'${s}'`));
+    assert.ok(VERIFIER_STATUSES.includes(s), `VERIFIER_STATUSES must contain ${s}`);
   }
 });
 
@@ -98,10 +104,10 @@ test('VERIFICATION.md templates carry behavior_unverified + the new truth-state'
   assert.match(standalone, /behavior_unverified_items/);
 });
 
-const verifyPhase = fs.readFileSync(path.join(ROOT, 'gsd-core', 'workflows', 'verify-phase.md'), 'utf-8');
+const verifyPhase = fs.readFileSync(path.join(ROOT, 'gsd-core', 'references', 'verifier-phase-gates.md'), 'utf-8');
 const planningArtifacts = fs.readFileSync(path.join(ROOT, 'docs', 'reference', 'planning-artifacts.md'), 'utf-8');
 
-test('shipped verify-phase workflow mirrors the behavior-unverified calibration', () => {
+test('shipped verifier-phase-gates reference mirrors the behavior-unverified calibration', () => {
   assert.match(verifyPhase, /PRESENT_BEHAVIOR_UNVERIFIED/);
   assert.match(verifyPhase, /behavior_unverified/);
   assert.match(verifyPhase, /state transition/i);
@@ -141,6 +147,8 @@ const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { scanFencedBlocks } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
+const { findTableWithColumns } = require('../gsd-core/bin/lib/markdown-table.cjs');
 
 const REPO_ROOT = path.join(__dirname, '..');
 const VERIFIER_AGENT = path.join(REPO_ROOT, 'agents', 'gsd-verifier.md');
@@ -158,16 +166,23 @@ function verifierProbeContract(content) {
   const sectionEnd = nextHeading === -1 ? content.length : nextHeading;
 
   const section = content.slice(sectionStart, sectionEnd);
-  const codeBlocks = [...section.matchAll(/```bash\r?\n([\s\S]*?)\r?\n```/g)].map((match) => match[1].split(/\r?\n/).join('\n'));
+  const sectionLines = section.split(/\r?\n/);
+  const codeBlocks = scanFencedBlocks(sectionLines)
+    .filter((b) => b.closeLineIdx !== -1 && (b.infoString || '').trim() === 'bash')
+    .map((b) => sectionLines.slice(b.openLineIdx + 1, b.closeLineIdx).join('\n'));
   const executionSteps = [...section.matchAll(/^\d+\.\s+(.+)$/gm)].map((match) => match[1]);
+  const probeTable = findTableWithColumns(section, ['Probe', 'Command', 'Result', 'Status']);
   return {
     title: 'Step 7c: Probe Execution',
     conventionalDiscoveryCommand: codeBlocks[0]?.split('\n').find((line) => line.startsWith('find scripts')) || null,
     declaredDiscoveryCommand: codeBlocks[0]?.split('\n').find((line) => line.startsWith('grep -R')) || null,
     executionCommand: codeBlocks[1] || '',
     executionSteps,
-    statusRows: [...section.matchAll(/^\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|[^|]+\|\s*([^|]+)\|$/gm)]
-      .map((match) => ({ probe: match[1], command: match[2], statuses: match[3].trim() })),
+    statusRows: (probeTable ? probeTable.rows : []).map((row) => ({
+      probe: row.Probe.replace(/^`|`$/g, ''),
+      command: row.Command.replace(/^`|`$/g, ''),
+      statuses: row.Status.trim(),
+    })),
     summaryClaimsRejected: section.includes('SUMMARY.md probe pass claims are not evidence'),
   };
 }
@@ -201,3 +216,48 @@ describe('bug #3321: gsd-verifier runs probes instead of trusting SUMMARY claims
 });
   });
 }
+
+// ─── #3206: explicit-evidence definition inline + cite resolution ────────────
+// The agent file IS the deployed product; content assertions test the shipped
+// contract (same basis as every test above).
+
+const verifierPhaseGatesPath = path.join(ROOT, 'gsd-core', 'references', 'verifier-phase-gates.md');
+const verifierPhaseGates = fs.readFileSync(verifierPhaseGatesPath, 'utf-8');
+
+test('#3206: step 5b defines explicit evidence inline — presence+wiring never qualifies', () => {
+  const m = verifier.match(/5b\.\s+\*\*Non-inferable[^\r\n]{0,400}/);
+  assert.ok(m, 'step 5b line must exist');
+  assert.match(m[0], /held-out\/property-based test/i);
+  assert.match(m[0], /directly observed/i);
+  assert.match(m[0], /presence\+wirting|presence\+wiring/i);
+  assert.match(m[0], /\*never\* qualifies/, 'presence+wiring must be excluded in the 5b line itself');
+});
+
+test('#3206: every references-tree cite in gsd-verifier.md resolves on disk as written', () => {
+  // Pre-fix, this file cited `references/honest-verifier.md` — a bare path that
+  // 404s from repo root after the reference-tree reorg. Every cite must now
+  // resolve exactly as written.
+  const citeRe = /`((?:gsd-core\/)?references\/[A-Za-z0-9._-]+\.md)`/g;
+  const cites = [...verifier.matchAll(citeRe)].map((m) => m[1]);
+  assert.ok(cites.includes('gsd-core/references/honest-verifier.md'), 'the 5c honest-verifier cite');
+  assert.ok(cites.includes('gsd-core/references/verify-mvp-mode.md'), 'the MVP-mode cite');
+  assert.ok(cites.length >= 2, `expected the two repaired cites, found ${cites.length}`);
+  for (const cited of cites) {
+    assert.ok(
+      fs.existsSync(path.join(ROOT, cited)),
+      `gsd-verifier.md cites \`${cited}\` but no such file exists — the agent is handed a path that does not resolve (#3206)`,
+    );
+  }
+});
+
+test('#3206: backstop reporting contract is in the eagerly-included verifier-phase-gates.md', () => {
+  // The AFK-projection and insufficient_spec-distinctness clauses must be
+  // reachable from the agent's guaranteed reading path: verifier-phase-gates.md
+  // is @~/-included by gsd-verifier.md, so pinning their presence there pins
+  // their reachability.
+  assert.match(verifier, /@~\/\.claude\/gsd-core\/references\/verifier-phase-gates\.md/);
+  assert.match(verifierPhaseGates, /Never silent, never a hard halt/);
+  assert.match(verifierPhaseGates, /complete with N unverified non-inferable checks/);
+  assert.match(verifierPhaseGates, /Distinguishable reason/);
+  assert.match(verifierPhaseGates, /reason: insufficient_spec/);
+});

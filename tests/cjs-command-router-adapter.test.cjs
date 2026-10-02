@@ -269,6 +269,9 @@ describe('bug #224: --pick stdout capture contract', () => {
   let src;
 
   before(() => {
+    // allow-test-rule: structural-implementation-guard (see #224) — locks the
+    // main()-body byte-length seam contract structurally (no deterministic
+    // Windows repro harness yet); see block header above.
     src = fs.readFileSync(GSD_TOOLS_SRC, 'utf-8');
   });
 
@@ -519,6 +522,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const { cleanup } = require('./helpers.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const GSD_TOOLS = path.resolve(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 
@@ -529,7 +533,7 @@ function run(args, cwd) {
       stdout: execFileSync(process.execPath, [GSD_TOOLS, ...args], {
         cwd,
         encoding: 'utf-8',
-        timeout: 15000,
+        timeout: PROBE_TIMEOUT_MS,
       }),
     };
   } catch (e) {

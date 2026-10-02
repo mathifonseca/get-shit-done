@@ -16,7 +16,7 @@ Set `model_profile` in `.planning/config.json` or via `/gsd-config --profile <na
 | `adaptive` | Opus | Sonnet | Sonnet | Sonnet | Resolves the same way as the other tiers under runtime-aware profiles; use when switching between runtimes frequently |
 | `inherit` | (session model) | (session model) | (session model) | (session model) | Non-Anthropic providers (OpenRouter, local models) — all agents follow your current session model |
 
-The table above shows a representative subset. All 33 shipped agents have explicit per-profile tier assignments in `sdk/shared/model-catalog.json`. For the full table see [Model Profiles](../CONFIGURATION.md#model-profiles) in the configuration reference.
+The table above shows a representative subset. All 33 shipped agents have explicit per-profile tier assignments in `gsd-core/bin/shared/model-catalog.json`. For the full table see [Model Profiles](../CONFIGURATION.md#model-profiles) in the configuration reference.
 
 **Quick switch via command:**
 
@@ -51,11 +51,13 @@ If a single agent needs a different tier without changing the whole profile, use
 }
 ```
 
-Valid values: `opus`, `sonnet`, `haiku`, `inherit`, or any fully-qualified model ID (e.g. `"openai/o3"`, `"google/gemini-2.5-pro"`).
+Valid values: `opus`, `sonnet`, `haiku`, `fable`, `inherit`, or any fully-qualified model ID (e.g. `"openai/o3"`, `"google/gemini-2.5-pro"`).
+
+On the Claude runtime, fully-qualified Claude model IDs act as explicit generation pins (#4192): an ID naming the current tier default (e.g. `"claude-sonnet-5"`) resolves to its tier alias — the same model in the form Claude Code's Agent tool always accepts — while any other ID (e.g. `"claude-opus-4-7"`) resolves verbatim, with a warn-once stderr note that setups accepting only tier aliases will not honor a full ID. `fable` is a Claude Code Agent-tool alias, not a GSD profile tier: valid here, but it has no column in the profile table. To pin a generation for a whole tier instead of one agent, use `model_profile_overrides` (see below).
 
 `model_overrides` can be set per-project in `.planning/config.json` or globally in `~/.gsd/defaults.json`. Per-project entries win on conflict; non-conflicting global entries are preserved.
 
-**Important for Codex and OpenCode:** Those runtimes embed the resolved model into each agent's static config at install time. After editing `model_overrides`, re-run the installer for the change to take effect:
+**Important for Codex and OpenCode:** Those runtimes embed the model into each agent's static config at install time rather than choosing it per spawn, so after editing `model_overrides` you must re-run the installer for the change to take effect:
 
 ```bash
 npx @opengsd/gsd-core@latest --codex --global   # or --opencode, --kilo, etc.
@@ -185,18 +187,98 @@ quota / rate-limit failures; other failures keep the tier ladder. Leaving
 
 ## Using GSD on non-Anthropic runtimes
 
-If you installed GSD for Codex, OpenCode, Antigravity CLI, or Kilo, the installer already set `resolve_model_ids: "omit"` in your config. This tells GSD to skip Anthropic model ID resolution and let the runtime choose its own default model. No manual setup is needed for the basic case.
+If you installed GSD for Codex, OpenCode, Antigravity CLI, or Kilo, the installer already set `resolve_model_ids: "omit"` in the shared config. This prevents unresolved Anthropic model IDs from leaking into those runtimes. Your install's recorded runtime identity (the `.gsd-runtime` marker) tells GSD which runtime tier map to resolve instead, so runtime-native profile resolution still supplies any model and effort that the runtime adapter can transport. No manual setup is needed for the basic case.
 
-**If you want tiered models on Codex:**
+### Codex routes tiers at spawn time when supported
+
+GSD deliberately writes no profile-resolved `model` line into
+`~/.codex/agents/<agent>.toml` ([ADR-2313](../adr/2313-codex-passive-model-posture.md)).
+Instead, each Codex skill inspects the visible `spawn_agent` schema. When that schema advertises
+`model` and `reasoning_effort`, the skill passes the model and effort resolved from
+`model_profile` — including `adaptive` — on that individual spawn. When either field is absent,
+the skill omits that field and the child inherits the session or static agent configuration.
+
+This keeps compatibility with older Codex schemas while allowing newer installations to route
+`gsd-planner`, `gsd-executor`, and other roles to their configured tiers. The fields are detected
+independently; support for typed `agent_type` dispatch does not imply support for either routing
+field.
+
+**To pin a model on Codex, name a real Codex model id per agent:**
 
 ```json
 {
   "runtime": "codex",
-  "model_profile": "balanced"
+  "model_overrides": {
+    "gsd-planner":  "gpt-5.6-sol",
+    "gsd-executor": "gpt-5.6-terra"
+  }
 }
 ```
 
-GSD resolves each tier alias to the Codex-native model and reasoning effort defined in the runtime tier map.
+Then re-run the installer to materialize the override in the agent TOML as a fallback for spawn
+schemas that do not advertise inline `model` (see above).
+
+Two rules apply to what you can put there:
+
+- **It must be a real Codex model id.** A GSD tier alias (`opus`, `sonnet`, `haiku`, `fable`) or a
+  `claude-*` id is dropped with a warning rather than written, because Codex rejects them.
+- **Your account must actually expose it.** GSD cannot check this — if you pin `gpt-5.6-sol` on an
+  account that does not have it, you get the same 400. When in doubt, omit the pin and let the
+  session model apply.
+
+`model_reasoning_effort` follows the model: with no pin, GSD writes no effort line either, so the
+Codex UI drives both rather than one following GSD and the other following your session.
+
+> **Upgrading from v1.10 or earlier?** Codex installs used to embed a per-tier model
+> (`opus→gpt-5.6-sol`, `sonnet→gpt-5.6-terra`, `haiku→gpt-5.6-luna`). If you were on an API-key
+> account where those resolved successfully, add the `model_overrides` block above to keep them.
+> The installer prints a one-time notice when it drops a pin. If you were on a ChatGPT account, this
+> is the change that stops the 400s — nothing to do.
+
+### Allocating for execution-heavy workflows on Codex
+
+Execution and verification account for most of the model calls in a long GSD run — planning happens
+once per phase, execution happens per plan, and verification runs over everything produced. On
+2026-07-30 OpenAI cut GPT-5.6 Luna API pricing by 80% and Terra by 20%, and reduced how many credits
+both consume against Codex paid-plan quotas while leaving subscription prices and quota budgets
+unchanged. Sol was unchanged. That makes the cheaper models materially cheaper for exactly the
+high-volume half of a workflow.
+
+GSD does not add a routing surface for this — the levers below already express it, and
+[#2935](https://github.com/open-gsd/gsd-core/issues/2935) was closed as already-implemented on
+precisely that basis. Keep Sol where the reasoning is worth the spend, and put the volume on Terra
+or Luna:
+
+```json
+{
+  "runtime": "codex",
+  "model_overrides": {
+    "gsd-planner":   "gpt-5.6-sol",
+    "gsd-debugger":  "gpt-5.6-sol",
+    "gsd-executor":  "gpt-5.6-terra",
+    "gsd-verifier":  "gpt-5.6-luna"
+  }
+}
+```
+
+Prefer `models` when you want the split by *phase type* rather than by agent — it maps the six phase
+types at once and every agent carries a `phaseType`, so it survives the roster changing under you:
+
+```json
+{
+  "models": { "planning": "opus", "execution": "sonnet", "verification": "haiku" }
+}
+```
+
+Two things worth knowing before you tune this:
+
+- **Effort is a separate lever from model, and it is now per-model.** Dropping to Luna does not force
+  you to drop effort — Luna advertises everything up to `max`. See
+  [Configuration reference — effort](../CONFIGURATION.md#model-profiles) for the per-model table and
+  which levels clamp.
+- **These are cost/limit tradeoffs, not quality claims.** The 2026-07-30 change was a pricing and
+  credit-accounting change; it did not alter model quality. Sol remains the strongest model for
+  planning and hard debugging, which is why it stays there above.
 
 **If you want per-agent model IDs on any non-Claude runtime:**
 
@@ -223,8 +305,9 @@ When multiple layers apply, the resolver picks the highest-priority entry:
 1. model_overrides[<agent>]           — per-agent; full IDs; targeted exception
 2. dynamic_routing.tier_models[<tier>] — when enabled; escalates on soft failure
 3. models[<phase_type>]               — coarse phase-level tier
-4. model_profile (per-agent column)   — global tier strategy
-5. Runtime default                    — when nothing else applies
+4. model_profile_overrides.<runtime>.<tier> — per-tier model override (#4192: honored on the claude runtime too)
+5. model_profile (per-agent column)   — global tier strategy
+6. Runtime default                    — when nothing else applies
 ```
 
 ---
@@ -237,6 +320,7 @@ When multiple layers apply, the resolver picks the highest-priority entry:
 | Coarse phase-level tuning ("Opus for planning") | `models.<phase_type>` |
 | Per-agent precision ("force Haiku on the codebase mapper") | `model_overrides[<agent>]` |
 | A fully-qualified model ID for a specific agent | `model_overrides[<agent>]: "openai/gpt-5"` |
+| Pin a tier's generation on Claude Code (e.g. executor stays on Opus 4.7) | `model_profile_overrides.claude.<tier>: "claude-opus-4-7"` |
 | Start cheap, escalate only on failure | `dynamic_routing` |
 | All agents follow the session model (non-Anthropic provider) | `model_profile: "inherit"` |
 

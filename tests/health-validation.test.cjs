@@ -112,6 +112,87 @@ describe('W011: STATE/ROADMAP cross-validation', () => {
       `Should not have W011: ${JSON.stringify(output.warnings)}`
     );
   });
+
+  // ─── #3280 — the STATE.md format `gsd-tools state update` /
+  // `state begin-phase` actually persist: YAML frontmatter `current_phase` +
+  // `status` (syncStateFrontmatter), not the legacy bold-prose fields. New
+  // fixtures added alongside the legacy cases above (which stay, since real
+  // user repos still carry the prose format).
+
+  test('#3280: frontmatter current_phase + ROADMAP [x] -> W011 warning', () => {
+    writeMinimalProjectMd(tmpDir);
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap\n\n- [x] Phase 3: Database Layer\n\n### Phase 3: Database Layer\n**Goal:** DB setup\n`
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '---',
+        "gsd_state_version: '1.0'",
+        'milestone: v1.0',
+        'current_phase: 3',
+        'current_phase_name: Database Layer',
+        'status: executing',
+        '---',
+        '',
+        '# Session State',
+        '',
+        '## Current Position',
+        '',
+        'Phase: 3 of 4 (Database Layer)',
+        '',
+      ].join('\n')
+    );
+    writeValidConfigJson(tmpDir);
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '03-database-layer'), { recursive: true });
+
+    const result = runGsdTools('validate health', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.ok(
+      output.warnings.some(w => w.code === 'W011'),
+      `Expected W011 in warnings: ${JSON.stringify(output.warnings)}`
+    );
+  });
+
+  test('#3280: frontmatter current_phase + status completed (writer vocabulary) -> no W011 warning', () => {
+    writeMinimalProjectMd(tmpDir);
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap\n\n- [x] Phase 3: Database Layer\n\n### Phase 3: Database Layer\n**Goal:** DB setup\n`
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '---',
+        "gsd_state_version: '1.0'",
+        'current_phase: 3',
+        'current_phase_name: Database Layer',
+        'status: completed',
+        '---',
+        '',
+        '# Session State',
+        '',
+        '## Current Position',
+        '',
+        'Phase: 3 of 4 (Database Layer)',
+        '',
+      ].join('\n')
+    );
+    writeValidConfigJson(tmpDir);
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '03-database-layer'), { recursive: true });
+
+    const result = runGsdTools('validate health', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.ok(
+      !output.warnings.some(w => w.code === 'W011'),
+      `Should not have W011 for a completed phase in the writer's own status vocabulary: ${JSON.stringify(output.warnings)}`
+    );
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1075,7 +1156,12 @@ describe('W023 — colliding phase directories (issue #2408)', () => {
     fs.mkdirSync(realDir, { recursive: true });
     fs.writeFileSync(path.join(realDir, '01-01-PLAN.md'), '# Plan');
     fs.writeFileSync(path.join(realDir, '01-01-SUMMARY.md'), '# Summary');
-    fs.writeFileSync(path.join(realDir, 'VERIFICATION.md'), '---\nstatus: passed\n---\n# Verified');
+    // Real convention is `*-VERIFICATION.md` (gsd-core/workflows/verify-work.md:573's
+    // `ls "${PHASE_DIR}"/*-VERIFICATION.md` glob; verification.cts:425's
+    // `readVerificationStatus` matches the same `-VERIFICATION.md` suffix) — a bare
+    // `VERIFICATION.md` with no prefix is never produced by /gsd-verify-work and is
+    // invisible to the canonical reader `isPhaseComplete` now sources this rule from.
+    fs.writeFileSync(path.join(realDir, '05-real-VERIFICATION.md'), '---\nstatus: passed\n---\n# Verified');
 
     // 05-real-stray/ — empty → Not Started
     fs.mkdirSync(path.join(phasesDir, '05-real-stray'), { recursive: true });
@@ -1235,10 +1321,10 @@ describe('Drift item W006-archived — MILESTONE_ARCHIVE_DIR_RE and PHASE_TOKEN_
     assert.strictEqual(re.exec('64-auth-service')?.[1], '64');
     assert.strictEqual(re.exec('03B-feature')?.[1], '03B');
     assert.strictEqual(re.exec('999.1-foo')?.[1], '999.1');
-    assert.strictEqual(re.exec('CK-64-auth')?.[1], '64');
-    assert.strictEqual(re.exec('MANIFOLD-64-auth')?.[1], '64');
-    assert.strictEqual(re.exec('APP1-64-auth')?.[1], '64');
-    assert.strictEqual(re.exec('APP_1-64-auth')?.[1], '64');
+    assert.strictEqual(re.exec('CK-64-auth')?.[1], 'CK-64');
+    assert.strictEqual(re.exec('MANIFOLD-64-auth')?.[1], 'MANIFOLD-64');
+    assert.strictEqual(re.exec('APP1-64-auth')?.[1], 'APP1-64');
+    assert.strictEqual(re.exec('APP_1-64-auth')?.[1], 'APP_1-64');
   });
 
   test('PHASE_TOKEN_FROM_DIR_RE rejects a single-digit slug word after a phase number (#2043)', () => {
@@ -1251,11 +1337,11 @@ describe('Drift item W006-archived — MILESTONE_ARCHIVE_DIR_RE and PHASE_TOKEN_
     // Legit multi-segment (zero-padded) milestone-prefixed tokens are preserved.
     assert.strictEqual(re.exec('02-01-setup')?.[1], '02-01');
     // Single-digit letter-suffix phase ids ("1A"/"01A") and milestone-prefixed
-    // single-digit sub-phases ("M1-2" → "2") must still match (the fix tightens
+    // single-digit sub-phases ("M1-2") must still match (the fix tightens
     // only the continuation, not the first component).
     assert.strictEqual(re.exec('1A-foo')?.[1], '1A');
     assert.strictEqual(re.exec('01A-foo')?.[1], '01A');
-    assert.strictEqual(re.exec('M1-2-setup')?.[1], '2');
+    assert.strictEqual(re.exec('M1-2-setup')?.[1], 'M1-2');
   });
 });
 
@@ -1336,6 +1422,18 @@ describe('Drift item I001 — canonicalPlanStem: long PLAN stem matches short SU
     assert.strictEqual(re.exec('46-6-rs')?.[1], '46'); // 1-digit: slug (#2043)
   });
 
+  test('PHASE_TOKEN_FROM_DIR_RE reads a 2-digit segment literally, whatever follows (#2528)', () => {
+    const gen = require('../gsd-core/bin/lib/validate.cjs');
+    const re = gen.PHASE_TOKEN_FROM_DIR_RE;
+    // A 1-digit word after the continuation is not evidence about the
+    // continuation: "10-24-7-autonomy" (phase 10, slug "24/7 Autonomy") and
+    // "10-24-7-zip" (sub-phase 10.24, slug "7-Zip") are the same string shape.
+    assert.strictEqual(re.exec('10-24-7-autonomy')?.[1], '10-24');
+    assert.strictEqual(re.exec('10-24-7-zip')?.[1], '10-24');
+    // Lowercase inside the segment IS evidence — the write side never emits it.
+    assert.strictEqual(re.exec('05-80-20-25abc')?.[1], '05-80-20');
+  });
+
   test('canonicalPlanStem does not pair a ≥3-digit slug word (#2232)', () => {
     const gen = require('../gsd-core/bin/lib/validate.cjs');
     // A year-leading slug is not a plan component: the stem is returned
@@ -1393,6 +1491,19 @@ const {
   buildRoadmapPhaseVariants,
   buildNotStartedPhaseVariants,
 } = require('../gsd-core/bin/lib/validate.cjs');
+
+/**
+ * NOT a subprocess spawn timeout. This is `node:test`'s own per-test
+ * `{ timeout }` option (the second positional argument to `test(name,
+ * options, fn)`), used as a hang BACKSTOP for two ReDoS (#663) adversarial-
+ * input regression tests -- catches any regression that re-introduces a
+ * catastrophically-backtracking pattern. Coincides numerically with
+ * tests/helpers/timeouts.cjs's SCAN_USAGE_ERROR_TIMEOUT_MS and
+ * MALFORMED_INPUT_HOOK_TIMEOUT_MS but is a completely different mechanism
+ * (a node:test option, not a subprocess spawn bound) -- disclosed, not
+ * merged.
+ */
+const REDOS_BACKSTOP_TEST_TIMEOUT_MS = 5000;
 
 // ─── Part A: behavior preservation ───────────────────────────────────────────
 
@@ -1490,7 +1601,7 @@ describe('buildRoadmapPhaseVariants — ReDoS adversarial fixture (#663)', () =>
   // yields NO match (empty roadmapPhases Set) — the correct behavior when the
   // terminating colon is absent.  The { timeout: 5000 } backstop catches any
   // regression that re-introduces a slow pattern.
-  test('malformed heading without colon yields no phase match (adversarial input)', { timeout: 5000 }, () => {
+  test('malformed heading without colon yields no phase match (adversarial input)', { timeout: REDOS_BACKSTOP_TEST_TIMEOUT_MS }, () => {
     const pathological = '## Phase a' + '-a'.repeat(32) + ' ';
     const { roadmapPhases } = buildRoadmapPhaseVariants(pathological);
     assert.strictEqual(roadmapPhases.size, 0,
@@ -1503,7 +1614,7 @@ describe('buildNotStartedPhaseVariants — ReDoS adversarial fixture (#663)', ()
   // A checklist-style line with many "-a" segments and no colon triggers the
   // same catastrophic backtracking.  Assert the correct structured result:
   // the malformed line yields an empty notStarted Set.
-  test('malformed unchecked-item without terminator yields no phase match (adversarial input)', { timeout: 5000 }, () => {
+  test('malformed unchecked-item without terminator yields no phase match (adversarial input)', { timeout: REDOS_BACKSTOP_TEST_TIMEOUT_MS }, () => {
     // No trailing colon or whitespace: the regex terminator [:\s*] cannot match,
     // so the engine must backtrack through all '-a' repetitions and conclude no
     // match.  Under the old nested-quantifier pattern this was exponential;
@@ -1816,3 +1927,187 @@ describe('validate consistency — checklist-style roadmap phases must not emit 
 });
   });
 }
+
+// ── W024 (#2573): STATE.md commit-age freshness advisory ─────────────────────
+//
+// Advisory ONLY. It appends to warnings[] and must never change `status` or any
+// existing count — promoting it to a gate is a separate, disclosed change.
+//
+// Goodhart guard (why the threshold is coarse and the wording is a proxy):
+// `state_head` restamps on EVERY state write, so a low commits-behind count
+// means "something wrote STATE recently", not "STATE's content is accurate".
+// The number is a freshness proxy; the message must never assert drift.
+describe('W024 — STATE.md commit-age freshness advisory (#2573)', () => {
+  const { after } = require('node:test');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { runGsdTools, cleanup } = require('./helpers.cjs');
+  const { runGit, OUTCOME } = require('./helpers/process-seam.cjs');
+  const {
+    STATE_HEAD_ADVISORY_COMMITS,
+  } = require('../gsd-core/bin/lib/verify.cjs');
+
+  const dirs = [];
+  const track = (d) => { dirs.push(d); return d; };
+  after(() => { while (dirs.length) cleanup(dirs.pop()); });
+
+  // `runGit` (tests/helpers/process-seam.cjs) reports a failed spawn as DATA,
+  // never as a throw — by design, so retry-aware callers can inspect it. A
+  // fixture builder that ignores that return value swallows the failure and
+  // silently produces a WEAKER input (e.g. one fewer commit, a blank
+  // `state_head`) than what the test asked for: the exact "swallowed
+  // precondition laundered into a plausible downstream outcome" shape that
+  // eslint-rules/no-swallowed-precondition.cjs exists to catch, just in test
+  // code instead of source. `mustGit` closes that gap for this builder.
+  function mustGit(args, options) {
+    const r = runGit(args, options);
+    if (r.outcome !== OUTCOME.EXITED || r.exitCode !== 0) {
+      throw new Error(
+        `mustGit: \`git ${args.join(' ')}\` did not succeed ` +
+        `(outcome=${r.outcome}, exitCode=${r.exitCode}): ${r.stderr.trim()}`
+      );
+    }
+    return r;
+  }
+
+  function project({ commitsAhead, stateHead = 'BASE' }) {
+    const base = track(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-h-')));
+    const planningDir = path.join(base, '.planning');
+    fs.mkdirSync(path.join(planningDir, 'phases'), { recursive: true });
+    fs.writeFileSync(
+      path.join(planningDir, 'PROJECT.md'),
+      '# Project\n\n## What This Is\nTest.\n\n## Core Value\nTest.\n\n## Requirements\nTest.\n',
+    );
+    fs.writeFileSync(path.join(planningDir, 'config.json'), JSON.stringify({ model_profile: 'balanced' }));
+    fs.writeFileSync(
+      path.join(planningDir, 'ROADMAP.md'),
+      '# Roadmap\n\n## Milestone v1.0\n\n### Phase 1: One\n**Goal:** g\n',
+    );
+
+    mustGit(['init', '-q'], { cwd: base });
+    mustGit(['config', 'user.email', 't@t.com'], { cwd: base });
+    mustGit(['config', 'user.name', 'T'], { cwd: base });
+    mustGit(['config', 'commit.gpgsign', 'false'], { cwd: base });
+    mustGit(['add', '-A'], { cwd: base });
+    mustGit(['commit', '-q', '-m', 'seed'], { cwd: base });
+    const seed = mustGit(['rev-parse', 'HEAD'], { cwd: base }).stdout.trim();
+    const head = seed;
+    assert.ok(head.length > 0, 'FIXTURE ERROR: `git rev-parse HEAD` for the seed commit returned empty');
+
+    fs.writeFileSync(
+      path.join(planningDir, 'STATE.md'),
+      [
+        '---',
+        'status: executing',
+        ...(stateHead === null ? [] : [`state_head: ${stateHead === 'BASE' ? head : stateHead}`]),
+        '---',
+        '',
+        '# State',
+        '',
+        '**Current Phase:** 1',
+        '**Status:** In progress',
+        '',
+      ].join('\n'),
+    );
+
+    for (let i = 0; i < commitsAhead; i++) {
+      fs.writeFileSync(path.join(base, `f${i}.txt`), `${i}\n`);
+      mustGit(['add', '-A'], { cwd: base });
+      mustGit(['commit', '-q', '-m', `c${i}`], { cwd: base });
+    }
+
+    // Precondition check: prove the fixture built what it claims rather than
+    // trusting the loop above ran to completion. A silently-failed `git
+    // commit` here previously dropped one commit off the count with no
+    // signal, which was enough to move `readStateHeadFreshness`
+    // (src/state.cts) across the W024 threshold and produce a false negative
+    // (#2573 flake). Fail as a FIXTURE error, not as the assertion under test.
+    const actualCommitsAhead = Number(
+      mustGit(['rev-list', '--count', `${seed}..HEAD`], { cwd: base }).stdout.trim()
+    );
+    assert.strictEqual(
+      actualCommitsAhead,
+      commitsAhead,
+      `FIXTURE ERROR: requested commitsAhead=${commitsAhead} but ` +
+      `\`git rev-list --count ${seed}..HEAD\` reports ${actualCommitsAhead}`
+    );
+
+    return base;
+  }
+
+  function health(dir) {
+    const r = runGsdTools(['validate', 'health', '--json'], dir);
+    assert.strictEqual(r.success, true, `unexpected failure: ${r.error}`);
+    return JSON.parse(r.output);
+  }
+
+  const w024 = (d) => (d.warnings ?? []).filter((w) => w.code === 'W024');
+
+  test('exports a named threshold constant rather than a bare magic number', () => {
+    assert.strictEqual(typeof STATE_HEAD_ADVISORY_COMMITS, 'number');
+    assert.ok(STATE_HEAD_ADVISORY_COMMITS > 0);
+  });
+
+  test('does NOT fire when STATE.md was written at HEAD', () => {
+    const data = health(project({ commitsAhead: 0 }));
+    const w024 = (data.warnings ?? []).filter((w) => w.code === 'W024');
+    assert.strictEqual(w024.length, 0, `expected no W024, got ${JSON.stringify(w024)}`);
+  });
+
+  test('boundary: silent at threshold-1, fires at threshold+1', () => {
+    // The 0/1/20 cases alone leave the actual boundary untested — 1 is a
+    // trivial-fit, not an edge. These two pin the comparison operator.
+    const below = health(project({ commitsAhead: STATE_HEAD_ADVISORY_COMMITS - 1 }));
+    assert.strictEqual((below.warnings ?? []).filter((w) => w.code === 'W024').length, 0,
+      `must stay silent at ${STATE_HEAD_ADVISORY_COMMITS - 1} commits`);
+    const above = health(project({ commitsAhead: STATE_HEAD_ADVISORY_COMMITS + 1 }));
+    assert.strictEqual((above.warnings ?? []).filter((w) => w.code === 'W024').length, 1,
+      `must fire at ${STATE_HEAD_ADVISORY_COMMITS + 1} commits`);
+  });
+
+  test('does NOT fire below the threshold (a healthy project stays quiet)', () => {
+    // Hyrum guard: firing on every ordinary project would change health's
+    // observable "clean" state and make anything gating on clean-health noisy.
+    const data = health(project({ commitsAhead: 1 }));
+    const w024 = (data.warnings ?? []).filter((w) => w.code === 'W024');
+    assert.strictEqual(w024.length, 0, `expected no W024 at 1 commit, got ${JSON.stringify(w024)}`);
+  });
+
+  test('fires at/above the threshold, states the count, and stays a proxy (never asserts drift)', () => {
+    const data = health(project({ commitsAhead: STATE_HEAD_ADVISORY_COMMITS }));
+    const w024 = (data.warnings ?? []).filter((w) => w.code === 'W024');
+    assert.strictEqual(w024.length, 1, `expected exactly one W024, got ${JSON.stringify(data.warnings)}`);
+    const msg = String(w024[0].message);
+    assert.ok(msg.includes(String(STATE_HEAD_ADVISORY_COMMITS)),
+      `W024 must state the commit count, got: ${msg}`);
+    assert.ok(/approximate/i.test(msg),
+      `W024 must frame the signal as approximate (freshness proxy), got: ${msg}`);
+    assert.ok(!/\bdrift(ed)?\b|\bis wrong\b|\bstale content\b/i.test(msg),
+      `W024 must NOT assert drift — it is a proxy, not a measurement. Got: ${msg}`);
+  });
+
+  test('is advisory only — lands in warnings[], never errors[] or the repair set', () => {
+    // NOT "stale.status === fresh.status": these fixtures already carry W006
+    // ("Phase in ROADMAP but no directory"), so both sides are `degraded`
+    // regardless of W024 and that assertion can never fail. Health derives
+    // status from warnings by design (warnings -> degraded), so the real
+    // invariant is that W024 is a WARNING and never escalates.
+    const data = health(project({ commitsAhead: STATE_HEAD_ADVISORY_COMMITS }));
+    assert.strictEqual(w024(data).length, 1, 'precondition: W024 fired');
+    assert.ok(
+      !(data.errors ?? []).some((e) => e.code === 'W024'),
+      `W024 must never appear in errors[]: ${JSON.stringify(data.errors)}`,
+    );
+    assert.notStrictEqual(data.status, 'broken',
+      'an advisory must never break health');
+    assert.ok(!w024(data)[0].repairable,
+      'W024 is diagnostic, not auto-repairable — it must not enter the repair set');
+  });
+
+  test('absent state_head → no W024 (unknown is not a finding)', () => {
+    const data = health(project({ commitsAhead: 5, stateHead: null }));
+    const w024 = (data.warnings ?? []).filter((w) => w.code === 'W024');
+    assert.strictEqual(w024.length, 0, `unknown must stay silent, got ${JSON.stringify(w024)}`);
+  });
+});

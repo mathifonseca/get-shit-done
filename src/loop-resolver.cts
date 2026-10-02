@@ -43,7 +43,7 @@ const { resolveCapabilityRuntimeState } = capabilityStateModule;
 // ─── Capability-activation engine (single owner for config-key precedence) ────
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import capabilityActivationModule = require('./capability-activation.cjs');
-const { _getNestedConfigValue, _readRawConfigKey, _resolveActivationValue, resolveConfigKey } = capabilityActivationModule;
+const { _getNestedConfigValue, _readRawConfigKey, _resolveActivationValue, _resolvePointGate, resolveConfigKey } = capabilityActivationModule;
 
 // ─── Canonical points (derived from LOOP_HOST_CONTRACT — authoritative 12) ───
 
@@ -115,6 +115,8 @@ interface RawHook {
   onError?: unknown;
   blocking?: unknown;
   check?: unknown;
+  /** #4209 DISP-02: step-only reviewer-lane opt-in trait; validated boolean upstream. */
+  supportsReviewerLanes?: unknown;
 }
 
 type HookKind = 'step' | 'contribution' | 'gate';
@@ -133,6 +135,13 @@ interface ActiveHook {
   onError?: string;
   /** Resolved capability-owned config values declared in the contribution's configValues map. */
   configValues?: Record<string, unknown>;
+  /**
+   * #4209 DISP-02: step-only reviewer-lane opt-in trait. Only present (and only
+   * ever `true`) when the source step declared a literal `true`; omitted or
+   * `false` never reach the active hook — the field is inert by absence, not
+   * by carrying `false`.
+   */
+  supportsReviewerLanes?: true;
 }
 
 interface ResolveLoopHooksInput {
@@ -203,11 +212,13 @@ function resolveLoopHooks(input: ResolveLoopHooksInput): ResolveLoopHooksResult 
   // Helper: check activation using single-key precedence resolver (FIX 1 + FIX 3)
   function isActive(hook: RawHook): boolean {
     const when = hook['when'];
-    // No `when` → unconditional hook, always active
-    if (when === undefined || when === null) return true;
-    // FIX 3: `when` present but not a non-empty string → malformed registry data → INACTIVE
-    if (typeof when !== 'string' || when.length === 0) return false;
-    return _resolveActivationValue(when, config, cwd, registry);
+    if (when !== undefined && when !== null) {
+      // FIX 3: `when` present but not a non-empty string → malformed registry data → INACTIVE
+      if (typeof when !== 'string' || when.length === 0) return false;
+      if (!_resolveActivationValue(when, config, cwd, registry)) return false;
+    }
+    // #3661: optional point-selection gate — see capability-activation.cts.
+    return _resolvePointGate((hook as Record<string, unknown>)['pointFrom'], point, config, cwd, registry);
   }
 
   function isCapabilityActive(capId: string): boolean {
@@ -284,6 +295,8 @@ function resolveLoopHooks(input: ResolveLoopHooksInput): ResolveLoopHooksResult 
     if (produces.length > 0) active.produces = produces;
     if (consumes.length > 0) active.consumes = consumes;
     if (onError !== undefined) active.onError = onError;
+    // #4209 DISP-02: only a literal `true` projects; absent/false stay inert.
+    if (hook['supportsReviewerLanes'] === true) active.supportsReviewerLanes = true;
     activeHooks.push(active);
   }
 
@@ -475,24 +488,30 @@ function sanitizeLoadFailReason(reason: unknown): string {
   return cleaned || '(no reason given)';
 }
 
-function cmdLoopRenderHooks(
+interface ResolvedActiveHooks {
+  point: string;
+  activeHooks: ActiveHook[];
+  warnings: string[];
+}
+
+/**
+ * The full config/registry/capability-state resolution `cmdLoopRenderHooks` performs, minus its
+ * CLI-only output formatting — extracted so an in-process caller (e.g. `review-lane dispatch-step`
+ * self-verifying a `supportsReviewerLanes` trait) can reach the SAME resolution `gsd_run loop
+ * render-hooks <point> --raw` would give it, without spawning a subprocess and re-parsing its
+ * stdout (which was subject to `io.cjs`'s `@file:` overflow protocol on the rendered-string
+ * envelope — a bug class this in-process call cannot hit, since it never touches that envelope
+ * or its rendering at all).
+ *
+ * Throws on an invalid `point` (mirrors `resolveLoopHooks`); callers convert to their own error
+ * channel. Emits the same loud stderr load-failure warnings `cmdLoopRenderHooks` always has,
+ * regardless of caller — a skipped gate must never be silently invisible.
+ */
+function resolveActiveHooksForPoint(
   cwd: string,
   point: string,
-  raw: boolean,
   options: Record<string, unknown> = {},
-): void {
-  if (!point) {
-    coreError('loop render-hooks requires a <point> argument. Valid points: ' + CANONICAL_POINTS.join(', '));
-    return;
-  }
-
-  // --active-cap <capId> mode: emit 'true' or 'false' only (scanner-safe, no JSON envelope)
-  const activeCapId = typeof options['activeCap'] === 'string' ? options['activeCap'] : undefined;
-  if (activeCapId !== undefined && activeCapId === '') {
-    coreError('--active-cap requires a <capId> value (e.g. --active-cap tdd)');
-    return;
-  }
-
+): ResolvedActiveHooks {
   const runtimeConfigDir = typeof options['configDir'] === 'string'
     ? options['configDir']
     : undefined;
@@ -531,14 +550,7 @@ function cmdLoopRenderHooks(
     capabilityStatesById.set(cap.id, cap);
   }
 
-  let resolved: ResolveLoopHooksResult;
-  try {
-    resolved = resolveLoopHooks({ point, registry, config, cwd, capabilityStatesById });
-  } catch (err: unknown) {
-    const msg = (err instanceof Error) ? err.message : String(err);
-    coreError(msg);
-    return;
-  }
+  const resolved: ResolveLoopHooksResult = resolveLoopHooks({ point, registry, config, cwd, capabilityStatesById });
 
   // ── ADR-1244 D2: load-failed capability gates FAIL OPEN with a loud warning ────
   // Decision (#2009): a capability that failed to LOAD must not block the loop.
@@ -590,30 +602,59 @@ function cmdLoopRenderHooks(
     process.stderr.write(`gsd: warning — ${w}\n`);
   }
 
-  // --active-cap mode: print exactly 'true' or 'false' with no envelope
+  // Surface capability-state warnings and the #2009 load-failure fail-open warnings together
+  // (in addition to the stderr emission above, which is the channel host workflows actually see).
+  const combinedWarnings = [...(state.warnings || []), ...loadFailWarnings];
+
+  return { point: resolved.point, activeHooks: resolved.activeHooks, warnings: combinedWarnings };
+}
+
+function cmdLoopRenderHooks(
+  cwd: string,
+  point: string,
+  raw: boolean,
+  options: Record<string, unknown> = {},
+): void {
+  if (!point) {
+    coreError('loop render-hooks requires a <point> argument. Valid points: ' + CANONICAL_POINTS.join(', '));
+    return;
+  }
+
+  // --active-cap <capId> mode: emit 'true' or 'false' only (scanner-safe, no JSON envelope)
+  const activeCapId = typeof options['activeCap'] === 'string' ? options['activeCap'] : undefined;
+  if (activeCapId !== undefined && activeCapId === '') {
+    coreError('--active-cap requires a <capId> value (e.g. --active-cap tdd)');
+    return;
+  }
+
+  let result: ResolvedActiveHooks;
+  try {
+    result = resolveActiveHooksForPoint(cwd, point, options);
+  } catch (err: unknown) {
+    const msg = (err instanceof Error) ? err.message : String(err);
+    coreError(msg);
+    return;
+  }
+
   if (activeCapId !== undefined) {
-    const isActive = resolved.activeHooks.some((h) => h.capId === activeCapId);
+    const isActive = result.activeHooks.some((h) => h.capId === activeCapId);
     process.stdout.write(isActive ? 'true\n' : 'false\n');
     return;
   }
 
-  const rendered = renderLoopHooks(resolved);
+  const rendered = renderLoopHooks({ point: result.point, activeHooks: result.activeHooks });
   const envelope: {
     point: string;
     activeHooks: ActiveHook[];
     rendered: string;
     warnings?: string[];
   } = {
-    point: resolved.point,
-    activeHooks: resolved.activeHooks,
+    point: result.point,
+    activeHooks: result.activeHooks,
     rendered,
   };
-  // Surface capability-state warnings and the #2009 load-failure fail-open
-  // warnings together in the structured `warnings` channel (in addition to the
-  // stderr emission above, which is the channel host workflows actually see).
-  const combinedWarnings = [...(state.warnings || []), ...loadFailWarnings];
-  if (combinedWarnings.length > 0) {
-    envelope.warnings = combinedWarnings;
+  if (result.warnings.length > 0) {
+    envelope.warnings = result.warnings;
   }
 
   coreOutput(envelope, raw);
@@ -623,6 +664,7 @@ export = {
   resolveLoopHooks,
   renderLoopHooks,
   cmdLoopRenderHooks,
+  resolveActiveHooksForPoint,
   // Exported for tests
   _getNestedConfigValue,
   _resolveActivationValue,
@@ -630,6 +672,10 @@ export = {
   // Re-exported for identity parity guard (FIX 2: resolveConfigValues in this module
   // calls resolveConfigKey; exporting it here makes the single-owner contract testable).
   resolveConfigKey,
+  // #3661: re-exported for the same identity parity guard — isActive calls
+  // _resolvePointGate; exporting it here makes the single-owner contract testable
+  // (see tests/capability-precedence-parity.test.cjs's identity guard describe block).
+  _resolvePointGate,
   CANONICAL_POINTS_FALLBACK,
   CANONICAL_POINTS,
 };

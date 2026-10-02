@@ -75,6 +75,21 @@
 
 const fs = require('fs');
 const path = require('path');
+const { HOOK_ON_CRASH, allow, deny, crash } = require('./lib/hook-exit.js');
+
+// This guard's outer catch has always exited 0 (fail open — a hook error
+// must never block a legitimate tool call; see the emitBlock/consumeSentinelFor
+// header comments). Declared ONCE here so the outer catch's crash() call
+// states its policy explicitly rather than inheriting a default (#3911).
+const ON_CRASH = HOOK_ON_CRASH.ALLOW;
+
+// #3911 (ADR-3889 Phase 7) NOTE: the exit(2) call site (emitBlock, below) is
+// migrated to hooks/lib/hook-exit.js's deny(), using its `stderrPayload`
+// param (added for exactly this site): fd 1 still gets the full JSON
+// `output`, fd 2 gets ONLY the plain-text `output.reason` string — because
+// Kimi's native hook bus reads stderr verbatim back to the model, and a raw
+// JSON-stringified object on stderr is not the same reason text a model
+// should read. Byte-identical to the pre-migration emitBlock.
 
 // Block when the pending payload has fewer than this fraction of the on-disk
 // line count (0.4 → a Write shrinking a file below 40% of its current size).
@@ -90,10 +105,37 @@ const FLOOR_LINES = 40;
 // default to, a differently-cased path is the SAME real file — a Write to
 // '.planning/roadmap.md' clobbers ROADMAP.md while a case-sensitive match
 // waves it through.
+// #4455: workstream-scoped (and optionally project-scoped) variants —
+// planningDir(cwd) (src/planning-workspace.cts) resolves to
+// `.planning/[<project>/]workstreams/<ws>/...` whenever GSD_WORKSTREAM is
+// set. Before this, none of these three root-only patterns matched a
+// workstream-scoped target at all, so the ENTIRE guard (not just the
+// sentinel step — the shrink-ratio check too) silently never engaged for a
+// workstream-scoped ROADMAP.md/STATE.md/milestone-archive Write: exactly
+// the catastrophic-shrink scenario this file exists to stop, unguarded
+// under an active workstream. consumeSentinelFor's own `.planning`
+// derivation below is unaffected by this addition — it locates the single
+// outer `.planning` segment regardless of what's nested inside it, which is
+// also where the workflow's sentinel `printf` already writes, so no change
+// was needed there.
+//
+// Same gap exists one level up: planningDir(cwd) ALSO resolves to
+// `.planning/<project>/...` when GSD_PROJECT is set with NO GSD_WORKSTREAM
+// (project-only mode — the two env vars are independent; see planningDir's
+// own body). None of the patterns above cover that shape either. Found
+// during #4455's own review pass (same root cause, one more path variant)
+// — fixed in the same change rather than deferred, since it is the
+// identical defect class this PR already exists to close.
 const CURATED_PATTERNS = [
   /(?:^|\/)\.planning\/ROADMAP\.md$/i,
   /(?:^|\/)\.planning\/STATE\.md$/i,
   /(?:^|\/)\.planning\/milestones\/[^/]+-ROADMAP\.md$/i,
+  /(?:^|\/)\.planning\/(?:[^/]+\/)?workstreams\/[^/]+\/ROADMAP\.md$/i,
+  /(?:^|\/)\.planning\/(?:[^/]+\/)?workstreams\/[^/]+\/STATE\.md$/i,
+  /(?:^|\/)\.planning\/(?:[^/]+\/)?workstreams\/[^/]+\/milestones\/[^/]+-ROADMAP\.md$/i,
+  /(?:^|\/)\.planning\/[^/]+\/ROADMAP\.md$/i,
+  /(?:^|\/)\.planning\/[^/]+\/STATE\.md$/i,
+  /(?:^|\/)\.planning\/[^/]+\/milestones\/[^/]+-ROADMAP\.md$/i,
 ];
 
 // Count logical lines, ignoring a single trailing newline so that
@@ -141,7 +183,25 @@ function consumeSentinelFor(filePath, normalized) {
     // Path-bound: the token names exactly one file, resolved against the
     // .planning/ dir's parent (repo root) — same case-insensitive stance as
     // the curated match itself.
-    const namedNorm = path.resolve(path.join(planningDir, '..'), token).replace(/\\/g, '/').toLowerCase();
+    let namedPath = path.resolve(path.join(planningDir, '..'), token);
+    // Symmetry with the caller's own resolution (#4455 CI finding, macOS
+    // full-test shard): `filePath`/`normalized` were already realpath-resolved
+    // before this function was called (round 9 Minor 1's symlink-before-match
+    // fix), but `token` — typically an already-absolute path composed by the
+    // workflow's own init.* fields — was compared WITHOUT that same
+    // resolution. Wherever cwd sits under a symlink (macOS's /var ->
+    // /private/var is the common case, since that's exactly what os.tmpdir()
+    // resolves through, but any symlinked project/worktree checkout hits the
+    // same asymmetry), the token names the lexical path while `normalized`
+    // names the realpath — a validly-armed sentinel then never matches, and a
+    // legitimate milestone-reset Write stays incorrectly blocked. The named
+    // file is already known to exist (the caller only reaches this function
+    // after successfully reading it), so realpath is expected to succeed;
+    // keep the lexical path on failure, matching the caller's own fallback.
+    try {
+      namedPath = fs.realpathSync(namedPath);
+    } catch { /* keep the lexical path */ }
+    const namedNorm = namedPath.replace(/\\/g, '/').toLowerCase();
     if (namedNorm !== normalized.toLowerCase()) {
       return false; // armed for a different file — leave it for that write
     }
@@ -158,20 +218,13 @@ function consumeSentinelFor(filePath, normalized) {
 
 // m2 (round 5): the block emission must itself be exception-safe. An EPIPE
 // from writeSync inside the outer try would land in the fail-OPEN catch —
-// the one outcome the fail-closed branches exist to prevent. The decision
-// stands regardless of whether the payload could be delivered.
+// the one outcome the fail-closed branches exist to prevent. terminateNow
+// (via deny()) already guarantees this: a failed write never changes the
+// exit code and never throws out of the call. `output.reason` is passed as
+// the distinct stderrPayload so fd 2 gets the plain reason string — not the
+// full JSON `output` fd 1 gets — matching the pre-migration byte-for-byte.
 function emitBlock(output) {
-  try {
-    // writeSync: pipe writes via process.stdout/stderr are async on Windows
-    // and process.exit() does not flush them — a truncated block payload is
-    // a guard that silently half-fired.
-    fs.writeSync(1, JSON.stringify(output));
-    // Kimi feeds stderr (not stdout) back to the model on exit 2.
-    fs.writeSync(2, output.reason);
-  } catch {
-    // Emission failed; the block still stands.
-  }
-  process.exit(2);
+  deny(output, output.reason);
 }
 
 // #2304: Kimi's native hook bus delivers Kimi's tool vocabulary in the payload
@@ -223,7 +276,7 @@ function normalizeKimiPayload(data) {
 }
 
 let input = '';
-const stdinTimeout = setTimeout(() => process.exit(0), 3000);
+const stdinTimeout = setTimeout(() => allow(undefined), 3000);
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => input += chunk);
 process.stdin.on('end', () => {
@@ -234,17 +287,17 @@ process.stdin.on('end', () => {
     // A null/primitive payload has nothing to guard — exit deliberately
     // rather than throwing into the fail-open catch below (#2595 class).
     if (data === null || typeof data !== 'object') {
-      process.exit(0);
+      allow(undefined);
     }
 
     // Only whole-file Write is catastrophic-by-construction; Edit/MultiEdit
     // replace bounded spans and are out of scope by design (#2255).
     if (data.tool_name !== 'Write') {
-      process.exit(0);
+      allow(undefined);
     }
 
     if (isOverrideSet()) {
-      process.exit(0); // documented escape hatch — legitimate reset in progress
+      allow(undefined); // documented escape hatch — legitimate reset in progress
     }
 
     // Typed read (#2547 class): `[]`/`{}` are truthy, pass a `!value`
@@ -254,7 +307,7 @@ process.stdin.on('end', () => {
     const rawFilePath = typeof rawInput?.file_path === 'string' ? rawInput.file_path : '';
     const content = rawInput?.content;
     if (!rawFilePath || typeof content !== 'string') {
-      process.exit(0);
+      allow(undefined);
     }
 
     // Resolve relative paths against the session cwd (the same base the
@@ -272,7 +325,7 @@ process.stdin.on('end', () => {
     const normalized = filePath.replace(/\\/g, '/');
 
     if (!CURATED_PATTERNS.some(re => re.test(normalized))) {
-      process.exit(0); // not a curated planning artifact
+      allow(undefined); // not a curated planning artifact
     }
 
     // Only guard overwrites — creating a curated file fresh is fine.
@@ -285,7 +338,7 @@ process.stdin.on('end', () => {
       onDisk = fs.readFileSync(filePath, 'utf8');
     } catch (err) {
       if (err && err.code === 'ENOENT') {
-        process.exit(0); // does not exist — new-file Write, nothing to clobber
+        allow(undefined); // does not exist — new-file Write, nothing to clobber
       }
       emitBlock({
         decision: 'block',
@@ -306,17 +359,17 @@ process.stdin.on('end', () => {
     const newLines = countLines(content);
 
     if (oldLines < FLOOR_LINES) {
-      process.exit(0); // sub-floor stub — ratio checks are meaningless here
+      allow(undefined); // sub-floor stub — ratio checks are meaningless here
     }
 
     if (newLines >= oldLines * SHRINK_RATIO) {
-      process.exit(0); // shrink (if any) is within tolerance
+      allow(undefined); // shrink (if any) is within tolerance
     }
 
     // The mechanical hatch for workflow steps (see header): consulted only
     // here, at the block point, so a within-tolerance write never burns it.
     if (consumeSentinelFor(filePath, normalized)) {
-      process.exit(0); // armed for exactly this file, fresh, now consumed
+      allow(undefined); // armed for exactly this file, fresh, now consumed
     }
 
     const pct = Math.round((newLines / oldLines) * 100);
@@ -353,7 +406,9 @@ process.stdin.on('end', () => {
         `to bypass this guard once.`,
     });
   } catch {
-    // Silent fail — never block valid tool calls due to hook errors
-    process.exit(0);
+    // Silent fail — never block valid tool calls due to hook errors.
+    // ON_CRASH is declared ALLOW at module top: this preserves today's
+    // exit(0) fail-open behavior exactly (#3911).
+    crash(ON_CRASH, undefined);
   }
 });

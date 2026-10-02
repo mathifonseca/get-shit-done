@@ -1,9 +1,3 @@
-// allow-test-rule: structural-implementation-guard
-// init.cjs cmdInitPlanPhase must expose text_mode in its returned flags object.
-// The behavioral alternative (run plan-phase init and inspect JSON output) is
-// fragile across runtime variations. Structural inspection guards the contract
-// until a stable behavioral API test is in place.
-
 /**
  * Discuss Mode Config Tests
  *
@@ -14,6 +8,7 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const { createTempProject, cleanup, captureFdSync } = require('./helpers.cjs');
 
 describe('workflow.discuss_mode config', () => {
   test('config template includes discuss_mode default', () => {
@@ -37,6 +32,7 @@ describe('workflow.discuss_mode config', () => {
       path.join(__dirname, '..', 'commands', 'gsd', 'discuss-phase.md'), 'utf8'
     );
     // Extract the <process> block
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own command .md content, fixed-size author-controlled content
     const processMatch = command.match(/<process>([\s\S]*?)<\/process>/);
     assert.ok(processMatch, 'should have a <process> block');
     const processBlock = processMatch[1];
@@ -139,13 +135,35 @@ describe('workflow.discuss_mode config', () => {
     assert.ok(command.includes('--text'), 'argument-hint should include --text flag');
   });
 
-  test('plan-phase init exposes text_mode in workflow flags', () => {
-    const initSrc = fs.readFileSync(
-      path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'init.cjs'), 'utf8'
+  test('plan-phase init propagates config.workflow.text_mode into its result', () => {
+    // Behavioral replacement for a source-grep assertion (#3466): calls
+    // cmdInitPlanPhase directly against a real project fixture whose
+    // config.json sets workflow.text_mode, and asserts the value actually
+    // reaches the JSON result cmdInitPlanPhase emits — rather than grepping
+    // init.cjs's source text for the propagation line.
+    const { cmdInitPlanPhase } = require(
+      path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'init.cjs')
     );
-    // The cmdInitPlanPhase result object must include text_mode
-    const planPhaseBlock = initSrc.slice(initSrc.indexOf('function cmdInitPlanPhase'));
-    assert.ok(planPhaseBlock.includes('text_mode: config.text_mode'), 'init plan-phase must expose text_mode');
+    const cwd = createTempProject('gsd-text-mode-propagation-');
+    try {
+      fs.writeFileSync(
+        path.join(cwd, '.planning', 'config.json'),
+        JSON.stringify({ workflow: { text_mode: true } }, null, 2)
+      );
+
+      // cmdInitPlanPhase writes its JSON result directly to fd 1 via
+      // io.cjs's writeAllSync (bypasses console.log — captureConsole()
+      // cannot observe it). Delegates to the shared, safe fd-capture helper
+      // (#4306) — see tests/helpers.cjs's captureFdSync.
+      const captured = captureFdSync(1, () => cmdInitPlanPhase(cwd, 'does-not-exist', false, {}));
+      const result = JSON.parse(captured);
+      assert.strictEqual(
+        result.text_mode, true,
+        'cmdInitPlanPhase result must propagate config.workflow.text_mode'
+      );
+    } finally {
+      cleanup(cwd);
+    }
   });
 
   test('progress workflow references discuss_mode', () => {
@@ -194,7 +212,6 @@ describe('workflow.discuss_mode config', () => {
 {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-2549-2550-2552-discuss-phase-context (consolidation epic #1969 B4 #1973)", () => {
-// allow-test-rule: source-text-is-the-product (see #2549)
 // Workflow .md / agent .md / command .md / reference .md files — their text
 // IS what the runtime loads. Testing text content tests the deployed contract.
 // Per CONTRIBUTING.md exception matrix.

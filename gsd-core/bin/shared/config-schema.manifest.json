@@ -22,6 +22,7 @@
     "workflow.smart_zone_tokens",
     "workflow.human_verify_mode",
     "workflow.text_mode",
+    "workflow.compact_content",
     "workflow.research_before_questions",
     "workflow.discuss_mode",
     "workflow.skip_discuss",
@@ -29,12 +30,14 @@
     "workflow.use_worktrees",
     "workflow.worktree_skip_hooks",
     "workflow.code_review_command",
+    "workflow.code_review_depth_overrides",
     "workflow.plan_bounce",
     "workflow.plan_bounce_script",
     "workflow.plan_bounce_passes",
     "workflow.plan_chunked",
     "workflow.specless_probe_fallback",
     "workflow.plan_review_convergence",
+    "workflow.agent_hint_routing",
     "code_quality.fallow.enabled",
     "code_quality.fallow.scope",
     "code_quality.fallow.profile",
@@ -42,16 +45,22 @@
     "ship.pr_body_sections",
     "git.branching_strategy",
     "git.base_branch",
+    "git.protected_branches",
+    "git.allow_default_branch_commits",
     "git.create_tag",
     "git.phase_branch_template",
     "git.milestone_branch_template",
     "git.quick_branch_template",
     "planning.commit_docs",
+    "planning.pr_strict",
     "planning.search_gitignored",
     "planning.sub_repos",
+    "planning.chunked_parallel",
+    "agent_tools",
     "review.default_reviewers",
     "review.max_prompt_tokens",
     "review.max_prompt_tokens_per_reviewer",
+    "review.parallel_lanes",
     "workflow.cross_ai_execution",
     "workflow.cross_ai_command",
     "workflow.cross_ai_timeout",
@@ -63,18 +72,24 @@
     "workflow.context_guard_mode",
     "executor.stall_detect_interval_minutes",
     "executor.stall_threshold_minutes",
+    "planner.stall_detection_enabled",
     "planner.stall_detect_interval_minutes",
     "planner.stall_threshold_minutes",
     "workflow.inline_plan_threshold",
     "hooks.context_warnings",
+    "hooks.context_warning_threshold",
+    "hooks.context_critical_threshold",
     "hooks.workflow_guard",
     "hooks.workflow_guard_strict",
+    "hooks.commit_types",
+    "hooks.community",
     "workflow.context_coverage_gate",
     "statusline.show_last_command",
     "statusline.context_position",
     "statusline.show_context_tokens",
     "statusline.state_format",
     "statusline.show_git",
+    "statusline.show_state_freshness",
     "workflow.max_discuss_passes",
     "features.thinking_partner",
     "context",
@@ -134,6 +149,11 @@
     "workflow._auto_chain_active"
   ],
   "dynamicKeyPatterns": [
+    {
+      "topLevel": "agent_tools",
+      "source": "^agent_tools\\.(\\*|[a-zA-Z0-9_-]+)$",
+      "description": "agent_tools.<selector>"
+    },
     {
       "topLevel": "agent_skills",
       "source": "^agent_skills\\.[a-zA-Z0-9_-]+$",
@@ -202,7 +222,12 @@
     {
       "topLevel": "model_policy",
       "source": "^model_policy\\.runtime_tiers\\.[a-zA-Z0-9_-]+\\.(opus|sonnet|haiku)$",
-      "description": "model_policy.runtime_tiers.<runtime>.<opus|sonnet|haiku>"
+      "description": "model_policy.runtime_tiers.<runtime>.<opus|sonnet|haiku> (#3587)"
+    },
+    {
+      "topLevel": "phase_commit_docs",
+      "source": "^phase_commit_docs\\.\\d+[A-Z]?(?:\\.\\d+)*$",
+      "description": "phase_commit_docs.<phase-id> — per-phase commit_docs override (#3587). The <phase-id> segment is a hand-copy of the canonical PHASE_NUMBER_TOKEN_SOURCE grammar owned by src/phase-id.cts (#2128); this manifest is hand-maintained JSON so it cannot import that constant. Pinned against drift by the behavioral parity test in tests/commit-docs-bypass.test.cjs (folded 'phase-commit-docs' block, describe block 'E', #3587) — do not hand-edit this pattern without updating that test."
     }
   ]
 }

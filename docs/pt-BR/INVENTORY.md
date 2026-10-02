@@ -6,7 +6,7 @@
 
 - As contagens aqui são derivadas do sistema de arquivos no pino v1.36.0 e podem divergir entre versões. Para contagens ao vivo, execute `ls commands/gsd/*.md | wc -l`, `ls agents/gsd-*.md | wc -l`, etc. na cópia local do repositório.
 - Este arquivo enumera toda superfície entregue em todas as seis famílias (agentes, comandos, workflows, referências, módulos de CLI, hooks). Documentações amplas podem apresentar narrativas ou subconjuntos curados; quando discordarem do sistema de arquivos, este arquivo e as listagens de diretório são autoritativos.
-- Novas superfícies adicionadas após v1.36.0 devem aparecer aqui primeiro, depois propagar para as documentações amplas. Os testes de controle de drift em `tests/inventory-counts.test.cjs`, `tests/commands-doc-parity.test.cjs`, `tests/agents-doc-parity.test.cjs`, `tests/cli-modules-doc-parity.test.cjs`, `tests/hooks-doc-parity.test.cjs`, `tests/architecture-counts.test.cjs` e `tests/command-count-sync.test.cjs` ancoram as contagens e o conteúdo do registro ao sistema de arquivos.
+- Novas superfícies adicionadas após v1.36.0 devem aparecer aqui primeiro, depois propagar para as documentações amplas. O teste de controle de drift em `tests/inventory-manifest-sync.test.cjs` ancora o conteúdo do registro ao sistema de arquivos.
 
 Este é o registro autoritativo de toda superfície do GSD Core entregue. Veja o [índice de documentação](README.md) para navegar por tópico.
 
@@ -189,7 +189,6 @@ Registro completo em `gsd-core/workflows/*.md`. Workflows são orquestradores en
 | `code-review.md` | Revisa alterações de código-fonte da fase via gsd-code-reviewer; produz REVIEW.md. | `/gsd-code-review` |
 | `complete-milestone.md` | Marca uma versão entregue como concluída — entrada no MILESTONES.md, evolução do PROJECT.md, tag. | `/gsd-complete-milestone` |
 | `diagnose-issues.md` | Orquestra agentes de debug paralelos para investigar lacunas de UAT e encontrar causas raiz. | `/gsd-verify-work` (autodiagnóstico) |
-| `discovery-phase.md` | Executa a descoberta no nível de profundidade apropriado. | `/gsd-new-project` (caminho de descoberta) |
 | `discuss-phase-assumptions.md` | Discuss no modo de premissas — extrai decisões de implementação via análise com base no código primeiro. | `/gsd-discuss-phase` (quando `discuss_mode=assumptions`) |
 | `discuss-phase-power.md` | Discuss para usuário avançado — pré-gera todas as perguntas em um arquivo de estado JSON + UI HTML. | `/gsd-discuss-phase --power` |
 | `discuss-phase.md` | Extrai decisões de implementação por meio de discussão iterativa de zonas cinzentas. | `/gsd-discuss-phase` |
@@ -259,10 +258,9 @@ Registro completo em `gsd-core/workflows/*.md`. Workflows são orquestradores en
 | `thread.md` | Cria, lista, fecha ou retoma threads de contexto persistentes para trabalho entre sessões. | `/gsd-thread` |
 | `update.md` | Atualiza o GSD para a versão mais recente com exibição do changelog. | `/gsd-update` |
 | `validate-phase.md` | Audita retroativamente e preenche lacunas de validação Nyquist para uma fase concluída. | `/gsd-validate-phase` |
-| `verify-phase.md` | Verifica o alcance dos objetivos da fase por meio de análise retroativa a partir dos objetivos. | `execute-phase.md` (pós-execução) |
 | `verify-work.md` | UAT conversacional com autodiagnóstico — produz UAT.md e planos de correção. | `/gsd-verify-work` |
 
-> **Nota:** Alguns workflows não têm comando direto voltado ao usuário (p. ex. `execute-plan.md`, `verify-phase.md`, `transition.md`, `node-repair.md`, `diagnose-issues.md`) — eles são invocados internamente por workflows orquestradores. `discovery-phase.md` é uma entrada alternativa para `/gsd-new-project`.
+> **Nota:** Alguns workflows não têm comando direto voltado ao usuário (p. ex. `execute-plan.md`, `transition.md`, `node-repair.md`, `diagnose-issues.md`) — eles são invocados internamente por workflows orquestradores.
 
 ---
 
@@ -280,6 +278,7 @@ Registro completo em `gsd-core/references/*.md`. Referências são documentos de
 | `model-profile-resolution.md` | Documentação do algoritmo de resolução de modelo. |
 | `verification-patterns.md` | Como verificar diferentes tipos de artefato. |
 | `verification-overrides.md` | Regras de substituição de verificação por artefato. |
+| `verifier-phase-gates.md` | Gates de verificação carregados eager pelo gsd-verifier (migrados do workflow verify-phase aposentado, #1892): validação de cobertura de decisões (#2492), auditoria de qualidade de testes, escopo de human-verification para fases de infraestrutura (#2504). | |
 | `planning-config.md` | Esquema completo de configuração e comportamento. |
 | `git-integration.md` | Padrões de commit git, ramificação e histórico. |
 | `git-planning-commit.md` | Convenções de commit do diretório de planejamento. |
@@ -303,7 +302,7 @@ Registro completo em `gsd-core/references/*.md`. Referências são documentos de
 | `scout-codebase.md` | Tabela de seleção de tipo de fase → mapa de base de código para a etapa de scout da discuss-phase (extraída via a divisão progressiva discuss-phase/modes, #717). |
 | `revision-loop.md` | Padrões de iteração de revisão de plano. |
 | `universal-anti-patterns.md` | Antipadrões universais a detectar e evitar. |
-| `worktree-path-safety.md` | Suite de guarda do worktree: asserção de HEAD, sentinela de drift de cwd (etapa 0a, #3097) e guarda de caminho absoluto (etapa 0b, #3099) — carregados nos prompts de spawn do executor via `<execution_context>`. |
+| `worktree-path-safety.md` | Guardas de caminho do executor: pin de raiz fornecida (etapa 0p, #4254 — todo modo; o execute-phase.md binda a raiz validada pelo orquestrador em dispatches sequenciais como `<project_root_pin>`), sentinela de drift de cwd (etapa 0a, #3097) e guarda de caminho absoluto (etapa 0b, #3099) — carregados nos prompts de spawn do executor via `<execution_context>`. |
 | `artifact-types.md` | Definições de tipos de artefato de planejamento. |
 | `phase-argument-parsing.md` | Convenções de análise de argumentos de fase. |
 | `decimal-phase-calculation.md` | Regras de numeração de subfases decimais. |
@@ -396,7 +395,7 @@ Listagem completa: `gsd-core/bin/lib/*.cjs`.
 | `decisions.cjs` | Analisa blocos `<decisions>` do CONTEXT.md; aceita IDs numéricos (D-42) e alfanuméricos (D-INFRA-01); retorna `{id, text, category, tags, trackable}` |
 | `docs.cjs` | Inicialização do workflow docs-update, varredura de Markdown, detecção de monorepo |
 | `drift.cjs` | Detector de drift estrutural pós-execução da base de código (#2003): classifica alterações de arquivo em categorias new-dir/barrel/migration/route e faz round-trip do frontmatter `last_mapped_commit` |
-| `fallow-runner.cjs` | Adaptador de auditoria fallow para `/gsd-code-review`: resolução binária (`PATH` depois `node_modules/.bin`), erros acionáveis de binário ausente e normalização de descobertas estruturais |
+| `fallow-runner.cjs` | Adaptador de auditoria fallow para `/gsd-code-review`: resolução binária (`node_modules/.bin` depois `PATH`), erros acionáveis de binário ausente e normalização de descobertas estruturais |
 | `frontmatter.cjs` | Operações CRUD de frontmatter YAML |
 | `gap-checker.cjs` | Análise de lacunas pós-planejamento (#2493): relatório unificado de cobertura de decisões do REQUIREMENTS.md + CONTEXT.md vs PLAN.md (`gsd-tools gap-analysis`) |
 | `graphify.cjs` | Build/consulta/status/diff do grafo de conhecimento para `/gsd-graphify` |
@@ -477,8 +476,9 @@ Listagem completa: `hooks/`.
 | `gsd-worktree-path-guard.js` | `PreToolUse` | Bloqueia rigorosamente Edit/Write/MultiEdit com caminhos absolutos fora da raiz do worktree (PR #579, #260) |
 | `gsd-agent-isolation-guard.js` | `PreToolUse` | Bloqueia rigorosamente um dispatch `Agent()` de executor que não tenha o parâmetro de isolamento do harness quando o isolamento de dispatch resolvido do projeto é `harness-worktree` (#3045) |
 | `gsd-write-guard.js` | `PreToolUse` | Bloqueia rigorosamente um `Write` de arquivo inteiro que encolhe catastroficamente um artefato curado de `.planning/` (ROADMAP.md, roadmaps de milestone, STATE.md); override via o sentinela de uso único `.planning/.gsd-allow-shrink` (passos de workflow) ou `GSD_ALLOW_PLANNING_SHRINK=1` (interativo) (#2255, correção 3 de #973) |
-| `gsd-session-state.sh` | `PostToolUse` | Rastreamento de estado de sessão para runtimes baseados em shell |
-| `gsd-validate-commit.sh` | `PostToolUse` | Validação de commit para aplicação de conventional-commit |
+| `gsd-secret-read-guard.js` | `PreToolUse` | Bloqueia rigorosamente leituras de `.env`, `.env.<suffix>` (exceto templates como `.env.example`) e `.secrets` via Read / Grep / Bash; substitui as regras deny `Read(.env*)` que o instalador escrevia (#4221) |
+| `gsd-session-state.sh` | `SessionStart` | Rastreamento de estado de sessão para runtimes baseados em shell |
+| `gsd-validate-commit.sh` | `PreToolUse` | Validação de commit para aplicação de conventional-commit |
 | `gsd-phase-boundary.sh` | `PostToolUse` | Detecção de limite de fase para transições de workflow |
 | `gsd-graphify-update.sh` | `PostToolUse` | Reconstrução automática do grafo de conhecimento após o avanço do HEAD principal (opt-in, padrão desativado — #3347) |
 

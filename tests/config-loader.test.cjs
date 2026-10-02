@@ -233,6 +233,17 @@ describe('loadConfig — unknown-key warning dedup', () => {
     assert.ok(warnings.length <= 1, `warning emitted more than once: ${warnings.length} times`);
   });
 
+  test('agent_tools is accepted without an unknown-key warning (#4032)', () => {
+    writeConfig(tmpDir, { agent_tools: { 'gsd-executor': ['WebFetch'] } });
+    const config = loadConfig(tmpDir);
+    assert.deepEqual(config.agent_tools, { 'gsd-executor': ['WebFetch'] });
+    assert.equal(
+      stderrLines.some((line) => line.includes('agent_tools')),
+      false,
+      'a documented agent_tools config must not be reported as unknown',
+    );
+  });
+
   // #2674: the two cases above only pass because each picks a key name no other
   // case reuses — so neither can observe whether the documented reset actually
   // runs. _resetRuntimeWarningCacheForTests is documented as resetting
@@ -481,6 +492,26 @@ describe('loadConfigResolved — provenance', () => {
     const result = loadConfigResolved(tmpDir, { workstream: '' });
     assert.equal(result.source, 'root', 'empty-string workstream should yield source:"root"');
     assert.equal(result.degraded, false);
+  });
+
+  test('whitespace-only explicit and environment workstreams resolve and label the root (#4462)', () => {
+    writeConfig(tmpDir, { model_profile: 'quality' });
+    for (const workstream of ['  ', '\t', '\n', ' \t\n ']) {
+      const explicit = loadConfigResolved(tmpDir, { workstream });
+      assert.equal(explicit.source, 'root');
+      assert.equal(explicit.degraded, false);
+
+      const original = process.env.GSD_WORKSTREAM;
+      try {
+        process.env.GSD_WORKSTREAM = workstream;
+        const ambient = loadConfigResolved(tmpDir);
+        assert.equal(ambient.source, 'root');
+        assert.equal(ambient.degraded, false);
+      } finally {
+        if (original === undefined) delete process.env.GSD_WORKSTREAM;
+        else process.env.GSD_WORKSTREAM = original;
+      }
+    }
   });
 
   test('Fix 2a: GSD_WORKSTREAM set to nonexistent workstream (dir absent) → source:"root", degraded:true', () => {
@@ -740,26 +771,9 @@ const { describe, test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { createTempProject, cleanup, TOOLS_PATH } = require('./helpers.cjs');
+const { createTempProject, cleanup, TOOLS_PATH, TEST_ENV_BASE, installSpawnHome } = require('./helpers.cjs');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-
-const TEST_ENV_BASE = {
-  GSD_SESSION_KEY: '',
-  CODEX_THREAD_ID: '',
-  CLAUDE_SESSION_ID: '',
-  CLAUDE_CODE_SSE_PORT: '',
-  OPENCODE_SESSION_ID: '',
-  GEMINI_SESSION_ID: '',
-  CURSOR_SESSION_ID: '',
-  WINDSURF_SESSION_ID: '',
-  TERM_SESSION_ID: '',
-  WT_SESSION: '',
-  TMUX_PANE: '',
-  ZELLIJ_SESSION_NAME: '',
-  TTY: '',
-  SSH_TTY: '',
-};
 
 /**
  * Run gsd-tools and return { stdout, stderr, status }.
@@ -768,7 +782,11 @@ const TEST_ENV_BASE = {
 function runWithStderr(args, cwd, env = {}) {
   const result = runNode([TOOLS_PATH, ...args], {
     cwd,
-    env: { ...process.env, ...TEST_ENV_BASE, ...env },
+    // #3532: pin GSD_HOME to an empty sandbox so a developer's real
+    // ~/.gsd/defaults.json cannot leak shadow-key warnings into children that
+    // these suites assert are stderr-clean (TEST_ENV_BASE only BLANKS the
+    // var; an empty string falls through to the real homedir).
+    env: { ...process.env, ...TEST_ENV_BASE, GSD_HOME: installSpawnHome(), ...env },
     timeoutMs: PROBE_TIMEOUT_MS,
   });
   return {
@@ -1299,5 +1317,534 @@ describe('#2997: phase_id_convention is not silently dropped on a clean read', (
       assert.equal(res.config.phase_id_convention, null,
         'absent phase_id_convention must resolve to null, not undefined');
     } finally { cleanup(tmpDir); }
+  });
+});
+
+// ─── #3532 (10b): shadowed global-defaults diagnostic ─────────────────────────
+
+// The keys Branch D's _globalBaseCfg demonstrably honors when NO project config
+// exists. Under a project .planning/config.json (Branch A — every real project)
+// the global file is never opened, so each of these set globally is silently
+// inert. `effort` is deliberately absent: the install-time effort sync
+// (readGsdEffectiveEffortConfig) DOES merge the global file, so warning on it
+// would be false for the channel users control via effort sync.
+const GLOBAL_KEYS_SHADOWED_UNDER_PROJECT = [
+  'model_profile', 'commit_docs', 'research', 'plan_checker', 'verifier',
+  'nyquist_validation', 'post_planning_gaps', 'research_before_questions', 'parallelization', 'text_mode',
+  'resolve_model_ids', 'context_window', 'subagent_timeout', 'model_overrides',
+  'models', 'granularity', 'granularities', 'planning', 'dynamic_routing',
+  'fast_mode', 'agent_skills', 'response_language', 'runtime',
+  'model_profile_overrides', 'model_policy',
+];
+
+describe('#3532 shadowed global-defaults warning', () => {
+  let tmpDir;
+  let gsdHome;
+  let stderrLines;
+  let originalStderrWrite;
+  let originalGsdHome;
+
+  beforeEach(() => {
+    tmpDir = makeTempProject('gsd-3532-shadow-');
+    gsdHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3532-home-'));
+    stderrLines = [];
+    originalStderrWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
+    originalGsdHome = process.env.GSD_HOME;
+    process.env.GSD_HOME = gsdHome;
+    if (_resetRuntimeWarningCacheForTests) _resetRuntimeWarningCacheForTests();
+  });
+
+  afterEach(() => {
+    process.stderr.write = originalStderrWrite;
+    if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = originalGsdHome;
+    if (tmpDir) cleanup(tmpDir);
+    if (gsdHome) cleanup(gsdHome);
+    tmpDir = gsdHome = null;
+  });
+
+  function writeGlobalDefaults(obj) {
+    fs.mkdirSync(path.join(gsdHome, '.gsd'), { recursive: true });
+    fs.writeFileSync(
+      path.join(gsdHome, '.gsd', 'defaults.json'),
+      JSON.stringify(obj, null, 2),
+    );
+  }
+
+  test('project config + global model keys -> one warning naming both keys', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ model_overrides: { 'gsd-executor': 'haiku' }, model_profile: 'quality' });
+    loadConfigResolved(tmpDir);
+    const warnings = stderrLines.filter(l => l.includes('model_overrides') && l.includes('model_profile'));
+    assert.equal(warnings.length, 1, `expected exactly one shadowed-keys warning, got: ${stderrLines.join('')}`);
+  });
+
+  test('second loadConfig call does not repeat the warning', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ model_profile: 'quality' });
+    loadConfigResolved(tmpDir);
+    loadConfigResolved(tmpDir);
+    const warnings = stderrLines.filter(l => l.includes('model_profile') && l.includes('defaults.json'));
+    assert.ok(warnings.length <= 1, `warning emitted more than once: ${warnings.length}`);
+  });
+
+  test('global effort keys do not warn (honored by the install-time effort sync)', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ effort: { default: 'low' } });
+    loadConfigResolved(tmpDir);
+    assert.equal(stderrLines.filter(l => l.includes('defaults.json')).length, 0,
+      `effort must not trigger the shadow warning: ${stderrLines.join('')}`);
+  });
+
+  test('absent global defaults never warn', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    loadConfigResolved(tmpDir);
+    assert.equal(stderrLines.length, 0, `unexpected warnings: ${stderrLines.join('')}`);
+  });
+
+  test('bare dir without .planning honors global defaults without warning (Branch D)', () => {
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3532-bare-'));
+    try {
+      writeGlobalDefaults({ model_profile: 'quality' });
+      const resolution = loadConfigResolved(bare);
+      assert.equal(resolution.source, 'global-defaults');
+      assert.equal(resolution.config['model_profile'], 'quality');
+      assert.equal(stderrLines.length, 0, `Branch D must not warn: ${stderrLines.join('')}`);
+    } finally {
+      cleanup(bare);
+    }
+  });
+
+  test('unparseable global defaults skip the shadow warning', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    fs.mkdirSync(path.join(gsdHome, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(gsdHome, '.gsd', 'defaults.json'), '{not json');
+    loadConfigResolved(tmpDir);
+    assert.equal(stderrLines.filter(l => l.includes('shadowed')).length, 0);
+  });
+
+  test('present-but-empty project config still shadows', () => {
+    writeConfig(tmpDir, {});
+    writeGlobalDefaults({ model_profile: 'quality' });
+    loadConfigResolved(tmpDir);
+    assert.ok(stderrLines.some(l => l.includes('model_profile')),
+      `empty project config must still warn: ${stderrLines.join('')}`);
+  });
+
+  test('non-resolution global keys do not warn from this check', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ __gsd_3532_arbitrary__: true });
+    loadConfigResolved(tmpDir);
+    assert.equal(stderrLines.filter(l => l.includes('__gsd_3532_arbitrary__') && l.includes('shadowed')).length, 0);
+  });
+
+  // Typed-IR parity canary (CONTRIBUTING: assert the exported dedup Set, not
+  // stderr prose — #2674 precedent). Every key Branch D honors must register
+  // as shadowed when set globally under a project config.
+  for (const key of GLOBAL_KEYS_SHADOWED_UNDER_PROJECT) {
+    test(`canary: global "${key}" alone warns under a project config`, () => {
+      writeConfig(tmpDir, { model_profile: 'balanced' });
+      writeGlobalDefaults({ [key]: true });
+      loadConfigResolved(tmpDir);
+      const registered = [...configLoader._warnedShadowedGlobalKeys].some(set => set.split(',').includes(key));
+      assert.ok(registered, `global "${key}" must register as shadowed`);
+    });
+  }
+
+  // The nested alias Branch D honors (workflow.post_planning_gaps fallback in
+  // _globalBaseCfg) is equally shadowed and reports under its dotted name.
+  test('canary: nested workflow.post_planning_gaps warns under a project config', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ workflow: { post_planning_gaps: 'extended' } });
+    loadConfigResolved(tmpDir);
+    const registered = [...configLoader._warnedShadowedGlobalKeys].some(set => set.split(',').includes('workflow.post_planning_gaps'));
+    assert.ok(registered, 'nested workflow.post_planning_gaps must register as shadowed');
+  });
+
+  // List parity, both directions: the implementation's exported list (minus
+  // effort) must equal this file's expected list — a key _globalBaseCfg grows
+  // without updating GLOBAL_DEFAULTS_RESOLUTION_KEYS goes silently unwarned,
+  // and a key the export grows without _globalBaseCfg reading makes the
+  // warning lie.
+  test('GLOBAL_DEFAULTS_RESOLUTION_KEYS parity with the expected shadow set', () => {
+    const exported = configLoader.GLOBAL_DEFAULTS_RESOLUTION_KEYS.filter(k => k !== 'effort').sort();
+    const expected = GLOBAL_KEYS_SHADOWED_UNDER_PROJECT.slice().sort();
+    assert.deepEqual(exported, expected,
+      `resolution-key list drifted: exported=${JSON.stringify(exported)} expected=${JSON.stringify(expected)}`);
+  });
+
+  test('_resetRuntimeWarningCacheForTests clears the shadowed-key dedup set', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ model_profile: 'quality' });
+    loadConfigResolved(tmpDir);
+    assert.ok(
+      configLoader._warnedShadowedGlobalKeys && configLoader._warnedShadowedGlobalKeys.size > 0,
+      'precondition: a shadowed key must populate the dedup set',
+    );
+    _resetRuntimeWarningCacheForTests();
+    assert.equal(configLoader._warnedShadowedGlobalKeys.size, 0);
+  });
+});
+
+// ─── Regressions — #3760: a non-object section must not be expanded or written ──
+//
+// The loader is the surface that actually WRITES: a non-empty `normalizations`
+// array marks the config dirty and `platformWriteSync` persists it. Before the
+// fix a config holding `{"git":"main","branching_strategy":"none"}` came back
+// from `normalizeLegacyKeys` as `{"git":{"0":"m","1":"a","2":"i","3":"n",...}}`
+// and that object was written to the user's file — the original `"main"` was
+// unrecoverable afterwards.
+//
+// The loader's own multiRepo branches carried a second, quieter form of the
+// same defect: `if (!fileData.planning) fileData.planning = {}` treats a
+// non-empty STRING as an already-present section, so the next line
+// (`fileData.planning['sub_repos'] = detected`) threw a strict-mode TypeError.
+// That throw was swallowed by the enclosing catch, which discarded the entire
+// configuration and fell back to defaults — the ADR-1411 silent-fallback
+// failure, reached from an input the user can trivially write by hand.
+
+describe('regressions — #3760 loader never expands or persists a non-object section', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = makeTempProject('gsd-3760-loader-');
+    _resetRuntimeWarningCacheForTests();
+  });
+
+  afterEach(() => {
+    if (tmpDir) cleanup(tmpDir);
+    tmpDir = null;
+  });
+
+  function readRawConfig() {
+    return fs.readFileSync(path.join(tmpDir, '.planning', 'config.json'), 'utf-8');
+  }
+
+  test('loadConfig leaves a string git section untouched on disk', () => {
+    writeConfig(tmpDir, { git: 'main', branching_strategy: 'none' });
+    const before = readRawConfig();
+
+    let config;
+    assert.doesNotThrow(() => { config = loadConfig(tmpDir); });
+
+    assert.equal(readRawConfig(), before, 'the config file must not be rewritten with an expanded section');
+    // The loader projects `git.branching_strategy` to a flat top-level key, so the
+    // legacy value the migration declined to move is still what resolution sees.
+    assert.equal(config.branching_strategy, 'none', 'the legacy value must still resolve');
+  });
+
+  test('loadConfig leaves a string planning section untouched on disk', () => {
+    writeConfig(tmpDir, { planning: 'docs', sub_repos: ['a'] });
+    const before = readRawConfig();
+
+    assert.doesNotThrow(() => { loadConfig(tmpDir); });
+
+    assert.equal(readRawConfig(), before);
+    assert.equal(JSON.parse(readRawConfig()).planning, 'docs');
+  });
+
+  test('loadConfig does not discard the config when multiRepo meets a string planning section', () => {
+    // Pre-fix the loader threw a TypeError assigning sub_repos onto the string,
+    // and the enclosing catch discarded the user's entire config. It also
+    // consumed `multiRepo` and wrote the file back with no diagnostic at all.
+    fs.mkdirSync(path.join(tmpDir, 'sub', '.git'), { recursive: true });
+    writeConfig(tmpDir, { planning: 'docs', multiRepo: true, model_profile: 'balanced' });
+    const before = readRawConfig();
+
+    let config;
+    assert.doesNotThrow(() => { config = loadConfig(tmpDir); });
+
+    assert.equal(
+      config.model_profile, 'balanced',
+      'an unrelated user setting must survive — a swallowed TypeError would have reverted it to the default',
+    );
+    assert.equal(
+      readRawConfig(), before,
+      'nothing migrated, so the file must be byte-identical — planning intact AND multiRepo still present',
+    );
+  });
+
+  test('multiRepo still migrates normally when the planning section is usable', () => {
+    // Negative space: refusing on a bad section must not break the good path.
+    fs.mkdirSync(path.join(tmpDir, 'sub', '.git'), { recursive: true });
+    writeConfig(tmpDir, { multiRepo: true });
+
+    assert.doesNotThrow(() => { loadConfig(tmpDir); });
+
+    assert.deepEqual(JSON.parse(readRawConfig()).planning.sub_repos, ['sub']);
+    assert.equal(JSON.parse(readRawConfig()).multiRepo, undefined, 'the marker is consumed once honored');
+  });
+
+  test('loadConfigResolved reports a usable resolution and writes no expanded section', () => {
+    writeConfig(tmpDir, { git: 'main', branching_strategy: 'none' });
+    const before = readRawConfig();
+
+    let resolution;
+    assert.doesNotThrow(() => { resolution = loadConfigResolved(tmpDir); });
+
+    assert.equal(readRawConfig(), before);
+    assert.equal(resolution.source, 'root', 'a present, parseable config still resolves from the project');
+    assert.equal(resolution.degraded, false);
+  });
+
+  test('a refused section emits exactly one deduplicated diagnostic, and a repeat emits none', () => {
+    // The loader is where the out-of-band diagnostic has to live: loadConfig
+    // returns `.config` alone, so an in-band `skipped` record would be unreachable
+    // to nearly every caller (ADR-1411: "a reason no caller reads is an
+    // unreachable field"). Asserted on the typed emission counter, never by
+    // scraping stderr prose.
+    const {
+      _resetUnusableInputWarningsForTests,
+      _unusableInputEmissionCountForTests,
+    } = require('../gsd-core/bin/lib/unusable-input.cjs');
+
+    function emissionsDuring(fn) {
+      const before = _unusableInputEmissionCountForTests();
+      const original = process.stderr.write;
+      process.stderr.write = () => true;
+      try { fn(); } finally { process.stderr.write = original; }
+      return _unusableInputEmissionCountForTests() - before;
+    }
+
+    _resetUnusableInputWarningsForTests();
+    writeConfig(tmpDir, { git: 'main', branching_strategy: 'none' });
+
+    const first = emissionsDuring(() => { loadConfig(tmpDir); });
+    assert.equal(first, 1, 'the operator must be told once');
+
+    const second = emissionsDuring(() => { loadConfig(tmpDir); });
+    assert.equal(second, 0, 'the ADR-1411 dedup guard must suppress the repeat');
+  });
+
+  test('an already-canonical config is still migrated normally', () => {
+    // Negative space: the guard must not suppress a legitimate hoist.
+    writeConfig(tmpDir, { git: { remote: 'origin' }, branching_strategy: 'none' });
+
+    const config = loadConfig(tmpDir);
+    // Assert on the FILE for the section shape (the loader flattens `git.*` into
+    // top-level keys, so the resolved object has no `git` to inspect) and on the
+    // resolved value for the projection.
+    const onDisk = JSON.parse(readRawConfig());
+    assert.equal(onDisk.git.branching_strategy, 'none', 'a well-formed section must still receive the hoisted key');
+    assert.equal(onDisk.git.remote, 'origin', 'existing section keys must be preserved');
+    assert.equal(onDisk.branching_strategy, undefined, 'the stale top-level key is consumed');
+    assert.equal(config.branching_strategy, 'none', 'the hoisted value still resolves');
+  });
+});
+
+// ─── #3894: workflow.research_before_questions resolves from global defaults ──
+
+describe('#3894 research_before_questions global-defaults forwarding', () => {
+  test('nested workflow.research_before_questions in ~/.gsd/defaults.json resolves', () => {
+    const homeTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3894-home-'));
+    const origGsdHome = process.env['GSD_HOME'];
+    try {
+      const gsdDir = path.join(homeTmp, '.gsd');
+      fs.mkdirSync(gsdDir, { recursive: true });
+      // The reporter's exact shape: same nesting as the forwarded
+      // workflow.post_planning_gaps, one resolves and one did not.
+      fs.writeFileSync(path.join(gsdDir, 'defaults.json'), JSON.stringify({
+        workflow: { post_planning_gaps: true, research_before_questions: true },
+      }), 'utf-8');
+      process.env['GSD_HOME'] = homeTmp;
+      const noPlanning = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3894-noplanning-'));
+      try {
+        const result = loadConfigResolved(noPlanning);
+        assert.equal(result.config.post_planning_gaps, true, 'control: the already-forwarded key resolves');
+        assert.equal(
+          result.config.research_before_questions, true,
+          '#3894: same file, same nesting — the quick-path key must resolve too, not just post_planning_gaps'
+        );
+      } finally {
+        cleanup(noPlanning);
+      }
+    } finally {
+      if (origGsdHome === undefined) delete process.env['GSD_HOME'];
+      else process.env['GSD_HOME'] = origGsdHome;
+      cleanup(homeTmp);
+    }
+  });
+
+  test('flat top-level research_before_questions in ~/.gsd/defaults.json also resolves (Branch D alias parity)', () => {
+    const homeTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3894b-home-'));
+    const origGsdHome = process.env['GSD_HOME'];
+    try {
+      const gsdDir = path.join(homeTmp, '.gsd');
+      fs.mkdirSync(gsdDir, { recursive: true });
+      fs.writeFileSync(path.join(gsdDir, 'defaults.json'), JSON.stringify({ research_before_questions: true }), 'utf-8');
+      process.env['GSD_HOME'] = homeTmp;
+      const noPlanning = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3894b-noplanning-'));
+      try {
+        const result = loadConfigResolved(noPlanning);
+        assert.equal(result.config.research_before_questions, true);
+      } finally {
+        cleanup(noPlanning);
+      }
+    } finally {
+      if (origGsdHome === undefined) delete process.env['GSD_HOME'];
+      else process.env['GSD_HOME'] = origGsdHome;
+      cleanup(homeTmp);
+    }
+  });
+
+  test('unset resolves to the documented default (false), never undefined', () => {
+    const noPlanning = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3894c-'));
+    const homeTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3894c-home-'));
+    const origGsdHome = process.env['GSD_HOME'];
+    try {
+      process.env['GSD_HOME'] = homeTmp; // no .gsd/defaults.json — builtin defaults
+      const result = loadConfigResolved(noPlanning);
+      assert.equal(result.config.research_before_questions, false, 'CANONICAL_CONFIG_DEFAULTS.workflow.research_before_questions is false');
+    } finally {
+      if (origGsdHome === undefined) delete process.env['GSD_HOME'];
+      else process.env['GSD_HOME'] = origGsdHome;
+      cleanup(homeTmp);
+      cleanup(noPlanning);
+    }
+  });
+});
+
+// ── #4717 — an empty config.runtime is filled from GSD_RUNTIME / the marker ──
+describe('loadConfigResolved — runtime identity fill (#4717)', () => {
+  const slash = require('../gsd-core/bin/lib/runtime-slash.cjs');
+  const fsx = require('node:fs');
+  const pathx = require('node:path');
+  const { createTempDir: mkTmp4717, cleanup: cleanup4717 } = require('./helpers.cjs');
+  let tmpCodexHome;
+  let originalCodexHome;
+  let originalGsdRuntime;
+
+  let originalGsdHome;
+  let originalHome;
+  let originalUserProfile;
+
+  beforeEach(() => {
+    originalCodexHome = process.env.CODEX_HOME;
+    originalGsdRuntime = process.env.GSD_RUNTIME;
+    originalGsdHome = process.env.GSD_HOME;
+    originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
+    delete process.env.GSD_RUNTIME;
+    tmpCodexHome = mkTmp4717('gsd-4717-');
+    process.env.CODEX_HOME = tmpCodexHome;
+    // Isolate the SHARED defaults file too: loadConfigResolved's global-defaults
+    // branch reads ~/.gsd/defaults.json from GSD_HOME || homedir, and a real
+    // machine's stamped defaults would bleed into these rows (#4717 review).
+    process.env.GSD_HOME = tmpCodexHome;
+    process.env.HOME = tmpCodexHome;
+    process.env.USERPROFILE = tmpCodexHome;
+    slash._setInstallRuntimeMarkerForTests('codex');
+  });
+
+  afterEach(() => {
+    slash._resetInstallRuntimeMarkerCacheForTests();
+    if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = originalCodexHome;
+    if (originalGsdRuntime === undefined) delete process.env.GSD_RUNTIME;
+    else process.env.GSD_RUNTIME = originalGsdRuntime;
+    if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = originalGsdHome;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
+    cleanup4717(tmpCodexHome);
+  });
+
+  test('an empty config.runtime is filled from the install marker (#4717)', (t) => {
+    const projDir = mkTmp4717('gsd-4717-proj-');
+    t.after(() => cleanup4717(projDir));
+    const resolved = loadConfigResolved(projDir, { persist: false });
+    assert.equal(resolved.config.runtime, 'codex',
+      'the marker-owned runtime fills an empty config.runtime (copy-on-write)');
+  });
+
+  test('GSD_RUNTIME outranks the marker in the identity fill (#4717)', (t) => {
+    const projDir = mkTmp4717('gsd-4717-proj-');
+    t.after(() => cleanup4717(projDir));
+    process.env.GSD_RUNTIME = 'kimi';
+    const resolved = loadConfigResolved(projDir, { persist: false });
+    assert.equal(resolved.config.runtime, 'kimi');
+  });
+
+  // Branch D (the shared-defaults path) fires only when the project dir has NO
+  // .planning/ at all — these rows use bare dirs for exactly that (#4717).
+  function bareProjDir(t, prefix) {
+    const dir = mkTmp4717(prefix);
+    t.after(() => cleanup4717(dir));
+    return dir;
+  }
+
+  test('#4717 stamped-defaults leg: a shared defaults runtime does not leak past THIS install\'s marker', (t) => {
+    // The issue's second failure shape: the first non-Claude install stamped
+    // `runtime` into the SHARED ~/.gsd/defaults.json; a Claude install on the
+    // same machine must not inherit that identity. Branch D forwards the
+    // stamped value; the fill corrects it to the marker's own.
+    fsx.mkdirSync(pathx.join(tmpCodexHome, '.gsd'), { recursive: true });
+    fsx.writeFileSync(
+      pathx.join(tmpCodexHome, '.gsd', 'defaults.json'),
+      JSON.stringify({ runtime: 'codex' }),
+    );
+    slash._setInstallRuntimeMarkerForTests('claude');
+
+    const projDir = bareProjDir(t, 'gsd-4717-proj-stamped-');
+
+    const resolved = loadConfigResolved(projDir);
+    assert.equal(resolved.source, 'global-defaults', 'fixture: the shared-defaults branch must fire');
+    assert.equal(
+      resolved.config.runtime,
+      'claude',
+      'the marker-owned identity must correct the machine-wide stamp',
+    );
+  });
+
+  test('#4717 stamped-defaults leg: with no marker of its own, the stamped value still stands (status quo preserved)', (t) => {
+    fsx.mkdirSync(pathx.join(tmpCodexHome, '.gsd'), { recursive: true });
+    fsx.writeFileSync(
+      pathx.join(tmpCodexHome, '.gsd', 'defaults.json'),
+      JSON.stringify({ runtime: 'codex' }),
+    );
+    slash._setInstallRuntimeMarkerForTests(null);
+
+    const projDir = bareProjDir(t, 'gsd-4717-proj-stamped-nomarker-');
+
+    const resolved = loadConfigResolved(projDir);
+    assert.equal(resolved.config.runtime, 'codex', 'no own identity — the stamped value is all we know');
+  });
+
+  test('#4717 fail-safe: a garbage marker does not fill the runtime (#4717 review)', (_t) => {
+    slash._setInstallRuntimeMarkerForTests('   not-a-runtime   ');
+
+    const projDir = bareProjDir(_t, 'gsd-4717-proj-garbage-');
+
+    const resolved = loadConfigResolved(projDir);
+    assert.equal(
+      resolved.config.runtime || null,
+      null,
+      'an unrecognizable marker value must fail safe to no identity',
+    );
+  });
+
+  test('an explicit config.runtime is preserved — the fill never overrides it (#4717)', (t) => {
+    const projDir = mkTmp4717('gsd-4717-proj-');
+    t.after(() => cleanup4717(projDir));
+    fsx.mkdirSync(pathx.join(projDir, '.planning'), { recursive: true });
+    fsx.writeFileSync(
+      pathx.join(projDir, '.planning', 'config.json'),
+      JSON.stringify({ runtime: 'claude' }),
+    );
+    const resolved = loadConfigResolved(projDir, { persist: false });
+    assert.equal(resolved.config.runtime, 'claude',
+      'an explicit project runtime is never overwritten by the marker fill');
+  });
+
+  test('copy-on-write: the shared builtin-defaults object is never mutated (#4717)', (t) => {
+    const projDir = mkTmp4717('gsd-4717-proj-');
+    t.after(() => cleanup4717(projDir));
+    const resolved = loadConfigResolved(projDir, { persist: false });
+    assert.equal(resolved.config.runtime, 'codex');
+    const again = loadConfigResolved(projDir, { persist: false });
+    assert.equal(again.config.runtime, 'codex');
   });
 });

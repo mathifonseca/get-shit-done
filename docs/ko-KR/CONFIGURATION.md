@@ -105,6 +105,7 @@ GSD는 프로젝트 설정을 `.planning/config.json`에 저장합니다. `/gsd-
 | `workflow.discuss_mode` | string | `'discuss'` | `/gsd-discuss-phase`의 컨텍스트 수집 방식을 제어합니다. `'discuss'` (기본값)는 질문을 하나씩 합니다. `'assumptions'`는 코드베이스를 먼저 읽고 신뢰도 수준이 있는 구조화된 가정을 생성하여 틀린 부분만 수정하도록 요청합니다. v1.28에서 추가 |
 | `workflow.skip_discuss` | boolean | `false` | `true`로 설정하면 `/gsd-autonomous`가 discuss 단계를 완전히 건너뛰고 ROADMAP 단계 목표로부터 최소한의 CONTEXT.md를 작성합니다. 개발자 선호사항이 PROJECT.md/REQUIREMENTS.md에 모두 캡처된 프로젝트에 유용합니다. v1.28에서 추가 |
 | `workflow.text_mode` | boolean | `false` | AskUserQuestion TUI 메뉴를 일반 텍스트 번호 목록으로 대체합니다. TUI 메뉴가 렌더링되지 않는 Claude Code 원격 세션 (`/rc` 모드)에 필요합니다. discuss 단계에서 `--text` 플래그로 세션별 설정도 가능합니다. v1.28에서 추가 |
+| `planner.stall_detection_enabled` | boolean | `true` | 표준 플래너, 청크형 개요/플랜별 플래너, 플랜 검사기, 수정 플래너의 제한된 정지 감지를 제어합니다. `gsd config-set planner.stall_detection_enabled false`로 설정하면 watchdog 폴링을 건너뛰고 각 에이전트를 런타임 네이티브 완료 메커니즘으로 기다립니다. **경고:** `false`는 런타임이 완료 전달을 잃을 때의 제한된 복구를 포기합니다. 기존 파일 시스템 폴백을 사용하려면 중단해야 할 수 있습니다. |
 
 ### 권장 프리셋
 
@@ -121,6 +122,7 @@ GSD는 프로젝트 설정을 `.planning/config.json`에 저장합니다. `/gsd-
 | 설정 | 타입 | 기본값 | 설명 |
 |------|------|--------|------|
 | `planning.commit_docs` | boolean | `true` | `.planning/` 파일을 git에 커밋할지 여부 |
+| `planning.pr_strict` | boolean | `false` | `/gsd-pr-branch`의 필터 모드. `false`는 STATE.md, ROADMAP.md, MILESTONES.md, PROJECT.md, REQUIREMENTS.md, milestones/ 등 구조적 플래닝 상태를 PR 브랜치에 유지하고, `true`는 모든 `.planning/` 경로를 제거함 |
 | `planning.search_gitignored` | boolean | `false` | 광범위한 검색에 `--no-ignore`를 추가하여 `.planning/`을 포함 |
 
 ### 자동 감지
@@ -297,7 +299,7 @@ quick 태스크 브랜칭 예시:
 
 유효한 재정의 값: `opus`, `sonnet`, `haiku`, `inherit`, 또는 완전히 정규화된 모델 ID (예: `"openai/o3"`, `"google/gemini-2.5-pro"`).
 
-### 비 Claude 런타임 (Codex, OpenCode, Gemini CLI, Kilo)
+### 비 Claude 런타임 (Codex, OpenCode, Antigravity CLI, Kilo)
 
 비 Claude 런타임에 GSD를 설치하면 인스톨러가 자동으로 `~/.gsd/defaults.json`에 `resolve_model_ids: "omit"`을 설정합니다. 이로 인해 GSD는 모든 에이전트에 빈 model 파라미터를 반환하며 각 에이전트는 런타임에 설정된 모델을 사용합니다. 기본 사용 시 추가 설정은 필요하지 않습니다.
 
@@ -332,7 +334,7 @@ quick 태스크 브랜칭 예시:
 |----|------|----------|
 | `false` (기본값) | Claude 별칭 반환 (`opus`, `sonnet`, `haiku`) | 네이티브 Anthropic API를 사용하는 Claude Code |
 | `true` | 별칭을 전체 Claude 모델 ID로 매핑 (`claude-opus-4-8`) | 전체 ID가 필요한 API를 사용하는 Claude Code |
-| `"omit"` | 빈 문자열 반환 (런타임이 기본값 선택) | 비 Claude 런타임 (Codex, OpenCode, Gemini CLI, Kilo) |
+| `"omit"` | 빈 문자열 반환 (런타임이 기본값 선택) | 비 Claude 런타임 (Codex, OpenCode, Antigravity CLI, Kilo) |
 
 ### 프로필 철학
 

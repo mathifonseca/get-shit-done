@@ -8,7 +8,7 @@
 
 ## 为什么需要安装程序
 
-GSD Core 以 Claude Code 原生 frontmatter 格式分发代理和命令文件。每个支持的运行时需要不同的 schema、目录结构和命令调用语法。安装程序负责执行必要的转换——例如，为 OpenCode 转换工具列表和颜色值、为 Codex 写入 TOML 代理条目，以及将所有命令体从连字符格式（`/gsd-update`）重写为冒号格式（`/gsd-update`）以适配 Gemini CLI。
+GSD Core 以 Claude Code 原生 frontmatter 格式分发代理和命令文件。每个支持的运行时需要不同的 schema、目录结构和命令调用语法。安装程序负责执行必要的转换——例如，为 OpenCode 转换工具列表和颜色值、为 Codex 写入 TOML 代理条目。
 
 **请勿直接从 `agents/` 或 `commands/` 复制文件。** 这样做会绕过转换过程，导致 schema 验证错误或命令缺失。
 
@@ -36,26 +36,12 @@ npx @opengsd/gsd-core@latest --claude --global
 
 技能文件存放于 `~/.claude/`。下次 Claude Code 会话中，命令将以 `/gsd-*` 斜杠命令的形式出现。重启 Claude Code 以加载它们。
 
+**同时在 `--global` 和 `--local` 两个作用域安装。** 这是受支持的配置（不同项目有时需要不同的自定义配置），但 Claude Code 自身的触发器解析规则——个人作用域覆盖项目作用域，且技能（skill）覆盖同名命令——都指向同一个方向：全局技能总是在 `/gsd-<name>` 触发器上胜过本地命令。GSD Core 会检测到这一点，并在安装完成后立即打印出哪个作用域胜出（并通过 `/gsd-health` 以诊断代码 `W028` 呈现相同的事实）；这只是一条提示，不是失败——安装本身仍然会成功。在**全局**作用域下，胜出技能的工作流规范引用会在运行时优先相对于你的工作目录解析，因此即使 Claude Code 实际调用的是全局技能，拥有自己 `.claude/gsd-core/` 的项目仍然能获取到自己的规范。
+
 **覆盖安装目录：**
 
 ```bash
 CLAUDE_CONFIG_DIR=~/.claude-alt npx @opengsd/gsd-core@latest --claude --global
-```
-
----
-
-### Gemini CLI
-
-```bash
-npx @opengsd/gsd-core@latest --gemini --global
-```
-
-技能文件存放于 `~/.gemini/`。安装程序将所有命令体重写为 Gemini 的冒号命名空间格式（`/gsd-update`、`/gsd-config` 等）。安装后重启 Gemini CLI。
-
-**覆盖安装目录：**
-
-```bash
-GEMINI_CONFIG_DIR=~/.gemini-alt npx @opengsd/gsd-core@latest --gemini --global
 ```
 
 ---

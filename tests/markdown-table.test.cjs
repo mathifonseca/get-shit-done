@@ -23,7 +23,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const fc = require('./helpers/fast-check-setup.cjs');
 
-const { parseMarkdownTable, matchTableSchema, TABLE_SCHEMAS, appendQuickTaskRow, findTableBySchema, findTableWithColumns, updateTableCell, deleteTableRow } = require('../gsd-core/bin/lib/markdown-table.cjs');
+const {
+  migrateQuickTasksTable, parseMarkdownTable, matchTableSchema, TABLE_SCHEMAS, appendQuickTaskRow, findTableBySchema, findTableWithColumns, updateTableCell, deleteTableRow, resetQuickTaskRows, QUICK_TASKS_SECTION_ABSENT } = require('../gsd-core/bin/lib/markdown-table.cjs');
 const { buildHeader, normalize } = require('../scripts/lint-table-schema-drift.cjs');
 
 const ROOT = path.join(__dirname, '..');
@@ -319,7 +320,7 @@ describe('appendQuickTaskRow (#2133)', () => {
     const noSection = '# STATE\n\n### Blockers/Concerns\nNone\n';
     const result = appendQuickTaskRow(noSection, { description: 'x', date: '2026-07-13', commit: 'abc' });
     assert.equal(result.ok, false);
-    assert.match(result.reason, /no Quick Tasks Completed section/);
+    assert.equal(result.reason, QUICK_TASKS_SECTION_ABSENT);
   });
 
   test('boundary: next row number is 1 with zero data rows, 3 with two data rows', () => {
@@ -457,6 +458,194 @@ describe('appendQuickTaskRow (#2133)', () => {
     // must be no bare \n (i.e. no \n NOT preceded by \r).
     assert.ok(!/(?<!\r)\n/.test(section), 'expected no bare \\n (mixed EOL) in the touched section');
     assert.ok(section.includes('\r\n'), 'expected \\r\\n to be preserved in the touched section');
+  });
+});
+
+// ─── quick-tasks-append: canonical row + no forced progress re-derive (#3356) ──
+//
+// #3356 named two independent, silent (exit 0, ok:true) defects in
+// `routeQuickTasksAppend` (gsd-core/bin/gsd-tools.cjs): (1) the emitted `#`
+// cell was hardcoded to a positional ordinal and `Directory` hardcoded to
+// `'—'`, so the row could never match the canonical row `workflows/
+// quick.md`'s Step 7c documents even though quick.md:635 (pre-fix :617)
+// claimed the CLI performs "the equivalent write"; (2) the route called
+// `readModifyWriteStateMd` with no `options`, so `resync` defaulted `true`
+// and a single Quick Tasks body-table row append forced a full disk
+// re-derive of the `progress.*` frontmatter block, silently overwriting any
+// curated counters that diverge from what's on disk.
+//
+// Both are fixed here: `appendQuickTaskRow`'s `QuickTaskFields.quickId`
+// widens the pure row constructor (unit-level, this describe block), and
+// `routeQuickTasksAppend` now (a) accepts `--quick-id`/`--slug`/`--directory`
+// to render the canonical row, and (b) passes `{ resync: false }`. Per
+// ADR-3180 Decision 4(b) / epic #3473 B7, the two CLI-level tests below drive
+// the real `gsd-tools quick-tasks-append` subcommand and assert on ITS
+// emitted output / the STATE.md it writes — not on `appendQuickTaskRow`'s
+// return value alone, which a helper-only test would leave unproven at the
+// consumer boundary.
+describe('appendQuickTaskRow quickId widening (#3356 defect 1, unit)', () => {
+  const emptyState = [
+    '# STATE',
+    '',
+    '### Quick Tasks Completed',
+    '',
+    '| # | Description | Date | Commit | Directory |',
+    '|---|-------------|------|--------|-----------|',
+    '',
+    '### Blockers/Concerns',
+    'None',
+  ].join('\n');
+
+  test('a supplied quickId renders in the `#` cell instead of the positional ordinal', () => {
+    const result = appendQuickTaskRow(emptyState, {
+      description: 'Arreglar quick-tasks-append',
+      date: '2026-08-11',
+      commit: '0d3c644',
+      quickId: '260811-gfl',
+      directory: '[260811-gfl-arreglar-quick-tasks-append](./quick/260811-gfl-arreglar-quick-tasks-append/)',
+    });
+    assert.equal(result.ok, true);
+    assert.equal(
+      result.value.row,
+      '| 260811-gfl | Arreglar quick-tasks-append | 2026-08-11 | 0d3c644 | [260811-gfl-arreglar-quick-tasks-append](./quick/260811-gfl-arreglar-quick-tasks-append/) |',
+    );
+  });
+
+  test('omitting quickId keeps the pre-existing ordinal + \'—\' Directory fallback (fast.md, #2133, unchanged)', () => {
+    const result = appendQuickTaskRow(emptyState, {
+      description: 'no id supplied',
+      date: '2026-08-11',
+      commit: 'abc1234',
+    });
+    assert.equal(result.ok, true);
+    assert.ok(result.value.row.startsWith('| 1 | no id supplied |'), `expected the ordinal fallback, got: ${result.value.row}`);
+    assert.ok(result.value.row.endsWith('| — |'), `expected the '—' Directory fallback, got: ${result.value.row}`);
+  });
+});
+
+describe('CLI: quick-tasks-append (#3356)', () => {
+  const { createTempProject, cleanup, runGsdTools } = require('./helpers.cjs');
+
+  /** Minimal STATE.md with a Quick Tasks table and a curated progress block. */
+  function writeState(tmpDir, totalPhases) {
+    fs.mkdirSync(path.join(tmpDir, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), [
+      '---',
+      'progress:',
+      `  total_phases: ${totalPhases}`,
+      '  completed_phases: 3',
+      '  total_plans: ' + totalPhases,
+      '  completed_plans: 3',
+      '  percent: 12',
+      '---',
+      '',
+      '### Blockers/Concerns',
+      '',
+      '### Quick Tasks Completed',
+      '',
+      '| # | Description | Date | Commit | Directory |',
+      '|---|-------------|------|--------|-----------|',
+      '',
+    ].join('\n'));
+  }
+
+  test('defect 1: --quick-id/--slug produce the canonical quick.md Step 7c row shape', (t) => {
+    const tmpDir = createTempProject();
+    t.after(() => cleanup(tmpDir));
+    writeState(tmpDir, 25);
+
+    const r = runGsdTools(
+      ['quick-tasks-append', '--task', 'Fix thing', '--quick-id', '260811-gfl', '--slug', 'fix-thing'],
+      tmpDir,
+    );
+    assert.ok(r.success, `quick-tasks-append should succeed: ${r.error}`);
+    const out = JSON.parse(r.output);
+
+    assert.ok(out.row.startsWith('| 260811-gfl | Fix thing |'), `expected the '#' cell to carry the quick id, got: ${out.row}`);
+    assert.ok(
+      out.row.endsWith('| [260811-gfl-fix-thing](./quick/260811-gfl-fix-thing/) |'),
+      `expected the canonical directory permalink, got: ${out.row}`,
+    );
+
+    const stateContent = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf8');
+    assert.ok(stateContent.includes('| 260811-gfl | Fix thing |'), 'STATE.md itself must carry the same canonical row');
+  });
+
+  /** STATE.md variant whose Quick Tasks table already has a Status column. */
+  function writeStateWithStatus(tmpDir, totalPhases) {
+    fs.mkdirSync(path.join(tmpDir, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), [
+      '---',
+      'progress:',
+      `  total_phases: ${totalPhases}`,
+      '  completed_phases: 3',
+      '  total_plans: ' + totalPhases,
+      '  completed_plans: 3',
+      '  percent: 12',
+      '---',
+      '',
+      '### Blockers/Concerns',
+      '',
+      '### Quick Tasks Completed',
+      '',
+      '| # | Description | Date | Commit | Status | Directory |',
+      '|---|-------------|------|--------|--------|-----------|',
+      '',
+    ].join('\n'));
+  }
+
+  test('#4906 Phase 3 (#4958): --status writes the Status column for quick.md VALIDATE_MODE rows', (t) => {
+    const tmpDir = createTempProject();
+    t.after(() => cleanup(tmpDir));
+    writeStateWithStatus(tmpDir, 25);
+
+    const r = runGsdTools(
+      ['quick-tasks-append', '--task', 'Fix thing', '--quick-id', '260811-gfl', '--slug', 'fix-thing', '--status', 'PASS'],
+      tmpDir,
+    );
+    assert.ok(r.success, `quick-tasks-append should succeed: ${r.error}`);
+    const out = JSON.parse(r.output);
+
+    assert.ok(out.row.includes('| PASS |'), `expected the Status cell to carry PASS, got: ${out.row}`);
+    assert.ok(out.row.startsWith('| 260811-gfl | Fix thing |'), `expected the '#' cell to carry the quick id, got: ${out.row}`);
+
+    const stateContent = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf8');
+    assert.ok(stateContent.includes('| PASS |'), 'STATE.md itself must carry the Status cell');
+  });
+
+  test('bare --task (no id) keeps the fast.md-compatible ordinal + \'—\' row, unchanged', (t) => {
+    const tmpDir = createTempProject();
+    t.after(() => cleanup(tmpDir));
+    writeState(tmpDir, 25);
+
+    const r = runGsdTools(['quick-tasks-append', '--task', 'Fix thing'], tmpDir);
+    assert.ok(r.success, `quick-tasks-append should succeed: ${r.error}`);
+    const out = JSON.parse(r.output);
+    assert.ok(/^\| 1 \| Fix thing \| .* \| — \|$/.test(out.row), `expected the ordinal + em-dash fallback, got: ${out.row}`);
+  });
+
+  test('defect 2: a body-only append does not force a full progress re-derive — a curated total_phases divergent from disk survives', (t) => {
+    const tmpDir = createTempProject();
+    t.after(() => cleanup(tmpDir));
+    // Curated progress (25) deliberately diverges from what a fresh disk scan
+    // would measure from the phases actually on disk (2) — the #3242 Bug A /
+    // #3356 defect 2 shape: a real project whose rollup total does not match
+    // this snapshot's own two phase dirs.
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '01-alpha'), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '02-beta'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), '# Roadmap\n\n## Phase 1: Alpha\n## Phase 2: Beta\n');
+    writeState(tmpDir, 25);
+
+    const r = runGsdTools(['quick-tasks-append', '--task', 'Fix thing'], tmpDir);
+    assert.ok(r.success, `quick-tasks-append should succeed: ${r.error}`);
+
+    const stateContent = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf8');
+    const match = stateContent.match(/total_phases:\s*(\d+)/);
+    assert.equal(
+      match && match[1], '25',
+      `a body-only Quick Tasks append must not re-derive progress.total_phases from disk; ` +
+      `expected the curated 25 to survive, got: ${JSON.stringify(stateContent)}`,
+    );
   });
 });
 
@@ -637,6 +826,29 @@ describe('updateTableCell', () => {
     const result = updateTableCell('just some prose, no table here', () => true, 'Status', 'x');
     assert.equal(result.ok, false);
     assert.match(result.reason, /no table found/);
+  });
+
+  test('#3255: reaches a later table when the first table lacks the requested column', () => {
+    // A ## Traceability section holding a phase-summary table (no Status) ABOVE
+    // the requirement table (with Status). The prior code bound to the FIRST
+    // table and returned 'unknown column: Status' without ever reaching the
+    // requirement table, so requirements.mark-complete left the row at Pending.
+    const multiTable = [
+      '| Phase | Name | Requirements |',
+      '|-------|------|--------------|',
+      '| 1 | Portal Spec | 4 (PORTAL-01..04) |',
+      '',
+      '| Requirement | Phase | Status |',
+      '|-------------|-------|--------|',
+      '| AUTHZ-02 | Phase 02.2 | Pending |',
+    ].join('\n');
+    const byReq = (row) => (Object.values(row)[0] ?? '').trim().toLowerCase() === 'authz-02';
+    const result = updateTableCell(multiTable, byReq, 'Status', ' Complete ');
+
+    assert.equal(result.ok, true, `expected ok:true (should reach the requirement table); got: ${result && result.reason}`);
+    assert.ok(result.value.includes('| Phase | Name | Requirements |'), 'first (summary) table header untouched');
+    assert.ok(result.value.includes('| 1 | Portal Spec | 4 (PORTAL-01..04) |'), 'first (summary) data row untouched');
+    assert.ok(/AUTHZ-02 \| Phase 02\.2 \| Complete/.test(result.value), 'second table Status cell flipped Pending → Complete');
   });
 
   test('5-column milestone table: Milestone cell and other columns stay byte-identical', () => {
@@ -964,5 +1176,523 @@ describe('TABLE_SCHEMAS parity: registry headers must appear verbatim in their s
     for (const variant of TABLE_SCHEMAS.Security) {
       assertHeaderInFile('gsd-core/templates/SECURITY.md', variant);
     }
+  });
+});
+
+// ─── Quick Tasks heading tolerance (#3860) ────────────────────────────────────
+
+describe('Quick Tasks heading tolerance (#3860)', () => {
+  // Byte-identical table body to the bare-heading control — only the heading
+  // suffix differs, which is exactly the reporter's isolation.
+  const suffixedState = [
+    '# STATE',
+    '',
+    '### Quick Tasks Completed (v1.1+)',
+    '',
+    '| # | Description | Date | Commit | Directory |',
+    '|---|-------------|------|--------|-----------|',
+    '| 1 | fix typo | 2026-01-01 | abc1234 | — |',
+    '',
+    '### Blockers/Concerns',
+    'None',
+  ].join('\n');
+
+  const multiMilestoneState = [
+    '# STATE',
+    '',
+    '### Quick Tasks Completed (v1.1+)',
+    '',
+    '| # | Description | Date | Commit | Directory |',
+    '|---|-------------|------|--------|-----------|',
+    '| 250101-abc | first v1.1 task | 2025-01-01 | 0123abc | [dir](./quick/250101-abc/) |',
+    '',
+    '### Quick Tasks Completed (v1.0)',
+    '',
+    '| # | Description | Date | Commit | Directory |',
+    '|---|-------------|------|--------|-----------|',
+    '| 1 | legacy v1.0 task | 2024-06-01 | old1234 | — |',
+  ].join('\n');
+
+  // v1.0 first in document order with a LEGACY (unrecognized) schema — the
+  // usable v1.1+ table below it must not be shadowed (#3860 "worth deciding
+  // deliberately rather than inheriting from document order").
+  const legacyFirstState = [
+    '# STATE',
+    '',
+    '### Quick Tasks Completed (v1.0)',
+    '',
+    '| Date | Slug | Scope | Artifacts |',
+    '|------|------|-------|-----------|',
+    '| 2024-06-01 | old | full | — |',
+    '',
+    '### Quick Tasks Completed (v1.1+)',
+    '',
+    '| # | Description | Date | Commit | Directory |',
+    '|---|-------------|------|--------|-----------|',
+    '| 1 | fix typo | 2026-01-01 | abc1234 | — |',
+  ].join('\n');
+
+  test('appendQuickTaskRow locates a milestone-suffixed heading', () => {
+    const result = appendQuickTaskRow(suffixedState, {
+      description: 'probe',
+      date: '2026-08-25',
+      commit: 'deadbee',
+    });
+    assert.equal(result.ok, true, `reason: ${result.reason}`);
+    assert.ok(result.value.content.includes('| 2 | probe | 2026-08-25 | deadbee | — |'));
+    assert.ok(result.value.content.includes('### Quick Tasks Completed (v1.1+)'), 'the suffixed heading itself is untouched');
+  });
+
+  test('resetQuickTaskRows clears a milestone-suffixed heading', () => {
+    const result = resetQuickTaskRows(suffixedState);
+    assert.equal(result.ok, true, `reason: ${result.reason}`);
+    assert.equal(result.value.cleared, 1);
+    assert.ok(!result.value.content.includes('fix typo'));
+    assert.ok(result.value.content.includes('### Quick Tasks Completed (v1.1+)'));
+  });
+
+  test('bare "Quick Tasks Completedness" is NOT matched (word boundary holds)', () => {
+    const notQuick = suffixedState.replace(
+      '### Quick Tasks Completed (v1.1+)',
+      '### Quick Tasks Completedness (v1.1+)',
+    );
+    const result = appendQuickTaskRow(notQuick, { description: 'x', date: '2026-08-25', commit: 'abc' });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, QUICK_TASKS_SECTION_ABSENT, 'a different section name must still be absent');
+  });
+
+  test('multiple milestone sections: appends to the one holding the canonical table', () => {
+    const result = appendQuickTaskRow(multiMilestoneState, {
+      description: 'second v1.1 task',
+      date: '2025-02-02',
+      commit: '0456def',
+    });
+    assert.equal(result.ok, true, `reason: ${result.reason}`);
+    assert.ok(result.value.content.includes('second v1.1 task'));
+    const v11 = result.value.content.indexOf('### Quick Tasks Completed (v1.1+)');
+    const v10 = result.value.content.indexOf('### Quick Tasks Completed (v1.0)');
+    assert.ok(
+      result.value.content.indexOf('second v1.1 task') > v11 && result.value.content.indexOf('second v1.1 task') < v10,
+      'the row lands in the v1.1+ section (the one whose table matched the canonical schema), not the v1.0 section'
+    );
+    assert.ok(
+      result.value.content.includes('| 1 | legacy v1.0 task | 2024-06-01 | old1234 | — |'),
+      'the v1.0 row is present byte-identical (only the v1.1+ table gained a row)'
+    );
+  });
+
+  test('a legacy-schema section first in document order does not shadow a usable one', () => {
+    const result = appendQuickTaskRow(legacyFirstState, {
+      description: 'new task',
+      date: '2026-08-25',
+      commit: 'deadbee',
+    });
+    assert.equal(result.ok, true, `reason: ${result.reason}`);
+    assert.ok(
+      result.value.content.includes('| 2 | new task | 2026-08-25 | deadbee | — |'),
+      'appends to the v1.1+ canonical table below the legacy v1.0 one'
+    );
+    assert.ok(!result.value.content.includes('unrecognized'), 'no schema complaint when a usable section exists');
+  });
+
+  test('when NO matching section is usable, the error names the real problem (first section\'s)', () => {
+    const onlyLegacy = legacyFirstState.slice(0, legacyFirstState.indexOf('### Quick Tasks Completed (v1.1+)'));
+    const result = appendQuickTaskRow(onlyLegacy, { description: 'x', date: '2026-08-25', commit: 'abc' });
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.reason.includes('unrecognized Quick Tasks schema'),
+      `the failure must describe the legacy table, not claim the section is absent; got: ${result.reason}`
+    );
+  });
+
+  test('#3860 review: a later ## Deferred Items pipe table is NOT the splice target', () => {
+    // The canonical STATE.md layout (templates/state.md + workflows/quick.md)
+    // puts a pipe table AFTER the Quick Tasks section. A section-body
+    // collection that only stops at the next matching heading would swallow
+    // it, and the append's last-table-line scan would splice the quick-task
+    // row into the Deferred Items table.
+    const canonicalLayout = [
+      '# STATE',
+      '',
+      '### Quick Tasks Completed (v1.1+)',
+      '',
+      '| # | Description | Date | Commit | Directory |',
+      '|---|-------------|------|--------|-----------|',
+      '| 1 | fix typo | 2026-01-01 | abc1234 | — |',
+      '',
+      '### Blockers/Concerns',
+      'None',
+      '',
+      '## Deferred Items',
+      '',
+      '| Category | Item | Status | Deferred At | Milestone |',
+      '|----------|------|--------|-------------|-----------|',
+      '| scope | extra thing | deferred | 2026-01-02 | v1.1 |',
+      '',
+    ].join('\n');
+    const result = appendQuickTaskRow(canonicalLayout, {
+      description: 'probe',
+      date: '2026-08-25',
+      commit: 'deadbee',
+    });
+    assert.equal(result.ok, true, `reason: ${result.reason}`);
+    const content = result.value.content;
+    const quickRow = '| 2 | probe | 2026-08-25 | deadbee | — |';
+    assert.ok(content.includes(quickRow), 'the new row exists');
+    assert.ok(
+      content.indexOf(quickRow) < content.indexOf('## Deferred Items'),
+      'the row lands INSIDE the Quick Tasks table, before the Deferred Items section'
+    );
+    assert.ok(
+      content.includes('| scope | extra thing | deferred | 2026-01-02 | v1.1 |'),
+      'the Deferred Items table is byte-identical (no row spliced after its last line)'
+    );
+    const deferred = content.slice(content.indexOf('## Deferred Items'));
+    assert.ok(!deferred.includes(quickRow), 'the Deferred Items section contains no quick-task row');
+  });
+
+  test('#3860 convention: several schema-valid sections — document order (newest-on-top) wins', () => {
+    // The archive flow preserves a recognized header-only table under the old
+    // heading (workflows/complete-milestone.md), so both sections can be
+    // schema-valid. This layer has no active-milestone signal; the pinned
+    // tie-break is document order — first section — matching the issue's own
+    // newest-on-top layout.
+    const bothValid = [
+      '# STATE',
+      '',
+      '### Quick Tasks Completed (v1.1+)',
+      '',
+      '| # | Description | Date | Commit | Directory |',
+      '|---|-------------|------|--------|-----------|',
+      '| 1 | current task | 2026-01-01 | abc1234 | — |',
+      '',
+      '### Quick Tasks Completed (v1.0)',
+      '',
+      '| # | Description | Date | Commit | Directory |',
+      '|---|-------------|------|--------|-----------|',
+      '| 99 | archived task | 2025-01-01 | old1234 | — |',
+    ].join('\n');
+    const result = appendQuickTaskRow(bothValid, {
+      description: 'new task',
+      date: '2026-08-25',
+      commit: 'deadbee',
+    });
+    assert.equal(result.ok, true, `reason: ${result.reason}`);
+    const v11 = result.value.content.indexOf('### Quick Tasks Completed (v1.1+)');
+    const v10 = result.value.content.indexOf('### Quick Tasks Completed (v1.0)');
+    assert.ok(
+      result.value.content.indexOf('| 2 | new task | 2026-08-25 | deadbee | — |') > v11
+        && result.value.content.indexOf('| 2 | new task | 2026-08-25 | deadbee | — |') < v10,
+      'the row lands in the FIRST (newest-on-top) section'
+    );
+  });
+});
+
+// ─── resetQuickTaskRows (#2142) ─────────────────────────────────────────────
+
+describe('resetQuickTaskRows (#2142)', () => {
+  const noStatusState = [
+    '# STATE',
+    '',
+    '### Quick Tasks Completed',
+    '',
+    '| # | Description | Date | Commit | Directory |',
+    '|---|-------------|------|--------|-----------|',
+    '| 1 | fix typo | 2026-01-01 | abc1234 | — |',
+    '| 2 | bump version | 2026-01-02 | def5678 | — |',
+    '',
+    '### Blockers/Concerns',
+    'None',
+  ].join('\n');
+
+  const withStatusState = [
+    '# STATE',
+    '',
+    '### Quick Tasks Completed',
+    '',
+    '| # | Description | Date | Commit | Status | Directory |',
+    '|---|-------------|------|--------|--------|-----------|',
+    '| 1 | fix typo | 2026-01-01 | abc1234 | Pass | — |',
+    '',
+    '### Blockers/Concerns',
+    'None',
+  ].join('\n');
+
+  const emptyNoStatusState = [
+    '# STATE',
+    '',
+    '### Quick Tasks Completed',
+    '',
+    '| # | Description | Date | Commit | Directory |',
+    '|---|-------------|------|--------|-----------|',
+    '',
+    '### Blockers/Concerns',
+    'None',
+  ].join('\n');
+
+  test('reset clears all rows in a 5-col no-status table; header/delimiter byte-identical, variant no-status, cleared=2', () => {
+    const beforeLines = noStatusState.split('\n');
+    const result = resetQuickTaskRows(noStatusState);
+    assert.equal(result.ok, true);
+    assert.equal(result.value.cleared, 2);
+    assert.equal(result.value.variant, 'no-status');
+
+    const afterLines = result.value.content.split('\n');
+    assert.equal(afterLines[4], beforeLines[4], 'header row byte-identical');
+    assert.equal(afterLines[5], beforeLines[5], 'delimiter row byte-identical');
+    assert.ok(!result.value.content.includes('fix typo'));
+    assert.ok(!result.value.content.includes('bump version'));
+
+    const section = result.value.content.split('### Blockers/Concerns')[0];
+    const reparsed = parseMarkdownTable(section);
+    assert.equal(reparsed.ok, true);
+    assert.equal(reparsed.value.rows.length, 0);
+  });
+
+  test('reset preserves the 6-col with-status header; variant with-status', () => {
+    const result = resetQuickTaskRows(withStatusState);
+    assert.equal(result.ok, true);
+    assert.equal(result.value.variant, 'with-status');
+    assert.equal(result.value.cleared, 1);
+    assert.ok(!result.value.content.includes('fix typo'));
+
+    const headerLine = withStatusState.split('\n')[4];
+    assert.ok(result.value.content.includes(headerLine), 'the 6-col header must survive verbatim');
+  });
+
+  test('reset is a no-op on an already-empty Quick Tasks table', () => {
+    const result = resetQuickTaskRows(emptyNoStatusState);
+    assert.equal(result.ok, true);
+    assert.equal(result.value.cleared, 0);
+    assert.equal(result.value.content, emptyNoStatusState, 'content must be byte-identical when there were zero rows');
+  });
+
+  test('refuses to reset an unrecognized Quick Tasks schema, leaving rows intact', () => {
+    const garbled = [
+      '# STATE',
+      '',
+      '### Quick Tasks Completed',
+      '',
+      '| # | Thing | When |',
+      '|---|-------|------|',
+      '| 1 | fix typo | 2026-01-01 |',
+    ].join('\n');
+    const before = garbled;
+
+    const result = resetQuickTaskRows(garbled);
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /unrecognized/);
+    // The caller-owned content must never be mutated on a refused write.
+    assert.equal(garbled, before);
+    assert.ok(garbled.includes('| 1 | fix typo | 2026-01-01 |'), 'the original row must still be present — no write occurred');
+  });
+
+  test('empty input and non-string input both return a typed failure, never throw', () => {
+    let r1;
+    let r2;
+    assert.doesNotThrow(() => { r1 = resetQuickTaskRows(''); });
+    assert.equal(r1.ok, false);
+    assert.doesNotThrow(() => { r2 = resetQuickTaskRows(42); });
+    assert.equal(r2.ok, false);
+  });
+
+  test('fails loud with a reason when the Quick Tasks Completed section is absent', () => {
+    const noSection = '# STATE\n\n### Blockers/Concerns\nNone\n';
+    const result = resetQuickTaskRows(noSection);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, QUICK_TASKS_SECTION_ABSENT);
+  });
+
+  test('CRLF input keeps \\r\\n in the touched section (no mixed EOL)', () => {
+    const crlfState = noStatusState.replace(/\n/g, '\r\n');
+    const result = resetQuickTaskRows(crlfState);
+    assert.equal(result.ok, true);
+
+    const section = result.value.content.split('### Blockers/Concerns')[0];
+    assert.ok(!/(?<!\r)\n/.test(section), 'expected no bare \\n (mixed EOL) in the touched section');
+    assert.ok(section.includes('\r\n'), 'expected \\r\\n to be preserved');
+  });
+
+  test('an unrelated preceding table (different schema) is untouched; only the quick table is cleared', () => {
+    const doc = [
+      '# STATE',
+      '',
+      '## Roadmap Progress',
+      '',
+      '| Phase | Plans Complete | Status | Completed |',
+      '| --- | --- | --- | --- |',
+      '| 1. Alpha | 2/2 | Complete | ✅ |',
+      '',
+      '### Quick Tasks Completed',
+      '',
+      '| # | Description | Date | Commit | Directory |',
+      '|---|-------------|------|--------|-----------|',
+      '| 1 | fix typo | 2026-01-01 | abc1234 | — |',
+      '',
+      '### Blockers/Concerns',
+      'None',
+    ].join('\n');
+
+    const result = resetQuickTaskRows(doc);
+    assert.equal(result.ok, true);
+    assert.equal(result.value.cleared, 1);
+    assert.ok(
+      result.value.content.includes('| 1. Alpha | 2/2 | Complete | ✅ |'),
+      'the unrelated RoadmapProgress row must survive untouched',
+    );
+    assert.ok(!result.value.content.includes('fix typo'));
+  });
+
+  test('property: reset always clears exactly the input row count and never touches the header line', () => {
+    const rowCountArb = fc.integer({ min: 0, max: 50 });
+    fc.assert(
+      fc.property(rowCountArb, (n) => {
+        const rows = [];
+        for (let i = 1; i <= n; i++) {
+          rows.push(`| ${i} | task ${i} | 2026-01-01 | abc${String(i).padStart(4, '0')} | — |`);
+        }
+        const state = [
+          '# STATE',
+          '',
+          '### Quick Tasks Completed',
+          '',
+          '| # | Description | Date | Commit | Directory |',
+          '|---|-------------|------|--------|-----------|',
+          ...rows,
+          '',
+          '### Blockers/Concerns',
+          'None',
+        ].join('\n');
+        const headerLine = state.split('\n')[4];
+
+        const result = resetQuickTaskRows(state);
+        assert.equal(result.ok, true, `expected ok:true, got ${JSON.stringify(result)}`);
+        assert.equal(result.value.cleared, n);
+        assert.ok(result.value.content.includes(headerLine), 'header line must be unchanged');
+      }),
+      { seed: 20260817, numRuns: 50 },
+    );
+  });
+});
+
+describe('migrateQuickTasksTable (#3730 option b)', () => {
+  const legacyState = (eol = '\n') => [
+    '# State',
+    '',
+    '## Quick Tasks Completed',
+    '',
+    '| Date | Slug | Scope | Artifacts |',
+    '|------|------|-------|-----------|',
+    '| 2026-04-17 | 260417-abc | bootstrap | roles/x |',
+    '| 2026-05-02 | 260502-def | cli | quick/y |',
+  ].join(eol) + eol;
+
+  test('migrates the legacy pre-registry schema', () => {
+    const r = migrateQuickTasksTable(legacyState());
+    assert.equal(r.ok, true, `migrate failed: ${r.reason}`);
+    assert.equal(r.value.migrated, true);
+    assert.ok(r.value.content.includes('| # | Description | Date | Commit | Status | Directory |'),
+      'canonical with-status header is written');
+    assert.ok(r.value.content.includes('| 1 | 260417-abc · bootstrap | 2026-04-17 | — | — | roles/x |'),
+      'Slug+Scope bucket into Description; Artifacts maps to Directory; # renumbered');
+    assert.ok(r.value.content.includes('| 2 | 260502-def · cli | 2026-05-02 | — | — | quick/y |'),
+      'every data row migrates');
+    assert.ok(!r.value.content.includes('| Date | Slug |'), 'the legacy header is gone');
+  });
+
+  test('keeps unknown-named columns losslessly in the Description bucket', () => {
+    const state = [
+      '# State', '', '## Quick Tasks Completed', '',
+      '| Date | Owner |', '|------|-------|', '| 2026-04-17 | sim |',
+    ].join('\n');
+    const r = migrateQuickTasksTable(state);
+    assert.equal(r.ok, true);
+    assert.ok(r.value.content.includes('Owner: sim'), 'unknown column keeps its name: value');
+  });
+
+  test('no-ops a canonical table (byte-identical)', () => {
+    const canonical = [
+      '# State', '', '## Quick Tasks Completed', '',
+      '| # | Description | Date | Commit | Directory |',
+      '|---|-------------|------|--------|-----------|',
+      '| 1 | existing | 2026-04-17 | deadbee | ./quick/a/ |',
+    ].join('\n');
+    const r = migrateQuickTasksTable(canonical);
+    assert.equal(r.ok, true);
+    assert.equal(r.value.migrated, false);
+    assert.equal(r.value.content, canonical);
+  });
+
+  test('no-ops an absent section (absence is normal, #2142)', () => {
+    const r = migrateQuickTasksTable('# State\n\n## Other\n');
+    assert.equal(r.ok, true);
+    assert.equal(r.value.migrated, false);
+  });
+
+  test('fails loud on an unparseable table', () => {
+    const state = '# State\n\n## Quick Tasks Completed\n\nnot a table\n';
+    const r = migrateQuickTasksTable(state);
+    assert.equal(r.ok, false);
+    assert.ok(r.reason.length > 0, 'carries the parse failure reason');
+  });
+
+  test('preserves CRLF section endings', () => {
+    const r = migrateQuickTasksTable(legacyState('\r\n'));
+    assert.equal(r.ok, true);
+    assert.ok(r.value.content.includes('\r\n'), 'CRLF preserved');
+    assert.ok(!/[^\r]\n/.test(r.value.content.split('## Quick Tasks Completed')[1] || ''),
+      'no mixed EOL introduced into the section');
+  });
+
+  test('a migrated table is appendable (round-trip)', () => {
+    const migrated = migrateQuickTasksTable(legacyState());
+    const appended = appendQuickTaskRow(migrated.value.content, {
+      description: 'probe', date: '2026-08-20', commit: 'deadbee', directory: './quick/probe/',
+    });
+    assert.equal(appended.ok, true, `append after migrate failed: ${appended.reason}`);
+    assert.ok(appended.value.row.includes('probe'));
+  });
+});
+
+describe('quick-tasks-migrate CLI and workflow wiring (#3730)', () => {
+  const { createTempProject, cleanup, runGsdTools } = require('./helpers.cjs');
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  test('quick-tasks-migrate CLI round-trip', (t) => {
+    const tmpDir = createTempProject('gsd-3730-cli-');
+    t.after(() => cleanup(tmpDir));
+    const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+    fs.writeFileSync(statePath, [
+      '# State', '', '## Quick Tasks Completed', '',
+      '| Date | Slug | Scope | Artifacts |',
+      '|------|------|-------|-----------|',
+      '| 2026-04-17 | 260417-abc | bootstrap | roles/x |',
+    ].join('\n'));
+
+    const first = runGsdTools('quick-tasks-migrate', tmpDir);
+    assert.equal(first.success, true, `migrate failed: ${first.error}`);
+    const firstOut = JSON.parse(first.output);
+    assert.equal(firstOut.migrated, true);
+    assert.deepEqual(firstOut.from, ['Date', 'Slug', 'Scope', 'Artifacts']);
+    assert.ok(fs.readFileSync(statePath, 'utf8').includes('| # | Description | Date | Commit | Status | Directory |'),
+      'STATE.md rewritten to canonical');
+
+    const second = runGsdTools('quick-tasks-migrate', tmpDir);
+    assert.equal(second.success, true, `second migrate failed: ${second.error}`);
+    assert.equal(JSON.parse(second.output).migrated, false, 'a canonical table is a no-op');
+  });
+
+  test('quick and fast run the migration check first', () => {
+    const fast = fs.readFileSync(path.join(__dirname, '..', 'gsd-core', 'workflows', 'fast.md'), 'utf8');
+    const quick = fs.readFileSync(path.join(__dirname, '..', 'gsd-core', 'workflows', 'quick.md'), 'utf8');
+    // Compare the INVOCATIONS, not first prose mentions — fast.md's prose
+    // names the append helper (~line 77) before the bash block that runs both.
+    const fastMigrate = fast.indexOf('gsd_run quick-tasks-migrate');
+    const fastAppend = fast.indexOf('gsd_run quick-tasks-append');
+    assert.ok(fastMigrate !== -1, 'fast.md invokes quick-tasks-migrate');
+    assert.ok(fastAppend !== -1 && fastMigrate < fastAppend, 'the migration runs BEFORE the append');
+    assert.ok(quick.includes('quick-tasks-migrate'),
+      'quick.md documents and invokes the migration path (#3730)');
   });
 });

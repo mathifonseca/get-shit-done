@@ -16,7 +16,7 @@
 | `adaptive` | Opus | Sonnet | Sonnet | Sonnet | ランタイム対応プロファイルで他のティアと同様に解決。ランタイムを頻繁に切り替える場合に使用 |
 | `inherit` | （セッションモデル） | （セッションモデル） | （セッションモデル） | （セッションモデル） | Anthropic 以外のプロバイダー（OpenRouter、ローカルモデル）— すべてのエージェントが現在のセッションモデルに従う |
 
-上の表は代表的なサブセットを示しています。出荷済みの全 33 エージェントは `sdk/shared/model-catalog.json` にプロファイルごとの明示的なティア割り当てを持っています。完全なテーブルは設定リファレンスの [モデルプロファイル](../CONFIGURATION.md#model-profiles) を参照してください。
+上の表は代表的なサブセットを示しています。出荷済みの全 33 エージェントは `gsd-core/bin/shared/model-catalog.json` にプロファイルごとの明示的なティア割り当てを持っています。完全なテーブルは設定リファレンスの [モデルプロファイル](../CONFIGURATION.md#model-profiles) を参照してください。
 
 **コマンドによるクイック切り替え:**
 
@@ -154,7 +154,7 @@ npx @opengsd/gsd-core@latest --codex --global   # または --opencode、--kilo 
 
 ## Anthropic 以外のランタイムでの GSD 使用
 
-Codex、OpenCode、Gemini CLI、または Kilo 向けに GSD をインストールした場合、インストーラーはすでに設定に `resolve_model_ids: "omit"` を設定しています。これにより GSD は Anthropic のモデル ID 解決をスキップし、ランタイムが独自のデフォルトモデルを選択できるようにします。基本的なケースでは手動設定は不要です。
+Codex、OpenCode、Antigravity CLI、または Kilo 向けに GSD をインストールした場合、インストーラーはすでに設定に `resolve_model_ids: "omit"` を設定しています。これにより GSD は Anthropic のモデル ID 解決をスキップし、ランタイムが独自のデフォルトモデルを選択できるようにします。基本的なケースでは手動設定は不要です。
 
 **Codex でティアードモデルを使用したい場合:**
 

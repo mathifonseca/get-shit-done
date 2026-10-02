@@ -44,6 +44,9 @@
  *   4. `flags: string[]` — Antigravity is selected by BOTH `--antigravity` and
  *      `--agy`, which a single-valued field cannot express. This also flattens
  *      D8's uniqueness invariant across every lane's flags.
+ *   5. `NATIVE_TIMEOUT` — a lane whose CLI takes its own native inner timeout flag (today only
+ *      antigravity's `--print-timeout`) declares where the resolved value goes; `resolveLanePlan`
+ *      computes what it is from the same resolved outer `timeoutMs` (#3274).
  *
  * Phase 2 (#2795) implements the manifest validator against the amended
  * vocabulary, which is the point of amending rather than leaving it to be
@@ -102,7 +105,7 @@ export type LaneProbe =
  * `args` is an argv TEMPLATE, not a prefix. The injected pieces — model, effort, output file,
  * argv-borne prompt — do not all go in the same place, and no positional rule expresses that:
  * `codex` injects the model in the MIDDLE (after the `exec --ephemeral` subcommand) and the output
- * file later still, while `gemini` injects the model first and five lanes end with a bare `-` that
+ * file later still, while `kimi-code` injects the model first and five lanes end with a bare `-` that
  * must stay last. Splicing by position silently produced
  * `codex --model M -o F exec --ephemeral …`, which is not a valid codex invocation.
  *
@@ -110,7 +113,7 @@ export type LaneProbe =
  * and vanishes when it has nothing to contribute (no model configured, no effort channel, prompt on
  * stdin), which is what lets one template serve the configured and unconfigured cases.
  *
- * This is a closed four-member vocabulary with no expressions, no nesting and no conditionals — a
+ * This is a closed five-member vocabulary with no expressions, no nesting and no conditionals — a
  * placeholder set, deliberately not a template language. The moment it needs a conditional, the
  * lane wants a `handler` instead (D6).
  */
@@ -123,6 +126,9 @@ export const ARGV_PLACEHOLDER = Object.freeze({
   OUTPUT: '{{output}}',
   /** The argv-borne prompt, or nothing unless `promptChannel` is `argv`/`argv-file-ref`. */
   PROMPT: '{{prompt}}',
+  /** A lane's own CLI-native inner timeout duration, derived from the resolved outer `timeoutMs`
+   * (never independently configured) — see `resolveLanePlan`'s expansion of this token. */
+  NATIVE_TIMEOUT: '{{nativeTimeout}}',
 } as const);
 
 export interface SpawnInvoke {
@@ -136,6 +142,15 @@ export interface SpawnInvoke {
   /** `null` when the lane accepts no model override. */
   modelArg: string | null;
   effortChannel: EffortChannel;
+  /**
+   * Per-invocation environment pairs, merged over the inherited environment at spawn time (#2483).
+   * Declared data, not a handler (D6): the pairs are static per lane. Scoped to the one spawn —
+   * the orchestrating session's environment is never mutated. First-party lanes only today: the
+   * resolver sees exactly `REVIEWER_LANES`, so no third-party manifest can reach this field; if
+   * manifest lanes are ever wired to execute, `env` must join the trust disclosure
+   * (`capability-trust`) before it is honored there.
+   */
+  env?: Readonly<Record<string, string>>;
 }
 
 export interface HttpInvoke {
@@ -169,6 +184,24 @@ interface ReviewerLaneCommon {
   probe: LaneProbe;
   /** Outer wall-clock bound. An inner tool-native timeout lives in the handler (D6). */
   timeoutFloorMs: number;
+  /**
+   * Dotted config key holding this lane's outer timeout override, in SECONDS, or null when the
+   * lane accepts none.
+   *
+   * Added by #3274 in the same spirit as `promptBudgetKey`/`modelConfigKey`: the frozen
+   * `timeoutFloorMs` table has no reachable override, and a review duration is a property of the
+   * user's repository and model, not of the lane — a cap right for a three-plan phase is wrong
+   * for a fifteen-plan one. Resolved at invocation time (`resolveLanePlan`); an unset key, or a
+   * config value that is not a positive finite number, falls back to `timeoutFloorMs` unchanged.
+   * For a lane whose `args` template ALSO carries a native tool-side timeout (antigravity's
+   * `--print-timeout`, via the `{{nativeTimeout}}` ARGV_PLACEHOLDER), the resolved value feeds both
+   * levels — see `resolveLanePlan`'s expansion of that token. Two lanes — `qwen` and `coderabbit` —
+   * accept neither a model flag nor a host and own no `review.timeouts.<slug>` key either, matching
+   * the same narrow key-ownership invariant `modelConfigKey` already follows for them (#3691 narrows
+   * #2797). `cursor` gained a model flag (`review.models.cursor`, #3653) but still owns no
+   * `review.timeouts.cursor` key of its own.
+   */
+  timeoutConfigKey: string | null;
   emptyOutput: EmptyOutputPolicy;
   /** The `## <reviewsSection> Review` heading in write_reviews. Unique (D8). */
   reviewsSection: string;
@@ -191,6 +224,30 @@ interface ReviewerLaneCommon {
    * the lane, and a naming convention that one shipped lane already breaks is not a contract.
    */
   modelConfigKey: string | null;
+  /**
+   * Dotted config key holding this lane's REVIEW reasoning effort, or null when the lane has no
+   * effort channel to feed.
+   *
+   * #4255. Lane effort used to be resolved by querying `gsd-plan-checker`'s execution settings
+   * with a hardcoded agent id, so every prompt-fed lane ran at the plan CHECKER's frontmatter
+   * effort — `low` under every shipped profile. A cross-AI review is the opposite workload from a
+   * fast structural verifier, and `low` is where a large prompt makes a model end its turn with no
+   * final message: the lane came back empty and the stub read as a crash. Effort is a property of
+   * the REVIEW, so it is declared here beside the lane's other keys and never inherited from an
+   * agent that has nothing to do with reviewing.
+   */
+  effortConfigKey: string | null;
+  /**
+   * The effort this lane runs at when `effortConfigKey` is unset — the review-specific default,
+   * declared per lane rather than centrally so a lane that wants a different floor can say so.
+   *
+   * #4255. `'high'` for the prompt-fed, source-grounded lanes: they read the repository against a
+   * plan set, which is the one place effort is load-bearing. `null` means GSD has NO
+   * review-specific value for this lane and the invocation emits no effort argument at all, so the
+   * CLI's own configuration decides — the correct behaviour when GSD has nothing of its own to
+   * say. A configured `'inherit'` selects that same no-argument path explicitly (#3533).
+   */
+  defaultEffort: string | null;
   handler: LaneHandler;
 }
 
@@ -221,33 +278,16 @@ const SPAWN_STDIN_STDOUT = {
 } as const;
 
 /**
- * The twelve declared lanes, in `write_reviews` order.
+ * The eleven declared lanes, in `write_reviews` order.
+ *
+ * The `gemini` lane was retired by #4709: Google sunset Gemini CLI on 2026-06-18 (the same
+ * sunset that removed the gemini RUNTIME in #1928/1.8.0), so the lane spawned a binary that no
+ * longer serves the free/Pro/Ultra tiers that are GSD's audience.
  *
  * `kimi-code` joined in Phase 5b (#2799, closes #2718) — ADR-2782's phase table lands it here
  * rather than in 5a precisely so it arrives together with the iteration that can invoke it.
  */
 export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
-  {
-    slug: 'gemini',
-    flags: ['--gemini'],
-    transport: 'spawn',
-    probe: { kind: 'command-exists', binary: 'gemini' },
-    invoke: {
-      binary: 'gemini',
-      args: ['{{model}}', '-p', '-'],
-      ...SPAWN_STDIN_STDOUT,
-      modelArg: '-m',
-      effortChannel: 'none',
-    },
-    timeoutFloorMs: 900_000,
-    emptyOutput: 'stub-with-stderr',
-    reviewsSection: 'Gemini',
-    evidenceClass: 'source-grounded',
-    requiresBinaries: [],
-    promptBudgetKey: null,
-    modelConfigKey: 'review.models.gemini',
-    handler: null,
-  },
   {
     // 1_200_000 rather than the 900_000 floor: headless Claude measured ~525 s
     // on a large plan set (review.md:304).
@@ -261,14 +301,26 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
       ...SPAWN_STDIN_STDOUT,
       modelArg: '--model',
       effortChannel: 'argv',
+      // #2483: without these the claude leg is the only reviewer that additionally inherits the
+      // invoking user's global CLAUDE.md, the project CLAUDE.md, and Claude Code auto-memory —
+      // a context asymmetry against the independent-review premise (codex sees only the
+      // assembled prompt and runs --ephemeral). Both flags, not just the first: CLAUDE.md
+      // loading and auto-memory are independently-toggled mechanisms, and an environment
+      // exporting CLAUDE_CODE_DISABLE_AUTO_MEMORY=0 forces auto-memory back ON — the explicit
+      // pair is robust against that. Applies when /gsd:review runs from a non-Claude-Code host;
+      // inside Claude Code the claude lane self-skips for independence.
+      env: { CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
     },
     timeoutFloorMs: 1_200_000,
+    timeoutConfigKey: 'review.timeouts.claude',
     emptyOutput: 'stub-with-stderr',
     reviewsSection: 'Claude',
     evidenceClass: 'source-grounded',
     requiresBinaries: [],
-    promptBudgetKey: null,
+    promptBudgetKey: 'review.max_prompt_tokens_per_reviewer.claude',
     modelConfigKey: 'review.models.claude',
+    effortConfigKey: 'review.effort.claude',
+    defaultEffort: 'high',
     handler: null,
   },
   {
@@ -291,12 +343,15 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
       effortChannel: 'argv',
     },
     timeoutFloorMs: 1_200_000,
+    timeoutConfigKey: 'review.timeouts.codex',
     emptyOutput: 'stub-with-stderr',
     reviewsSection: 'Codex',
     evidenceClass: 'source-grounded',
     requiresBinaries: [],
-    promptBudgetKey: null,
+    promptBudgetKey: 'review.max_prompt_tokens_per_reviewer.codex',
     modelConfigKey: 'review.models.codex',
+    effortConfigKey: 'review.effort.codex',
+    defaultEffort: 'high',
     handler: null,
   },
   {
@@ -316,13 +371,16 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
       effortChannel: 'none',
     },
     timeoutFloorMs: 360_000,
+    timeoutConfigKey: null,
     emptyOutput: 'stub-with-stderr',
     reviewsSection: 'CodeRabbit',
     evidenceClass: 'diff-only',
     requiresBinaries: [],
-    promptBudgetKey: null,
+    promptBudgetKey: 'review.max_prompt_tokens_per_reviewer.coderabbit',
     // Accepts no model flag at all (review.md:367) — not merely "none configured".
     modelConfigKey: null,
+    effortConfigKey: null,
+    defaultEffort: null,
     handler: null,
   },
   {
@@ -341,14 +399,17 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
       effortChannel: 'argv',
     },
     timeoutFloorMs: 660_000,
+    timeoutConfigKey: 'review.timeouts.opencode',
     emptyOutput: 'stub-with-stderr',
     reviewsSection: 'OpenCode',
     evidenceClass: 'source-grounded',
     // Phase 5b: the handler reconstructs from the JSON stream with JSON.parse, so `jq` — absent on
     // stock Windows/Git-Bash (#2589) — is no longer a prerequisite for this lane.
     requiresBinaries: [],
-    promptBudgetKey: null,
+    promptBudgetKey: 'review.max_prompt_tokens_per_reviewer.opencode',
     modelConfigKey: 'review.models.opencode',
+    effortConfigKey: 'review.effort.opencode',
+    defaultEffort: 'high',
     // Phase 5b (#2799): was `null`. The review is REBUILT from assistant `text` parts; a plain
     // stdout copy would write the raw JSON envelope as the review (#1936). See LaneHandler.
     handler: 'opencode',
@@ -366,12 +427,15 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
       effortChannel: 'none',
     },
     timeoutFloorMs: 900_000,
+    timeoutConfigKey: null,
     emptyOutput: 'stub-with-stderr',
     reviewsSection: 'Qwen',
     evidenceClass: 'source-grounded',
     requiresBinaries: [],
-    promptBudgetKey: null,
+    promptBudgetKey: 'review.max_prompt_tokens_per_reviewer.qwen',
     modelConfigKey: null,
+    effortConfigKey: null,
+    defaultEffort: null,
     handler: null,
   },
   {
@@ -384,19 +448,23 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
     probe: { kind: 'command-exists', binary: 'cursor-agent' },
     invoke: {
       binary: 'cursor-agent',
-      args: ['-p', '--mode', 'ask', '--trust', '--output-format', 'text', '{{prompt}}'],
+      args: ['-p', '{{model}}', '--mode', 'ask', '--trust', '--output-format', 'text', '{{prompt}}'],
       promptChannel: 'argv-file-ref',
       outputChannel: 'stdout',
-      modelArg: null,
+      modelArg: '--model',
       effortChannel: 'none',
     },
     timeoutFloorMs: 900_000,
+    timeoutConfigKey: null,
     emptyOutput: 'stub-with-stderr',
     reviewsSection: 'Cursor',
     evidenceClass: 'source-grounded',
     requiresBinaries: [],
-    promptBudgetKey: null,
-    modelConfigKey: null,
+    promptBudgetKey: 'review.max_prompt_tokens_per_reviewer.cursor',
+    // #3653: cursor-agent exposes --model (204 selectable models); wired the same as codex.
+    modelConfigKey: 'review.models.cursor',
+    effortConfigKey: null,
+    defaultEffort: null,
     handler: null,
   },
   {
@@ -410,22 +478,30 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
     probe: { kind: 'command-exists', binary: 'agy' },
     invoke: {
       binary: 'agy',
-      args: ['--print-timeout', '540s', '{{model}}', '-p', '{{prompt}}'],
+      // `{{nativeTimeout}}` is the fifth ARGV_PLACEHOLDER member (#3274) — `resolveLanePlan`
+      // (review-lane-invocation.cts) expands it to a value DERIVED from this same lane's resolved
+      // outer `timeoutMs`, so the native `--print-timeout` and the outer wall-clock cap can never
+      // drift apart. No other shipped lane's `args` template contains this token, so the expansion
+      // is inert everywhere else.
+      args: ['--print-timeout', '{{nativeTimeout}}', '{{model}}', '-p', '{{prompt}}'],
       promptChannel: 'argv-file-ref',
       outputChannel: 'stdout',
       modelArg: '--model',
       effortChannel: 'none',
     },
     timeoutFloorMs: 600_000,
+    timeoutConfigKey: 'review.timeouts.antigravity',
     emptyOutput: 'handler-owned',
     reviewsSection: 'Antigravity',
     evidenceClass: 'source-grounded',
     // Phase 5b: the handler reads the transcript with JSON.parse per line, not `jq`.
     requiresBinaries: [],
-    promptBudgetKey: null,
+    promptBudgetKey: 'review.max_prompt_tokens_per_reviewer.antigravity',
     // NOT `review.models.antigravity` — the shipped key is `review.models.agy` (review.md:291) and
     // Phase 4 federated it under that name. This lane is why the key is declared, not derived.
     modelConfigKey: 'review.models.agy',
+    effortConfigKey: null,
+    defaultEffort: null,
     handler: 'antigravity',
   },
   {
@@ -447,6 +523,7 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
       effortChannel: 'none',
     },
     timeoutFloorMs: 120_000,
+    timeoutConfigKey: 'review.timeouts.ollama',
     emptyOutput: 'stub-with-stderr',
     reviewsSection: 'Ollama',
     evidenceClass: 'source-grounded',
@@ -455,6 +532,8 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
     requiresBinaries: [],
     promptBudgetKey: 'review.max_prompt_tokens_per_reviewer.ollama',
     modelConfigKey: 'review.models.ollama',
+    effortConfigKey: null,
+    defaultEffort: null,
     handler: 'openai-compatible',
   },
   {
@@ -476,12 +555,15 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
       effortChannel: 'none',
     },
     timeoutFloorMs: 120_000,
+    timeoutConfigKey: 'review.timeouts.lm_studio',
     emptyOutput: 'stub-with-stderr',
     reviewsSection: 'LM Studio',
     evidenceClass: 'source-grounded',
     requiresBinaries: [],
     promptBudgetKey: 'review.max_prompt_tokens_per_reviewer.lm_studio',
     modelConfigKey: 'review.models.lm_studio',
+    effortConfigKey: null,
+    defaultEffort: null,
     handler: 'openai-compatible',
   },
   {
@@ -503,12 +585,15 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
       effortChannel: 'none',
     },
     timeoutFloorMs: 120_000,
+    timeoutConfigKey: 'review.timeouts.llama_cpp',
     emptyOutput: 'stub-with-stderr',
     reviewsSection: 'llama.cpp',
     evidenceClass: 'source-grounded',
     requiresBinaries: [],
     promptBudgetKey: 'review.max_prompt_tokens_per_reviewer.llama_cpp',
     modelConfigKey: 'review.models.llama_cpp',
+    effortConfigKey: null,
+    defaultEffort: null,
     handler: 'openai-compatible',
   },
   {
@@ -548,12 +633,15 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
       effortChannel: 'none',
     },
     timeoutFloorMs: 900_000,
+    timeoutConfigKey: 'review.timeouts.kimi-code',
     emptyOutput: 'stub-with-stderr',
     reviewsSection: 'Kimi Code',
     evidenceClass: 'source-grounded',
     requiresBinaries: [],
-    promptBudgetKey: null,
+    promptBudgetKey: 'review.max_prompt_tokens_per_reviewer.kimi-code',
     modelConfigKey: 'review.models.kimi-code',
+    effortConfigKey: null,
+    defaultEffort: null,
     handler: null,
   },
 ].map((lane) => Object.freeze(lane)) as ReviewerLane[]);
@@ -596,10 +684,10 @@ export const REVIEWER_LANES: ReadonlyArray<ReviewerLane> = Object.freeze([
  *                   (`loadRegistry({ includeInstalled: true })`); only its
  *                   `capabilities` map is read. A cap contributes a lane iff it
  *                   carries an object `reviewer` body with a non-empty,
- *                   grammar-valid `slug`. The `role:"runtime"` legacy
- *                   `reviewerCli` alias contributes NO lane here — it has no lane
- *                   descriptor, and the selection roster (`deriveReviewerSlugs`)
- *                   is a separate surface.
+ *                   grammar-valid `slug`. The `role:"runtime"` `reviewerCli`
+ *                   alias never contributed a lane here, and as of #2801 it no
+ *                   longer contributes to the selection roster
+ *                   (`deriveReviewerSlugs`) either — the two surfaces now agree.
  * @returns A NEW array: first-party lanes (in order) followed by accepted overlay
  *          lanes (in registry iteration order). Callers must not mutate it.
  */
@@ -952,7 +1040,7 @@ const NON_LANE_SIGNATURE_FLAGS: ReadonlySet<string> = new Set(['--all']);
 /**
  * Is `flag` documented in `text` under one of the two structural shapes docs actually use?
  *
- * Backticked is the `COMMANDS.md` table-cell shape; bracketed (`[--gemini]`) is the
+ * Backticked is the `COMMANDS.md` table-cell shape; bracketed (`[--codex]`) is the
  * `FEATURES.md` signature shape. Requiring one of those two delimiters — rather than a bare
  * substring — is what keeps prose and fenced examples from satisfying the gate, and it bounds the
  * token for free: a backticked `--claude` demands its closing backtick, so a backticked
@@ -1047,7 +1135,7 @@ const BRACKETED_FLAG_RE = /\[(--[a-z0-9][a-z0-9-]*)\]/g;
  * cell 3. A file-scoped check is therefore satisfied by the forwarding row alone, so deleting a
  * lane's actual table row — the exact #2781 regression — passes. Keying on cell 1 separates the
  * two: `| `--agy` / `--antigravity` | … |` is one lane row declaring two flags, while
- * `| Reviewer flags | No | … `--gemini`, `--claude` … |` is not a lane row at all.
+ * `| Reviewer flags | No | … `--codex`, `--claude` … |` is not a lane row at all.
  */
 function flagsInFirstTableCell(lines: string[], declared: ReadonlySet<string>): Set<string> {
   const found = new Set<string>();

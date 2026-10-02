@@ -13,9 +13,31 @@ const { describe, test, before } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const { splitTableRow } = require('../gsd-core/bin/lib/markdown-table.cjs');
 
 const REFERENCE_PATH = path.join(__dirname, '..', 'gsd-core', 'references', 'planning-config.md');
 const CORE_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'config-loader.cjs');
+const DOCS_CONFIG_PATH = path.join(__dirname, '..', 'docs', 'CONFIGURATION.md');
+const CONFIG_SCHEMA_MANIFEST_PATH = path.join(
+  __dirname,
+  '..',
+  'gsd-core',
+  'bin',
+  'shared',
+  'config-schema.manifest.json',
+);
+
+/** Find the markdown table row whose first cell is `` `key` `` and return its cells. */
+function tableRowForKey(content, key) {
+  const target = `\`${key}\``;
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('|')) continue;
+    const cells = splitTableRow(line);
+    if (cells[0] === target) return cells;
+  }
+  return null;
+}
 
 describe('config-field-docs', () => {
   let content;
@@ -61,16 +83,12 @@ describe('config-field-docs', () => {
   });
 
   test('every CONFIG_DEFAULTS key appears in the doc', () => {
-    // Extract CONFIG_DEFAULTS keys from config-loader.cjs source (moved from core.cjs by ADR-857 phase 2e)
-    const coreSource = fs.readFileSync(CORE_PATH, 'utf-8');
-    const defaultsMatch = coreSource.match(
-      /const CONFIG_DEFAULTS\s*=\s*\{([\s\S]*?)\r?\n\};/
-    );
-    assert.ok(defaultsMatch, 'Could not find CONFIG_DEFAULTS in config-loader.cjs');
+    // Read CONFIG_DEFAULTS' actual keys straight from the module (moved from
+    // core.cjs by ADR-857 phase 2e) instead of regex-parsing its source text.
+    const { CONFIG_DEFAULTS } = require(CORE_PATH);
+    assert.ok(CONFIG_DEFAULTS && typeof CONFIG_DEFAULTS === 'object', 'Could not find CONFIG_DEFAULTS export in config-loader.cjs');
 
-    const body = defaultsMatch[1];
-    // Match property keys (word characters before the colon)
-    const keys = [...body.matchAll(/^\s*(\w+)\s*:/gm)].map(m => m[1]);
+    const keys = Object.keys(CONFIG_DEFAULTS);
     assert.ok(keys.length > 0, 'Could not extract any keys from CONFIG_DEFAULTS');
 
     // CONFIG_DEFAULTS uses flat keys; the doc may use namespaced equivalents.
@@ -83,6 +101,7 @@ describe('config-field-docs', () => {
       ai_integration_phase: 'workflow.ai_integration_phase',
       api_coverage_gate: 'workflow.api_coverage_gate',
       text_mode: 'workflow.text_mode',
+      compact_content: 'workflow.compact_content',
       subagent_timeout: 'workflow.subagent_timeout',
       branching_strategy: 'git.branching_strategy',
       phase_branch_template: 'git.phase_branch_template',
@@ -91,6 +110,7 @@ describe('config-field-docs', () => {
       security_enforcement: 'workflow.security_enforcement',
       security_asvs_level: 'workflow.security_asvs_level',
       security_block_on: 'workflow.security_block_on',
+      inline_plan_threshold: 'workflow.inline_plan_threshold', // #3801
     };
 
     const missing = keys.filter(k => {
@@ -140,6 +160,46 @@ describe('config-field-docs', () => {
     );
   });
 
+  test('git.protected_branches canonical field has synchronized type and examples', () => {
+    const manifest = JSON.parse(fs.readFileSync(CONFIG_SCHEMA_MANIFEST_PATH, 'utf-8'));
+    assert.ok(
+      manifest.validKeys.includes('git.protected_branches'),
+      'config schema manifest must register git.protected_branches',
+    );
+
+    const publicDocs = fs.readFileSync(DOCS_CONFIG_PATH, 'utf-8');
+    const references = [
+      ['docs/CONFIGURATION.md', publicDocs],
+      ['gsd-core/references/planning-config.md', content],
+    ];
+    const example = /"protected_branches"\s*:\s*\[\s*"develop"\s*,\s*"staging"\s*\]/;
+
+    for (const [name, reference] of references) {
+      const row = reference
+        .split(/\r?\n/)
+        .find((line) => line.startsWith('| `git.protected_branches` |'));
+      assert.ok(row, `${name} must document the canonical git.protected_branches key`);
+      assert.match(row, /array of non-empty strings/i,
+        `${name} must document the non-empty string-array contract`);
+      assert.match(row, /\| \(none\) \|/,
+        `${name} must document that the optional field has no persisted default`);
+      assert.match(reference, example,
+        `${name} must show the synchronized multi-branch JSON example`);
+      assert.match(reference, /extends the resolved base branch/i,
+        `${name} must state that configured names extend the resolved base`);
+      assert.match(reference, /execute-phase and ship/i,
+        `${name} must name both advisory warning boundaries`);
+      assert.match(reference, /does not\s+change\s+`git\.branching_strategy: "none"`/i,
+        `${name} must preserve branching_strategy none behavior`);
+      assert.match(reference, /exact branch name/i,
+        `${name} must state that matching is by exact name`);
+      assert.match(reference, /no glob or prefix/i,
+        `${name} must say globs and prefixes are unsupported, so git-flow layouts enumerate`);
+      assert.match(reference, /remaining names\s+still apply/i,
+        `${name} must state that an invalid entry drops only itself`);
+    }
+  });
+
   test('documents KNOWN_TOP_LEVEL internal fields not in CONFIG_DEFAULTS', () => {
     // These fields are in KNOWN_TOP_LEVEL (core.cjs) and read by loadConfig()
     // but not in CONFIG_DEFAULTS, so the CONFIG_DEFAULTS test doesn't cover them.
@@ -153,6 +213,21 @@ describe('config-field-docs', () => {
       [],
       `KNOWN_TOP_LEVEL internal fields missing from planning-config.md: ${missing.join(', ')}`
     );
+  });
+
+  test('agent_tools is registered in the central schema and public configuration docs (#4032)', () => {
+    const manifest = JSON.parse(fs.readFileSync(CONFIG_SCHEMA_MANIFEST_PATH, 'utf-8'));
+    assert.ok(manifest.validKeys.includes('agent_tools'),
+      'agent_tools must be accepted by the central config schema');
+    const selectorPattern = manifest.dynamicKeyPatterns.find((entry) => entry.topLevel === 'agent_tools');
+    assert.ok(selectorPattern, 'agent_tools must register a dynamic selector pattern');
+    assert.ok(new RegExp(selectorPattern.source).test('agent_tools.gsd-executor'));
+    assert.ok(new RegExp(selectorPattern.source).test('agent_tools.*'));
+    const publicDocs = fs.readFileSync(DOCS_CONFIG_PATH, 'utf-8');
+    assert.ok(tableRowForKey(publicDocs, 'agent_tools.<selector>'),
+      'agent_tools must have a public configuration table row');
+    assert.match(publicDocs, /agents without a\s+`tools:` key inherit/i);
+    assert.match(publicDocs, /Codex.*parent.*MCP servers.*sandbox_mode/is);
   });
 
   test('documents sub_repos field (CONFIG_DEFAULTS, no namespace form)', () => {
@@ -238,6 +313,82 @@ describe('config-field-docs', () => {
   });
 });
 
+// ─── Capability-enum doc parity (#3303) ─────────────────────────────────────
+
+describe('capability-enum doc parity (#3303)', () => {
+  const CAPABILITY_PATH = path.join(
+    __dirname, '..', 'capabilities', 'code-review', 'capability.json'
+  );
+
+  let docContent;
+  let capability;
+
+  before(() => {
+    docContent = fs.readFileSync(REFERENCE_PATH, 'utf-8');
+    capability = JSON.parse(fs.readFileSync(CAPABILITY_PATH, 'utf-8'));
+  });
+
+  /**
+   * Extract a single Complete-Field-Reference table row by key and split it into
+   * trimmed cells: ['', '`key`', type, default, allowedValues, description, ''].
+   * Row-scoping keeps unrelated wording elsewhere in the doc from satisfying
+   * (or breaking) the parity assertions.
+   */
+  function docRow(key) {
+    const line = docContent
+      .split(/\r?\n/)
+      .find(l => l.startsWith(`| \`${key}\` |`));
+    assert.ok(line, `planning-config.md must have a table row for \`${key}\``);
+    return line.split('|').map(c => c.trim());
+  }
+
+  test('workflow.code_review_depth allowed values match the capability registry (#3303)', () => {
+    const spec = capability.config && capability.config['workflow.code_review_depth'];
+    assert.ok(
+      spec && Array.isArray(spec.values),
+      'capabilities/code-review/capability.json must declare workflow.code_review_depth values'
+    );
+
+    const allowedCell = docRow('workflow.code_review_depth')[4];
+    const docValues = [...allowedCell.matchAll(/"([^"]+)"/g)].map(m => m[1]);
+    assert.ok(
+      docValues.length > 0,
+      `workflow.code_review_depth Allowed-Values cell must list quoted values, got: ${allowedCell}`
+    );
+    assert.deepStrictEqual(
+      [...docValues].sort(),
+      [...spec.values].sort(),
+      `planning-config.md workflow.code_review_depth allowed values (${docValues.join(', ')}) ` +
+        `must exactly match what config-set accepts per capability.json (${spec.values.join(', ')})`
+    );
+  });
+
+  test('workflow.code_review_depth default matches the capability registry (#3303)', () => {
+    const spec = capability.config && capability.config['workflow.code_review_depth'];
+    assert.ok(spec, 'capability.json must declare workflow.code_review_depth');
+    const defaultCell = docRow('workflow.code_review_depth')[3];
+    const [docDefault] = [...defaultCell.matchAll(/"([^"]+)"/g)].map(m => m[1]);
+    assert.strictEqual(
+      docDefault,
+      spec.default,
+      `planning-config.md workflow.code_review_depth default must match capability.json default (${spec.default})`
+    );
+  });
+
+  test('agent_skills row documents the array-of-strings form (#3303)', () => {
+    const cells = docRow('agent_skills');
+    const allowedCell = cells[4];
+    assert.ok(
+      /\[\s*"<skill-set>"\s*,/.test(allowedCell),
+      `agent_skills Allowed-Values cell must show the array-of-strings form, got: ${allowedCell}`
+    );
+    assert.ok(
+      /array/i.test(cells[5]),
+      'agent_skills description must explain the array form assigns multiple skill sets to one agent type'
+    );
+  });
+});
+
 // ─── CONFIGURATION.md parity (#1216) ────────────────────────────────────────
 
 describe('CONFIGURATION.md parity (#1216)', () => {
@@ -263,16 +414,22 @@ describe('CONFIGURATION.md parity (#1216)', () => {
       docsContent.includes('millisecond') || docsContent.includes('milliseconds'),
       'CONFIGURATION.md workflow.subagent_timeout must use the word "millisecond(s)"'
     );
-    assert.ok(
-      !docsContent.match(/\|\s*`workflow\.subagent_timeout`[^|]*\|\s*`?600`?\s*\|/),
-      'CONFIGURATION.md workflow.subagent_timeout must NOT have default 600 (that was the seconds default)'
+    const row = tableRowForKey(docsContent, 'workflow.subagent_timeout');
+    assert.ok(row, 'CONFIGURATION.md must have a table row for workflow.subagent_timeout');
+    assert.notEqual(
+      row[2].replace(/`/g, ''),
+      '600',
+      'CONFIGURATION.md workflow.subagent_timeout default must not be 600 (that was the seconds default)'
     );
   });
 
   test('CONFIGURATION.md workflow.subagent_timeout default is 300000 (#1216)', () => {
     // Row-scoped: the actual table row for workflow.subagent_timeout must contain 300000
-    assert.ok(
-      /\|\s*`workflow\.subagent_timeout`\s*\|[^|]*\|\s*`?300000`?\s*\|/.test(docsContent),
+    const row = tableRowForKey(docsContent, 'workflow.subagent_timeout');
+    assert.ok(row, 'CONFIGURATION.md must have a table row for workflow.subagent_timeout');
+    assert.equal(
+      row[2].replace(/`/g, ''),
+      '300000',
       'CONFIGURATION.md workflow.subagent_timeout table row must have default 300000'
     );
   });

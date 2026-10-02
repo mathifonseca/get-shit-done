@@ -323,7 +323,7 @@ if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 
 ```bash
 # マイルストーンをアーカイブ
-node gsd-tools.cjs milestone complete <version> [--name <name>] [--no-archive-phases]
+node gsd-tools.cjs milestone complete <version> (--confirm | --dry-run) [--name <name>] [--no-archive-phases] [--force] [--archive-quick]
 
 # 要件を完了としてマーク
 node gsd-tools.cjs requirements mark-complete <ids>
@@ -396,7 +396,7 @@ node gsd-tools.cjs progress [json|table|bar]
 node gsd-tools.cjs progress --json
 
 # TODO を完了にする
-node gsd-tools.cjs todo complete <filename>
+node gsd-tools.cjs todo complete <filename> [--dry-run]
 
 # UAT 監査 — 全フェーズの未解決項目をスキャン
 node gsd-tools.cjs audit-uat
@@ -479,7 +479,7 @@ node gsd-tools.cjs graphify snapshot [name]
 
 ```bash
 node gsd-tools.cjs config-set review.models.codex    "codex exec --model gpt-5"
-node gsd-tools.cjs config-set review.models.gemini   "gemini -m gemini-2.5-pro"
+node gsd-tools.cjs config-set review.models.agy      "gemini-3.1-pro-preview"
 node gsd-tools.cjs config-set review.models.opencode "opencode run --model claude-sonnet-4"
 node gsd-tools.cjs config-set review.models.claude   ""   # クリア — セッションモデルにフォールバック
 ```

@@ -49,10 +49,10 @@ for (const scope of ['global', 'local']) {
     assert.ok(fs.existsSync(agentsDir), `${agentsDir} must exist`);
 
     const expectedNames = listAgentFiles(); // dynamically derived source roster
-    // Fork: 36, not upstream's 34 — the fork ships gsd-lens and
+    // Fork: 37, not upstream's 35 — the fork ships gsd-lens and
     // gsd-lens-synthesizer (multilens retro / plan-lens-review).
-    assert.equal(expectedNames.length, 36,
-      'sanity: shipped GSD agent roster is 36 files — update this boundary if the roster changes');
+    assert.equal(expectedNames.length, 37,
+      'sanity: shipped GSD agent roster is 37 files — update this boundary if the roster changes');
 
     const installedFiles = fs.readdirSync(agentsDir)
       .filter((f) => f.startsWith('gsd-') && f.endsWith('.md'));

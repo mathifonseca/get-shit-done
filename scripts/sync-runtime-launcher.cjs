@@ -19,6 +19,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+const { escapeRegex: escapeRegExp } = require('../gsd-core/bin/lib/pattern.cjs');
+
 const WORKFLOWS_DIR = path.join(__dirname, '..', 'gsd-core', 'workflows');
 const AGENTS_DIR = path.join(__dirname, '..', 'agents');
 const SNIPPET_FILE = path.join(WORKFLOWS_DIR, '_runtime-launcher.snippet.sh');
@@ -328,6 +330,16 @@ function transformFile(content, preamble) {
   let changed = false;
   let firstGsdRunBlockIdx = -1; // index into shellBlockRanges of the first gsd_run block (after strip)
 
+  // A file may place the preamble in a bootstrap-only block that defines
+  // gsd_run without calling it (gsd-core/workflows/explore.md Step 1, which
+  // documents exactly why). Stripping empties that block of gsd_run calls, so
+  // a pure "first block that CALLS gsd_run" target silently relocates the
+  // preamble forward and breaks define-before-use. Honour where it already is.
+  const existingPreambleBlockIdx = shellBlockRanges.findIndex((range) =>
+    allLines
+      .slice(range.contentStart, range.contentEnd)
+      .some((l) => /^\s*_GSD_SHIM_NAME=/.test(l)));
+
   // First: strip + replace in all blocks, find first gsd_run block
   const strippedBlocks = shellBlockRanges.map((range) => {
     const blockLines = outputLines.slice(range.contentStart, range.contentEnd);
@@ -343,12 +355,17 @@ function transformFile(content, preamble) {
     }
   }
 
-  // Insert preamble into the first gsd_run block only — UNLESS this file
+  // If the preamble already existed in a specific block before stripping,
+  // keep it there (even if that block no longer calls gsd_run after
+  // stripping). Otherwise fall back to the first gsd_run-calling block.
+  const preambleTargetIdx = existingPreambleBlockIdx >= 0 ? existingPreambleBlockIdx : firstGsdRunBlockIdx;
+
+  // Insert preamble into the target block only — UNLESS this file
   // delegates to the shared resolver reference (@-include). Delegating files keep
   // the stripped blocks (any inline preamble removed) but never get one inserted.
   const delegates = delegatesToResolverReference(content);
   const finalBlocks = strippedBlocks.map((stripped, bi) => {
-    if (!delegates && bi === firstGsdRunBlockIdx) {
+    if (!delegates && bi === preambleTargetIdx) {
       return insertPreamble(stripped, preamble);
     }
     return stripped;
@@ -371,10 +388,6 @@ function transformFile(content, preamble) {
   if (!changed) return null;
 
   return outputLines.join('\n');
-}
-
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -430,4 +443,8 @@ function main() {
   console.log(`\nDone. ${transformedCount} files transformed, ${unchangedCount} unchanged.`);
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { transformFile };

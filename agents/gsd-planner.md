@@ -109,26 +109,7 @@ If ANY decision is "Partial" → either fix the task to deliver fully, or return
 
 Exclusions (not gaps): Deferred Ideas in CONTEXT.md, items scoped to other phases, RESEARCH.md "out of scope" items.
 
-**Violating the letter of these rules is violating the spirit.**
-
-**Red Flags — if you catch yourself thinking any of these, STOP:**
-
-- "Pragmatic simplification" or "practical approach"
-- "Basic version first, enhance later"
-- "The user didn't mean it literally"
-- "Research suggests a simpler approach"
-- "This is too complex for one phase" (without proposing a split)
-- "Discovery isn't needed, I know this stack"
-- "The user will be fine with this alternative"
-
-| Excuse | Reality |
-|--------|---------|
-| "This is too complex for one phase" | Then split the phase. Never reduce decision fidelity. |
-| "Research suggests a simpler approach" | User locked decisions override research. Note disagreement, honor decision. |
-| "Discovery isn't needed, I know this stack" | Discovery level is based on objective criteria, not confidence. Follow the protocol. |
-| "The user probably didn't mean it literally" | CONTEXT.md decisions are literal specifications. D-XX = exact implementation. |
-| "Basic version first, enhance later" | PROHIBITED language. Deliver fully or propose PHASE SPLIT. |
-| "The user will be fine with this" | You don't decide what the user is fine with. Honor their decisions or ask. |
+**Violating the letter of these rules is violating the spirit.** Red flags and the excuse/reality table: @~/.claude/gsd-core/references/planner-scope-fidelity.md
 </scope_reduction_prohibition>
 
 <planner_authority_limits>
@@ -213,14 +194,16 @@ Every task has four required fields:
 
 **Nyquist Rule:** Every `<verify>` includes `<automated>`. If no test exists, set `<automated>MISSING — Wave 0 must create {test_file} first</automated>` and create that scaffold.
 
+**Inherit the command that already worked (#2401):** reuse `prior_verify_commands` verbatim, prefer `npm --prefix <dir> run <script>`, ground every path you author. @~/.claude/gsd-core/references/planner-verify-command-grounding.md
+
 **Grep gate hygiene:** `grep -c` counts comments, so header prose can be self-invalidating. Use `grep -v '^#' | grep -c token`. Bare `== 0` gates on unfiltered files are forbidden.
 
 <comment_text_discipline>
-**Comment-text discipline (HARD GATE, #429):** A literal an acceptance criterion negative-greps for must NOT appear verbatim in any `<action>` body. Full rules + `<!-- planner-discipline-allow: LIT -->` allowlist + worked examples: @gsd-core/references/planner-antipatterns.md ("Comment-Text Discipline").
+**Comment-text discipline (HARD GATE, #429):** A literal an acceptance criterion negative-greps for must NOT appear verbatim in any `<action>` body. Rules + `<!-- planner-discipline-allow: LIT -->` allowlist + examples: @~/.claude/gsd-core/references/planner-antipatterns.md ("Comment-Text Discipline").
 </comment_text_discipline>
 
 <region_scoped_negative_gate>
-**Region-scoped negative gates (WARN, #968)** and **Verify-gate hygiene (#1478/#1479):** @gsd-core/references/planner-antipatterns.md.
+**Region-scoped negative gates (WARN, #968)** and **Verify-gate hygiene (#1478/#1479):** @~/.claude/gsd-core/references/planner-antipatterns.md.
 </region_scoped_negative_gate>
 
 **<done>:** Acceptance criteria - measurable state of completion.
@@ -229,28 +212,7 @@ Every task has four required fields:
 
 **<precondition>** (optional, one prose line): a runnable/checkable fact the task assumes that plan ordering does not guarantee — external setup (`user_setup`), a prior-phase artifact, or an env var. The executor asserts it before running the task and halts on unmet. Emission rules + the contract triad (precondition ↔ `<verify>`/`<done>` ↔ `must_haves.truths`): @~/.claude/gsd-core/references/planner-preconditions.md.
 
-**Outcome-focused guidance** (when `workflow.spec_outcome_enforcement` is enabled):
-
-Read the config:
-```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; if [ -f "$GSD_TOOLS" ]; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif command -v gsd-tools >/dev/null 2>&1; then GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; elif [ -f "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}" ]; then GSD_TOOLS="${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd-tools is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
-_GSD_R="$(git rev-parse --show-toplevel 2>/dev/null)"; for _d in "$_GSD_R/gsd-core" "$_GSD_R/.claude/gsd-core" "${HOME}/.claude/gsd-core"; do [ -f "$_d/bin/gsd-tools.cjs" ] && { GSD_TOOLS="$_d/bin/gsd-tools.cjs"; break; }; done; command -v gsd-tools >/dev/null 2>&1 && [ -z "$GSD_TOOLS" ] && GSD_TOOLS="$(command -v gsd-tools)"; gsd_run() { node "$GSD_TOOLS" "$@"; }
-SPEC_OUTCOME=$(gsd_run query config-get workflow.spec_outcome_enforcement 2>/dev/null || echo "true")
-```
-
-When enabled, task `<action>` fields should describe WHAT the code should accomplish, not step-by-step HOW to write it. The executor agent is better at figuring out implementation details than a prescriptive plan.
-
-**Good (outcome-focused):**
-- "Create a POST endpoint that authenticates users via email/password, returns a JWT in an httpOnly cookie, and rejects invalid credentials with 401."
-- "Build a message list component that fetches from /api/messages, displays sender + timestamp + content, and auto-scrolls to newest."
-
-**Bad (overly prescriptive):**
-- "First create a file at src/api/auth.ts. Import bcrypt from 'bcrypt'. Create an async function called authenticate. Call bcrypt.compare()..."
-- "Step 1: Create useState for messages. Step 2: Add useEffect with fetch. Step 3: Map over messages array..."
-
-The `<done>` and `<verify>` fields are where specificity belongs — they define the contract. The `<action>` field should give the executor enough context to make good decisions without dictating every line.
-
-Constraints and non-obvious decisions still belong in `<action>` (e.g., "Use jose library, not jsonwebtoken — CommonJS issues with Edge runtime"). The goal is to eliminate mechanical step-by-step instructions, not useful context.
+**Outcome-focused `<action>`** (fork; when `workflow.spec_outcome_enforcement` is enabled, the default): describe WHAT the task accomplishes, not step-by-step HOW — specificity belongs in `<done>`/`<verify>`. Rules + examples: @~/.claude/gsd-core/references/planner-outcome-specs.md
 
 **<reversibility>** (optional): `rating="reversible|costly|one-way"` + one-line rationale for a decision this task implements. `one-way` inserts a `checkpoint:decision` before this task; `costly` is flagged only; unsure means `reversible`. Rules: @~/.claude/gsd-core/references/planner-reversibility.md
 
@@ -309,7 +271,7 @@ Exceptions where `tdd="true"` is not needed: `type="checkpoint:*"` tasks, config
   <name>End-to-end "[capability]" — one path only</name>
   <files>[one file per layer the phase touches]</files>
   <action>Wire ONE entry point through every layer to the far end of the stack. No other call sites, no batching. Real error handling on the single path.</action>
-  <verify>[a real, runnable END-TO-END check of the one path — not a per-layer unit test]</verify>
+  <verify><automated>[a real END-TO-END check of the one path — not a per-layer unit test]</automated></verify>
   <done>The single happy path works end-to-end and is committed.</done>
 </task>
 ```
@@ -417,6 +379,8 @@ Output: [Artifacts created]
 | {e.g., client→API} | {untrusted input crosses here} |
 
 ## STRIDE Threat Register
+
+Threat IDs are unique within a phase. Before numbering, read the `<threat_model>` blocks of the phase's existing PLAN files and continue after their highest `T-{phase}-NN` — if the phase already uses `T-47-19`, new plans number from `T-47-20`, never from `T-47-01` again (#4683: a reused ID names two different threats, which makes `SECURITY.md` rows and `VALIDATION.md`'s Threat Ref column ambiguous). `T-{phase}-SC` is the exception: reserved, and every plan keeps it.
 
 | Threat ID | Category | Component | Severity | Disposition | Mitigation Plan |
 |-----------|----------|-----------|----------|-------------|-----------------|
@@ -539,47 +503,7 @@ See @~/.claude/gsd-core/references/planner-guidance.md for a worked example and 
 
 ## Checkpoint Types
 
-**checkpoint:human-verify (90% of checkpoints)**
-Human confirms Claude's automated work works correctly.
-
-Use for: Visual UI checks, interactive flows, functional verification, animation/accessibility.
-
-```xml
-<task type="checkpoint:human-verify" gate="blocking">
-  <what-built>[What Claude automated]</what-built>
-  <how-to-verify>
-    [Exact steps to test - URLs, commands, expected behavior]
-  </how-to-verify>
-  <resume-signal>Type "approved" or describe issues</resume-signal>
-</task>
-```
-
-**checkpoint:decision (9% of checkpoints)**
-Human makes implementation choice affecting direction.
-
-Use for: Technology selection, architecture decisions, design choices.
-
-```xml
-<task type="checkpoint:decision" gate="blocking">
-  <decision>[What's being decided]</decision>
-  <context>[Why this matters]</context>
-  <options>
-    <option id="option-a">
-      <name>[Name]</name>
-      <pros>[Benefits]</pros>
-      <cons>[Tradeoffs]</cons>
-    </option>
-  </options>
-  <resume-signal>Select: option-a, option-b, or ...</resume-signal>
-</task>
-```
-
-**checkpoint:human-action (1% - rare)**
-Action has NO CLI/API and requires human-only interaction.
-
-Use ONLY for: Email verification links, SMS 2FA codes, manual account approvals, credit card 3D Secure flows.
-
-Do NOT use for: Deploying (use CLI), creating webhooks (use API), creating databases (use provider CLI), running builds/tests (use Bash), creating files (use Write).
+Three types: **checkpoint:human-verify (90%)**, **checkpoint:decision (9%)**, **checkpoint:human-action (1% - rare)**. Full "use for" criteria and XML templates for each: @~/.claude/gsd-core/references/checkpoints.md
 
 ## Authentication Gates
 
@@ -658,6 +582,8 @@ start of execution when `--reviews` flag is present or reviews mode is active.
 <step name="load_project_state" priority="first">
 Load planning context:
 
+@~/.claude/gsd-core/references/gsd-run-resolver.md
+
 ```bash
 INIT=$(gsd_run query init.plan-phase "${PHASE}")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
@@ -678,6 +604,7 @@ Check the invocation mode and load the relevant reference file:
 - If `--gaps` flag or gap_closure context present: Read `gsd-core/references/planner-gap-closure.md`
 - If `<revision_context>` provided by orchestrator: Read `gsd-core/references/planner-revision.md`
 - If `--reviews` flag present or reviews mode active: Read `gsd-core/references/planner-reviews.md`
+- If `**Mode:** quick-batch` in `<planning_context>` (#3676, epic #3344): Read `gsd-core/references/planner-quick-batch.md`
 - Standard planning mode: no additional file to read
 
 Load the file before proceeding to planning steps. The reference file contains the full
@@ -707,9 +634,10 @@ If exists, load relevant documents by phase type:
 
 <step name="load_graph_context">
 Read `gsd-core/references/planner-load-graph-context.md` and execute it. It checks for a
-knowledge graph and, if `.planning/graphs/graph.json` exists, reads freshness and
-phase-relevant dependency context via the `gsd_run` launcher and incorporates the results
-into planning. If the graph is absent, skip and continue without graph context.
+knowledge graph and, if one exists, reads freshness and phase-relevant dependency context
+— through the `graphify` CLI when it is on PATH, otherwise through the `gsd_run` launcher
+— and incorporates the results into planning. If the graph is absent, skip and continue
+without graph context.
 </step>
 
 <step name="identify_phase">
@@ -749,7 +677,8 @@ Select top 2-4 phases. Skip phases with no relevance signal.
 
 **Step 3 — Read full SUMMARYs for selected phases:**
 ```bash
-cat .planning/phases/{selected-phase}/*-SUMMARY.md
+_SUMMARIES=( .planning/phases/{selected-phase}/*-SUMMARY.md )
+if [ -e "${_SUMMARIES[0]}" ]; then cat "${_SUMMARIES[@]}"; fi
 ```
 
 From full SUMMARYs extract:
@@ -786,10 +715,14 @@ If `features.global_learnings` is `true`: run `gsd_run query learnings.query --t
 Use `phase_dir` from init context (already loaded in load_project_state).
 
 ```bash
-cat "$phase_dir"/*-CONTEXT.md 2>/dev/null   # From /gsd:discuss-phase
-cat "$phase_dir"/*-DESIGN.md 2>/dev/null    # From /gsd:discuss-phase (fork: frozen design spec, workflow.design_spec)
-cat "$phase_dir"/*-RESEARCH.md 2>/dev/null   # Research output
-cat "$phase_dir"/*-DISCOVERY.md 2>/dev/null  # From mandatory discovery
+_CTX=( "$phase_dir"/*-CONTEXT.md )
+if [ -e "${_CTX[0]}" ]; then cat "${_CTX[@]}"; fi   # From /gsd:discuss-phase
+_DESIGN=( "$phase_dir"/*-DESIGN.md )
+if [ -e "${_DESIGN[0]}" ]; then cat "${_DESIGN[@]}"; fi   # From /gsd:discuss-phase (fork: frozen design spec, workflow.design_spec)
+_RESEARCH=( "$phase_dir"/*-RESEARCH.md )
+if [ -e "${_RESEARCH[0]}" ]; then cat "${_RESEARCH[@]}"; fi   # Research output
+_DISCOVERY=( "$phase_dir"/*-DISCOVERY.md )
+if [ -e "${_DISCOVERY[0]}" ]; then cat "${_DISCOVERY[@]}"; fi  # From mandatory discovery
 ```
 
 **If CONTEXT.md exists (has_context=true from init):** Honor user's vision, prioritize essential features, respect boundaries. Locked decisions — do not revisit.
@@ -838,12 +771,16 @@ for each plan in plan_order:
 # Implicit dependency: files_modified overlap forces a later wave.
 for each plan B in plan_order:
   for each earlier plan A where A != B:
-    if any file in B.files_modified is also in A.files_modified:
+    if any file in (B.files_modified + B.files_deleted) is also in (A.files_modified + A.files_deleted):
       B.wave = max(B.wave, A.wave + 1)
       waves[B.id] = B.wave
 ```
 
-**Rule:** Same-wave plans must have zero `files_modified` overlap. After assigning waves, scan each wave; if any file appears in 2+ plans, bump the later plan to the next wave and repeat.
+**Rule:** Same-wave plans must have zero `files_modified`/`files_deleted` overlap. After assigning waves, scan each wave; if any file appears in 2+ plans, bump the later plan to the next wave and repeat.
+
+**External review ordering:** When a PR opening has known automatic external review (for example a GitHub App reviewer such as CodeRabbit via `.coderabbit.yaml`) and the plan includes internal review lanes, run internal review and apply the accepted internal-review fixes before the final open. If an open-time property exists (for example a not-behind-base check that must be measured at PR-open instant), re-check it immediately before opening, with nothing intervening; post-open CI, review, and tracking may follow. Examples: @~/.claude/gsd-core/references/planner-antipatterns.md ("External Review Before PR Open (#4107)").
+
+Non-file coupling: @~/.claude/gsd-core/references/planner-coupling.md
 </step>
 
 <step name="group_into_plans">
@@ -990,7 +927,7 @@ Return structured planning outcome to orchestrator.
 
 <structured_returns>
 
-See @~/.claude/gsd-core/references/planner-guidance.md for `## PLANNING COMPLETE` and `## GAP CLOSURE PLANS CREATED` return format templates.
+See @~/.claude/gsd-core/references/planner-guidance.md for return formats; gap-closure returns are artifact-based (#3440).
 
 See @~/.claude/gsd-core/references/planner-chunked.md for `## OUTLINE COMPLETE` and `## PLAN COMPLETE` return formats used in chunked mode.
 
@@ -1006,6 +943,49 @@ See @~/.claude/gsd-core/references/planner-chunked.md for `## OUTLINE COMPLETE` 
 </critical_rules>
 
 <success_criteria>
+
+## Return Markers
+
+Your orchestrator dispatches on exact marker strings in your final output. Emit exactly one of:
+
+```markdown
+## PLANNING COMPLETE
+```
+(final plans committed, ready for verification)
+
+```markdown
+## OUTLINE COMPLETE
+```
+(outline produced, awaiting confirmation — chunked planning mode)
+
+```markdown
+## PHASE SPLIT RECOMMENDED
+```
+(phase too large to plan as one unit, include the proposed split)
+
+```markdown
+## ⚠ Source Audit
+```
+(unplanned items found in the requirements, include the options)
+
+```markdown
+## CHECKPOINT REACHED
+```
+(paused at a user checkpoint, include resume instructions)
+
+```markdown
+## PLANNING INCONCLUSIVE
+```
+(cannot produce a plan, include exactly what is missing)
+
+```markdown
+## REVISION_CONFLICT
+```
+(revision mode only — a checker `fix_hint` contradicts a locked decision, capability guidance, or
+an existing plan constraint, OR the `required_property` is unreachable without breaking one of
+those. Carries the conflict and the alternatives considered, plus the
+non-conflicting issues you did address. Not a failure: the orchestrator routes it to the user and
+does not spend a revision iteration on it. Shape: `gsd-core/references/planner-revision.md` Step 7b)
 
 ## Standard Mode
 

@@ -36,6 +36,8 @@ npx @opengsd/gsd-core@latest --claude --global
 
 Skills land in `~/.claude/`. Commands appear as `/gsd-*` slash commands in your next Claude Code session. Restart Claude Code to pick them up.
 
+**Installing at both `--global` and `--local`.** This is a supported configuration (different projects sometimes need different customizations), but Claude Code's own trigger-resolution rules — personal scope overrides project scope, and a skill overrides a same-named command — both point the same direction: the global skill always wins the `/gsd-<name>` trigger over the local command. GSD Core detects this and prints which scope is winning right after install completes (and surfaces the identical fact from `/gsd-health` as diagnostic `W028`); it is an advisory, not a failure — the install itself still succeeds. At **global** scope, the winning skill's workflow-spec reference resolves at runtime against your working directory first, so a project with its own `.claude/gsd-core/` still gets its own specs even though the global skill is what Claude Code invokes — see [Interpret install-shadow warnings](interpret-install-shadow-warnings.md) for what the warning means, how to read which scope wins, and the limits of that resolution (it does not extend to the skill's `references/`/`templates/` includes).
+
 **Override the install directory:**
 
 ```bash
@@ -50,7 +52,7 @@ GSD registers the following Claude Code hook events automatically on install:
 |---|---|---|
 | `SessionStart` | `gsd-check-update.js`, `gsd-session-state.sh` | Update check, session orientation |
 | `PostToolUse` | `gsd-context-monitor.js`, `gsd-read-injection-scanner.js`, `gsd-phase-boundary.sh`, `gsd-graphify-update.sh` | Context monitoring, read-time scan, phase boundary detection |
-| `PreToolUse` | `gsd-prompt-guard.js`, `gsd-read-guard.js`, `gsd-workflow-guard.js`, `gsd-worktree-path-guard.js`, `gsd-agent-isolation-guard.js`, `gsd-validate-commit.sh` | Prompt guard, read-before-edit, workflow + worktree safety, agent-dispatch isolation, commit validation |
+| `PreToolUse` | `gsd-prompt-guard.js`, `gsd-read-guard.js`, `gsd-workflow-guard.js`, `gsd-worktree-path-guard.js`, `gsd-agent-isolation-guard.js`, `gsd-secret-read-guard.js`, `gsd-validate-commit.sh` | Prompt guard, read-before-edit, workflow + worktree safety, agent-dispatch isolation, secret-file read protection, commit validation |
 | `SubagentStop` | `gsd-context-monitor.js` | Context headroom tracking after subagent completion |
 | `Stop` | `gsd-context-monitor.js` | Context headroom tracking before model stop |
 | `PreCompact` | `gsd-context-monitor.js` | Context awareness before conversation compaction |
@@ -62,7 +64,9 @@ The `FileChanged` hook is always-on and a no-op when `.planning/config.json` doe
 
 ### Claude Code — native plugin install
 
-GSD Core ships a `.claude-plugin/plugin.json` manifest, which enables installation and lifecycle management through the Claude Code plugin system. This path is **additive** — the npm installer above remains fully supported, and the two approaches differ in namespace and lifecycle only.
+GSD Core ships a `.claude-plugin/plugin.json` manifest, which enables installation and lifecycle management through the Claude Code plugin system. This path is **additive** — the npm installer above remains fully supported, and the two approaches differ in namespace and lifecycle.
+
+**Install-time config does not apply here.** The native plugin path (this section, the skills-dir load below, and marketplace discovery) materializes the repository tree directly — there is no install step. Install-time config that the npm installer bakes into generated artifact files at install time (confirmed for `agent_tools`; the same applies architecturally to `model_overrides` and other install-time-only keys) is never applied on this path, and running `claude plugin update` does not change that. If your setup relies on install-time config, use the npm installer above.
 
 **Install paths**
 
@@ -167,14 +171,13 @@ Skills land in `~/.codex/skills/gsd-*/SKILL.md`. Agents are written as standalon
 
 **Hook coverage**
 
-GSD registers the following Codex hook events automatically on install (requires Codex CLI 0.137.0+ for the stable hook-event schema):
+GSD registers the following Codex hook event automatically on install (requires Codex CLI 0.137.0+ for the stable hook-event schema):
 
 | Event | Hook | Purpose |
 |---|---|---|
 | `SessionStart` | `gsd-check-update.js` | Update check at session open; Windows installs also emit a `commandWindows` field pointing to the `.cmd` shim so Codex picks the correct executor on Windows without requiring per-OS config regeneration |
-| `SubagentStart` | `gsd-context-monitor.js` | Inject context / GSD_AGENT_NAME awareness at subagent open |
-| `Stop` | `gsd-context-monitor.js` | Context headroom tracking before model stop |
-| `PostToolUse` | `gsd-context-monitor.js` | Mirror the context-monitor coverage available in Claude Code |
+
+**Context warnings are not supported on Codex (#2586).** Earlier revisions of GSD also registered `SubagentStart`/`Stop`/`PostToolUse` (plus, briefly, six more events) against `gsd-context-monitor.js` for context-headroom tracking. That hook only produces a warning by reading a remaining-context-percentage bridge file that `gsd-statusline.js` — Claude Code's own statusline mechanism — writes; Codex never installs a statusline writer, so every one of those registrations fired as a guaranteed silent no-op, every invocation, with no exceptions. GSD no longer copies or registers `gsd-context-monitor.js` on a fresh Codex install; a reinstall over an older GSD install removes the stale registrations and the now-unreferenced script automatically. Agent-facing context warnings and GSD phase/lifecycle display remain unsupported capabilities on Codex (see `capabilities/codex/capability.json`) until a real metrics producer exists for this runtime — native Codex `/statusline` configuration is a separate, not-yet-implemented surface.
 
 All registered hooks are managed by GSD and are removed cleanly on `--uninstall`.
 
@@ -213,7 +216,15 @@ If your machine already uses `~/.agents/skills` and does not have `~/.config/age
 kimi --agent-file ~/.agents/agents/gsd.yaml
 ```
 
-Kimi also discovers user skills from the brand-specific `~/.kimi-code` directory. If your Kimi setup is already centered on `~/.kimi-code`, install there explicitly:
+> **If you are on Kimi Code, use `--kimi-code`, not `--kimi` with a redirected config dir.** Since 1.10.0 (#2755) Kimi Code is its own runtime with its own hooks root:
+>
+> ```bash
+> npx @opengsd/gsd-core@latest --kimi-code --global
+> ```
+>
+> `--config-dir` and `KIMI_CONFIG_DIR` select the *skills* root only. They do **not** move the native `config.toml` that carries GSD's `[[hooks]]` block — that root is chosen by the runtime (`~/.kimi` for `--kimi` via `KIMI_SHARE_DIR`, `~/.kimi-code` for `--kimi-code` via `KIMI_CODE_HOME`). Running `--kimi --config-dir ~/.kimi-code` therefore puts your skills under `~/.kimi-code` while the hooks still land in `~/.kimi` — the exact split that left orphaned hooks behind before 1.10.0. See [Migrating from `--kimi` to `--kimi-code`](../migration/kimi-to-kimi-code.md), which also covers reclaiming artifacts an older install already wrote.
+
+Kimi CLI also discovers user skills from the brand-specific `~/.kimi-code` directory. If you are genuinely on **Kimi CLI** and your setup is centered on `~/.kimi-code`, redirect its skills root explicitly:
 
 ```bash
 npx @opengsd/gsd-core@latest --kimi --global --config-dir ~/.kimi-code
@@ -242,7 +253,7 @@ GSD wires its lifecycle hooks into Kimi's native `[[hooks]]` array in `config.to
 | Event | Hook | Purpose |
 |---|---|---|
 | `SessionStart` | `gsd-check-update.js`, `gsd-session-state.sh` | Update check and session-state bootstrap at session open |
-| `PreToolUse` | `gsd-prompt-guard.js`, `gsd-read-guard.js`, `gsd-worktree-path-guard.js`, `gsd-workflow-guard.js`, `gsd-validate-commit.sh` | Prompt-injection guard, read-before-edit guidance, worktree path safety, workflow guard, and commit validation before tool calls |
+| `PreToolUse` | `gsd-prompt-guard.js`, `gsd-read-guard.js`, `gsd-worktree-path-guard.js`, `gsd-workflow-guard.js`, `gsd-secret-read-guard.js`, `gsd-validate-commit.sh` | Prompt-injection guard, read-before-edit guidance, worktree path safety, workflow guard, secret-file read protection, and commit validation before tool calls |
 | `PostToolUse` | `gsd-context-monitor.js`, `gsd-phase-boundary.sh`, `gsd-read-injection-scanner.js`, `gsd-graphify-update.sh` | Context window tracking, phase-boundary detection, read-time injection scanning, and graph updates after tool calls |
 | `Stop` | `gsd-context-monitor.js` | Context headroom tracking before the model stops |
 | `PreCompact` | `gsd-context-monitor.js` | Context headroom tracking before compaction |
@@ -366,7 +377,7 @@ GSD registers the following events automatically on install (Claude hook event d
 | Event | Hook | Purpose |
 |---|---|---|
 | `SessionStart` | `gsd-check-update.js`, `gsd-session-state.sh` | Update check, session orientation |
-| `PreToolUse` | `gsd-prompt-guard.js`, `gsd-read-guard.js`, `gsd-workflow-guard.js`, `gsd-worktree-path-guard.js`, `gsd-agent-isolation-guard.js`, `gsd-validate-commit.sh` | Prompt guard, read-before-edit, workflow + worktree safety, agent-dispatch isolation, commit validation |
+| `PreToolUse` | `gsd-prompt-guard.js`, `gsd-read-guard.js`, `gsd-workflow-guard.js`, `gsd-worktree-path-guard.js`, `gsd-agent-isolation-guard.js`, `gsd-secret-read-guard.js`, `gsd-validate-commit.sh` | Prompt guard, read-before-edit, workflow + worktree safety, agent-dispatch isolation, secret-file read protection, commit validation |
 | `PostToolUse` | `gsd-context-monitor.js`, `gsd-read-injection-scanner.js`, `gsd-phase-boundary.sh`, `gsd-graphify-update.sh` | Context monitoring, read-time scan, phase boundary detection |
 | `SubagentStop` | `gsd-context-monitor.js` | Context headroom tracking after subagent completion |
 | `SubagentStart` | `gsd-context-monitor.js` | Context headroom tracking at subagent start |
@@ -405,7 +416,7 @@ Qwen Code supports 15 hook events. GSD registers the following events automatica
 |---|---|---|
 | `SessionStart` | `gsd-check-update.js`, `gsd-session-state.sh` | Update check, session orientation |
 | `PostToolUse` | `gsd-context-monitor.js`, `gsd-read-injection-scanner.js`, `gsd-phase-boundary.sh`, `gsd-graphify-update.sh` | Context monitoring, read-time scan, phase boundary detection |
-| `PreToolUse` | `gsd-prompt-guard.js`, `gsd-read-guard.js`, `gsd-workflow-guard.js`, `gsd-worktree-path-guard.js`, `gsd-agent-isolation-guard.js`, `gsd-validate-commit.sh` | Prompt guard, read-before-edit, workflow + worktree safety, agent-dispatch isolation, commit validation |
+| `PreToolUse` | `gsd-prompt-guard.js`, `gsd-read-guard.js`, `gsd-workflow-guard.js`, `gsd-worktree-path-guard.js`, `gsd-agent-isolation-guard.js`, `gsd-secret-read-guard.js`, `gsd-validate-commit.sh` | Prompt guard, read-before-edit, workflow + worktree safety, agent-dispatch isolation, secret-file read protection, commit validation |
 | `SubagentStop` | `gsd-context-monitor.js` | Context headroom tracking after subagent completion |
 | `SubagentStart` | `gsd-context-monitor.js` | Context headroom tracking at subagent start |
 | `Stop` | `gsd-context-monitor.js` | Context headroom tracking before model stop |
@@ -429,7 +440,7 @@ Skills land in `~/.augment/skills/` and slash command definitions land in `~/.au
 npx @opengsd/gsd-core@latest --antigravity --global
 ```
 
-The installer auto-detects the Antigravity config directory (`~/.gemini/antigravity`, `~/.gemini/antigravity-ide`, or `~/.gemini/antigravity-cli`). Uses Gemini-compatible settings policy.
+The installer auto-detects the Antigravity config directory (`~/.gemini/antigravity`, `~/.gemini/antigravity-ide`, or `~/.gemini/antigravity-cli`). Uses Gemini-compatible settings policy. Global skills and agents install under `~/.gemini/config/skills/` and `~/.gemini/config/agents/` — the directories Antigravity scans for machine-local discovery (#3738); the config directory above holds settings and GSD's runtime files.
 
 **Override the install directory:**
 
@@ -512,6 +523,75 @@ WINDSURF_CONFIG_DIR=~/.codeium/windsurf-next npx @opengsd/gsd-core@latest --wind
 ```
 
 Select the corresponding stable runtime in the installer prompt. GSD does not enumerate prerelease editions as separate named runtimes — they are best-effort via this env-var mechanism and are not separately tested in release CI.
+
+---
+
+## Sharing one config root across environments
+
+When one config root (`~/.claude`, `~/.config/opencode`, …) is mounted or synced into
+machines with different Node.js layouts — a host plus Docker containers bind-mounting the
+same directory, or WSL and Windows sharing a drive — install with `--portable-hooks`
+(or `GSD_PORTABLE_HOOKS=1`):
+
+```bash
+npx @opengsd/gsd-core@latest --claude --global --portable-hooks
+```
+
+Hook script paths are emitted `$HOME`-relative, and every managed JavaScript hook command
+resolves its node binary at hook-fire time instead of depending on whichever machine ran
+the installer (#3662): portable installs route through a staged
+`hooks/gsd-node-runner.sh` resolver (the install-time node path first, then `command -v
+node`, then the well-known layouts); non-portable installs carry an equivalent inline
+fallback chain. The install-time path is always tried first, so GUI launches with a
+minimal `PATH` keep working, and a bare `node` lookup is never depended on. Re-running
+install or update from any of the environments converges stale runner paths — no mixed
+state where some hooks work in one environment and the rest in another.
+
+To pin down which node a given environment picks, run the resolver directly with
+`GSD_NODE_RUNNER_NO_FALLBACKS=1` (first-argument-only resolution) — it prints a stderr
+diagnostic and exits non-zero when nothing resolves.
+
+---
+
+## Local installs across several git worktrees
+
+A local (`--local`) install writes the includes that point at GSD's own installed
+files as absolute paths — the path the installer resolved at install time. For a
+single checkout that is invisible and works fine.
+
+It stops working once the same repository is checked out more than once. Each git
+worktree gets its own `.claude/` copy, but every one of those copies points back at
+the checkout that ran the installer. So a worktree runs its own `gsd-tools.cjs`
+(correctly resolved through `git rev-parse --show-toplevel`) while reading its
+workflow prose out of a different checkout — and the moment you update that one
+checkout, every other worktree is executing new instructions against an old engine,
+with no way to stage the update.
+
+Install with `--relative-includes` (or `GSD_RELATIVE_INCLUDES=1`) to write the
+includes relative to the project instead:
+
+```bash
+npx @opengsd/gsd-core@latest --claude --local --relative-includes
+```
+
+Every emitted `@` include then reads `@.claude/gsd-core/...` rather than
+`@/absolute/path/to/checkout/.claude/gsd-core/...`, so each worktree resolves its
+own copy and the worktrees become independent.
+
+Notes:
+
+- **It is opt-in and stays opt-in.** Absolute includes work for a single checkout,
+  which is most people; the flag exists for those who need it.
+- **Global installs are unaffected.** They keep their `$HOME`-relative form, which
+  is already checkout-independent.
+- **The runtime launcher keeps its absolute fallbacks.** The shell snippet that
+  locates `gsd-tools.cjs` probes `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` and one such
+  default per runtime; those are shell word expansions, not includes, and a relative
+  value there would resolve against the current shell's directory rather than the
+  project. The launcher already probes `$(git rev-parse --show-toplevel)/.claude`
+  first, so it finds the current worktree before it ever reaches those defaults.
+- **`--relative-includes` with `--global` does nothing.** The flag is only consulted
+  for local installs.
 
 ---
 

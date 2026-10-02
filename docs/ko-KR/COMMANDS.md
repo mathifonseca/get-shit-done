@@ -7,10 +7,9 @@
 ## 명령어 구문
 
 - **Claude Code / Copilot / OpenCode / Kilo:** `/gsd-command-name [args]` (하이픈 형식)
-- **Gemini CLI:** `/gsd:command-name [args]` (콜론 형식 — Gemini는 `gsd:` 네임스페이스로 명령어를 분류합니다)
 - **Codex:** `$gsd-command-name [args]`
 
-하이픈 형식과 콜론 형식은 *동일한 명령어의 런타임별 표기법*입니다. 사용 중인 런타임에 따라 인스톨러가 해당 런타임의 명령어 디렉토리에 올바른 형식을 자동으로 작성합니다.
+사용 중인 런타임에 따라 인스톨러가 해당 런타임의 명령어 디렉토리에 올바른 형식을 자동으로 작성합니다.
 
 ---
 
@@ -218,8 +217,8 @@ WebSearch에서 가져온 패키지는 `[ASSUMED]`(`[VERIFIED]`가 아님)로 �
 | 인수 / 플래그 | 필수 | 설명 |
 |-----------------|----------|-------------|
 | `N` | **예** | 계획 및 리뷰할 단계 번호 |
-| 리뷰어 플래그 | 아니요 | 모든 리뷰어 레인 플래그를 그대로 전달: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
-| `--all` | 아니요 | 구성된 모든 리뷰어를 병렬로 실행 |
+| 리뷰어 플래그 | 아니요 | 모든 리뷰어 레인 플래그를 그대로 전달: `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
+| `--all` | 아니요 | 구성된 모든 리뷰어를 실행합니다. 레인은 기본적으로 **순차적으로** 디스패치되며, `review.parallel_lanes`를 `true`로 설정하면 단일 리뷰 패스 내에서 동시에 디스패치됩니다 |
 | `--max-cycles N` | 아니요 | 사이클 상한 재정의 (기본값 3) |
 
 **종료 동작:** HIGH 카운트가 0이 되면 루프 종료. 사이클 간 HIGH 카운트가 감소하지 않을 때 정체 감지 경고. `--max-cycles`에 도달해도 HIGH 우려사항이 남아 있으면 에스컬레이션 게이트가 계속 진행하거나 수동 리뷰를 요청합니다.
@@ -820,6 +819,8 @@ GSD 보장을 통해 애드혹 작업을 실행합니다.
 /gsd-health --context               # 컨텍스트 활용 트리아지
 ```
 
+**범위 간 설치 섀도잉(`W028`).** 런타임이 `global`과 `local` 두 범위 모두에 설치되어 있고, 호스트의 트리거 해석 규칙으로 인해 한 범위의 `/gsd-*` 표면에 도달할 수 없게 되는 경우 — Claude Code의 사례: 개인 스킬이 항상 프로젝트 명령을 이깁니다 — 상태 점검은 섀도잉된 트리거, 승리한 범위, 패배한 범위를 명시하는 WARNING 심각도 권고를 추가합니다. 이는 상태 점검의 통과/실패 상태를 절대 변경하지 않으며, 자동으로 수정되지도 않습니다(제거해야 할 단 하나의 올바른 범위가 존재하지 않기 때문입니다). 따라서 `--repair`는 이를 절대 건드리지 않습니다. 설치 시점에 GSD Core가 출력하는 것과 동일한 권고입니다.
+
 ### `/gsd-cleanup`
 
 완료된 마일스톤에서 누적된 단계 디렉토리를 아카이브하고 업스트림이 삭제된 로컬 브랜치를 정리합니다.
@@ -922,7 +923,7 @@ GSD 보장을 통해 애드혹 작업을 실행합니다.
 | `--format` | 출력 형식: `markdown` (기본값), `json` |
 
 **전제 조건:** 단계가 실행됨 (SUMMARY.md 파일 존재)
-**생성 결과:** `.planning/learnings/{phase}-LEARNINGS.md`
+**생성 결과:** `.planning/phases/{phase-dir}/{padded-phase}-LEARNINGS.md`
 
 **추출 내용:**
 - 아키텍처 결정 및 근거
@@ -1167,7 +1168,7 @@ AI 시스템 구축을 포함하는 단계에 대한 AI-SPEC.md 디자인 계약
 | 인수 | 필수 | 설명 |
 |----------|----------|-------------|
 | `N` | **예** | 검토할 변경사항이 있는 단계 번호 (예: `2` 또는 `02`) |
-| `--depth=quick\|standard\|deep` | 아니요 | 검토 깊이 수준 (`workflow.code_review_depth` 설정 재정의). `quick`: 패턴 매칭만 (~2분). `standard`: 언어별 검사를 통한 파일별 분석 (~5–15분, 기본값). `deep`: 임포트 그래프와 호출 체인을 포함한 크로스 파일 분석 (~15–30분) |
+| `--depth=quick\|standard\|deep` | 아니요 | 검토 깊이 수준. `workflow.code_review_depth`와 일치하는 `workflow.code_review_depth_overrides` 경로 규칙을 모두 재정의합니다 — 플래그가 항상 우선합니다. `quick`: 패턴 매칭만 (~2분). `standard`: 언어별 검사를 통한 파일별 분석 (~5–15분, 기본값). `deep`: 임포트 그래프와 호출 체인을 포함한 크로스 파일 분석 (~15–30분) |
 | `--files file1,file2,...` | 아니요 | 명시적 쉼표 구분 파일 목록; SUMMARY/git 범위 지정을 완전히 건너뜀 |
 | `--fix` | 아니요 | 검토 후 자동 문제 수정 — REVIEW.md를 읽고, 수정자 에이전트를 생성하고, 각 수정을 원자적으로 커밋 |
 | `--fix --all` | 아니요 | 수정 범위에 Info 결과 포함 (기본값: Critical + Warning만) |
@@ -1242,7 +1243,6 @@ AI 시스템 구축을 포함하는 단계에 대한 AI-SPEC.md 디자인 계약
 
 | 플래그 | 설명 |
 |------|-------------|
-| `--gemini` | Gemini CLI 검토 포함 |
 | `--claude` | Claude CLI 검토 포함 (별도 세션) |
 | `--codex` | Codex CLI 검토 포함 |
 | `--coderabbit` | CodeRabbit 검토 포함 |
@@ -1258,7 +1258,7 @@ AI 시스템 구축을 포함하는 단계에 대한 AI-SPEC.md 디자인 계약
 
 **기본 리뷰어 동작 (플래그 없음):**
 - `review.default_reviewers`가 **설정되지 않은** 경우, `/gsd-review`는 감지된 모든 리뷰어를 실행합니다 (현재 기본 동작).
-- `review.default_reviewers`가 **설정된** 경우, `/gsd-review`는 해당 하위 집합만 실행합니다 (예: `["gemini","codex"]`).
+- `review.default_reviewers`가 **설정된** 경우, `/gsd-review`는 해당 하위 집합만 실행합니다 (예: `["codex","claude"]`).
 - `--all`은 항상 설정을 재정의하고 전체 감지된 집합을 실행합니다.
 - 명시적 플래그 (예: `--cursor`)는 해당 실행에 대해 `--all`과 설정 기본값 모두를 재정의합니다.
 
@@ -1266,11 +1266,11 @@ AI 시스템 구축을 포함하는 단계에 대한 AI-SPEC.md 디자인 계약
 
 ```bash
 # 플래그 없는 /gsd-review 실행을 위한 프로젝트 기본 리뷰어 설정
-gsd config-set review.default_reviewers '["gemini","codex"]'
+gsd config-set review.default_reviewers '["codex","claude"]'
 
-/gsd-review --phase 2             # 설정에서 gemini+codex 실행
+/gsd-review --phase 2             # 설정에서 codex+claude 실행
 /gsd-review --phase 3 --all
-/gsd-review --phase 2 --gemini
+/gsd-review --phase 2 --codex
 /gsd-review --phase 2 --cursor    # 일회성 재정의
 ```
 

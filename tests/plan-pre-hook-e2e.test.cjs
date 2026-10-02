@@ -29,9 +29,19 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const { cleanup } = require('./helpers.cjs');
+const { cleanup, installSpawnEnv, withAmbientCapabilityHome } = require('./helpers.cjs');
 
 const GSD_TOOLS = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
+
+/**
+ * Bounds a single gsd-tools.cjs CLI subcommand invocation — the same call
+ * shape as the shared LOOP_HOOK_POINT_CLI_TIMEOUT_MS constant in
+ * tests/helpers/timeouts.cjs. This file's pre-existing bound (30000ms) is
+ * half that shared norm's value (60000ms) — kept as its own file-local
+ * constant rather than folded into the shared one, since no fresh bench
+ * data justifies raising this file's bound to match.
+ */
+const PLAN_PRE_HOOK_CLI_TIMEOUT_MS = 30000;
 
 // ─── Subprocess helper (isolated env, no ambient GSD_ vars) ───────────────────
 
@@ -56,7 +66,7 @@ const CLEAN_ENV = {
 
 /**
  * Run gsd-tools via spawnSync. Returns { status, stdout, stderr }.
- * Passes env overrides merged on top of process.env + CLEAN_ENV.
+ * Passes env overrides through the canonical sandboxed child environment.
  */
 function runTools(args, cwd, envOverrides = {}) {
   return spawnSync(
@@ -65,8 +75,8 @@ function runTools(args, cwd, envOverrides = {}) {
     {
       cwd: cwd || process.cwd(),
       encoding: 'utf8',
-      timeout: 30000,
-      env: { ...process.env, ...CLEAN_ENV, ...envOverrides },
+      timeout: PLAN_PRE_HOOK_CLI_TIMEOUT_MS,
+      env: installSpawnEnv({ ...CLEAN_ENV, ...envOverrides }),
     },
   );
 }
@@ -255,6 +265,7 @@ describe('plan:pre all-off — empty resolution', () => {
         pattern_mapper: false,
         schema_push_detection: false,
         plan_drift_precheck: false,
+        context_drift_precheck: false,
         assumption_delta: false,
       },
       intel: { enabled: false },
@@ -267,10 +278,19 @@ describe('plan:pre all-off — empty resolution', () => {
     assert.strictEqual(result.status, 0, `exit non-zero. stderr=${result.stderr?.slice(0, 300)}`);
     const envelope = parseEnvelope(result, 'all-off');
 
-    assert.deepEqual(envelope.activeHooks, [],
+    assert.deepStrictEqual(envelope.activeHooks, [],
       `activeHooks must be empty when all flags false. Got: ${JSON.stringify(envelope.activeHooks.map(h=>h.capId))}`);
     assert.strictEqual(envelope.rendered, '_No active hooks at plan:pre._',
       'rendered must be placeholder when no active hooks');
+  });
+
+  test('#4485: an ambient plan:pre capability cannot perturb the empty resolution', (t) => {
+    withAmbientCapabilityHome(t, 'gsd-ambient-plan-pre-', 'ambient-plan-pre', 'plan:pre');
+
+    const result = runTools(['loop', 'render-hooks', 'plan:pre', '--cwd', tmpDir, '--raw'], tmpDir);
+    assert.strictEqual(result.status, 0, `exit non-zero. stderr=${result.stderr?.slice(0, 300)}`);
+    const envelope = parseEnvelope(result, 'all-off-ambient');
+    assert.deepStrictEqual(envelope.activeHooks, []);
   });
 });
 
@@ -295,19 +315,71 @@ describe('check ui.plan-gate — frontend phase, no UI-SPEC', () => {
       ].join('\n'),
       'utf8',
     );
+    // Static frontend evidence (#3312): block requires token match AND structural
+    // corroboration — this fixture is a real frontend repo.
+    fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, 'src', 'App.tsx'), 'export function App() { return null; }\n', 'utf8');
     // No UI-SPEC.md in phase dir
   });
   after(() => cleanup(tmpDir));
 
-  test('[happy] frontend phase + no UI-SPEC: block:true, frontend:true, hasUiSpec:false, exit 0', () => {
+  test('[happy] frontend phase + evidence + no UI-SPEC: block:true, frontend:true, hasUiSpec:false, exit 0', () => {
     const result = runTools(['check', 'ui.plan-gate', '1', '--raw'], tmpDir);
     assert.strictEqual(result.status, 0, `exit non-zero. stderr=${result.stderr?.slice(0, 300)}`);
     const out = parseEnvelope(result, 'ui-plan-gate-no-spec');
 
     assert.strictEqual(out.frontend, true, 'frontend must be true for frontend-keyword phase');
+    assert.strictEqual(out.hasFrontendEvidence, true, 'src/App.tsx is frontend evidence');
     assert.strictEqual(out.hasUiSpec, false, 'hasUiSpec must be false when no spec file exists');
-    assert.strictEqual(out.block, true, 'block must be true (frontend && !hasUiSpec)');
+    assert.strictEqual(out.block, true, 'block must be true (frontend && hasFrontendEvidence && !hasUiSpec)');
     assert.strictEqual(out.uiSpecPath, null, 'uiSpecPath must be null when spec absent');
+    // matchedToken is the FIRST match in the phase section — the "## Phase 1:
+    // Dashboard" heading precedes the body, so the first match is `dashboard`.
+    assert.strictEqual(out.matchedToken, 'dashboard', 'matchedToken surfaces what tripped the sniffer');
+  });
+});
+
+// ─── 6b. check ui.plan-gate: #3312 — token match without frontend evidence ────
+
+describe('check ui.plan-gate — #3312 proper-noun token match, no frontend evidence', () => {
+  let tmpDir;
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-pre-ui-gate-3312-'));
+    const planningDir = path.join(tmpDir, '.planning');
+    fs.mkdirSync(path.join(planningDir, 'phases', '01-infra'), { recursive: true });
+    fs.writeFileSync(path.join(planningDir, 'config.json'), '{}', 'utf8');
+    fs.writeFileSync(
+      path.join(planningDir, 'ROADMAP.md'),
+      [
+        '# Project Roadmap',
+        '',
+        '## Phase 1: Infra',
+        '',
+        'Fix broken references in dashboard-financeiro, update .env.tpl and CI workflows.',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    // Markdown/bash/config repo by design: no src/, no package.json, no component files.
+  });
+  after(() => cleanup(tmpDir));
+
+  test('[regression] dashboard-financeiro mention in non-frontend repo: frontend:true but block:false', () => {
+    const result = runTools(['check', 'ui.plan-gate', '1', '--raw'], tmpDir);
+    assert.strictEqual(result.status, 0, `exit non-zero. stderr=${result.stderr?.slice(0, 300)}`);
+    const out = parseEnvelope(result, 'ui-plan-gate-3312');
+
+    assert.strictEqual(out.frontend, true,
+      'sniffer still matches `dashboard` at the hyphen boundary (micro-frontend rule)');
+    assert.strictEqual(out.hasFrontendEvidence, false,
+      'markdown/bash repo has no component files and no UI-framework dependency');
+    assert.strictEqual(out.block, false,
+      '#3312: token match without structural evidence must NOT block planning');
+    assert.strictEqual(out.matchedToken, 'dashboard', 'matchedToken surfaces the proper-noun trigger');
+    assert.ok(
+      typeof out.matchedLine === 'string' && out.matchedLine.includes('dashboard-financeiro'),
+      'matchedLine surfaces the line for one-second operator triage',
+    );
   });
 });
 

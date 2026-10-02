@@ -6,7 +6,10 @@
  * When `workflow.windows_enforce` is true, `/gsd-ship` blocks while any entry is
  * `open`; an entry can be `waived` only with a recorded reason or `fixed`.
  *
- * LEAF MODULE — imports ONLY: node:fs, node:path. No other src/ imports.
+ * LEAF MODULE — imports node:fs + node:path, plus two compiled sibling lib
+ * modules require()d at runtime: workstream-inventory.cjs (the #4487
+ * milestone stamp) and capability-lock.cjs (the #3780 cross-process ledger
+ * lock). No other src/ imports.
  *
  * Storage format (`.planning/WINDOWS.md`):
  *   ---
@@ -19,9 +22,9 @@
  *   ---
  *   # Broken Windows Ledger
  *   <human-readable prose>
- *   ```json
+ *   ````json
  *   [ <entries array, canonical JSON> ]
- *   ```
+ *   ````
  *
  * Frontmatter holds scalar counts (the FAST path the ship gate reads via jq
  * without parsing JSON). The JSON code block is the AUTHORITATIVE entries
@@ -45,6 +48,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import workstreamInventory = require('./workstream-inventory.cjs');
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -70,6 +75,15 @@ export const REASON = Object.freeze({
   WINDOWS_INVALID_ID: 'windows_invalid_id',
   WINDOWS_APPEND_MISSING_FIELD: 'windows_append_missing_field',
   WINDOWS_USAGE: 'windows_usage',
+  // #3689: the rendered markdown table disagreed with the fenced JSON (the
+  // sole source of truth) at the pre-write seam — refuse rather than silently
+  // reconcile by overwriting the operator's hand-edit or dropping a row.
+  WINDOWS_LEDGER_TABLE_DRIFT: 'windows_ledger_table_drift',
+  // #3780: the read-compute-write cycle is serialized on a cross-process
+  // ledger lock; this fires only when another writer held the lock past the
+  // whole bounded retry budget — a typed, actionable refusal instead of a
+  // silently-lost mutation reported as success.
+  WINDOWS_LEDGER_LOCK: 'windows_ledger_lock',
 });
 
 /** Allowed window kinds. Aligned with the issue's enumerated sources. */
@@ -111,11 +125,25 @@ export interface WindowEntry {
   reason: string;      // '' unless status === 'waived'
   recorded_at: string; // ISO-8601
   resolved_at: string | null;
+  // #4487: the workstream's resolved milestone version (e.g. "v2.0") at the
+  // moment the entry was recorded, or null when it could not be resolved.
+  // Phase numbers are unique only within one active phases/ directory --
+  // `milestone complete` archives phases and frees their numbers for reuse,
+  // so two milestones routinely produce entries under the same `phase`
+  // value with nothing to distinguish them. Absence (on an entry recorded
+  // before this field existed) reads as "recorded before this change" --
+  // validateEntryShape below does NOT require this key, so existing ledgers
+  // stay valid with no migration. Optional (not `| null` alone): a genuinely
+  // absent key must survive parseLedger -> renderLedger as absent, not as an
+  // explicit `null`, or every legacy entry picks up permanent JSON noise
+  // the first time ANY entry in the ledger is touched (JSON.stringify drops
+  // an `undefined` property but keeps an explicit `null` one).
+  milestone?: string | null;
 }
 
 /** Input shape for appendWindow — id/status/timestamps are assigned by the fn. */
 export type WindowInput = Pick<WindowEntry, 'kind' | 'phase' | 'description'> &
-  Partial<Pick<WindowEntry, 'file' | 'line'>>;
+  Partial<Pick<WindowEntry, 'file' | 'line' | 'milestone'>>;
 
 export interface Ledger {
   schema_version: number;
@@ -269,12 +297,14 @@ function nextId(entries: WindowEntry[]): number {
  * Append a window to the ledger. Assigns the next dense id (max+1), sets
  * status=open, timestamps via opts.now.
  *
- * Concurrency (issue #1950 review L2): NOT safe for concurrent writers. Two
- * parallel `gsd_run windows append` invocations both read the same snapshot,
- * both compute the same nextId, both write — the second atomic rename wins
- * and the first append (and the entry it added) is silently lost. This is
- * acceptable in the current single-executor-per-phase model; document if the
- * executor ever gains parallel wave-level append.
+ * Concurrency (issue #1950 review L2, superseded by #3780): as a PURE
+ * function this operates on whatever ledger snapshot it is passed and cannot
+ * see concurrent writers — serialization is the CALLER's job. The I/O entry
+ * points below (cmdWindowsAppend/Waive/MarkFixed) now discharge that duty by
+ * holding the cross-process ledger lock across their whole
+ * read-compute-write cycle, so the previously-documented loss (two parallel
+ * writers, second rename wins, first entry silently gone) can no longer
+ * occur through the CLI.
  */
 export function appendWindow(
   ledger: Ledger,
@@ -298,6 +328,7 @@ export function appendWindow(
     reason: '',
     recorded_at: opts.now,
     resolved_at: null,
+    milestone: input.milestone ?? null,
   };
 
   const entries = [...ledger.entries, entry];
@@ -380,6 +411,93 @@ const JSON_FENCE_CLOSE = '````';
 const FORBIDDEN_BACKTICK_RUN = '````';
 
 /**
+ * #3689: the ledger table's fixed header row literal. `renderTable` emits it
+ * on both the empty and non-empty branches; `extractTableRegion` anchors on
+ * it to bound the table region. Hoisted to one constant so the two surfaces
+ * cannot drift (see "Generative Fix Divergence" — CONTRIBUTING.md).
+ */
+const TABLE_HEADER_LINE =
+  '| id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |';
+
+// Reader-side fence tolerance (#3657): CommonMark formatters (Prettier et al.)
+// normalize the written 4-backtick fence down to the shortest legal width (3)
+// whenever the block body holds no backtick run — and a canonical-JSON ledger
+// body never does. Both widths are valid CommonMark, so the reader locates the
+// block by a line-anchored 3+ fence and closes on a run at least as wide as
+// the opening one (CommonMark: a shorter run does not close). The writer above
+// is unchanged — 4 backticks stay what renderLedger emits (#1950 review H1).
+
+type JsonBlockSpan = { bodyStart: number; bodyEnd: number; afterClose: number };
+type JsonBlockLookup =
+  | { ok: true; span: JsonBlockSpan }
+  | { ok: false; reason: 'missing-open' | 'unterminated' };
+
+/**
+ * Locate the entries JSON block by CommonMark fence rules rather than a fixed
+ * literal width. Both parseJsonBlock (strict) and writeLedgerAtomic's #2893
+ * prose preservation (lenient) go through this one function so read tolerance
+ * and splice tolerance cannot drift (#3657). A backtick-only line can never
+ * occur inside a body: JSON.stringify renders strings single-line-escaped, so
+ * an inline run inside a description is never a close-fence candidate.
+ *
+ * Disambiguation (#3657 security review): an entry description may contain
+ * newlines and 3-backtick runs (append validation rejects only 4+ runs), and
+ * renderTable renders descriptions into the prose ABOVE the JSON block — so
+ * hostile or accidental text can plant a second json fence above the real
+ * one. renderLedger always emits the entries block as the FINAL fenced
+ * section, so spans are scanned in REVERSE: prefer the latest span whose
+ * entries length equals the frontmatter total_count (the real block always
+ * satisfies it — parseLedger cross-checks that invariant), else the latest
+ * span whose body is a JSON array, else the first span so corrupt bodies keep
+ * their fail-closed parse errors. A mirror planted below with identical
+ * length and identical entries is indistinguishable by construction — and
+ * harmless.
+ */
+function locateJsonBlock(raw: string, expectedTotal?: number): JsonBlockLookup {
+  const spans: JsonBlockSpan[] = [];
+  for (const open of raw.matchAll(/^(`{3,})json[ \t]*\r?$/gm)) {
+    const width = open[1].length;
+    const bodyStart = (open.index ?? 0) + open[0].length;
+    for (const close of raw.slice(bodyStart).matchAll(/^(`{3,})[ \t]*\r?$/gm)) {
+      if (close[1].length < width) continue;
+      const bodyEnd = bodyStart + (close.index ?? 0);
+      const closeLineEnd = raw.indexOf('\n', bodyEnd);
+      spans.push({
+        bodyStart,
+        bodyEnd,
+        afterClose: closeLineEnd === -1 ? raw.length : closeLineEnd + 1,
+      });
+      break; // CommonMark: the first qualifying close ends this fence block
+    }
+  }
+  if (spans.length === 0) {
+    const sawOpen = /^(`{3,})json[ \t]*\r?$/m.test(raw);
+    return { ok: false, reason: sawOpen ? 'unterminated' : 'missing-open' };
+  }
+  const parseBody = (s: JsonBlockSpan): unknown => {
+    try {
+      return JSON.parse(raw.slice(s.bodyStart, s.bodyEnd).trim());
+    } catch {
+      return undefined;
+    }
+  };
+  if (expectedTotal !== undefined) {
+    for (let i = spans.length - 1; i >= 0; i--) {
+      const body = parseBody(spans[i]);
+      if (Array.isArray(body) && body.length === expectedTotal) {
+        return { ok: true, span: spans[i] };
+      }
+    }
+  }
+  for (let i = spans.length - 1; i >= 0; i--) {
+    if (Array.isArray(parseBody(spans[i]))) {
+      return { ok: true, span: spans[i] };
+    }
+  }
+  return { ok: true, span: spans[0] };
+}
+
+/**
  * Minimal strict frontmatter parser for flat scalar keys. Only supports the
  * shape this module emits: `key: <number|string>` per line. Throws on any
  * structural deviation — fail-closed on drift.
@@ -433,22 +551,17 @@ function parseFrontmatterStrict(raw: string): Record<string, number | string> {
   return out;
 }
 
-function parseJsonBlock(raw: string): WindowEntry[] {
-  const start = raw.indexOf(JSON_FENCE_OPEN);
-  if (start === -1) {
+function parseJsonBlock(raw: string, expectedTotal?: number): WindowEntry[] {
+  const span = locateJsonBlock(raw, expectedTotal);
+  if (!span.ok) {
     throw new WindowsError(
       REASON.WINDOWS_LEDGER_MALFORMED,
-      'Ledger missing JSON code block for entries.',
+      span.reason === 'missing-open'
+        ? 'Ledger missing JSON code block for entries.'
+        : 'Ledger JSON code block not terminated.',
     );
   }
-  const end = raw.indexOf(JSON_FENCE_CLOSE, start + JSON_FENCE_OPEN.length);
-  if (end === -1) {
-    throw new WindowsError(
-      REASON.WINDOWS_LEDGER_MALFORMED,
-      'Ledger JSON code block not terminated.',
-    );
-  }
-  const jsonText = raw.slice(start + JSON_FENCE_OPEN.length, end).trim();
+  const jsonText = raw.slice(span.span.bodyStart, span.span.bodyEnd).trim();
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonText);
@@ -528,6 +641,19 @@ function validateEntryShape(e: unknown, i: number): WindowEntry {
     reason: o.reason,
     recorded_at: recordedStr,
     resolved_at: resolvedStr,
+    // #4487: NOT in `required` above -- an entry recorded before this field
+    // existed has no `milestone` key at all, and that must parse cleanly.
+    // Preserve the absence itself -- by not materializing the property at
+    // all, via the conditional spread below, rather than assigning it
+    // `milestone: undefined` (an object literal property set to `undefined`
+    // is still an OWN property; `'milestone' in entry` reads true either
+    // way) -- so a genuinely absent key stays absent both to `in` and to
+    // JSON.stringify on re-render. Collapsing absence to an explicit null
+    // instead would stamp every legacy entry with permanent
+    // `"milestone": null` noise the moment the ledger is next touched. A
+    // genuinely-recorded-but-unresolvable milestone (set by appendWindow)
+    // is still an explicit null and round-trips as one.
+    ...('milestone' in o ? { milestone: typeof o.milestone === 'string' ? o.milestone : null } : {}),
   };
 }
 
@@ -556,7 +682,7 @@ export function parseLedger(raw: string): Ledger {
     );
   }
 
-  const entries = parseJsonBlock(raw);
+  const entries = parseJsonBlock(raw, typeof fm.total_count === 'number' ? fm.total_count : undefined);
   const ledger: Ledger = {
     schema_version: SCHEMA_VERSION,
     open_count: typeof fm.open_count === 'number' ? fm.open_count : 0,
@@ -613,16 +739,16 @@ export function renderLedger(ledger: Ledger): string {
   return [fm, header, table, '', jsonBlock].join('\n');
 }
 
-function renderTable(entries: WindowEntry[]): string {
+export function renderTable(entries: WindowEntry[]): string {
   if (entries.length === 0) {
     return [
-      '| id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |',
+      TABLE_HEADER_LINE,
       '|----|-------|------|------|------|-------------|--------|--------|-------------|-------------|',
       '| _(none)_ |  |  |  |  | _No windows recorded._ |  |  |  |  |',
     ].join('\n');
   }
   const rows = [
-    '| id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |',
+    TABLE_HEADER_LINE,
     '|----|-------|------|------|------|-------------|--------|--------|-------------|-------------|',
   ];
   for (const e of entries) {
@@ -647,10 +773,211 @@ function renderTable(entries: WindowEntry[]): string {
   return rows.join('\n');
 }
 
+/**
+ * #3689: extract the exact markdown table region a rendered ledger emits —
+ * the text `renderTable` produced, byte-for-byte — from a raw ledger file.
+ * Used by `writeLedgerAtomic`'s drift guard to compare the on-disk table
+ * against `renderTable(<on-disk JSON entries>)` without a table parser.
+ *
+ * Locates the JSON block with the same tolerant `locateJsonBlock` helper the
+ * rest of the module uses (#3657), so a formatter-normalized 3-backtick
+ * fence still resolves. Everything before the opening fence line, with
+ * trailing blank lines dropped, is the candidate region.
+ *
+ * #3689: the region is bounded by finding the LAST occurrence of the fixed
+ * `TABLE_HEADER_LINE` literal (anchored at a line start) within that
+ * candidate text, then taking everything from there through its end — NOT
+ * by scanning backward for a contiguous run of `|`-prefixed lines. A `|`
+ * prefix scan cannot bound the region: `validateDescription` rejects only
+ * empty strings and 4-backtick runs, so a description may contain a raw
+ * `\n`, and `renderTable`'s `cell()` escapes `\` and `|` but not newlines.
+ * Such a description renders a row that physically spans multiple file
+ * lines, and the continuation line does not start with `|` — a prefix scan
+ * either truncates the table or, when the row's tail is the last pre-fence
+ * line, returns null immediately, bricking every subsequent write with
+ * `WINDOWS_LEDGER_TABLE_DRIFT` on a ledger nobody hand-edited. Anchoring on
+ * the header instead includes any such row whole, so `renderTable`
+ * regenerates byte-identical text for it and the drift comparison passes.
+ *
+ * Returns null when the JSON block cannot be located, or no header line is
+ * present.
+ *
+ * `expectedTotal` (#3689 review finding 2) is threaded straight into
+ * `locateJsonBlock` so callers with trailing prose can disambiguate the real
+ * ledger block from an unrelated fenced JSON array a user pasted below the
+ * closing fence — without it, `locateJsonBlock`'s no-hint fallback picks the
+ * LATEST array-shaped span, which is the prose block, not the ledger, and
+ * every drift comparison then binds to the wrong table/JSON pairing.
+ */
+export function extractTableRegion(raw: string, expectedTotal?: number): string | null {
+  const span = locateJsonBlock(raw, expectedTotal);
+  if (!span.ok) return null;
+  // bodyStart sits right before the newline (or CR) ending the opening fence
+  // line; walk back to the start of that line.
+  const fenceLineStart = raw.lastIndexOf('\n', span.span.bodyStart - 1) + 1;
+  const before = raw.slice(0, fenceLineStart).replace(/\r\n/g, '\n');
+  let trimmedEnd = before.length;
+  while (trimmedEnd > 0 && before[trimmedEnd - 1] === '\n') {
+    trimmedEnd--;
+  }
+  const candidate = before.slice(0, trimmedEnd);
+  // Find the LAST occurrence of TABLE_HEADER_LINE anchored at a line start —
+  // a plain string scan rather than a regex, since the module is a leaf
+  // (imports only node:fs/node:path) and cannot pull in the shared
+  // escapeRegex() helper for a one-off fixed-literal search.
+  let headerIndex = -1;
+  let searchFrom = candidate.length;
+  for (;;) {
+    const idx = candidate.lastIndexOf(TABLE_HEADER_LINE, searchFrom);
+    if (idx === -1) break;
+    const atLineStart = idx === 0 || candidate[idx - 1] === '\n';
+    const atLineEnd =
+      idx + TABLE_HEADER_LINE.length === candidate.length ||
+      candidate[idx + TABLE_HEADER_LINE.length] === '\n';
+    if (atLineStart && atLineEnd) {
+      headerIndex = idx;
+      break;
+    }
+    // #3689: lastIndexOf clamps a negative position into [0, length] per
+    // spec, so `searchFrom = -1` would re-search from 0 and re-find the same
+    // rejected match at idx===0 forever. Stop explicitly once there is
+    // nowhere left to search — this makes the bound strictly decrease each
+    // iteration, so the loop terminates within candidate.length steps.
+    if (idx === 0) break;
+    searchFrom = idx - 1;
+  }
+  if (headerIndex === -1) return null;
+  return candidate.slice(headerIndex);
+}
+
+/**
+ * #3689: diff two `renderTable` outputs by row id (the first cell of each
+ * data row), skipping the header + separator lines (always exactly two).
+ * A row whose line text differs between the two tables, or that is present
+ * in only one of them, contributes its id to the result — this is what lets
+ * the drift-guard error message name the specific drifted/table-only row(s)
+ * rather than just saying "the table disagrees".
+ */
+function diffTableRowIds(expectedTable: string, actualTable: string): string[] {
+  const rowId = (line: string): string => (line.split('|')[1] ?? '').trim();
+  const dataRows = (table: string): Map<string, string> => {
+    const lines = table.split('\n');
+    const map = new Map<string, string>();
+    for (let i = 2; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.startsWith('|')) continue;
+      map.set(rowId(line), line);
+    }
+    return map;
+  };
+  const expectedRows = dataRows(expectedTable);
+  const actualRows = dataRows(actualTable);
+  const ids = new Set<string>();
+  for (const [id, line] of expectedRows) {
+    if (actualRows.get(id) !== line) ids.add(id);
+  }
+  for (const id of actualRows.keys()) {
+    if (!expectedRows.has(id)) ids.add(id);
+  }
+  return Array.from(ids).sort();
+}
+
 // ─── I/O entry points ──────────────────────────────────────────────────────
 
 function ledgerPath(cwd: string): string {
   return path.join(cwd, '.planning', LEDGER_FILE_NAME);
+}
+
+// ─── #3780: cross-process ledger mutation lock ─────────────────────────────
+
+interface LedgerLockHandle { path: string; token: string; dev: number | null; ino: number | null }
+
+interface LockModule {
+  acquireLock: (
+    lockPath: string,
+    opts?: { maxAttempts?: number; waitForFresh?: boolean },
+  ) => LedgerLockHandle | null;
+  releaseLock: (handle: LedgerLockHandle | null) => void;
+}
+
+/**
+ * The SHARED hardened cross-process lock primitive (single source of truth
+ * for capability-lifecycle + capability-consent, extracted so locks cannot
+ * diverge). Required LAZILY: capability-lock captures the process start time
+ * at module load — a `ps` subprocess on macOS, PowerShell on win32 — and
+ * this module is loaded by lock-free readers (`windows status`, the
+ * /gsd-ship gate) that must not pay that per-invocation cost (#3780
+ * review). `require` is cached, so writers pay it once per process.
+ */
+let _lockMod: LockModule | null = null;
+function ledgerLock(): LockModule {
+  if (_lockMod === null) {
+    /* eslint-disable @typescript-eslint/no-require-imports */
+    _lockMod = require('./capability-lock.cjs') as LockModule;
+    /* eslint-enable @typescript-eslint/no-require-imports */
+  }
+  return _lockMod;
+}
+
+/**
+ * Budget mirrors capability-consent's CONSENT_LOCK_MAX_ATTEMPTS: two
+ * genuinely-racing writers must SERIALIZE, not fail. The ledger's critical
+ * section is sub-millisecond and the primitive backs off ~25-50ms per
+ * attempt, so 50 attempts is orders of magnitude beyond any real contention
+ * while keeping the worst case (a holder that never releases until the
+ * primitive's own liveness/deadman protocol reclaims it) bounded at ~2s
+ * before the typed refusal below.
+ */
+const LEDGER_LOCK_MAX_ATTEMPTS = 50;
+
+function ledgerLockPath(cwd: string): string {
+  return path.join(cwd, '.planning', '.WINDOWS.lock');
+}
+
+function acquireLedgerLock(cwd: string): LedgerLockHandle | null {
+  return ledgerLock().acquireLock(ledgerLockPath(cwd), {
+    maxAttempts: LEDGER_LOCK_MAX_ATTEMPTS,
+    // A contended fresh/live holder is WAITED FOR (back off + retry), not
+    // failed-fast — racing wave-level executors serialize (issue #3780).
+    waitForFresh: true,
+  });
+}
+
+function releaseLedgerLock(handle: LedgerLockHandle | null): void {
+  ledgerLock().releaseLock(handle);
+}
+
+/**
+ * Run `fn` (a full ledger read-compute-write cycle) while holding the
+ * cross-process ledger lock. Throws a typed WindowsError — never falls back
+ * to an unlocked mutation — when the lock cannot be acquired within the
+ * budget, mirroring capability-consent finding 3: a locked store must refuse
+ * the write rather than silently race for it. Readers (cmdWindowsStatus, the
+ * ship gate) deliberately do NOT take this lock: the atomic rename already
+ * gives them a whole-file snapshot.
+ *
+ * EXPORTED (#3780) because `withLedgerLock` is the ONE serialization seam
+ * for WINDOWS.md: every writer of the ledger — the cmd* entry points here
+ * and any sibling module with its own read-compute-write cycle on the same
+ * file (refactor-trigger-command-router's strict-window record/resolve) —
+ * must hold this lock, or the lost-update race #3780 fixed survives on that
+ * path.
+ */
+export function withLedgerLock<T>(cwd: string, fn: () => T): T {
+  const handle = acquireLedgerLock(cwd);
+  if (!handle) {
+    throw new WindowsError(
+      REASON.WINDOWS_LEDGER_LOCK,
+      `Another writer holds the ledger lock at ${ledgerLockPath(cwd)}; WINDOWS.md ` +
+        'mutations are serialized per project. Re-run the command once the other ' +
+        'writer finishes — the lock is reclaimed automatically if its holder died.',
+    );
+  }
+  try {
+    return fn();
+  } finally {
+    releaseLedgerLock(handle);
+  }
 }
 
 function readLedgerOrNull(cwd: string): Ledger | null {
@@ -732,22 +1059,125 @@ function writeLedgerAtomic(cwd: string, ledger: Ledger): void {
   // trailing prose that users may have written below the closing fence.
   // Without this, every append/waive/fixed silently destroys that prose.
   let trailingProse = '';
+  // #3689: read the pre-image once into `existing` outside the catch, rather
+  // than doing every subsequent step inside a bare try/catch, so that a
+  // WindowsError thrown by the drift guard below propagates instead of being
+  // swallowed by the ENOENT handler meant only for "no ledger yet".
+  let existing: string | null = null;
   try {
-    const existing = fs.readFileSync(p, 'utf8');
-    // #2893: search for the CLOSING fence starting AFTER the opening fence,
-    // mirroring parseJsonBlock — indexOf(JSON_FENCE_CLOSE) alone would match
-    // the opening fence ('````json' starts with '````').
-    const openIdx = existing.indexOf(JSON_FENCE_OPEN);
-    if (openIdx !== -1) {
-      const fenceEnd = existing.indexOf(JSON_FENCE_CLOSE, openIdx + JSON_FENCE_OPEN.length);
-      if (fenceEnd !== -1) {
-        const afterFence = existing.slice(fenceEnd + JSON_FENCE_CLOSE.length);
-        // Drop leading newlines; keep the rest as prose.
-        trailingProse = afterFence.replace(/^\n+/, '');
-      }
+    existing = fs.readFileSync(p, 'utf8');
+  } catch (e: unknown) {
+    // #1950-H2 / #3689: ENOENT is the only "no ledger yet" case — mirror
+    // readLedgerOrNull's discipline exactly. A bare catch here would let
+    // EACCES/EIO/ENOTDIR/etc. fall through as "no pre-image", silently
+    // skipping BOTH the #2893 prose preservation and the drift guard below
+    // and proceeding to overwrite an unreadable file — a guard bypassable by
+    // making the pre-image unreadable is not a guard.
+    const code = (e && typeof e === 'object' && 'code' in e)
+      ? String((e as { code?: unknown }).code)
+      : '';
+    if (code !== 'ENOENT') {
+      throw new WindowsError(
+        REASON.WINDOWS_LEDGER_MALFORMED,
+        `Could not read ledger at ${p} (${code || 'unknown fs error'}): ${(e as Error).message}.`,
+      );
     }
-  } catch {
-    // File doesn't exist yet (first write) — no prose to preserve.
+    // File doesn't exist yet (first write) — no prose to preserve, and
+    // nothing on disk to disagree with, so the drift guard below is skipped.
+  }
+  if (existing !== null) {
+    // #3689 review finding 2 / #3689 bug discovery: both the #2893 prose
+    // span AND the drift guard below must disambiguate `locateJsonBlock`
+    // against the SAME pre-image ledger block, so this is computed ONCE,
+    // hoisted above both uses. expectedTotal MUST be derived from the
+    // PRE-IMAGE's own frontmatter (never `ledger.total_count`, which is
+    // already post-mutation — e.g. N+1 on an append): #2893 exists precisely
+    // because operators may paste prose below the closing fence, and that
+    // prose can itself contain a fenced JSON array of a different length.
+    // Passing the post-mutation total here (as a since-fixed #3689 review
+    // pass once did for the guard alone) makes locateJsonBlock's expectedTotal
+    // scan find nothing against the pre-image — no span has N+1 entries yet —
+    // so it silently falls through to the no-hint fallback, which binds to
+    // the LATEST array-shaped span: the prose block, not the ledger. Left
+    // unfixed, that means the #2893 prose-preservation span itself would
+    // resolve to the prose fence's `afterClose`, silently dropping
+    // everything between the real ledger block and the prose block —
+    // including the operator's own prose ABOVE that array — on every
+    // append. This is exactly the failure #2893 was written to prevent,
+    // reintroduced through the disambiguation hint; it is caught here by
+    // deriving the hint from the pre-image, not the post-mutation ledger,
+    // for BOTH call sites below. If the pre-image frontmatter cannot be
+    // parsed unambiguously, that is itself the ambiguous case — fail closed
+    // rather than falling back to the no-hint scan.
+    let preImageExpectedTotal: number;
+    try {
+      const preFm = parseFrontmatterStrict(existing);
+      if (typeof preFm.total_count !== 'number' || !Number.isInteger(preFm.total_count)) {
+        throw new WindowsError(
+          REASON.WINDOWS_LEDGER_MALFORMED,
+          `Ledger frontmatter total_count in ${p} is not an integer; refusing to write — ` +
+            'the ledger JSON block cannot be identified unambiguously.',
+        );
+      }
+      preImageExpectedTotal = preFm.total_count;
+    } catch (e) {
+      if (e instanceof WindowsError) throw e;
+      throw new WindowsError(
+        REASON.WINDOWS_LEDGER_MALFORMED,
+        `Ledger frontmatter in ${p} could not be parsed (${(e as Error).message}); refusing ` +
+          'to write — the ledger JSON block cannot be identified unambiguously.',
+      );
+    }
+
+    // #2893: search for the CLOSING fence starting AFTER the opening fence.
+    // The span is located with the same tolerant + disambiguated fence rules
+    // parseJsonBlock uses (#3657), so a formatter-normalized 3-backtick ledger
+    // keeps its prose too — a literal-width search here would find no block
+    // and silently drop everything below the ledger on the next write. The
+    // hint passed here is `preImageExpectedTotal` (pre-image derived, see
+    // above) — NOT `ledger.total_count` — so this binds to the same span the
+    // drift guard below does.
+    const span = locateJsonBlock(existing, preImageExpectedTotal);
+    if (span.ok) {
+      const afterFence = existing.slice(span.span.afterClose);
+      // Drop leading newlines; keep the rest as prose.
+      trailingProse = afterFence.replace(/^(?:\r?\n)+/, '');
+    }
+
+    // #3689 review finding 2: refuse the write if the on-disk table has
+    // drifted from the on-disk JSON — the source of truth — BEFORE anything
+    // is regenerated. Baseline is the ON-DISK entries, not `ledger` (already
+    // the post-mutation state: an appended entry or a changed status);
+    // comparing against `ledger` would report drift on every legitimate
+    // write.
+    const onDiskEntries = parseJsonBlock(existing, preImageExpectedTotal);
+    const expectedTable = renderTable(onDiskEntries);
+    const actualTable = extractTableRegion(existing, preImageExpectedTotal);
+    if (actualTable === null) {
+      throw new WindowsError(
+        REASON.WINDOWS_LEDGER_TABLE_DRIFT,
+        `Ledger table region could not be located in ${p}; refusing to write. Edit the ` +
+          'fenced JSON block directly — the sole source of truth — or delete the corrupted ' +
+          'table region and let gsd-tools regenerate it; never hand-edit the rendered table.',
+      );
+    }
+    if (actualTable !== expectedTable) {
+      const driftedIds = diffTableRowIds(expectedTable, actualTable);
+      // #3689 review finding 3: a header/separator-only drift (e.g. a
+      // hand-edited column name or mangled separator) produces no data-row
+      // diffs, so driftedIds is empty — naming nothing would read "...for
+      // row id(s): .". Say what actually differs instead.
+      const driftDescription = driftedIds.length > 0
+        ? `for row id(s): ${driftedIds.join(', ')}`
+        : "in its header or separator row (no data row differs from the expected rendering)";
+      throw new WindowsError(
+        REASON.WINDOWS_LEDGER_TABLE_DRIFT,
+        `Ledger table in ${p} disagrees with the fenced JSON entries (the sole source of ` +
+          `truth) ${driftDescription}. Edit the fenced JSON block ` +
+          'directly, or discard the table edit and re-run the command so gsd-tools ' +
+          'regenerates the table; never hand-edit the rendered table.',
+      );
+    }
   }
 
   const rendered = renderLedger(ledger);
@@ -801,27 +1231,43 @@ export function cmdWindowsAppend(
     required: ['--kind', '--phase', '--description'],
   });
 
-  let ledger: Ledger;
-  try {
-    ledger = readLedgerOrNull(cwd) ?? emptyLedger(nowIso());
-  } catch (e) {
-    if (e instanceof WindowsError) throw e;
-    throw new WindowsError(REASON.WINDOWS_LEDGER_MALFORMED, (e as Error).message);
-  }
+  // #3780: the whole read-compute-write cycle — snapshot, milestone stamp,
+  // id allocation, atomic rename — holds the ledger lock, so two parallel
+  // invocations can no longer compute the same nextId from the same snapshot
+  // and silently lose the first append to the second rename.
+  withLedgerLock(cwd, () => {
+    let ledger: Ledger;
+    try {
+      ledger = readLedgerOrNull(cwd) ?? emptyLedger(nowIso());
+    } catch (e) {
+      if (e instanceof WindowsError) throw e;
+      throw new WindowsError(REASON.WINDOWS_LEDGER_MALFORMED, (e as Error).message);
+    }
 
-  const result = appendWindow(
-    ledger,
-    {
-      kind: parsed.values['--kind'] as WindowKind,
-      phase: parsed.values['--phase'] ?? '',
-      file: parsed.values['--file'] ?? '',
-      line: parsed.values['--line'] == null ? null : Number(parsed.values['--line']),
-      description: parsed.values['--description'] ?? '',
-    },
-    { now: nowIso() },
-  );
-  writeLedgerAtomic(cwd, result.ledger);
-  emit({ ok: true, ledger: result.ledger, entry: result.entry });
+    // #4487: stamp the workstream's resolved milestone at record time -- the
+    // same STATE.md-first, ROADMAP-fallback resolution workstream-inventory.cts
+    // already uses. Best-effort: an unreadable/missing STATE.md or ROADMAP.md
+    // resolves to null, same as an entry recorded before this field existed.
+    const milestone = workstreamInventory.readCurrentMilestoneVersion(
+      path.join(cwd, '.planning', 'STATE.md'),
+      path.join(cwd, '.planning', 'ROADMAP.md'),
+    );
+
+    const result = appendWindow(
+      ledger,
+      {
+        kind: parsed.values['--kind'] as WindowKind,
+        phase: parsed.values['--phase'] ?? '',
+        file: parsed.values['--file'] ?? '',
+        line: parsed.values['--line'] == null ? null : Number(parsed.values['--line']),
+        description: parsed.values['--description'] ?? '',
+        milestone,
+      },
+      { now: nowIso() },
+    );
+    writeLedgerAtomic(cwd, result.ledger);
+    emit({ ok: true, ledger: result.ledger, entry: result.entry });
+  });
 }
 
 /** `gsd-tools windows waive <id> "<reason>"`. */
@@ -837,17 +1283,21 @@ export function cmdWindowsWaive(
 
   const id = parseIdOrThrow(idStr);
 
-  let ledger: Ledger;
-  try {
-    ledger = readLedgerOrNull(cwd) ?? emptyLedger(nowIso());
-  } catch (e) {
-    if (e instanceof WindowsError) throw e;
-    throw new WindowsError(REASON.WINDOWS_LEDGER_MALFORMED, (e as Error).message);
-  }
+  // #3780: same serialization as append — a concurrent append holding a stale
+  // snapshot would otherwise overwrite the waive and resurrect the entry.
+  withLedgerLock(cwd, () => {
+    let ledger: Ledger;
+    try {
+      ledger = readLedgerOrNull(cwd) ?? emptyLedger(nowIso());
+    } catch (e) {
+      if (e instanceof WindowsError) throw e;
+      throw new WindowsError(REASON.WINDOWS_LEDGER_MALFORMED, (e as Error).message);
+    }
 
-  const updated = markWaived(ledger, id, reason ?? '', { now: nowIso() });
-  writeLedgerAtomic(cwd, updated);
-  emit({ ok: true, ledger: updated });
+    const updated = markWaived(ledger, id, reason ?? '', { now: nowIso() });
+    writeLedgerAtomic(cwd, updated);
+    emit({ ok: true, ledger: updated });
+  });
 }
 
 /** `gsd-tools windows fixed <id>`. */
@@ -860,17 +1310,21 @@ export function cmdWindowsMarkFixed(
   const { positionals } = parseArgs(args, { flags: [], required: [], positionals: 1 });
   const id = parseIdOrThrow(positionals[0]);
 
-  let ledger: Ledger;
-  try {
-    ledger = readLedgerOrNull(cwd) ?? emptyLedger(nowIso());
-  } catch (e) {
-    if (e instanceof WindowsError) throw e;
-    throw new WindowsError(REASON.WINDOWS_LEDGER_MALFORMED, (e as Error).message);
-  }
+  // #3780: same serialization as append — a concurrent writer holding a
+  // stale snapshot would otherwise overwrite the resolved status.
+  withLedgerLock(cwd, () => {
+    let ledger: Ledger;
+    try {
+      ledger = readLedgerOrNull(cwd) ?? emptyLedger(nowIso());
+    } catch (e) {
+      if (e instanceof WindowsError) throw e;
+      throw new WindowsError(REASON.WINDOWS_LEDGER_MALFORMED, (e as Error).message);
+    }
 
-  const updated = markFixed(ledger, id, { now: nowIso() });
-  writeLedgerAtomic(cwd, updated);
-  emit({ ok: true, ledger: updated });
+    const updated = markFixed(ledger, id, { now: nowIso() });
+    writeLedgerAtomic(cwd, updated);
+    emit({ ok: true, ledger: updated });
+  });
 }
 
 function parseIdOrThrow(raw: string | undefined): number {

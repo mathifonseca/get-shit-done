@@ -15,6 +15,12 @@ const { countMatchedSummaries } = coreUtils;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatterMod = require('./frontmatter.cjs');
 const { extractFrontmatter } = frontmatterMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planningScopeMod = require('./planning-scope.cjs');
+const { SCOPE } = planningScopeMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planDependencyGraphMod = require('./plan-dependency-graph.cjs');
+const { isSummaryFileBlocked } = planDependencyGraphMod;
 
 // Excluded derivative files
 const PLAN_OUTLINE_RE = /-OUTLINE\.md$/i;
@@ -77,7 +83,18 @@ function isRootPlanFile(fileName: string): boolean {
   // fallback so legacy `<N>-PLAN-<NN>-SUMMARY.md` names (which contain the
   // substring "PLAN") are not double-counted as plans. (#500 RC2)
   if (isRootSummaryFile(fileName)) return false;
-  return /\.md$/i.test(fileName) && /PLAN/i.test(fileName);
+  // #3741: the PLAN token must be DELIMITED — anchored at the start or after
+  // a hyphen, and followed only by an optional `-<digits>…` suffix before
+  // `.md` (the `…` keeps the legacy slug form `3-PLAN-01-setup.md` that
+  // gsd-plan-phase writes, per #3128). A bare substring test counted
+  // REPLAN-INPUTS / PLANNING-INPUTS / PLANNING-NOTES as plans, inflating
+  // planCount and STATE.md's derived total_plans. Delimited keeps the
+  // fallback's deliberate permissiveness for legacy single-token names
+  // (`plan.md`, `Plan.md`, `01-PLAN-02.md`, `3-PLAN-01-setup.md`) while
+  // excluding any name where PLAN is merely embedded in a larger word
+  // (REPLAN, PLANNING) — the same anchoring discipline isNestedPlanFile
+  // already applies.
+  return /(^|-)PLAN(-\d+.*)?\.md$/i.test(fileName);
 }
 
 function isNestedPlanFile(fileName: string): boolean {
@@ -94,13 +111,58 @@ function isNestedSummaryFile(fileName: string): boolean {
   return /^SUMMARY-\d+.*\.md$/i.test(fileName) || /-SUMMARY-\d+.*\.md$/i.test(fileName);
 }
 
+/**
+ * Strict canonical-naming predicate over a `scanPhasePlans` `planFiles`/
+ * `allPlanFiles` ENTRY (root form bare, nested form `plans/`-prefixed, exactly
+ * as those arrays store them) — root `<phase>-<NN>-PLAN.md`/bare `PLAN.md`,
+ * or nested `plans/PLAN-<NN>....md`/`plans/<x>-PLAN-<NN>....md` — WITHOUT
+ * `isRootPlanFile`'s loose delimited-PLAN fallback.
+ *
+ * The `plans/` prefix check is load-bearing, not cosmetic: `isNestedPlanFile`
+ * matches ANY basename containing `-PLAN-<digits>...md` with no anchor
+ * requiring an actual `plans/` directory — that shape is exactly the #2893
+ * reporter's non-canonical example, `01-PLAN-01-foundation.md`. Applying
+ * `isNestedPlanFile` directly to a bare root-level name would therefore
+ * misclassify that exact offender as canonical. Only entries scanPhasePlans
+ * itself produced with the `plans/` prefix (i.e. read from the real nested
+ * subdirectory) are eligible for the nested check.
+ *
+ * #2893/#3183: `isRootPlanFile`'s loose fallback is deliberately permissive
+ * for live-plan COUNTING (a lowercase `plan.md` still counts toward
+ * completion — see plan-count-single-owner.test.cjs's pinned case-sensitivity
+ * asymmetry). But the #2893 "non-canonical filename" diagnostic (phase.cts's
+ * `describeNonCanonicalPlans`, used by find-phase/phase-plan-index/phases
+ * list --type plans) exists specifically to CATCH a plan-shaped file that
+ * does NOT match the canonical contract and warn instead of silently
+ * scheduling it. Feeding that diagnostic (and the `plans`/`files` lists those
+ * commands return) the loose `allPlanFiles`/`planFiles` set defeats the
+ * diagnostic entirely, since the loose fallback already recognizes the
+ * non-canonical file as "matched". This predicate is the STRICT filter those
+ * three call sites intersect against so the diagnostic (and what counts as a
+ * schedulable plan for those commands specifically) stays canonical-only,
+ * while scanPhasePlans's own planCount/summaryCount/completed stay on the
+ * loose, permissive rule.
+ */
+function isCanonicalPlanFile(fileEntry: string): boolean {
+  if (fileEntry.startsWith('plans/')) return isNestedPlanFile(fileEntry.slice('plans/'.length));
+  return fileEntry.endsWith('-PLAN.md') || fileEntry === 'PLAN.md';
+}
+
 interface PhaseScanResult {
   planCount: number;
   summaryCount: number;
   completed: boolean;
   hasNestedPlans: boolean;
+  // Callers asking "which plans are OUTSTANDING" (live-completion tracking,
+  // pairing, wave scheduling) use planFiles — it is post status:superseded
+  // exclusion. Callers asking "what plan files physically exist on disk"
+  // (e.g. numbering-gap detection) use allPlanFiles — it is EVERY plan file
+  // found, root + nested, BEFORE the superseded exclusion. One owner, two
+  // questions.
   planFiles: string[];
+  allPlanFiles: string[];
   summaryFiles: string[];
+  scope: planningScopeMod.Scope;
 }
 
 function scanPhasePlans(phaseDir: string): PhaseScanResult {
@@ -114,7 +176,9 @@ function scanPhasePlans(phaseDir: string): PhaseScanResult {
       completed: false,
       hasNestedPlans: false,
       planFiles: [],
+      allPlanFiles: [],
       summaryFiles: [],
+      scope: SCOPE.UNREADABLE,
     };
   }
 
@@ -123,6 +187,7 @@ function scanPhasePlans(phaseDir: string): PhaseScanResult {
   let nestedPlanFiles: string[] = [];
   let nestedSummaryFiles: string[] = [];
   let hasNestedPlans = false;
+  let scope: planningScopeMod.Scope = SCOPE.COMPLETE;
 
   const nestedDir = join(phaseDir, 'plans');
   if (existsSync(nestedDir)) {
@@ -131,7 +196,12 @@ function scanPhasePlans(phaseDir: string): PhaseScanResult {
       nestedPlanFiles = nestedFiles.filter(isNestedPlanFile).map((file) => `plans/${file}`);
       nestedSummaryFiles = nestedFiles.filter(isNestedSummaryFile).map((file) => `plans/${file}`);
       hasNestedPlans = nestedPlanFiles.length > 0;
-    } catch { /* ignore unreadable nested layout */ }
+    } catch {
+      // #3183 (ADR-3180 Decision 2): the nested plans/ dir exists but could not
+      // be read — this scan cannot see plans it knows are there, so zero is
+      // NOT a reliable answer; mark TRUNCATED rather than COMPLETE.
+      scope = SCOPE.TRUNCATED;
+    }
   }
 
   const allPlanFiles = rootPlanFiles.concat(nestedPlanFiles);
@@ -151,7 +221,20 @@ function scanPhasePlans(phaseDir: string): PhaseScanResult {
   // 30-GAPCLOSURE-SUMMARY.md) must not inflate summary_count or flip a phase to
   // Complete when plans are still missing summaries. summaryFiles (the array)
   // still holds every summary on disk for callers that read/list them.
-  const summaryCount = countMatchedSummaries(planFiles, summaryFiles);
+  //
+  // #3345: a SUMMARY whose frontmatter declares `status: blocked` is a failure
+  // record, not a completion record — it is dropped from the COUNTABLE pairing
+  // set before matching. The bounded-prefix status read is the SHARED predicate
+  // (plan-dependency-graph.cjs's isSummaryFileBlocked) that phase.cts's read
+  // path also filters through, so the count and the `incomplete` list cannot
+  // diverge. Fail-open: a SUMMARY with no `status` key, or one that cannot be read,
+  // keeps its pre-#3345 filename-existence meaning — untouched projects are
+  // byte-for-behaviour identical. `status: halted` stays counted (#2830: a
+  // designed stop still writes a completion record).
+  const countableSummaryFiles = summaryFiles.filter(
+    (f) => !isSummaryFileBlocked(join(phaseDir, f)),
+  );
+  const summaryCount = countMatchedSummaries(planFiles, countableSummaryFiles);
 
   return {
     planCount,
@@ -163,10 +246,31 @@ function scanPhasePlans(phaseDir: string): PhaseScanResult {
     // (0 >= 0) rather than being pinned below 100% forever, which is the very
     // failure this fix removes. A genuinely empty phase (no plans authored)
     // still has allPlanFiles.length 0 and stays not-completed, exactly as before.
+    //
+    // ADR-3180 §7.4 (issue #3186) — DELIBERATELY NOT routed through
+    // `isPhaseComplete` (src/verification.cts). This field answers "are all
+    // plans summarized?", NOT "is the phase complete?" — completion
+    // additionally requires a passing `*-VERIFICATION.md`, which is the
+    // whole point of that owner's unconditional readVerificationStatus call.
+    // Folding this field onto `isPhaseComplete` would either over-report
+    // completion (a phase whose plans are done but never verified) or drag a
+    // verification read into this module, inverting the dependency
+    // direction between this Phase-1 owner (plan counting) and the Phase-4
+    // owner (completion) — the owner must consume plan counts, never the
+    // reverse. Kept as its own, differently-scoped answer per the design's
+    // "0.x split" and exempted (function-scoped, not file-scoped) in
+    // scripts/lint-completion-predicate-drift.cjs's FUNCTION_SCOPED_EXEMPTIONS.
+    // The field name is left unchanged (not renamed to e.g.
+    // `summariesMeetPlanCount`) — scanPhasePlans has 11 direct callers, and a
+    // rename's blast radius is out of this phase's declared scope; noted
+    // here as a deliberate, considered-and-declined option rather than an
+    // oversight.
     completed: allPlanFiles.length > 0 && summaryCount >= planCount,
     hasNestedPlans,
     planFiles,
+    allPlanFiles,
     summaryFiles,
+    scope,
   };
 }
 
@@ -179,4 +283,5 @@ export = Object.assign(scanPhasePlans, {
   isNestedPlanFile,
   isRootSummaryFile,
   isNestedSummaryFile,
+  isCanonicalPlanFile,
 });

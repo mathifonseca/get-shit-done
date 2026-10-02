@@ -1,7 +1,7 @@
 {
   "id": "cursor",
   "role": "runtime",
-  "version": "1.10.0",
+  "version": "1.15.0",
   "title": "Cursor",
   "description": "Cursor IDE — skills-only workflow surface; hooks.json surface; Claude hook event dialect; recursive skill loader (flat nesting); tier-2 support.",
   "tier": "core",
@@ -57,6 +57,10 @@
         }
       ]
     },
+    "triggerPrecedence": [
+      "skills",
+      "commands"
+    ],
     "commandStyle": "slash-hyphen",
     "hooksSurface": "cursor-hooks-json",
     "hookEvents": "claude",
@@ -76,7 +80,8 @@
         "background": true,
         "subagentToolkit": "full",
         "backgroundDispatch": true,
-        "isolation": "harness-worktree"
+        "isolation": "harness-worktree",
+        "maxConcurrency": "undocumented"
       },
       "modelMode": "passive",
       "hookBus": "host",
@@ -107,8 +112,7 @@
         "stop",
         "subagentStart",
         "subagentStop"
-      ],
-      "reviewerCli": true
+      ]
     }
   },
   "reviewer": {
@@ -125,6 +129,7 @@
       "binary": "cursor-agent",
       "args": [
         "-p",
+        "{{model}}",
         "--mode",
         "ask",
         "--trust",
@@ -134,16 +139,31 @@
       ],
       "promptChannel": "argv-file-ref",
       "outputChannel": "stdout",
-      "modelArg": null,
+      "modelArg": "--model",
       "effortChannel": "none"
     },
     "timeoutFloorMs": 900000,
+    "timeoutConfigKey": null,
     "emptyOutput": "stub-with-stderr",
     "reviewsSection": "Cursor",
     "evidenceClass": "source-grounded",
     "requiresBinaries": [],
-    "promptBudgetKey": null,
-    "modelConfigKey": null,
+    "promptBudgetKey": "review.max_prompt_tokens_per_reviewer.cursor",
+    "modelConfigKey": "review.models.cursor",
+    "effortConfigKey": null,
+    "defaultEffort": null,
     "handler": null
+  },
+  "config": {
+    "review.models.cursor": {
+      "type": "string",
+      "default": "",
+      "description": "Model passed to the Cursor reviewer lane."
+    },
+    "review.max_prompt_tokens_per_reviewer.cursor": {
+      "type": "number",
+      "default": -1,
+      "description": "Prompt-token budget for the Cursor reviewer lane. Unset is -1, a sentinel: 0 is a legitimate value meaning \"do not trim this lane\", so it cannot double as \"not configured\"."
+    }
   }
 }

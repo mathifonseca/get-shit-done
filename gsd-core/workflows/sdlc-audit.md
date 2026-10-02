@@ -1,3 +1,5 @@
+@~/.claude/gsd-core/references/response-language-directive.md
+
 <purpose>
 Audit the current project against the SDLC Section 20 progressive initialization checklist.
 Reports what's set up, what's missing, and what to do next across 4 tiers.
@@ -22,7 +24,7 @@ if arguments contain "--fix"; then
 fi
 ```
 
-Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `workflow.text_mode` from the init JSON is `true`. When `TEXT_MODE` is active, replace every `AskUserQuestion` call in this workflow with a plain-text numbered list and ask the user to type their choice number. This keeps the audit usable on non-Claude runtimes (OpenAI Codex, Gemini, etc.) that render `AskUserQuestion` as an inert code block.
+Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `workflow.text_mode` from the init JSON is `true`. When `TEXT_MODE` is active, replace every `AskUserQuestion` call in this workflow with a plain-text numbered list and ask the user to type their choice number. This keeps the audit usable on non-Claude runtimes (OpenAI Codex, Antigravity, etc.) that render `AskUserQuestion` as an inert code block.
 </step>
 
 <step name="detect_project_root">
@@ -274,9 +276,7 @@ Determine `current_tier`:
 Format the report exactly as follows. Use the exact status markers shown.
 
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- SDLC Audit Report
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## SDLC Audit Report
 
 ### Tier 1: Foundation (Day 1)
   PASS  Git repo with main branch
@@ -369,19 +369,11 @@ For each MISS or PARTIAL item where `fix_available: true`, offer to fix it. Proc
 
 **.claude/settings.local.json (1.6):**
 - Use AskUserQuestion to confirm: "Create .claude/settings.local.json with .env deny rules? [y/n]"
-- If yes, create with standard deny patterns:
-```json
-{
-  "permissions": {
-    "deny": [
-      "Bash(cat .env*)",
-      "Bash(cat *.pem)",
-      "Read(.env*)",
-      "Edit(.env*)"
-    ]
-  }
-}
-```
+- If yes, create it as `{ "permissions": { "deny": [ ... ] } }` holding exactly these four permission-rule strings:
+  - `Bash(cat .env*)` <!-- # gsd-scan-ignore: #3409 permission-rule string written into JSON, never executed as shell -->
+  - `Bash(cat *.pem)` <!-- # gsd-scan-ignore: #3409 permission-rule string written into JSON, never executed as shell -->
+  - `Read(.env*)`
+  - `Edit(.env*)`
 
 **.claude/rules/ directory (3.1):**
 - Use AskUserQuestion to confirm: "Create .claude/rules/ directory with a starter rule file? [y/n]"
