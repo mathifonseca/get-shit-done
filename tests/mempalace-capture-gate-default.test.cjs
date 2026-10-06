@@ -47,8 +47,8 @@ describe('#2641 — mempalace-capture gate treats absent capture_artifacts as en
 // absent key as disabled — inverted from the registry default. Every gate on a
 // default-true key must treat absent as enabled (disabled only on an explicit
 // false); every gate on a default-false key must keep requiring positive
-// presence. The hand-maintained commands/gsd/*.md mirrors must stay in lockstep
-// with their skills/*/SKILL.md originals.
+// presence. The skills/*/SKILL.md copies are generated from commands/gsd/*.md
+// (scripts/gen-plugin-skills.cjs), so each pair must carry the same gate.
 
 const RECALL_SKILL = path.join(__dirname, '..', 'skills', 'gsd-mempalace-recall', 'SKILL.md');
 const RECALL_COMMAND = path.join(__dirname, '..', 'commands', 'gsd', 'mempalace-recall.md');
@@ -100,7 +100,7 @@ describe('#3479 — gates on default-true mempalace keys treat an absent key as 
     const text = fs.readFileSync(COMMAND, 'utf8');
     assert.ok(
       text.includes('config.mempalace.mirror_kg === false'),
-      'commands/gsd/mempalace-capture.md is a hand-maintained mirror of the skill — its mirror_kg gate needs the same fix (#3479)',
+      'commands/gsd/mempalace-capture.md is the source the skill is generated from — its mirror_kg gate needs the same fix (#3479)',
     );
     assert.ok(
       !text.includes('config.mempalace.mirror_kg` is true'),
@@ -112,7 +112,7 @@ describe('#3479 — gates on default-true mempalace keys treat an absent key as 
     const text = fs.readFileSync(RECALL_SKILL, 'utf8');
     assert.ok(
       text.includes('config.mempalace.mirror_kg !== false'),
-      'skills/gsd-mempalace-recall/SKILL.md KG-facts step must include mirror_kg unless !== false, matching its recall_on_plan gate style (#3479)',
+      'skills/gsd-mempalace-recall/SKILL.md KG-facts step must gate on config.mempalace.mirror_kg !== false (runs unless explicitly false), matching its recall_on_plan gate style (#3479)',
     );
     assert.ok(
       !text.includes('config.mempalace.mirror_kg` is true'),
@@ -124,7 +124,7 @@ describe('#3479 — gates on default-true mempalace keys treat an absent key as 
     const text = fs.readFileSync(RECALL_COMMAND, 'utf8');
     assert.ok(
       text.includes('config.mempalace.mirror_kg !== false'),
-      'commands/gsd/mempalace-recall.md is a hand-maintained mirror of the skill — its mirror_kg gate needs the same fix (#3479)',
+      'commands/gsd/mempalace-recall.md is the source the skill is generated from — its mirror_kg gate needs the same fix (#3479)',
     );
     assert.ok(
       !text.includes('config.mempalace.mirror_kg` is true'),
@@ -136,11 +136,11 @@ describe('#3479 — gates on default-true mempalace keys treat an absent key as 
     const text = fs.readFileSync(CURATOR, 'utf8');
     assert.ok(
       text.includes('mempalace.diary_journal !== false'),
-      'agents/gsd-mempalace-curator.md diary gate must run unless mempalace.diary_journal !== false (#3479)',
+      'agents/gsd-mempalace-curator.md diary gate must run when mempalace.diary_journal !== false (disabled only on an explicit false) (#3479)',
     );
     assert.ok(
       text.includes('mempalace.mirror_kg !== false'),
-      'agents/gsd-mempalace-curator.md KG-mirror gate must run unless mempalace.mirror_kg !== false (#3479)',
+      'agents/gsd-mempalace-curator.md KG-mirror gate must run when mempalace.mirror_kg !== false (disabled only on an explicit false) (#3479)',
     );
     assert.ok(
       !text.includes('mempalace.diary_journal` is true'),
@@ -200,5 +200,85 @@ describe('#3479 — registry parity guard: no default-true mempalace key is posi
       curator.includes('mempalace.cross_project_tunnels` is true'),
       'cross_project_tunnels (default: false) must keep its positive-presence gate — do not over-correct (#3479)',
     );
+  });
+});
+
+// #5173 — the #3479 fix moved these gates to a `!== false` predicate but paired
+// it with `unless`, so each read "(unless `K !== false` …)": literally "only
+// when K is false", the inverse of the intent its own trailing parenthetical
+// states. The includes() checks above omit the connective, which is why they
+// passed on the inverted text. Pin the connective itself: a `!== false`
+// predicate is introduced by `when` or `only if`, never by `unless`.
+
+const CURATOR_COMPACT = path.join(__dirname, '..', 'agents', 'gsd-mempalace-curator.compact.md');
+const rel = (file) => path.relative(path.join(__dirname, '..'), file);
+
+const NOT_FALSE_GATES = [
+  { file: RECALL_COMMAND, predicate: 'config.mempalace.mirror_kg !== false' },
+  { file: RECALL_SKILL, predicate: 'config.mempalace.mirror_kg !== false' },
+  { file: CURATOR, predicate: 'mempalace.diary_journal !== false' },
+  { file: CURATOR, predicate: 'mempalace.mirror_kg !== false' },
+];
+
+/**
+ * The word(s) directly before each backticked occurrence of `predicate`.
+ * Only letters count, so markdown emphasis, brackets and line breaks around
+ * the connective (`**when**`, `(when`) do not change what is read.
+ */
+function connectivesBefore(text, predicate) {
+  const needle = '`' + predicate + '`';
+  const found = [];
+  for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
+    const words = text.slice(Math.max(0, at - 80), at).match(/[A-Za-z]+/g) || [];
+    const last = (words[words.length - 1] || '').toLowerCase();
+    const prior = (words[words.length - 2] || '').toLowerCase();
+    found.push(prior === 'only' && last === 'if' ? 'only if' : last);
+  }
+  return found;
+}
+
+const UNLESS_NOT_FALSE = /\bunless\s+\(?`[^`]*!==\s*false`/;
+const UNLESS_EQ_FALSE = /\bunless\s+\(?`[^`]*===\s*false`/;
+
+describe('#5173 — a `!== false` gate is introduced by when/only if, never unless', () => {
+  for (const { file, predicate } of NOT_FALSE_GATES) {
+    test(`${rel(file)}: \`${predicate}\` reads "when", not "unless"`, () => {
+      const text = fs.readFileSync(file, 'utf8');
+      const connectives = connectivesBefore(text, predicate);
+      assert.ok(connectives.length > 0, `${rel(file)} must still carry the \`${predicate}\` gate (#5173)`);
+      // Every occurrence is checked for `unless`; an explanatory mention of the
+      // predicate elsewhere ("the predicate is `K !== false`") is not a gate and
+      // must not fail the test, so only the gate itself must read `when`.
+      assert.ok(
+        !connectives.includes('unless'),
+        `${rel(file)} introduces \`${predicate}\` with "unless" — "unless \`K !== false\`" means "only when K is false"; use "when" (#5173)`,
+      );
+      assert.ok(
+        connectives.some((c) => c === 'when' || c === 'only if'),
+        `${rel(file)} must introduce its \`${predicate}\` gate with "when" or "only if" (found: ${connectives.join(', ')}) (#5173)`,
+      );
+    });
+  }
+
+  test('no mempalace gate file pairs unless with a !== false predicate', () => {
+    for (const file of [SKILL, COMMAND, RECALL_SKILL, RECALL_COMMAND, CURATOR, CURATOR_COMPACT]) {
+      const text = fs.readFileSync(file, 'utf8');
+      assert.ok(
+        !UNLESS_NOT_FALSE.test(text),
+        `${rel(file)} pairs "unless" with a \`!== false\` predicate — the double negative inverts the gate (#5173)`,
+      );
+    }
+  });
+
+  test('the correct unless + === false form is untouched (capture command/skill, compact curator)', () => {
+    // Positive control for the absence check above: the same pattern shape,
+    // with the predicate flipped, must still match these files.
+    for (const file of [SKILL, COMMAND, CURATOR_COMPACT]) {
+      const text = fs.readFileSync(file, 'utf8');
+      assert.ok(
+        UNLESS_EQ_FALSE.test(text),
+        `${rel(file)} must keep its "unless \`… === false\`" gate — it already reads correctly (#5173)`,
+      );
+    }
   });
 });

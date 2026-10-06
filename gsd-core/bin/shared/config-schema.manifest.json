@@ -2,6 +2,9 @@
   "_comment": "Canonical schema manifest for valid config key paths. This manifest is the single CJS source of truth for valid config keys; dynamicKeyPatterns source strings are recompiled to RegExp at runtime by config-schema.cjs. runtimeStateKeys mirrors RUNTIME_STATE_KEYS.",
   "validKeys": [
     "mode",
+    "gates.execute_next_plan",
+    "gates.confirm_transition",
+    "gates.confirm_milestone_scope",
     "granularity",
     "parallelization",
     "commit_docs",
@@ -133,6 +136,7 @@
     "workflow.plan_lens_review",
     "effort.default",
     "fast_mode.enabled",
+    "audit.enabled",
     "plan_review.source_grounding",
     "plan_review.source_grounding_authority",
     "model_policy.provider",

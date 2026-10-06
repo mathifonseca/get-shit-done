@@ -39,7 +39,7 @@ const {
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import roadmapParserMod = require('./roadmap-parser.cjs');
 // #3642: hasMilestoneSectioning no longer consumed here — its >=2 semantics answered sibling conflation, but this branch asks asserted-vs-section (>=1). It stays exported from roadmap-parser.cjs for its unit pins.
-const { getMilestoneInfo, extractCurrentMilestone, isMilestoneBoundedInRoadmap, hasAnyMilestoneSection } = roadmapParserMod;
+const { getMilestoneInfo, extractCurrentMilestone, isMilestoneBoundedInRoadmap, hasAnyMilestoneSection, classifyMilestoneScalar } = roadmapParserMod;
 import { platformWriteSync, platformReadSync, platformEnsureDir, retryRenameSync, toPosixPath, execGit } from './shell-command-projection.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
@@ -68,7 +68,7 @@ import coreUtilsMod = require('./core-utils.cjs');
 import planDependencyGraphMod = require('./plan-dependency-graph.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import verificationMod = require('./verification.cjs');
-const { isPhaseComplete } = verificationMod;
+const { isPhaseComplete, VerificationStatusError } = verificationMod;
 // #4129: the single owner of "count the ROADMAP's milestone Complete rows"
 // (phase-lifecycle.cts) — reused for the completed-phases numerator floor so
 // this scan cannot grow a second ROADMAP parser. Pure computation module (no
@@ -1416,7 +1416,7 @@ function computeUpdateProgressPreview(statePath: string, cwd: string): UpdatePro
   const existingFm = extractFrontmatter(preContent, statePath) as Record<string, unknown>;
   const preBody = stripFrontmatter(preContent);
   const storedMilestone = typeof existingFm['milestone'] === 'string' ? existingFm['milestone'] : null;
-  const builtFm = buildStateFrontmatter(preBody, cwd, storedMilestone, readStoredTotalPhases(existingFm), readStoredCompletedPhases(existingFm), readStoredTotalPlans(existingFm), readStoredCompletedPlans(existingFm));
+  const builtFm = buildStateFrontmatter(preBody, cwd, storedMilestone, readStoredTotalPhases(existingFm), readStoredCompletedPhases(existingFm), readStoredTotalPlans(existingFm), readStoredCompletedPlans(existingFm), isMilestoneExplicitlyNull(existingFm));
   const progress = builtFm['progress'] as Record<string, unknown> | undefined;
   const percent = progress && typeof progress['percent'] === 'number' ? progress['percent'] : null;
   const completedPlans = progress && typeof progress['completed_plans'] === 'number' ? progress['completed_plans'] : null;
@@ -2769,6 +2769,125 @@ function countRoadmapPhaseHeadings(
 }
 
 /**
+ * The phase directories every STATE.md frontmatter rebuild scans, and the
+ * ROADMAP facts derived alongside them — the ONE owner of that set (#5118).
+ *
+ * `phaseDirs` is milestone-scoped (`listMilestonePhaseDirs`), drops retired
+ * phases (#1514) and holds exactly one directory per normalized phase key
+ * (Bug #2445, deterministic tie-break #3355). `buildStateFrontmatter` counts
+ * from it, and `statePhaseDirsToScan` hands it to `phase remove`'s pre-write
+ * validation, so the two cannot disagree about which reports a rebuild reads.
+ */
+function scanStatePhaseDirs(
+  cwd: string,
+  phasesDir: string,
+  phaseConvention: string | null,
+  storedMilestone?: string | null,
+  // `quiet` suppresses ONLY the duplicate-phase-key stderr warning. A pre-write
+  // validation pass that is followed by the real rebuild scan sets it, so the
+  // one command prints the warning once (the rebuild scan owns the warning).
+  options: { quiet?: boolean } = {},
+): {
+  phaseDirs: string[];
+  phaseDirScope: Scope;
+  roadmapScope: string | null;
+  roadmapRaw: string | null;
+  retiredPhaseNums: Set<string>;
+} {
+  // Read the current-milestone ROADMAP scope once: it feeds both the
+  // heading-based phase count and the retired/folded-phase
+  // exclusion (#1514). Computed before the disk scan so retired phases
+  // can be dropped from the dir set too.
+  let roadmapScope: string | null = null;
+  let roadmapRaw: string | null = null;
+  let retiredPhaseNums = new Set<string>();
+  try {
+    const roadmapPath = path.join(planningDir(cwd), 'ROADMAP.md');
+    roadmapRaw = platformReadSync(roadmapPath);
+    if (roadmapRaw !== null) {
+      roadmapScope = extractCurrentMilestone(roadmapRaw, cwd);
+      retiredPhaseNums = extractRetiredPhaseNumbers(roadmapScope, phaseConvention);
+    }
+  } catch { /* fall through: no roadmap scope → no retired exclusion */ }
+
+  // #3017: scope the milestone filter to the STORED milestone when available,
+  // so a state.* write doesn't auto-derive (and mis-bind) to a different
+  // milestone's heading and clobber the stored value + progress counts.
+  // #3185 (ADR-3180 Decision 1): "which phase directories belong to the
+  // CURRENT (stored) milestone" — routed through the canonical owner
+  // instead of a hand-rolled readdirSync + isDirInMilestone filter
+  // (which also never excluded sentinels, unlike the owner).
+  const { value: allMatchingDirs, scope: phaseDirScope } = listMilestonePhaseDirs(phasesDir, {
+    cwd,
+    versionOverride: storedMilestone ?? null,
+    phaseIdConvention: phaseConvention,
+  });
+
+  // Bug #2445: when stale phase dirs from a prior milestone remain in
+  // .planning/phases/ alongside new dirs with the same phase number,
+  // de-duplicate by normalized phase number keeping exactly one dir
+  // per key (deterministic tie-break: see #3355 below). This prevents
+  // double-counting (e.g. two "Phase 1" dirs).
+  const seenPhaseNums = new Map<string, string>(); // normalizedNum -> dirName
+  for (const dir of allMatchingDirs) {
+    // #1514: a retired/folded phase keeps a directory but no completion
+    // artifact; drop it from the disk phase set so it counts toward
+    // neither the denominator nor the numerator (mirrors the heading
+    // exclusion below). Project-code-aware via phaseKeyFromDir.
+    if (retiredPhaseNums.size > 0 && retiredPhaseNums.has(phaseKeyFromDir(dir, phaseConvention))) continue;
+    // #3185: dedup grouping routed through the canonical phaseKeyFromDir
+    // (src/phase-id.cts) instead of a local leading-digits regex that
+    // diverged from extractPhaseToken/phaseKeyFromDir on
+    // project-code-prefixed dirs (whole dirname fell through as the key,
+    // so a `PROJ-05`/`PROJ-05-slug` pair never deduped) and on
+    // multi-segment milestone dirs. Same key surface used two lines
+    // above for the retiredPhaseNums exclusion, so both filters agree.
+    const key = phaseKeyFromDir(dir, phaseConvention);
+    if (!seenPhaseNums.has(key)) {
+      seenPhaseNums.set(key, dir);
+    } else {
+      // #3355: the survivor of a same-milestone collision must be
+      // chosen from repository CONTENT, never from filesystem state.
+      // The pre-#3355 tie-break was `mtimeMs` — a checkout-order
+      // signal — so two byte-identical checkouts of the same commit
+      // that wrote the colliding dirs in a different order picked
+      // different survivors, and progress.total_plans /
+      // completed_plans drifted across clones and CI runs. The
+      // directory NAME is git-tracked content and a total order, so
+      // the lexicographically-first dir wins deterministically. The
+      // collision is still a project-level defect (duplicate phase
+      // number in scope), so it is surfaced on stderr instead of
+      // being silently resolved. The Bug #2445 invariant — exactly
+      // one survivor per normalized phase number — is unchanged.
+      const incumbent = seenPhaseNums.get(key) as string;
+      const survivor = dir < incumbent ? dir : incumbent;
+      seenPhaseNums.set(key, survivor);
+      if (options.quiet !== true) process.stderr.write(
+        `gsd: warning — phase directories '${incumbent}' and '${dir}' both normalize to phase key '${key}' (duplicate phase number in .planning/phases/); keeping '${survivor}' by deterministic lexicographic order. (#3355)\n`
+      );
+    }
+  }
+  return {
+    phaseDirs: [...seenPhaseNums.values()],
+    phaseDirScope,
+    roadmapScope,
+    roadmapRaw,
+    retiredPhaseNums,
+  };
+}
+
+/**
+ * #5038: does existing frontmatter assert an explicit null milestone, as
+ * opposed to omitting the `milestone:` key? `extractFrontmatter` parses under
+ * FAILSAFE_SCHEMA, so YAML null arrives as a string; classification is
+ * delegated to classifyMilestoneScalar.
+ */
+function isMilestoneExplicitlyNull(existingFm: Record<string, unknown>): boolean {
+  const raw = existingFm['milestone'];
+  return typeof raw === 'string' && classifyMilestoneScalar(raw).explicitNull;
+}
+
+/**
  * Extract machine-readable fields from STATE.md markdown body and build
  * a YAML frontmatter object. Allows hooks and scripts to read state
  * reliably via `state json` instead of fragile regex parsing.
@@ -2786,6 +2905,9 @@ function buildStateFrontmatter(
   storedCompletedPhases?: number | null,
   storedTotalPlans?: number | null,
   storedCompletedPlans?: number | null,
+  // #5038: explicit `milestone: null` (vs an absent key); withholds progress
+  // counters on a sectioned ROADMAP without the unbound warning.
+  milestoneExplicitlyNull?: boolean,
 ): Record<string, unknown> {
   // #2956: scope `Phase` extraction to ## Current Position (mirrors the read
   // path in cmdStateSnapshot and the Stopped At / Paused At ## Session scoping
@@ -2892,80 +3014,18 @@ function buildStateFrontmatter(
         // on repeated buildStateFrontmatter invocations within the same process (#1967)
         let cached = _diskScanCache.get(cwd);
         if (!cached) {
-          // Read the current-milestone ROADMAP scope once: it feeds both the
-          // heading-based phase count below and the retired/folded-phase
-          // exclusion (#1514). Computed before the disk scan so retired phases
-          // can be dropped from the dir set too.
-          let roadmapScope: string | null = null;
-          let roadmapRaw: string | null = null;
-          let retiredPhaseNums = new Set<string>();
-          try {
-            const roadmapPath = path.join(planningDir(cwd), 'ROADMAP.md');
-            roadmapRaw = platformReadSync(roadmapPath);
-            if (roadmapRaw !== null) {
-              roadmapScope = extractCurrentMilestone(roadmapRaw, cwd);
-              retiredPhaseNums = extractRetiredPhaseNumbers(roadmapScope, phaseConvention);
-            }
-          } catch { /* fall through: no roadmap scope → no retired exclusion */ }
-
-          // #3017: scope the milestone filter to the STORED milestone when available,
-          // so a state.* write doesn't auto-derive (and mis-bind) to a different
-          // milestone's heading and clobber the stored value + progress counts.
-          // #3185 (ADR-3180 Decision 1): "which phase directories belong to the
-          // CURRENT (stored) milestone" — routed through the canonical owner
-          // instead of a hand-rolled readdirSync + isDirInMilestone filter
-          // (which also never excluded sentinels, unlike the owner).
-          const { value: allMatchingDirs, scope: phaseDirScope } = listMilestonePhaseDirs(phasesDir, {
-            cwd,
-            versionOverride: storedMilestone ?? null,
-            phaseIdConvention: phaseConvention,
-          });
-
-          // Bug #2445: when stale phase dirs from a prior milestone remain in
-          // .planning/phases/ alongside new dirs with the same phase number,
-          // de-duplicate by normalized phase number keeping exactly one dir
-          // per key (deterministic tie-break: see #3355 below). This prevents
-          // double-counting (e.g. two "Phase 1" dirs).
-          const seenPhaseNums = new Map<string, string>(); // normalizedNum -> dirName
-          for (const dir of allMatchingDirs) {
-            // #1514: a retired/folded phase keeps a directory but no completion
-            // artifact; drop it from the disk phase set so it counts toward
-            // neither the denominator nor the numerator (mirrors the heading
-            // exclusion below). Project-code-aware via phaseKeyFromDir.
-            if (retiredPhaseNums.size > 0 && retiredPhaseNums.has(phaseKeyFromDir(dir, phaseConvention))) continue;
-            // #3185: dedup grouping routed through the canonical phaseKeyFromDir
-            // (src/phase-id.cts) instead of a local leading-digits regex that
-            // diverged from extractPhaseToken/phaseKeyFromDir on
-            // project-code-prefixed dirs (whole dirname fell through as the key,
-            // so a `PROJ-05`/`PROJ-05-slug` pair never deduped) and on
-            // multi-segment milestone dirs. Same key surface used two lines
-            // above for the retiredPhaseNums exclusion, so both filters agree.
-            const key = phaseKeyFromDir(dir, phaseConvention);
-            if (!seenPhaseNums.has(key)) {
-              seenPhaseNums.set(key, dir);
-            } else {
-              // #3355: the survivor of a same-milestone collision must be
-              // chosen from repository CONTENT, never from filesystem state.
-              // The pre-#3355 tie-break was `mtimeMs` — a checkout-order
-              // signal — so two byte-identical checkouts of the same commit
-              // that wrote the colliding dirs in a different order picked
-              // different survivors, and progress.total_plans /
-              // completed_plans drifted across clones and CI runs. The
-              // directory NAME is git-tracked content and a total order, so
-              // the lexicographically-first dir wins deterministically. The
-              // collision is still a project-level defect (duplicate phase
-              // number in scope), so it is surfaced on stderr instead of
-              // being silently resolved. The Bug #2445 invariant — exactly
-              // one survivor per normalized phase number — is unchanged.
-              const incumbent = seenPhaseNums.get(key) as string;
-              const survivor = dir < incumbent ? dir : incumbent;
-              seenPhaseNums.set(key, survivor);
-              process.stderr.write(
-                `gsd: warning — phase directories '${incumbent}' and '${dir}' both normalize to phase key '${key}' (duplicate phase number in .planning/phases/); keeping '${survivor}' by deterministic lexicographic order. (#3355)\n`
-              );
-            }
-          }
-          const phaseDirs = [...seenPhaseNums.values()];
+          // The ROADMAP scope + the deduped, milestone-scoped disk phase set:
+          // one owner (scanStatePhaseDirs, above buildStateFrontmatter) so the
+          // #5118 pre-write validation in `phase remove` reads exactly this set.
+          // #5038: an explicit-null `storedMilestone` is text, not a version;
+          // pass a real null so it never reaches the phase-dir version filter.
+          const {
+            phaseDirs,
+            phaseDirScope,
+            roadmapScope,
+            roadmapRaw,
+            retiredPhaseNums,
+          } = scanStatePhaseDirs(cwd, phasesDir, phaseConvention, milestoneExplicitlyNull ? null : storedMilestone);
 
           let diskTotalPlans = 0;
           let diskTotalSummaries = 0;
@@ -2987,7 +3047,14 @@ function buildStateFrontmatter(
             // #612: `phaseConvention` threaded so a bracket phase dir resolves
             // and scopes its verification report like its legacy twin — the
             // read-side half of the same thread cmdStateSync gets below.
-            if (isPhaseComplete(phaseDir, { convention: phaseConvention }).value.complete) diskCompletedPhases++;
+            const completion = isPhaseComplete(phaseDir, { convention: phaseConvention });
+            // #5118 (no write before the error): every STATE.md write rebuilds
+            // this frontmatter BEFORE its write, so a report whose `status` is
+            // outside the closed set fails the write here — the owner's error,
+            // rethrown past the best-effort catch below, nothing persisted and
+            // nothing cached.
+            if (completion.value.statusError) throw completion.value.statusError;
+            if (completion.value.complete) diskCompletedPhases++;
           }
           // Count phase headings from ROADMAP — single source of truth for
           // total_phases (#549). #612 round-4: shared with cmdStateSync's
@@ -3008,6 +3075,21 @@ function buildStateFrontmatter(
             // phase-dir count only, and mark unbounded so percent is skipped
             // downstream (mirrors the sync write-path guard).
             let milestoneBounded = true;
+            // #2828/#3642: distinguish a FLAT unmilestoned roadmap (no milestone
+            // sectioning at all — only Phase headings) from a MILESTONED one
+            // (milestone/version headings exist). Computed before the
+            // boundedness gate so the explicit-null branch can use it (#5038).
+            // #3642: the flat test uses the >=1 sibling (hasAnyMilestoneSection),
+            // not the >=2 predicate. >=2 under-answers the question this branch
+            // asks: with EXACTLY ONE milestone section and an asserted milestone
+            // absent from the ROADMAP, >=2 read "flat" and the whole-document
+            // count — which IS that single section's phases — was written as the
+            // asserted milestone's total, silently clobbering the stored value.
+            // The >=2 threshold governs SIBLING conflation; asserted-vs-section
+            // needs only one section to go wrong. Zero sections (genuinely flat)
+            // keeps the whole-document count, per #2828.
+            const roadmapHasAnyMilestoneSection = roadmapRaw !== null
+              && hasAnyMilestoneSection(roadmapRaw);
             // #3216 fix (#1761 regression): use `assertedMilestoneVersion` —
             // the version STATE.md actually asserts — not the scope-gated
             // `milestone`. `milestone` is null on any non-COMPLETE identity
@@ -3024,28 +3106,19 @@ function buildStateFrontmatter(
               // version token, so `v2.0` matched inside `v2.0.1` (#2562-class
               // defect, design row 17).
               milestoneBounded = isMilestoneBounded(roadmapRaw, String(assertedMilestoneVersion).trim(), phaseConvention);
+            } else if (milestoneExplicitlyNull && roadmapRaw !== null && roadmapHasAnyMilestoneSection) {
+              // #5038: explicit null on a sectioned ROADMAP: no section owns
+              // the counts, so treat as unbound for the withhold gate (the
+              // warning below is skipped, null is deliberate).
+              milestoneBounded = false;
             }
-            // #2828: distinguish a FLAT unmilestoned roadmap (no milestone sectioning
-            // at all — only Phase headings) from a MILESTONED-but-unbounded one
-            // (milestone/version headings exist but the asserted one isn't among them).
-            // On a flat roadmap the whole-doc count is correct (no sibling milestones to
-            // conflate); on a sectioned-but-unbounded one it conflates siblings (#1761),
-            // so fall back to phaseDirs.length.
+            // #2828: on a flat roadmap the whole-doc count is correct (no
+            // sibling milestones to conflate); on a sectioned-but-unbounded one
+            // it conflates siblings (#1761), so fall back to phaseDirs.length.
             // #3184: routed through the single owner (roadmap-parser.cjs) —
             // deliberately weaker than isMilestoneBoundedInRoadmap above (no
             // version-token requirement); see hasMilestoneSectioning's own
             // doc comment for why that distinction is load-bearing.
-            // #3642: the flat test uses the >=1 sibling (hasAnyMilestoneSection),
-            // not the >=2 predicate. >=2 under-answers the question this branch
-            // asks: with EXACTLY ONE milestone section and an asserted milestone
-            // absent from the ROADMAP, >=2 read "flat" and the whole-document
-            // count — which IS that single section's phases — was written as the
-            // asserted milestone's total, silently clobbering the stored value.
-            // The >=2 threshold governs SIBLING conflation; asserted-vs-section
-            // needs only one section to go wrong. Zero sections (genuinely flat)
-            // keeps the whole-document count, per #2828.
-            const roadmapHasAnyMilestoneSection = roadmapRaw !== null
-              && hasAnyMilestoneSection(roadmapRaw);
             const safeToUseRoadmapCount = milestoneBounded
               || (roadmapPhaseCount > 0 && !roadmapHasAnyMilestoneSection);
             // #3354: the milestoned-but-unbounded sibling of the #2828/#3204
@@ -3063,7 +3136,8 @@ function buildStateFrontmatter(
             // The degenerate un-sectioned zero-heading case keeps the
             // phaseDirs.length fallback — with nothing declared anywhere else,
             // the disk count is the only source and remains correct.
-            const milestonedButUnbounded = !milestoneBounded && roadmapHasAnyMilestoneSection;
+            // #5038: explicit null is withheld silently (explicitNullWithheld).
+            const milestonedButUnbounded = !milestoneBounded && roadmapHasAnyMilestoneSection && !milestoneExplicitlyNull;
             if (milestonedButUnbounded) {
               process.stderr.write(
                 `gsd: warning — milestone '${String(assertedMilestoneVersion ?? '').trim()}' is asserted in STATE.md but matches no ROADMAP heading, and the ROADMAP carries milestone section(s) — one (#3642) or several (#3354) — none matching it; the whole-document count would attribute a foreign section's phases to this milestone and the on-disk phase-directory count would understate the declared total, so the progress counters (total_phases, completed_phases, total_plans, completed_plans) are left at their stored values. (#3354/#3642/#4094)\n`
@@ -3080,10 +3154,12 @@ function buildStateFrontmatter(
             // value instead. Without an asserted milestone (fresh project,
             // pre-roadmap) the disk count is still the only source and stays
             // authoritative (the #3354 doctrine's degenerate case).
+            // #5038: an explicit null is not an asserted milestone.
             const roadmapAbsentWithAssertedMilestone =
               roadmapRaw === null &&
               typeof storedMilestone === 'string' &&
-              storedMilestone.trim() !== '';
+              storedMilestone.trim() !== '' &&
+              !milestoneExplicitlyNull;
             if (roadmapAbsentWithAssertedMilestone) {
               process.stderr.write(
                 `gsd: warning — milestone '${storedMilestone.trim()}' is asserted in STATE.md but ROADMAP.md is absent or unreadable, so the phase-heading total cannot be derived; the on-disk phase-directory count would understate the declared total, so the progress counters (total_phases, completed_phases, total_plans, completed_plans) are left at their stored values. (#3573) (#4094)\n`
@@ -3098,7 +3174,9 @@ function buildStateFrontmatter(
             // Pre-#4094 only totalPhases was nulled here, so every resyncing
             // write silently clobbered the three stored siblings with the
             // under-scoped disk numbers.
-            const diskCountsWithheld = milestonedButUnbounded || roadmapAbsentWithAssertedMilestone;
+            // #5038: silent sibling of milestonedButUnbounded.
+            const explicitNullWithheld = milestoneExplicitlyNull && !milestoneBounded && roadmapHasAnyMilestoneSection;
+            const diskCountsWithheld = milestonedButUnbounded || roadmapAbsentWithAssertedMilestone || explicitNullWithheld;
             // #4129: floor the completed-phases numerator at the ROADMAP's own
             // milestone Complete-row count. The disk numerator counts ONLY
             // phase dirs whose *-VERIFICATION.md routes `passed` (isPhaseComplete,
@@ -3187,8 +3265,11 @@ function buildStateFrontmatter(
        * crash `state show`; on failure this simply keeps whatever
        * frontmatter-derived totals/completedPhases/etc. were already set
        * above, a graceful degrade rather than a corrupted write (nothing is
-       * persisted from this block). */
-    } catch { /* intentionally empty */ }
+       * persisted from this block). #5118: an out-of-set verification
+       * report status is not a read failure to degrade over — rethrown. */
+    } catch (err) {
+      if (err instanceof VerificationStatusError) throw err;
+    }
   }
 
   // Derive percent from disk counts when available (ground truth).
@@ -3625,7 +3706,7 @@ function syncStateFrontmatter(
   // milestoned-but-unbounded withhold can preserve it across the write
   // (the derived progress sub-block replaces the stored one wholesale below,
   // so an omitted key would otherwise DELETE the stored value).
-  const derivedFm = buildStateFrontmatter(body, cwd, storedMilestone, readStoredTotalPhases(existingFm), readStoredCompletedPhases(existingFm), readStoredTotalPlans(existingFm), readStoredCompletedPlans(existingFm));
+  const derivedFm = buildStateFrontmatter(body, cwd, storedMilestone, readStoredTotalPhases(existingFm), readStoredCompletedPhases(existingFm), readStoredTotalPlans(existingFm), readStoredCompletedPlans(existingFm), isMilestoneExplicitlyNull(existingFm));
 
   // Preserve existing frontmatter status when body-derived status is 'unknown'.
   // This prevents a missing Status: field in the body from overwriting a
@@ -5018,7 +5099,7 @@ function cmdStateJson(cwd: string, raw: boolean): void {
   // reports the phase-directory count while the persisted file preserves the
   // stored total, exactly the write/read divergence #3354 closed for its shape.
   const storedMilestoneJson = typeof existingFm['milestone'] === 'string' ? existingFm['milestone'] : null;
-  const built = buildStateFrontmatter(body, cwd, storedMilestoneJson, readStoredTotalPhases(existingFm), readStoredCompletedPhases(existingFm), readStoredTotalPlans(existingFm), readStoredCompletedPlans(existingFm));
+  const built = buildStateFrontmatter(body, cwd, storedMilestoneJson, readStoredTotalPhases(existingFm), readStoredCompletedPhases(existingFm), readStoredTotalPlans(existingFm), readStoredCompletedPlans(existingFm), isMilestoneExplicitlyNull(existingFm));
 
   // ADR-3408 §8.5 / D3: route stopped_at / paused_at / status / current_phase /
   // current_phase_name / current_plan through the SAME `preserve-when-unchanged`
@@ -6115,7 +6196,12 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
     // #612: `syncConvention` threaded — the write-side half of
     // buildStateFrontmatter's thread above, so `state sync` and `state json`
     // keep agreeing on completed_phases under the bracket convention.
-    if (isPhaseComplete(dirPath, { convention: syncConvention }).value.complete) diskCompletedPhases++;
+    // #5118 (no write before the error): `state sync` writes STATE.md only
+    // after this scan, so an out-of-set report status fails it here, having
+    // written nothing.
+    const completion = isPhaseComplete(dirPath, { convention: syncConvention });
+    if (completion.value.statusError) throw completion.value.statusError;
+    if (completion.value.complete) diskCompletedPhases++;
 
     // Track the highest phase with incomplete plans (or any plans)
     const phaseMatch = dir.match(new RegExp(`^(${PHASE_NUMBER_TOKEN_SOURCE})`, 'i'));
@@ -6162,8 +6248,10 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
   // set — leave Progress untouched (percent=null) rather than silently writing
   // fallback-derived wrong values. Projects without a milestone version (the common
   // sync-test shape) are unaffected: the gate only fires when a version is asserted.
-  const fmVersion = (extractFrontmatter(content, statePath) as Record<string, unknown>).milestone;
-  const versionStr = typeof fmVersion === 'string' && fmVersion.trim() ? fmVersion.trim() : null;
+  const syncFm = extractFrontmatter(content, statePath) as Record<string, unknown>;
+  const fmVersion = syncFm.milestone;
+  const milestoneExplicitlyNull = isMilestoneExplicitlyNull(syncFm);
+  const versionStr = typeof fmVersion === 'string' && fmVersion.trim() && !milestoneExplicitlyNull ? fmVersion.trim() : null;
   let milestoneBounded = true;
   if (versionStr !== null && syncRoadmapRaw !== null) {
     // #3184: routed through the single owner (roadmap-parser.cjs) instead of
@@ -6171,6 +6259,9 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
     // fix in buildStateFrontmatter above. #612 composes its gated bracket
     // extension on top inside isMilestoneBounded.
     milestoneBounded = isMilestoneBounded(syncRoadmapRaw, versionStr, syncConvention);
+  } else if (milestoneExplicitlyNull && syncRoadmapRaw !== null && hasAnyMilestoneSection(syncRoadmapRaw)) {
+    // #5038: mirror buildStateFrontmatter's silent explicit-null withhold.
+    milestoneBounded = false;
   }
   let percent: number | null = null;
   if (!milestoneBounded) {
@@ -6774,6 +6865,36 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
   if (wrote) publishStateContract(cwd);
 }
 
+/**
+ * #5118 (no write before the error): throws `VerificationStatusError` when a
+ * verification report in the set every STATE.md write rebuilds its frontmatter
+ * from carries a `status` outside the closed set — and returns having done
+ * nothing else. It runs `buildStateFrontmatter` itself (the SAME disk scan,
+ * milestone scoping and dedupe every write performs), so a caller that writes
+ * OTHER files before STATE.md (`phase complete`, `phase remove`, `quick
+ * archive`, `validate health --repair`) refuses for exactly the phases the
+ * STATE.md write would refuse for — the set cannot drift from a second copy.
+ */
+function assertVerificationReportsReadable(bodyContent: string, cwd: string): void {
+  buildStateFrontmatter(bodyContent, cwd);
+}
+
+/**
+ * The phase directory NAMES (under `.planning/phases/`) a STATE.md frontmatter
+ * rebuild scans — milestone-scoped, retired phases dropped, one per phase key
+ * (`scanStatePhaseDirs`). For a caller that must validate the reports a rebuild
+ * WILL read after it has removed a directory of its own (`phase remove`): it
+ * takes this set and drops the directory it is about to delete (#5118).
+ */
+function statePhaseDirsToScan(cwd: string): string[] {
+  const phasesDir = planningPaths(cwd).phases;
+  if (!fs.existsSync(phasesDir)) return [];
+  // quiet: this is a pre-write validation pass, always followed by the real
+  // rebuild scan (buildStateFrontmatter), which owns the duplicate-phase-key
+  // stderr warning — so the command prints it once, not twice.
+  return scanStatePhaseDirs(cwd, phasesDir, resolvePhaseIdConvention(cwd), undefined, { quiet: true }).phaseDirs;
+}
+
 export = {
   stateExtractField,
   stateReplaceField,
@@ -6783,6 +6904,8 @@ export = {
   writeStateMd,
   readModifyWriteStateMd,
   syncStateFrontmatter,
+  assertVerificationReportsReadable,
+  statePhaseDirsToScan,
   // #3374: the shared post-sync preservation pass (snapshots + table-driven
   // applyStatePreservation + #2736 re-assert).
   applyPostSyncPreservation,

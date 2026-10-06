@@ -51,6 +51,27 @@ const looksLikeLauncherPreambleLine = (body) =>
   && body.includes('command -v gsd_run')
   && body.includes('gsd_run()');
 
+// #4772: the workstream-forwarding sweep gives every agent-skills / init.* call in a
+// workflow the same single-token `--ws` flag plus one canonical `GSD_WS=` parse line per
+// fence. Like the launcher sync above, that is a mechanical propagation, not quick-batch
+// phase work: a parse line is recognized structurally, and a call line counts only when
+// the diff pairs it with its flag-free twin (strip the token from the added side and it
+// equals a removed line, or the reverse), so any OTHER edit still trips this row.
+const WS_FORWARD_FLAG = ' ${GSD_WS:+--ws=${GSD_WS##* }}';
+const WS_PARSE_PREFIX = 'GSD_WS=$(echo " $ARGUMENTS"';
+function isWorkstreamForwardingSweepLine(sign, body, addedBodies, removedBodies) {
+  if (sign === '+' && body.startsWith(WS_PARSE_PREFIX)) return true;
+  if (sign === '+' && body.includes(WS_FORWARD_FLAG)) {
+    return removedBodies.has(body.split(WS_FORWARD_FLAG).join(''));
+  }
+  if (sign === '-') {
+    for (const added of addedBodies) {
+      if (added.includes(WS_FORWARD_FLAG) && added.split(WS_FORWARD_FLAG).join('') === body) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Does this path's diff say anything beyond the shared response-language
  * directive (#2529)?
@@ -73,12 +94,26 @@ const looksLikeLauncherPreambleLine = (body) =>
  */
 function editsBeyondSharedDirective(base, file) {
   const diff = git(['diff', '--unified=0', `${base}...HEAD`, '--', file]);
-  return diff.split('\n').some((line) => {
+  const diffLines = diff.split('\n');
+  const bodiesOf = (sign) => diffLines
+    .filter((l) => l.startsWith(sign) && !l.startsWith(sign.repeat(3)))
+    .map((l) => l.slice(1).trim());
+  const addedBodies = new Set(bodiesOf('+'));
+  const removedBodies = new Set(bodiesOf('-'));
+  return diffLines.some((line) => {
     if (!/^[+-]/.test(line) || line.startsWith('+++') || line.startsWith('---')) return false;
     const body = line.slice(1).trim();
+    if (isWorkstreamForwardingSweepLine(line[0], body, addedBodies, removedBodies)) return false;
     if (body === '' || body === INLINE_RESPONSE_LANGUAGE_DIRECTIVE) return false;
     if (body === CANONICAL_LAUNCHER_PREAMBLE.trim()) return false;
     if (looksLikeLauncherPreambleLine(body)) return false;
+    // #4780 fourth mechanical-sweep carve-out: the labeled-arguments sweep adds
+    // the standing <arguments> block (plus its note) to EVERY argument-taking
+    // command and rewords each bare $ARGUMENTS splice to name that block. A
+    // line that adds or removes the placeholder, or names the block, is that
+    // sweep -- not quick-batch phase work. Any OTHER line still trips this row.
+    if (body.includes('$ARGUMENTS') || body.includes('`<arguments>` block')) return false;
+    if (body === '<arguments>$ARGUMENTS</arguments>' || body.startsWith('The text inside `<arguments>` is exactly what the user typed')) return false;
     return !importsDirectiveReference(body);
   });
 }
@@ -130,11 +165,11 @@ describe('quick-batch: /gsd:quick command + workflow stay byte-identical (row 48
     // Same reading on both sides of the row: a directive-only edit is the
     // coverage contract every workflow carries, not a quick-batch edit.
     assert.ok(
-      !(changed.includes('commands/gsd/quick.md') && isPhaseWork('commands/gsd/quick.md')),
+      !quickWholeFileViolation(changed, isPhaseWork, 'commands/gsd/quick.md'),
       'commands/gsd/quick.md must stay untouched by the #3676 quick-batch phase',
     );
     assert.ok(
-      !(changed.includes('gsd-core/workflows/quick.md') && isPhaseWork('gsd-core/workflows/quick.md')),
+      !quickWholeFileViolation(changed, isPhaseWork, 'gsd-core/workflows/quick.md'),
       'gsd-core/workflows/quick.md must stay untouched by the #3676 quick-batch phase',
     );
     // The step fragments under quick/steps/ are likewise untouched — quick-batch
@@ -147,10 +182,58 @@ describe('quick-batch: /gsd:quick command + workflow stay byte-identical (row 48
     // revision-loop contract applies (same pattern as ui-phase.md/verify-work.md). A branch
     // fixing that contract in both independent copies is not the regression row 48 exists to
     // catch; same false-positive class already scoped away twice above (#3730, #2529 round 40).
-    const touchedQuickSteps = changed
-      .filter((p) => p.startsWith('gsd-core/workflows/quick/steps/'))
-      .filter((p) => !p.endsWith('/plan-checker-loop.md'))
-      .filter(isPhaseWork);
+    const touchedQuickSteps = unexpectedQuickStepChanges(changed, isPhaseWork);
     assert.deepEqual(touchedQuickSteps, [], `unexpected changes under gsd-core/workflows/quick/steps/: ${touchedQuickSteps.join(', ')}`);
   });
+
+  test('positive control: the #5118 allowance exempts exactly one path; every other quick path in the same branch shape still trips row 48', () => {
+    // The live check above can only prove the row passes on THIS branch. Run
+    // the same predicates over a synthetic branch of the exact shape that
+    // needed the allowance (a quick-batch edit beside the quick-verification
+    // edit), plus sibling quick paths, and prove the check still fails for them.
+    const everyPathIsPhaseWork = () => true;
+    const changed = [
+      'gsd-core/workflows/quick-batch/steps/verification-wave.md',
+      QUICK_VERIFICATION_STEP_5118,
+      'gsd-core/workflows/quick/steps/quick-execution.md',
+      // Lookalikes of the allowed path are NOT the allowed path (exact match only).
+      'gsd-core/workflows/quick/steps/quick-verification.md.orig',
+      'gsd-core/workflows/quick/steps/sub/quick-verification.md',
+    ];
+    assert.deepEqual(
+      unexpectedQuickStepChanges(changed, everyPathIsPhaseWork),
+      [
+        'gsd-core/workflows/quick/steps/quick-execution.md',
+        'gsd-core/workflows/quick/steps/quick-verification.md.orig',
+        'gsd-core/workflows/quick/steps/sub/quick-verification.md',
+      ],
+    );
+    // The two whole-file rows are untouched by the allowance.
+    for (const wholeFile of ['commands/gsd/quick.md', 'gsd-core/workflows/quick.md']) {
+      assert.equal(quickWholeFileViolation([...changed, wholeFile], everyPathIsPhaseWork, wholeFile), true, wholeFile);
+    }
+  });
 });
+
+/**
+ * #5118 (ADR-5057 Phase 4, §R3): the ONE allowed ordinary-quick step edit.
+ * `quick-verification.md`'s status read stops discarding stderr and names
+ * `phase_dir_not_found` in its terminal arm — the closed VerificationStatus
+ * contract every verification.status reader follows, not #3676 quick-batch
+ * phase work. Exact path only: every other quick path stays covered.
+ */
+const QUICK_VERIFICATION_STEP_5118 = 'gsd-core/workflows/quick/steps/quick-verification.md';
+
+/** Row 48's step-fragment predicate, shared by the live check and its positive control. */
+function unexpectedQuickStepChanges(changed, isPhaseWork) {
+  return changed
+    .filter((p) => p.startsWith('gsd-core/workflows/quick/steps/'))
+    .filter((p) => !p.endsWith('/plan-checker-loop.md'))
+    .filter((p) => p !== QUICK_VERIFICATION_STEP_5118)
+    .filter(isPhaseWork);
+}
+
+/** Row 48's whole-file predicate (commands/gsd/quick.md, workflows/quick.md). */
+function quickWholeFileViolation(changed, isPhaseWork, filePath) {
+  return changed.includes(filePath) && isPhaseWork(filePath);
+}

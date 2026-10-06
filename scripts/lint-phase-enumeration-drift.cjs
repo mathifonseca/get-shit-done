@@ -84,13 +84,16 @@
  *     shape as `collectDiskPhases` and the `audit.cts` scanners; it must see
  *     every phase directory regardless of milestone window to catch a
  *     naming/duplicate defect wherever it lives.
- *   - `src/verify.cts` `resolvePhaseDirByToken`: resolves ONE caller-supplied
- *     `phase` argument to its directory (falling back to an exact-name
- *     match) — a single-phase LOOKUP, not a current-milestone enumeration.
- *     Originally `cmdVerifySchemaDrift`'s own inline block; #3348 lifted it
- *     into this shared helper (also used by the new `cmdVerifyContextDrift`)
- *     without changing what question it asks, so the exemption moved with
- *     the call site rather than multiplying.
+ *   - `src/gate-phase-context.cts` `resolvePhaseDirByToken`: resolves ONE
+ *     caller-supplied `phase` argument to its directory (falling back to an
+ *     exact-name match) — a single-phase LOOKUP, not a current-milestone
+ *     enumeration. Originally `cmdVerifySchemaDrift`'s own inline block;
+ *     #3348 lifted it into this shared helper (also used by the context-drift
+ *     check) without changing what question it asks, so the exemption moved
+ *     with the call site rather than multiplying. #5219 (ADR-5057 §4) moved
+ *     both checks into gate modules and the helper beside `resolvePhaseDir`
+ *     in the gate phase-context module (it is not `resolvePhaseDir`: it
+ *     lists ONE given phases directory and nothing else).
  *   - `src/init.cts` `detectHasPriorPhases`: answers "has this project EVER
  *     completed a phase", explicitly excluding the current one. A history
  *     probe across all milestones, not a current-milestone enumeration.
@@ -309,7 +312,8 @@ const OWNER_FILES = new Set([
 // `lint-milestone-window-drift.cjs`'s FUNCTION_SCOPED_EXEMPTIONS mechanism.
 // See the header comment for the full written reason behind each entry.
 const FUNCTION_SCOPED_EXEMPTIONS = new Map([
-  [path.join('src', 'verify.cts'), new Set(['cmdValidateHealth', 'resolvePhaseDirByToken'])],
+  [path.join('src', 'verify.cts'), new Set(['cmdValidateHealth'])],
+  [path.join('src', 'gate-phase-context.cts'), new Set(['resolvePhaseDirByToken'])],
   [path.join('src', 'init.cts'), new Set(['detectHasPriorPhases', 'detectUiPhaseActive'])],
   [path.join('src', 'milestone.cts'), new Set(['archivePhaseDirectories', 'cmdMilestoneComplete', 'cmdPhasesClear'])],
   // #3849: collectSiblingWorktreePhaseNums reads a SIBLING worktree's phases dir —

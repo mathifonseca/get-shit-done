@@ -137,6 +137,36 @@ const BASE_SITES = [
   // pre-migration roadmap), so it always compiles the LABEL_ONLY base.
   { file: 'roadmap-upgrade.cts', site: 'computeBracketPlan CHECKLIST_BULLET_INTRO_SRC',
     baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  // #5007 (Phase 6 / ADR-4910 §8): the 6 phase.cts sites migrated off their
+  // hand-rolled `Phase\s+` literals directly onto `phaseHeadingPrefixSrcFor`
+  // (none onto `buildPhaseHeadingScanRegex`/`buildPhaseHeadingRegex`, so all 6
+  // are direct-call, census-visible sites). Adding these closes the gap the
+  // migration opened in "the census is live" / "no OTHER src file consumes
+  // the selector unpinned" below — those two tests fail as soon as phase.cts
+  // becomes a real consumer and this table isn't told about it.
+  { file: 'phase.cts', site: 'scanExistingDecimalPhaseNumbers rmPhasePattern',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  { file: 'phase.cts', site: 'cmdPhaseInsert anyHeadingPattern',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  { file: 'phase.cts', site: 'cmdPhaseInsert headerPattern',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  { file: 'phase.cts', site: 'cmdPhaseInsert nextPhaseHeadingPrefix (next-phase-boundary regex)',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  { file: 'phase.cts', site: 'phase-remove renumber rewrite (prefix/num/suffix)',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  { file: 'phase.cts', site: 'phaseSectionMatch (cmdPhaseComplete area)',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  // #5007: roadmap-parser.cts's bulk block-strip (shared by the <details>-
+  // fallback branch and preambleWithoutPhaseDetails — one composed regex, two
+  // call sites collapsed to one `phaseHeadingPrefixSrcFor` call via the
+  // shared PHASE_HEADING_BLOCK_STRIP_RE const), migrated off its own
+  // hand-rolled `Phase\s+` literal.
+  { file: 'roadmap-parser.cts', site: 'PHASE_HEADING_BLOCK_STRIP_RE (extractCurrentMilestoneScoped fallback + preambleWithoutPhaseDetails)',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  // #5007: the "does this section have ANY phase heading" boolean gate,
+  // migrated off its own hand-rolled `Phase\s+` literal.
+  { file: 'roadmap-parser.cts', site: 'currentSectionHasPhaseDetails',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
 ];
 
 // Every convention value that is NOT the bracket convention. A repo carrying any
@@ -701,8 +731,13 @@ describe('#612 PR-2: every selector call site declares the right baseline (live 
     'validate.cts': [1, 2],
     'state.cts': [0, 3],
     'planning-snapshot.cts': [0, 2],
-    'roadmap-parser.cts': [2, 0],
+    'roadmap-parser.cts': [2, 2],
     'roadmap-upgrade.cts': [0, 1],
+    // #5007 (Phase 6 / ADR-4910 §8): phase.cts became a real selector consumer
+    // once its 11 grandfathered sites migrated onto phaseHeadingPrefixSrcFor /
+    // buildPhaseHeadingScanRegex / buildPhaseHeadingRegex — 6 of those calls
+    // are direct (census-visible) phaseHeadingPrefixSrcFor invocations.
+    'phase.cts': [0, 6],
   };
 
   for (const [file, [anyBracket, labelOnly]] of Object.entries(EXPECTED)) {

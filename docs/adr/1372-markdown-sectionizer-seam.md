@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-17
 - **Issue:** [#1372](https://github.com/open-gsd/gsd-core/issues/1372) (epic)
+- **Subsumed by:** [ADR-4910](4910-planning-document-seam.md) (PlanningDoc parse → mutate → serialize seam) — frames this seam as a layer, not a rewrite target; `src/markdown-sectionizer.cts` remains live and unchanged (`stripFencedCode`, `tokenizeHeadings`, `collectSection`/`collectSections`, `iterateBullets`, `extractTaggedBlocks`, `replaceSection`)
 - **Resolves (via tier T1):** [#1364](https://github.com/open-gsd/gsd-core/issues/1364), [#1365](https://github.com/open-gsd/gsd-core/issues/1365)
 - **Relates:** [#1343](https://github.com/open-gsd/gsd-core/issues/1343), [#1324](https://github.com/open-gsd/gsd-core/issues/1324), [#447](https://github.com/open-gsd/gsd-core/issues/447) — prior single-parser markdown bugs
 - **Pattern precedent:** [ADR-857](857-capability-system.md) / epic [#1267](https://github.com/open-gsd/gsd-core/issues/1267) (retire a duplicated spine via tiered children)

@@ -40,12 +40,15 @@ const TEST_TIER = Object.freeze({
 });
 
 describe('prohibition-enforcement: deterministic test-tier producer (#1259 / ADR-550 D5d)', () => {
-  test('exports the producer + route functions', () => {
+  test('exports the producer; the CLI surface is the gate module (#5219, ADR-5057 §4)', () => {
     const enforce = require(ENFORCEMENT_LIB);
     assert.equal(typeof enforce.runProhibitionEnforcement, 'function',
       'must export runProhibitionEnforcement (the deterministic producer)');
-    assert.equal(typeof enforce.routeProhibitionEnforcement, 'function',
-      'must export routeProhibitionEnforcement (the CLI surface)');
+    assert.equal(enforce.routeProhibitionEnforcement, undefined,
+      'the producer no longer formats output: the router does, over the gate module');
+    const gate = require(path.join(path.dirname(ENFORCEMENT_LIB), 'gate-prohibition-enforcement.cjs'));
+    assert.equal(typeof gate.evaluateProhibitionEnforcementGate, 'function',
+      'must export evaluateProhibitionEnforcementGate (the CLI surface as a gate)');
   });
 
   test('locate-miss (no check descriptor) -> fail-closed, located:false, no evidence', () => {
@@ -346,7 +349,7 @@ describe('prohibition-enforcement: deterministic test-tier producer (#1259 / ADR
     }
   });
 
-  test('routeProhibitionEnforcement parses a JSON request file and emits a structured result', (t) => {
+  test('the check router parses a JSON request file and emits a structured result (gate-prohibition-enforcement)', (t) => {
     const fs = require('node:fs');
     const { runNode } = require('./helpers/process-seam.cjs');
     const { throwIfFailed } = require('./helpers/git-fixture.cjs');
@@ -363,10 +366,11 @@ describe('prohibition-enforcement: deterministic test-tier producer (#1259 / ADR
       check: { kind: 'node-test', target: 'tests/neg.test.cjs', failFirst: true },
       mode: 'autonomous',
     }));
-    // A tiny runner that requires the BUILT module and invokes the route — output() writes to fd 1.
+    // A tiny runner that requires the BUILT check router and invokes the verb — output() writes to fd 1.
+    const routerPath = path.join(path.dirname(ENFORCEMENT_LIB), 'check-command-router.cjs');
     fs.writeFileSync(runnerPath,
-      "require(" + JSON.stringify(ENFORCEMENT_LIB) + ")" +
-      ".routeProhibitionEnforcement(['check','prohibition-enforcement'," + JSON.stringify(reqPath) + "], false);\n");
+      "require(" + JSON.stringify(routerPath) + ")" +
+      ".routeCheckCommand({ args: ['check','prohibition-enforcement'," + JSON.stringify(reqPath) + "], cwd: process.cwd(), raw: false });\n");
     t.after(() => cleanup(dir));
 
     const r = runNode([runnerPath], { timeoutMs: PROBE_TIMEOUT_MS });

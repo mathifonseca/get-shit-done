@@ -10,7 +10,8 @@
  * changes here; if the derivation breaks for any runtime, this fails loudly.
  *
  * Also covers:
- *   - the fail-closed fallback (`getDirName('unknown')` / `getDirName('')` → '.claude');
+ *   - the empty-id default (`getDirName('')` → '.claude') and the refusal of an
+ *     unknown id (`getDirName('unknown')` throws `UnknownRuntimeError`, #5169);
  *   - a structural cross-check that every descriptor's localConfigDir is a
  *     non-empty dot-dir string.
  *
@@ -69,10 +70,12 @@ test('getDirName(id) projects each descriptor runtime.localConfigDir (derivation
   }
 });
 
-test('getDirName fallback: unknown / empty runtime returns ".claude" (fail-closed)', () => {
-  assert.strictEqual(getDirName('unknown'), '.claude');
+test('getDirName: an empty runtime keeps the generic ".claude"; an unknown runtime REFUSES (#5169)', () => {
   assert.strictEqual(getDirName(''), '.claude');
-  assert.strictEqual(getDirName('__nonexistent_runtime__'), '.claude');
+  // "Unknown" used to answer '.claude' — Claude Code's directory — for ANY id the
+  // registry did not carry (#4632). Every descriptor accessor now refuses instead.
+  assert.throws(() => getDirName('unknown'), { name: 'UnknownRuntimeError' });
+  assert.throws(() => getDirName('__nonexistent_runtime__'), { name: 'UnknownRuntimeError' });
 });
 
 test('registry cross-check: every runtimes[id].runtime.localConfigDir is a non-empty dot-dir string, except configHome.kind==="none" runtimes (localConfigDir: null)', () => {

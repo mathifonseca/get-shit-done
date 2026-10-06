@@ -289,6 +289,68 @@ shrinks: growth happens by adding an acknowledgment carrying a real issue
 number (a reviewable diff), never by widening the generator's tolerance and
 never by prose alone.
 
+## The gate positive-control ratchet
+
+A gate that has never been seen to fail cannot be trusted to pass. Every gate
+module has a **positive control**: a test that drives the gate, through its real
+`evaluate*` export, to the verdict that makes it fail and to a different one
+(ADR-5057 §4, #5204). `scripts/lint-gate-positive-control.cjs` (part of
+`npm run lint:ci`) fails when a gate has none.
+
+### Reference
+
+- **What counts as a gate.** A module `src/gate-<id>.cts` that exports an
+  `evaluate*` function declared to return `GateResult` (a function declaration,
+  a `const` arrow or function expression, or an `export { … }` re-export). Gates
+  are discovered, never listed, so a new gate is covered without editing the
+  lint. The verb entries outside gate modules (`phase uat-passed`, `verify
+  artifacts`) are covered by the exit guard (`lint-gate-evidence-drift`), not by
+  this ratchet.
+- **The control.** `gateControl({ gate, module, fn, red, expectRed, redScenario,
+  greenScenario })` from `tests/helpers/gate-positive-control.cjs`, as a top-level
+  statement of a `tests/**/*.test.cjs` file (by convention
+  `tests/gate-positive-control.test.cjs`) with `gateControl` bound from that
+  helper (a single top-level `const`, resolved against the file, never rebound or
+  redeclared); an inert call (a local function of that name, a nested call, a
+  reassigned binding, a file that exits or throws before the call, a file the
+  runner does not execute) does not count. Each scenario runs in a fresh temp
+  project (`git: true` for a git repository); `setup(dir)` may return a restore
+  function for a monkeypatched `fs` method (never a `chmod`: root bypasses mode
+  bits). `expectRed` pins the red verdict to the arm the control is about
+  (`outcome` and/or payload keys), so a scenario that fails for an unrelated
+  reason does not count. A misspelled option key is rejected.
+- **`red` is derived, not chosen.** From the exported `evaluate*` and the
+  same-file functions it reaches: `block` when some `gateVerdict` or
+  `gateUnreadable` call's block argument is anything but the literal `false`
+  (the red verdict carries `block: true`, the green one `block: false`);
+  `unreadable` for a gate that can never block (the red verdict is the typed
+  `unreadable` outcome, the green one any other). A control that declares the
+  other value is `wrong-red`, so a control cannot dodge a blocking arm.
+- **Rules.** `no-control`, `duplicate-control`, `wrong-red`,
+  `no-failing-verdict` (a gate that can neither block nor reach `unreadable`),
+  `wrong-module` (the `module` must resolve to `gsd-core/bin/lib/gate-<id>.cjs`),
+  `wrong-fn`, `malformed-control` (a field the lint cannot read as a literal, a
+  call that is not a top-level statement, or a `gateControl` not bound from the
+  helper), `orphan-control`, `unclassified-evaluate` (an exported `evaluate*`
+  with no `GateResult` return, one that cannot be resolved, or a gate file using
+  `export default`, `export * from` or an `evaluate*` class/object member, shapes
+  the lint does not read), `multiple-evaluates` (one gate module, one gate).
+  The allowlist is empty by decision and a stale entry is itself a problem.
+- **Fail-closed.** Zero discovered gates, a `gate-*.cts` file whose name the lint
+  cannot read, or a source the parser cannot read, is a violation: an inert scan
+  does not report a clean tree.
+
+### How-to: you added a gate and `lint:ci` reports `no-control`
+
+1. Add a `gateControl({...})` call to `tests/gate-positive-control.test.cjs`
+   naming your gate, its module and its `evaluate*` function.
+   `expectRed` names the arm the red scenario reaches.
+2. Take `red` from the lint's message (`wrong-red` states what the gate reaches).
+3. Write the red scenario from the input that makes the gate fail, and the green
+   scenario from the nearest input that does not. Reuse the cases in your gate's
+   own unit test; the control asserts the pair through one harness.
+4. Run `npm run lint:gate-positive-control`.
+
 ## Running suites locally
 
 ```bash
@@ -518,6 +580,8 @@ mis-ranked files badly enough that the slowest chunk ran ~3.9x the lightest.
 | `RUN_TESTS_MAX_FILES_PER_CHUNK` | `60` (`22` on win32) | Per-chunk weight budget. Weights are normalized so an **average-cost** file weighs 1, so this still reads as "about 60 average files" (about 22 on win32). Windows gets a lower cap than Linux/macOS because the weight table's calibration does not transfer 1:1 to the Windows runner for install/subprocess-heavy work — see the derivation comment above `DEFAULT_MAX_FILES_PER_CHUNK` in `scripts/run-tests.cjs`. |
 | `RUN_TESTS_MAX_CMDLINE_CHARS` | `28000` | argv ceiling per chunk, with headroom under the Windows 32,767 limit. |
 | `RUN_TESTS_TIMINGS_FILE` | `tests/test-timings.json` | Path to the timing table. Tests override it to inject a synthetic cost profile. |
+| `RUN_TESTS_PLATFORM_TIMINGS_FILE` | `tests/test-timings.<platform>.json` | Path to the table measured on the platform the runner is on (`process.platform` spelling: `win32`, `darwin`, `linux`). Only `tests/test-timings.win32.json` is committed. When `RUN_TESTS_TIMINGS_FILE` is overridden and this variable is not, no platform table is loaded, so an injected cost profile is used exactly as given. |
+| `RUN_TESTS_TIMING_EVENTS_FILE` | unset | When set, every chunk appends its per-file `test:summary` durations to this file (the input `gen-test-timings.cjs` reads). Written after every chunk, including failed and killed ones. The runner removes the variable from its own environment before spawning chunks, so a nested `run-tests.cjs` never writes to it. A write failure prints one warning and never changes the exit code. |
 | `RUN_TESTS_CHUNK_TIMEOUT_MS` | `600000` | Per-chunk timeout. When it fires, the runner kills the chunk (on Windows it first attempts a whole-tree kill) and prints the in-flight-file diagnostic immediately, without waiting for the child's exit to be reported. |
 | `RUN_TESTS_CHUNK_KILL_GRACE_MS` | `30000` | Once a chunk times out, how long the runner waits for the child's exit to be observed before it stops waiting, reports that the exit was never confirmed, and aborts the remaining chunks. |
 
@@ -528,6 +592,40 @@ weight (1), and a missing or unparseable table falls back to uniform weight — 
 drift costs chunk *balance*, never a red build. A count-based floor additionally
 guarantees the packer never produces fewer chunks than plain count-based packing
 would, so a badly stale table cannot collapse the suite into a few fat chunks.
+
+### Platform-measured timings (win32)
+
+`tests/test-timings.json` is measured in Linux containers. Windows runs the same
+files at a different, and differently *ordered*, cost, so on `win32` the runner
+also loads `tests/test-timings.win32.json` (#5071) and weighs each file this way:
+
+| File is in… | Weight on win32 |
+|---|---|
+| the win32 table | its Windows duration, converted into Linux-table weight units |
+| only the Linux table | its Linux weight (unchanged) |
+| neither table | `2.2` (`WINDOWS_UNMEASURED_COST_MULTIPLIER`, #4434) |
+
+The conversion keeps the weight *unit* unchanged. It scales Windows milliseconds
+so that the files both tables measured keep their combined Linux weight. The
+total pool weight, and so the chunk count, `RUN_TESTS_MAX_FILES_PER_CHUNK`, the
+isolation threshold and `RUN_TESTS_SHARD_RESERVE`, all keep their meaning. Only
+the distribution of weight across files changes, to follow what each file really
+costs on Windows. With no file in common, Windows durations are divided by the
+win32 table's own mean.
+
+A file present in the win32 table counts as measured for the unmeasured-files
+chunk cap, even when the Linux table has never seen it. A missing Linux table
+still means uniform weight 1 on every platform.
+
+Each shard prints a second line after its `run-tests: shard=` line, reporting how
+many of its files the win32 table priced:
+
+```text
+run-tests: platform-timings=win32 weighed=91/94
+```
+
+No line means no win32 table loaded, and the shard was packed from Linux weights
+exactly as before.
 
 ### CI job timeout budgets: report + near-cap warning (#4036)
 
@@ -549,6 +647,18 @@ described below, but it has no `LANE_COSTS` entry in
 (non-cancelled) per-shard measurement exists — so the headroom-factor gate
 does not cover it until one lands.
 
+**`.platform.test.cjs` siblings (#5074).** The tier selects whole files, so a large file whose
+platform signal sits in a few tests can be split: those tests move to
+`tests/<name>.platform.test.cjs`, which the tier selects, and `tests/<name>.test.cjs` runs on
+Linux only. A sibling is a unit-suite file (`suiteOf` returns `null`), so Linux shards run both
+halves. `gen-platform-conformance-tier.cjs` fails with `platform split invariant violated` when a
+split base regains a platform signal (`base-has-signal`), a sibling carries none
+(`sibling-without-signal`), or a split base is listed in `ALWAYS_REAL_OS`
+(`base-always-real-os`). Split so far: `state`, `commands`, `phase`, `config` (`init` needed no
+sibling — its residual matches were fixture idioms and comments). See
+[Split platform-sensitive tests](how-to/split-platform-sensitive-tests.md) and the #5074 amendment
+to [ADR-4641](adr/4641-windows-selector-consolidation.md).
+
 Two runtime mechanisms sit on top of that static gate, both new in #4036:
 
 - **In-job near-cap check** (`scripts/ci-check-job-near-cap.cjs`) — the last
@@ -568,10 +678,15 @@ Two runtime mechanisms sit on top of that static gate, both new in #4036:
   `mutate`'s per-module shards), and appends any new `(runId, jobName)`
   records to `tests/ci-timeout-budget-history.jsonl`. Unlike the in-job check,
   this also catches jobs killed by an actual timeout breach — GitHub's Jobs
-  API still reports `started_at`/`completed_at` for a cancelled job. Each run
-  opens a small, data-only PR carrying that run's new rows, since `next` is a
+  API still reports `started_at`/`completed_at` for a cancelled job. The new
+  rows travel in one rolling, data-only PR (branch `chore/4036-ci-timeout-budget-history`,
+  titled `chore(#4036): CI timeout budget history update`), since `next` is a
   protected branch and nothing pushes to it directly — the same constraint
-  `auto-backmerge.yml` already works within.
+  `auto-backmerge.yml` already works within. Each run rebuilds that branch on
+  the current `next` tip with every pending row; the workflow approves the PR
+  when it is provably its own data-only PR, then auto-merges it once required
+  checks pass. Until the org allows GitHub Actions to approve PRs, it waits for
+  one human approval (the run logs a warning).
 
 This does not retune any `timeout-minutes` value, rebalance shard composition,
 or trim what runs in shard 1 — those stay maintainer policy calls made from
@@ -593,6 +708,10 @@ Pass every lane you have. A file's recorded time is the **max** across the
 supplied streams, not the mean: the packer exists to keep the *slowest* lane's
 slowest chunk away from the timeout, so the conservative bound is the right one.
 Keys are sorted so a regeneration diff shows only the files whose cost moved.
+
+### How-to: regenerate the win32 timing table
+
+See [Regenerate the win32 timing table](how-to/regenerate-the-win32-timing-table.md).
 
 ## Best practices for forward-compat (Node 24/26)
 

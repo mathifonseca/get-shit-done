@@ -32,6 +32,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { platformWriteSync, posixNormalize } from './shell-command-projection.cjs';
+import { hostBehaviorsFor } from './runtime-name-policy.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import installProfiles = require('./install-profiles.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -419,7 +420,7 @@ function applySurface(runtimeConfigDir: string, layout: Layout, manifest: Map<st
   // then projects the defaulted value to the boolean `_computePathPrefix`'s
   // existing `isGlobal: boolean` API requires.
   const _isGlobal = isGlobalScope(layout.scope ?? 'global');
-  const _isOpencode = layout.runtime === 'opencode';
+  const _isOpencode = hostBehaviorsFor(layout.runtime).opencodePathPrefix === true;
   const _isWindowsHost = (opts?.platform ?? process.platform) === 'win32';
   // #4377: style is an install-time fact, not a process environment setting.
   // A later gsd-tools surface apply runs in another process, so it must reuse

@@ -3,6 +3,14 @@
 // Check for GSD updates in background, write result to cache
 // Called by SessionStart hook - runs once per session
 
+// #5183: Node's on-disk compile cache, so later runs reuse V8's compiled code
+// for unchanged modules. Only as the entry (a test require() is unaffected),
+// skipped under V8 coverage, optional (Bun stubs it), and never fatal.
+// NODE_DISABLE_COMPILE_CACHE (any value) turns it off.
+if (require.main === module && !process.env.NODE_V8_COVERAGE) {
+  try { require('node:module').enableCompileCache?.(); } catch { /* optimization only */ }
+}
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');

@@ -1333,5 +1333,69 @@ function resolveTriggerSurface(runtime: string, scopes: InstallScope[], opts: Tr
   return surfaces;
 }
 
+// ---------------------------------------------------------------------------
+// The advertised "next step" command (#5215, ADR-5057 §5 Phase 12).
+//
+// What the installer tells a user to run is a projection of what the runtime
+// registered: the `new-project` trigger the Trigger Surface resolves for the
+// install scope. It is never a per-runtime literal, so a runtime that registers
+// no such trigger (pi's native extension registers only `/gsd`; windsurf's
+// global layout registers nothing) cannot be told to run one (#4567).
+// ---------------------------------------------------------------------------
+
+/** The cross-agent default for an id GSD cannot know (ADR-5057 §5 Phase 10 amendment). */
+const DEFAULT_NEW_PROJECT_COMMAND = '/gsd-new-project';
+
+/**
+ * How a host invokes a registered trigger. Presentation only — whether the
+ * trigger exists is decided by the registered surface, not by this table. A
+ * runtime absent here is invoked as `/<trigger>`.
+ */
+const TRIGGER_INVOCATION: Readonly<Record<string, (trigger: string) => string>> = {
+  codex: (trigger) => `$${trigger}`,
+  cursor: (trigger) => `${trigger} (mention the skill name)`,
+  kimi: (trigger) => `/skill:${trigger}`,
+};
+
+type AdvertisedNewProject =
+  | { kind: 'command'; command: string }
+  | { kind: 'unregistered'; nativeCommand: string | null };
+
+/**
+ * The command a native-extension runtime registers instead of per-workflow
+ * triggers: the extension file's stem as a slash command (pi's `gsd.js`
+ * registers `/gsd`; pinned by tests/advertised-command-parity.test.cjs against
+ * the extension itself). `null` for a runtime with no native plugin.
+ */
+function nativePluginCommand(runtime: string): string | null {
+  const descriptor = getTriggerRegistry().runtimes[runtime]?.runtime as
+    | { hostBehaviors?: { nativePlugin?: { file?: unknown } } }
+    | undefined;
+  const file = descriptor?.hostBehaviors?.nativePlugin?.file;
+  if (typeof file !== 'string' || file.length === 0) return null;
+  const stem = file.replace(/\.[^.]+$/, '');
+  return stem.length > 0 ? `/${stem}` : null;
+}
+
+/**
+ * The command the installer advertises for starting a project, generated from
+ * the registered trigger surface of `runtime` in `scope`. `unregistered` means
+ * the runtime registers no `new-project` trigger there (`nativeCommand` names
+ * what a native-extension runtime registers instead). An empty or unregistered
+ * id keeps the documented cross-agent default: it names a runtime GSD cannot
+ * know, so no surface exists to project from. Membership is decided up front,
+ * so an error inside the surface resolution is a bug and propagates.
+ */
+function resolveAdvertisedNewProject(runtime: string, scope: InstallScope): AdvertisedNewProject {
+  const known = Boolean(runtime) && Object.prototype.hasOwnProperty.call(getTriggerRegistry().runtimes, runtime);
+  if (!known) return { kind: 'command', command: DEFAULT_NEW_PROJECT_COMMAND };
+  const registered = resolveTriggerSurface(runtime, [scope], { stems: ['new-project'] })[0];
+  if (!registered) return { kind: 'unregistered', nativeCommand: nativePluginCommand(runtime) };
+  const render = Object.prototype.hasOwnProperty.call(TRIGGER_INVOCATION, runtime)
+    ? TRIGGER_INVOCATION[runtime]
+    : (trigger: string): string => `/${trigger}`;
+  return { kind: 'command', command: render(registered.trigger) };
+}
+
 // getInstallExports removed in ADR-1508 / #1511 Phase 2 (last upward .cts→install.js dep).
-export = { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutFromRegistry, findInstallSourceRoot, resolveTriggerSurface, isNamespacedByDir, composeCommandFilename };
+export = { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutFromRegistry, findInstallSourceRoot, resolveTriggerSurface, resolveAdvertisedNewProject, isNamespacedByDir, composeCommandFilename };

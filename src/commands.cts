@@ -11,6 +11,7 @@ import path from 'node:path';
 import { normalizeEol } from './text-lines.cjs';
 import { execGit, platformWriteSync, platformReadSync, platformEnsureDir, isSpawnTimeout, retryRenameSync } from './shell-command-projection.cjs';
 import { escapeRegex } from './pattern.cjs';
+import { locateFrontmatterFence, type LocateFrontmatterFenceOptions } from './frontmatter-fence.cjs';
 import { requireSafePath, sanitizeForDisplay, tryWithinRoot, assertWithinRoot, PathAcceptance } from './security.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import ioMod = require('./io.cjs');
@@ -70,7 +71,7 @@ import planningWorkspace = require('./planning-workspace.cjs');
 const { planningDir, planningPaths, todosDir, resolvePhaseIdConvention } = planningWorkspace;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatter = require('./frontmatter.cjs');
-const { extractFrontmatter, agentScalarNeedsDoubleQuoting, escapeDoubleQuotedScalar } = frontmatter;
+const { extractFrontmatter, agentScalarNeedsDoubleQuoting, escapeDoubleQuotedScalar, FRONTMATTER_UNPARSEABLE } = frontmatter;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import modelProfiles = require('./model-profiles.cjs');
 const { MODEL_PROFILES, VALID_PHASE_TYPES } = modelProfiles;
@@ -80,9 +81,45 @@ import { clampPercent, renderProgressBar } from './phase-lifecycle.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planScanMod = require('./plan-scan.cjs');
 const { scanPhasePlans } = planScanMod;
-// eslint-disable-next-line @typescript-eslint/no-require-imports -- verification.cjs is an export= CommonJS module
+// #5060: Phase Status Module — the single owner of "what state is phase P
+// in?" (ADR-5057 §1/§2). Replaces this file's own precedence ladder and
+// determinePhaseStatus derivation.
+import { phaseStatus, toDisplayLabel, foldPhaseStatuses, PHASE_STATUS } from './phase-status.cjs';
+import type { PhaseStatus } from './phase-status.cjs';
+// #5118: an aggregate over a refused verification report fails through the owner.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 import verificationMod = require('./verification.cjs');
-const { resolveVerificationFile } = verificationMod;
+const { failOnVerificationStatusError, firstStatusError } = verificationMod;
+
+/** The effort-sync line editors' fence reading: a block behind a preamble is still edited (#3706). */
+const EFFORT_SYNC_FENCE: LocateFrontmatterFenceOptions = Object.freeze({ allowPreamble: true });
+
+/** Prefer the Claude agents beside the running local install over the global home. */
+function claudeEffortAgentsDir(explicitDir?: string): string {
+  if (explicitDir) return path.join(explicitDir, 'agents');
+
+  // Compiled commands.cjs lives at <configDir>/gsd-core/bin/lib. In a source
+  // checkout the same path leads to the repository root, where no install
+  // manifest exists; keep the existing global fallback in that case.
+  const configDir = path.resolve(__dirname, '..', '..', '..');
+  try {
+    const manifestPath = path.join(configDir, 'gsd-file-manifest.json');
+    if (fs.lstatSync(manifestPath).isFile()) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const migrations = require('./installer-migrations.cjs') as {
+        readInstallManifest(dir: string): { runtime: string | null; scope: string | null };
+      };
+      const manifest = migrations.readInstallManifest(configDir);
+      if (manifest.runtime === 'claude' && manifest.scope === 'local') {
+        return path.join(configDir, 'agents');
+      }
+    }
+  } catch { /* an absent or unreadable manifest retains the global fallback */ }
+
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/unbound-method
+  const { getGlobalConfigDir } = require('./runtime-homes.cjs') as { getGlobalConfigDir(runtime: string): string };
+  return path.join(getGlobalConfigDir('claude'), 'agents');
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -167,92 +204,6 @@ interface EffortSyncChange {
   from: string | null;
   // #3533 (10d): to === null is the typed IR for omission (inherit strips the key).
   to: string | null;
-}
-
-// ─── Phase Status ─────────────────────────────────────────────────────────────
-
-/**
- * Phase-status precedence ladder — furthest-along wins (#2408).
- *
- * `cmdStats` builds `phasesByNumber` by scanning on-disk phase directories.
- * When two directories normalize to the same phase key (e.g. `05-real/` and
- * `05-real-stray/`), the status field must be folded by precedence rather
- * than overwritten last-write-wins — otherwise `/gsd-stats` reports whatever
- * directory `fs.readdirSync` happened to yield last, which is non-deterministic
- * across platforms and can silently call a `Complete` phase `Not Started`.
- */
-const PHASE_STATUS_PRECEDENCE: ReadonlyArray<string> = [
-  'Complete',
-  'Needs Review',
-  'Executed',
-  'In Progress',
-  'Planned',
-  'Not Started',
-  'Pending',
-];
-const PHASE_STATUS_RANK = new Map<string, number>(
-  PHASE_STATUS_PRECEDENCE.map((s, i) => [s, i]),
-);
-
-/**
- * Fold two phase statuses by precedence — returns whichever is further along
- * the {@link PHASE_STATUS_PRECEDENCE} ladder. Unrecognized statuses fall behind
- * every recognized one (so a recognized status always wins over an unknown one;
- * two unrecognized statuses favor `a` for determinism).
- */
-function foldPhaseStatus(a: string, b: string): string {
-  const ra = PHASE_STATUS_RANK.get(a);
-  const rb = PHASE_STATUS_RANK.get(b);
-  if (ra === undefined && rb === undefined) return a;
-  if (ra === undefined) return b;
-  if (rb === undefined) return a;
-  // Lower rank = higher precedence (Complete=0 wins over Not Started=5).
-  return ra <= rb ? a : b;
-}
-
-/**
- * Determine phase status by checking plan/summary counts AND verification state.
- * Introduces "Executed" for phases with all summaries but no passing verification.
- */
-function determinePhaseStatus(plans: number, summaries: number, phaseDir: string, defaultPending: string): string {
-  if (plans === 0) return defaultPending;
-  if (summaries < plans && summaries > 0) return 'In Progress';
-  if (summaries < plans) return 'Planned';
-
-  // summaries >= plans — check verification
-  try {
-    const files = fs.readdirSync(phaseDir);
-    // #3473 F2: routed through the shared resolver (readdir order is
-    // filesystem-dependent, so the prior hand-rolled `.find()` could pick
-    // either file when a phase held both a canonical report and an ad-hoc
-    // `-CORRECTION-VERIFICATION.md` worksheet — see #3357).
-    // #3492: pin selection to THIS phase's own token so a stray cross-phase
-    // or sentinel-numbered canonically-shaped file cannot outrank this
-    // phase's own (possibly non-canonical) report.
-    const phaseDirName = path.basename(phaseDir);
-    const phaseToken = extractPhaseToken(phaseDirName);
-    const verificationFile = resolveVerificationFile(files, { allowBare: true, phaseToken, phaseDirName });
-    if (verificationFile) {
-      const verificationFilePath = path.join(phaseDir, verificationFile);
-      const content = platformReadSync(verificationFilePath) || '';
-      // #1159 (Defect A): read ONLY the frontmatter `status` key to avoid false
-      // matches from historical body metadata such as `previous_status: gaps_found`.
-      // Full-text regexes like /status:\s*gaps_found/ match the substring inside
-      // `previous_status: gaps_found`, producing incorrect phase status labels.
-      const fm = extractFrontmatter(content, verificationFilePath) as Record<string, unknown>;
-      // Normalise to lower-case to preserve the prior case-insensitive behaviour
-      // while reading only the frontmatter `status` key (not the full body text).
-      const fmStatus = typeof fm['status'] === 'string' ? fm['status'].trim().toLowerCase() : '';
-      if (fmStatus === 'passed') return 'Complete';
-      if (fmStatus === 'human_needed') return 'Needs Review';
-      if (fmStatus === 'gaps_found') return 'Executed';
-      // Verification exists but unrecognized status — treat as executed
-      return 'Executed';
-    }
-  } catch { /* directory read failed — fall through */ }
-
-  // No verification file — executed but not verified
-  return 'Executed';
 }
 
 function cmdGenerateSlug(text: string | undefined, raw: boolean): void {
@@ -719,19 +670,19 @@ function cmdResolveExecution(cwd: string, agentType: string | undefined, raw: bo
   let effortEffective: string = effort;
   if (runtime === 'claude') {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/unbound-method
-      const { getGlobalConfigDir } = require('./runtime-homes.cjs') as { getGlobalConfigDir(runtime: string, explicitDir?: string | null): string };
-      const agentsDirEff = path.join(getGlobalConfigDir(runtime), 'agents');
+      const agentsDirEff = claudeEffortAgentsDir();
       // agentType is an unvalidated CLI positional: keep the read inside the
       // agents dir so `../../x` cannot point it elsewhere (defense in depth —
       // the reflected surface is only a frontmatter effort line). Untrusted
       // input feeding a real read → realpath family (ADR-4650 decision 6).
       const agentPath = assertWithinRoot(`${agentType}.md`, agentsDirEff, 'agent file');
       const agentContent = fs.readFileSync(agentPath, 'utf8');
-      // eslint-disable-next-line local/no-unbounded-quantifier -- same lazy `*?` bounded by the `^---$/m` closing anchor as the sibling frontmatter regexes in this file
-      const fmMatchEff = /^---\r?\n([\s\S]*?)^---\r?$/m.exec(agentContent);
-      if (fmMatchEff) {
-        const effortLine = /^effort:[ \t]*(.+?)[ \t]*$/m.exec(fmMatchEff[1]);
+      // Byte-0 read: the runtime only honors a frontmatter block that opens at
+      // byte 0, so a block behind a preamble is not frontmatter to the loader
+      // and this reports what the installed agent will actually run at (#5105).
+      const fmSpanEff = agentFrontmatterSpan(agentContent);
+      if (fmSpanEff) {
+        const effortLine = /^effort:[ \t]*(.+?)[ \t]*$/m.exec(fmSpanEff.body);
         if (effortLine) {
           effortEffective = effortLine[1];
           effortEffectiveSource = 'frontmatter';
@@ -819,31 +770,40 @@ function effortSurfaceForHost(cwd: string, host: string): string {
 }
 
 /**
+ * The leading frontmatter block of an installed agent file, as the one fence owner
+ * (`locateFrontmatterFence`) finds it: `body` is the text between the two fences (the last
+ * content line's line ending included), `bodyStart`/`closingStart` bound it, and `eol` is the
+ * opening fence's line ending. Null when the file has no closed block. By default a block that
+ * does not open at byte 0 is not one, exactly as the runtime that loads the agent reads it;
+ * the effort-sync line editors pass `EFFORT_SYNC_FENCE` to edit a block behind a preamble too
+ * (#3706 pinned that).
+ */
+function agentFrontmatterSpan(content: string, options?: LocateFrontmatterFenceOptions): { body: string; bodyStart: number; closingStart: number; eol: '\n' | '\r\n' } | null {
+  const fence = locateFrontmatterFence(content, options);
+  if (!fence?.closed) return null;
+  return { body: content.slice(fence.openEnd, fence.closingStart), bodyStart: fence.openEnd, closingStart: fence.closingStart, eol: fence.eol };
+}
+
+/**
  * #488 — Replace or inject the `<key>:` value in YAML frontmatter.
  * Unlike injectEffortFrontmatter (install.js), this overwrites an existing value.
  * #3706: key-parameterised so the same line-editor serves both claude's
- * `effort:` and OpenCode's `variant:`. #3706: all offsets (eol, openLen,
- * closingStart) are derived from the MATCHED BLOCK, not the start of the
- * file, and the existing-key replace is scoped to the frontmatter span only.
+ * `effort:` and OpenCode's `variant:`. #3706: all offsets (eol, bodyStart,
+ * closingStart) come from the block `agentFrontmatterSpan` found, and the
+ * existing-key replace is scoped to the frontmatter span only.
  */
 function setFrontmatterKeyLine(content: string, key: string, value: string): string {
-  const fmRe = /^---\r?\n([\s\S]*?)^---\r?$/m;
-  const match = fmRe.exec(content);
-  if (!match) return content;
-  const fmBody = match[1];
+  const span = agentFrontmatterSpan(content, EFFORT_SYNC_FENCE);
+  if (!span) return content;
+  const fmBody = span.body;
   // Both writers of these frontmatter keys — this sync path and the
   // install-side `frontmatterScalar` in runtime-artifact-conversion.cts —
   // now share one escaping rule: quote via `agentScalarNeedsDoubleQuoting` +
   // `escapeDoubleQuotedScalar` (both from frontmatter.cts) rather than each
   // interpolating `value` raw/differently.
   const renderedValue = agentScalarNeedsDoubleQuoting(value) ? `"${escapeDoubleQuotedScalar(value)}"` : value;
-  // EOL comes from the MATCHED BLOCK, not the start of the file. With a
-  // preamble the two can disagree, and on a CRLF document that misaligns every
-  // offset below by one byte and mangles the opening fence.
-  const eol = /^---\r\n/.test(match[0]) ? '\r\n' : '\n';
-  const openLen = 3 + eol.length;
-  const bodyStart = match.index + openLen;
-  const closingStart = bodyStart + fmBody.length;
+  // Every offset and the EOL come from the block the fence owner found (#3706).
+  const { eol, bodyStart, closingStart } = span;
   // #3706: key is now generic (not just the literal 'effort'/'variant'
   // callers happen to pass today) — escape it before interpolating into the
   // RegExp so a future caller can't have its key metacharacters reinterpreted.
@@ -883,18 +843,16 @@ function setFrontmatterKeyLine(content: string, key: string, value: string): str
  * codex-agent-toml strip discipline: targeted line removal, EOL-aware, every
  * other byte (comments, sibling keys, the body) untouched.
  * #3706: key-parameterised so the same line-editor serves both claude's
- * `effort:` and OpenCode's `variant:`. #3706: openLen is derived from the
- * MATCHED BLOCK, not the start of the file — a preamble on a CRLF document
- * would otherwise misalign every offset below.
+ * `effort:` and OpenCode's `variant:`. #3706: every offset comes from the
+ * block `agentFrontmatterSpan` found.
  */
 function removeFrontmatterKeyLine(content: string, key: string): string {
   // Scoped to the FIRST frontmatter block (not a whole-file /m match): a
   // preamble or body line starting with `<key>:` (a fenced config example,
   // a thematic-break flanked fragment) must never be the line removed.
-  const fmRe = /^---\r?\n([\s\S]*?)^---\r?$/m;
-  const match = fmRe.exec(content);
-  if (!match) return content;
-  const fmBody = match[1];
+  const span = agentFrontmatterSpan(content, EFFORT_SYNC_FENCE);
+  if (!span) return content;
+  const fmBody = span.body;
   // #3706: same generic-key escape as setFrontmatterKeyLine above.
   const lineRe = new RegExp(`^${escapeRegex(key)}:[ \\t]*.*\\r?\\n?`, 'm');
   if (!lineRe.test(fmBody)) return content;
@@ -908,12 +866,7 @@ function removeFrontmatterKeyLine(content: string, key: string): string {
   // is removed in one pass.
   const stripAllRe = new RegExp(`^${escapeRegex(key)}:[ \\t]*.*\\r?\\n?`, 'gm');
   const strippedFm = fmBody.replace(stripAllRe, '');
-  // Same rule as setFrontmatterKeyLine: the EOL must come from the matched
-  // block, not the start of the file, or a preambled CRLF document misaligns.
-  const eol = /^---\r\n/.test(match[0]) ? '\r\n' : '\n';
-  const openLen = 3 + eol.length;
-  const closingStart = match.index + openLen + fmBody.length;
-  return content.slice(0, match.index + openLen) + strippedFm + content.slice(closingStart);
+  return content.slice(0, span.bodyStart) + strippedFm + content.slice(span.closingStart);
 }
 
 /** #488 — Replace or inject the `effort:` value in YAML frontmatter. */
@@ -966,8 +919,6 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
     return;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/unbound-method
-  const { getGlobalConfigDir } = require('./runtime-homes.cjs') as { getGlobalConfigDir(runtime: string, explicitDir?: string | null): string };
   // Use install-time resolvers: they merge ~/.gsd/defaults.json with project config,
   // matching the exact logic used when agents were originally installed. #2071: these
   // live in the shipped sibling install-effort-resolver.cjs (extracted from the
@@ -979,7 +930,7 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
   };
   const effortCfg = readGsdEffectiveEffortConfig(cwd);
 
-  const agentsDir = path.join(opts.configDir || getGlobalConfigDir(runtime), 'agents');
+  const agentsDir = claudeEffortAgentsDir(opts.configDir);
 
   if (!fs.existsSync(agentsDir)) {
     output({ synced: 0, skipped: 0, changes: [], dry_run: dryRun, agents_dir: agentsDir, reason: 'agents directory not found' }, raw, '');
@@ -993,6 +944,11 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
   }).sort(); // #3706: sorted like the codex and
   // opencode branches — readdir order is platform-dependent, so leaving it unsorted makes the
   // reported `changes` ordering differ across machines for identical inputs.
+
+  if (files.length === 0) {
+    output({ synced: 0, skipped: 0, changes: [], dry_run: dryRun, agents_dir: agentsDir, reason: 'no GSD agent files found' }, raw, '');
+    return;
+  }
 
   const changes: EffortSyncChange[] = [];
   let synced = 0;
@@ -1040,7 +996,7 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
     // drift and the sync re-added a hand-stripped key on every apply. A
     // present key under inherit is stripped, reported as {from, to: null}.
     if (universalEffort === 'inherit') {
-      const fmMatchInherit = /^---\r?\n([\s\S]*?)^---\r?$/m.exec(content);
+      const fmMatchInherit = agentFrontmatterSpan(content, EFFORT_SYNC_FENCE);
       if (!fmMatchInherit) { skipped++; continue; }
       // Presence and value are distinct questions: `effort:` with an EMPTY
       // value is a key that IS present but whose captured value is null (the
@@ -1048,9 +1004,9 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
       // from a null value alone is wrong here — it would leave an
       // unresolvable `effort: null` key on disk forever. Test presence with
       // its own regex, and only compare values once presence is known.
-      const effortPresentInherit = /^effort:/m.test(fmMatchInherit[1]);
+      const effortPresentInherit = /^effort:/m.test(fmMatchInherit.body);
       if (!effortPresentInherit) { skipped++; continue; }
-      const effortMatchInherit = /^effort:[ \t]*(.+?)[ \t]*$/m.exec(fmMatchInherit[1]);
+      const effortMatchInherit = /^effort:[ \t]*(.+?)[ \t]*$/m.exec(fmMatchInherit.body);
       // `effortPresentInherit` is guaranteed true here (checked above), so a
       // failed value match means the key is present with an EMPTY value —
       // report `''`, not `null`, so "present-but-empty" is never conflated
@@ -1108,7 +1064,7 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
     const rendered = renderEffortForRuntime(runtime, universalEffort);
     const newEffortValue = rendered.value as string;
 
-    const fmMatch = /^---\r?\n([\s\S]*?)^---\r?$/m.exec(content);
+    const fmMatch = agentFrontmatterSpan(content, EFFORT_SYNC_FENCE);
     if (!fmMatch) { skipped++; continue; }
 
     // Presence and value are distinct questions here too: `currentEffort`
@@ -1119,8 +1075,8 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
     // never null on this path (guarded above), so an absent key already
     // yields `currentEffort === null !== newEffortValue` without consulting
     // presence separately.
-    const effortPresent = /^effort:/m.test(fmMatch[1]);
-    const effortMatch = /^effort:[ \t]*(.+?)[ \t]*$/m.exec(fmMatch[1]);
+    const effortPresent = /^effort:/m.test(fmMatch.body);
+    const effortMatch = /^effort:[ \t]*(.+?)[ \t]*$/m.exec(fmMatch.body);
     // `null` (key absent) and `''` (key present, value empty) are distinct
     // states `effortPresent` deliberately disambiguates — collapsing both to
     // `null` here would make the reported `from` lie about which case fired.
@@ -1424,7 +1380,7 @@ function cmdEffortSyncOpencode(cwd: string, raw: boolean, dryRun: boolean, confi
     const universal = effortCfg ? resolveInstallTimeEffort(effortCfg, agentName) : null;
     const target = universal ? clampEffortForHost('opencode', universal) : null;
 
-    const fmMatch = /^---\r?\n([\s\S]*?)^---\r?$/m.exec(content);
+    const fmMatch = agentFrontmatterSpan(content, EFFORT_SYNC_FENCE);
     if (!fmMatch) { skipped++; continue; }
 
     // Presence and value are distinct questions: `variant:` with an EMPTY
@@ -1434,8 +1390,8 @@ function cmdEffortSyncOpencode(cwd: string, raw: boolean, dryRun: boolean, confi
     // null — it would leave an unresolvable `variant: null` key on disk
     // forever. Test presence with its own regex, and only compare values
     // once presence is known.
-    const variantPresent = /^variant:/m.test(fmMatch[1]);
-    const variantMatch = /^variant:[ \t]*(.+?)[ \t]*$/m.exec(fmMatch[1]);
+    const variantPresent = /^variant:/m.test(fmMatch.body);
+    const variantMatch = /^variant:[ \t]*(.+?)[ \t]*$/m.exec(fmMatch.body);
     // `null` (key absent) and `''` (key present, value empty) are distinct
     // states this code deliberately tracks via `variantPresent` above — a
     // reported `from` that collapses both to `null` would make "no key" and
@@ -3170,7 +3126,20 @@ function cmdSummaryExtract(cwd: string, summaryPath: string | undefined, fields:
     error('summary-path required for summary-extract');
   }
 
-  const fullPath = path.join(cwd, summaryPath);
+  // #5013: requireSafePath (not path.join) so an absolute summaryPath resolves to
+  // that literal path instead of being concatenated onto cwd — path.join has no
+  // special case for an absolute second argument the way path.resolve does. Uses
+  // requireSafePath (the same PathAcceptance.AbsoluteInsideRoot pattern
+  // cmdAuditAcknowledge's write-side counterpart already uses in audit.cts)
+  // rather than a bare path.resolve: a plain path.resolve would also have made
+  // an absolute summaryPath anywhere on the filesystem resolve and have its
+  // content echoed back (this command reads and returns file content, unlike
+  // cmdVerifyPathExists's exists-only check) — an orthogonal-review finding on
+  // this same fix. requireSafePath keeps the acceptance criterion (an absolute
+  // path within the project resolves correctly) while refusing one that
+  // escapes cwd, and rejects relative `../` escapes the same way (pre-existing
+  // in this function, closed as a direct consequence, not separately in scope).
+  const fullPath = requireSafePath(summaryPath, cwd, 'summary-extract target', PathAcceptance.AbsoluteInsideRoot);
 
   if (!fs.existsSync(fullPath)) {
     output({ error: 'File not found', path: summaryPath }, raw, undefined);
@@ -3179,6 +3148,23 @@ function cmdSummaryExtract(cwd: string, summaryPath: string | undefined, fields:
 
   const content = fs.readFileSync(fullPath, 'utf-8');
   const fm = extractFrontmatter(content, fullPath) as Record<string, unknown>;
+
+  // #5013: an unparseable frontmatter block (malformed YAML in the fence) is
+  // NOT the same as an absent/empty one — extractFrontmatter marks it with
+  // FRONTMATTER_UNPARSEABLE (mirrors state.cts's isUnparseableFrontmatter /
+  // state-transition.cts's identical helper). Left unchecked, every field
+  // below silently falls back to its empty default and this command exits 0,
+  // so a milestone audit reading requirements_completed through it would
+  // report "zero requirements completed" for a plan that completed several,
+  // with nothing on stderr. Refuse instead, naming the file, the same way
+  // cmdAuditAcknowledge (audit.cts) refuses on the write-side counterpart.
+  if ((fm as unknown as Record<symbol, unknown>)[FRONTMATTER_UNPARSEABLE] === true) {
+    error(
+      `summary-extract: the frontmatter of "${summaryPath}" is not parseable YAML — fix the syntax error in the file (e.g. an unquoted ": " inside a block-sequence item) before re-running; every field would otherwise silently read as empty`,
+      ERROR_REASON.SUMMARY_EXTRACT_UNPARSEABLE,
+      { path: summaryPath }
+    );
+  }
 
   // Parse key-decisions into structured format
   const parseDecisions = (decisionsList: unknown) => {
@@ -3370,6 +3356,8 @@ function cmdProgressRender(cwd: string, format: string | undefined, raw: boolean
   let totalPlans = 0;
   let totalSummaries = 0;
   let phaseScope: string | null = null;
+  // #5118: carried out of the scan below and failed on after it.
+  let statusError: ReturnType<typeof phaseStatus>['value']['statusError'];
 
   try {
     // #3185 (ADR-3180 Decision 1): the single owner applies the milestone
@@ -3406,16 +3394,18 @@ function cmdProgressRender(cwd: string, format: string | undefined, raw: boolean
         phaseNum = dm ? dm[1] : dir;
         phaseName = dm && dm[2] ? dm[2].replace(/-/g, ' ') : '';
       }
-      // #3183: canonical plan/summary counts (root+nested, superseded-excluded,
-      // canonical pairing) from the single owner.
-      const phaseScan = scanPhasePlans(path.join(phasesDir, dir));
-      const plans = phaseScan.planCount;
-      const summaries = phaseScan.summaryCount;
+      // #3183/#5060: canonical plan/summary counts and lifecycle status
+      // (root+nested, superseded-excluded, canonical pairing) from the
+      // single owner (Phase Status Module, ADR-5057).
+      const ps = phaseStatus(path.join(phasesDir, dir), { convention: phaseIdConvention });
+      statusError = firstStatusError(statusError, ps.value.statusError);
+      const plans = ps.value.planCount;
+      const summaries = ps.value.summaryCount;
 
       totalPlans += plans;
       totalSummaries += summaries;
 
-      const status = determinePhaseStatus(plans, summaries, path.join(phasesDir, dir), 'Pending');
+      const status = toDisplayLabel(ps.value.status, { pendingWord: 'Pending' });
 
       phases.push({
         number: phaseNum,
@@ -3427,6 +3417,8 @@ function cmdProgressRender(cwd: string, format: string | undefined, raw: boolean
       });
     }
   } catch { /* intentionally empty */ }
+  // #5118: a read-only aggregate over a refused report prints nothing.
+  if (statusError) failOnVerificationStatusError(statusError);
 
   // #3217 (ADR-3180 §7.6 rule 4): `phaseScope` was already computed above
   // (Phase 3, #3222) but never consulted before rendering — a percentage was
@@ -3612,31 +3604,36 @@ function cmdTodoMatchPhase(cwd: string, phase: string | undefined, raw: boolean)
 // #4096: upsert completion keys INSIDE the leading frontmatter block. Never a
 // bare prefix line above the opening `---` (that displaces the fence to line 2
 // and breaks every fence-locating reader). A file with no well-formed block
-// (absent, or an unterminated opening fence) gains a complete block.
+// (absent, or an unterminated opening fence) gains a complete block. The block is
+// the one the one fence owner (`locateFrontmatterFence`) finds, so this writer and
+// every todo reader agree on where it is.
 function upsertTodoCompletionFields(content: string, today: string): string {
-  const lines = content.split('\n');
   const fields = [`completed: ${today}`, 'status: completed'];
 
-  const hasOpeningFence = lines[0] !== undefined && lines[0].trim() === '---';
-  const closeIdx = hasOpeningFence ? lines.findIndex((l, i) => i > 0 && l.trim() === '---') : -1;
-
-  if (!hasOpeningFence || closeIdx === -1) {
+  const fence = locateFrontmatterFence(content);
+  if (!fence?.closed) {
     // No parseable frontmatter: wrap the whole content in a complete block
-    // rather than prefixing bare keys (#4096 fix 2).
-    return `---\n${fields.join('\n')}\n---\n\n${content}`;
+    // rather than prefixing bare keys (#4096 fix 2). A leading BOM (#2977) stays
+    // the document's first character, ahead of the new fence.
+    const bom = content.charCodeAt(0) === 0xFEFF ? content.slice(0, 1) : '';
+    return `${bom}---\n${fields.join('\n')}\n---\n\n${content.slice(bom.length)}`;
   }
 
-  const block = lines.slice(1, closeIdx);
+  // The block's lines, split on a bare '\n' so a CRLF line keeps its '\r' — and a
+  // written field line carries one too, so a CRLF block never gains LF-only lines.
+  const inner = content.slice(fence.openEnd, fence.closingStart);
+  const block = inner === '' ? [] : inner.slice(0, -1).split('\n');
+  const cr = fence.eol === '\r\n' ? '\r' : '';
   for (const field of fields) {
     const key = `${field.slice(0, field.indexOf(':'))}:`;
     const idx = block.findIndex(l => l.startsWith(key));
     if (idx === -1) {
-      block.push(field);
+      block.push(field + cr);
     } else {
-      block[idx] = field;
+      block[idx] = field + cr;
     }
   }
-  return [...lines.slice(0, 1), ...block, ...lines.slice(closeIdx)].join('\n');
+  return `${content.slice(0, fence.openEnd)}${block.join('\n')}\n${content.slice(fence.closingStart)}`;
 }
 
 interface TodoCompleteOptions {
@@ -3661,7 +3658,7 @@ function cmdTodoComplete(cwd: string, filename: string | undefined, options: Tod
   // to a location inside todosRoot (or inside pending/) and would pass
   // containment, yet none of them is a bare filename. Reject on basename
   // shape FIRST, before any path is even joined — same predicate shape as
-  // findPhaseArtifact in check-command-router.cts. Checking both `/` and
+  // findPhaseArtifact in gate-predicate.cts. Checking both `/` and
   // `\` explicitly (not just path.basename) matters on POSIX, where a
   // literal backslash is just an ordinary filename character to
   // path.basename but not to path.win32.basename or to the user's intent.
@@ -3818,13 +3815,16 @@ function cmdStats(cwd: string, format: string | undefined, raw: boolean): void {
   const milestoneVersion = milestoneDisplay ?? milestone?.version ?? null;
 
   // Phase & plan stats (reuse progress pattern)
+  // #5060: `phaseStatus` here is the internal PHASE_STATUS ladder value, never
+  // a display label — the output projection below is the only place a label
+  // is produced (toDisplayLabel).
   const phasesByNumber = new Map<string, {
     number: string;
     display_id?: string;
     name: string;
     plans: number;
     summaries: number;
-    status: string;
+    phaseStatus: PhaseStatus;
   }>();
   let totalPlans = 0;
   let totalSummaries = 0;
@@ -3886,11 +3886,14 @@ function cmdStats(cwd: string, format: string | undefined, raw: boolean): void {
         name: phaseName.replace(/\(INSERTED\)/i, '').trim(),
         plans: 0,
         summaries: 0,
-        status: 'Not Started',
+        phaseStatus: PHASE_STATUS.NOT_STARTED,
       });
     }
   } catch { /* intentionally empty */ }
 
+  // #5118: the first phase whose verification report `status` is outside the
+  // closed set — carried out of the scan below and failed on after it.
+  let statusError: ReturnType<typeof phaseStatus>['value']['statusError'];
   try {
     // #3185 (ADR-3180 Decision 1): route through the single owner. This
     // previously applied the milestone window but NOT a directory-level
@@ -3926,16 +3929,16 @@ function cmdStats(cwd: string, format: string | undefined, raw: boolean): void {
         const afterToken = dir.slice(phaseToken ? phaseToken.length : 0).replace(/^-/, '');
         phaseName = afterToken ? afterToken.replace(/-/g, ' ') : '';
       }
-      // #3183: canonical plan/summary counts (root+nested, superseded-excluded,
-      // canonical pairing) from the single owner.
-      const phaseScan = scanPhasePlans(path.join(phasesDir, dir));
-      const plans = phaseScan.planCount;
-      const summaries = phaseScan.summaryCount;
+      // #3183/#5060: canonical plan/summary counts and lifecycle status
+      // (root+nested, superseded-excluded, canonical pairing) from the
+      // single owner (Phase Status Module, ADR-5057).
+      const ps = phaseStatus(path.join(phasesDir, dir), { convention: phaseIdConvention });
+      statusError = firstStatusError(statusError, ps.value.statusError);
+      const plans = ps.value.planCount;
+      const summaries = ps.value.summaryCount;
 
       totalPlans += plans;
       totalSummaries += summaries;
-
-      const status = determinePhaseStatus(plans, summaries, path.join(phasesDir, dir), 'Not Started');
 
       const normalizedNum = normalizePhaseName(phaseNum);
       const existing = phasesByNumber.get(normalizedNum);
@@ -3952,13 +3955,25 @@ function cmdStats(cwd: string, format: string | undefined, raw: boolean): void {
         // platforms, so a naive overwrite can report a Complete phase as Not
         // Started (or vice versa) depending on read order. The fold picks the
         // furthest-along status, matching what an operator expects.
-        status: existing ? foldPhaseStatus(existing.status, status) : status,
+        phaseStatus: existing ? foldPhaseStatuses(existing.phaseStatus, ps.value.status) : ps.value.status,
       });
     }
   } catch { /* intentionally empty */ }
+  // #5118: a read-only aggregate over a refused report prints nothing.
+  if (statusError) failOnVerificationStatusError(statusError);
 
-  const phases = [...phasesByNumber.values()].sort((a, b) => comparePhaseNum(a.number, b.number));
-  const completedPhases = phases.filter(p => p.status === 'Complete').length;
+  const internalPhases = [...phasesByNumber.values()].sort((a, b) => comparePhaseNum(a.number, b.number));
+  const completedPhases = internalPhases.filter(p => p.phaseStatus === PHASE_STATUS.COMPLETE).length;
+  // #5060: project the internal PHASE_STATUS ladder to the display label at
+  // the output boundary only — the internal `phaseStatus` field is never emitted.
+  const phases = internalPhases.map(p => ({
+    number: p.number,
+    ...(p.display_id ? { display_id: p.display_id } : {}),
+    name: p.name,
+    plans: p.plans,
+    summaries: p.summaries,
+    status: toDisplayLabel(p.phaseStatus, { pendingWord: 'Not Started' }),
+  }));
   // #3217 (ADR-3180 §7.6 rule 4): both percentages here are derived from the
   // same `phaseScope`-carrying directory enumeration above (Phase 3, #3222) —
   // withhold both when that scope is not COMPLETE, same rationale as
@@ -4327,9 +4342,6 @@ function cmdCommitDocsGuardDisable(cwd: string, raw: boolean): void {
 export = {
   effortSurfaceForHost,
   groupFilesBySubrepo,
-  determinePhaseStatus,
-  foldPhaseStatus,
-  PHASE_STATUS_PRECEDENCE,
   cmdGenerateSlug,
   cmdCurrentTimestamp,
   cmdListTodos,

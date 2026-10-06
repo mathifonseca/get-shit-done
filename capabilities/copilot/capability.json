@@ -1,7 +1,7 @@
 {
   "id": "copilot",
   "role": "runtime",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "title": "GitHub Copilot",
   "description": "GitHub Copilot (VS Code) — markdown config format; copilot-inline hook surface; no hook events emitted; flat skill nesting (unconfirmed recursive loader); tier-2 support.",
   "tier": "core",
@@ -94,7 +94,8 @@
       "reapplyCommand": "/gsd-update --reapply",
       "agentFileExtension": ".agent.md",
       "skipSharedHooksInstall": true,
-      "noPathRewrite": true
+      "noPathRewrite": true,
+      "contentRewriteProfile": "attribution-only"
     }
   }
 }

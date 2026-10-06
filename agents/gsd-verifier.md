@@ -85,6 +85,12 @@ At verification decision points, apply structured reasoning:
 At verification decision points, reference calibration examples:
 @~/.claude/gsd-core/references/few-shot-examples/verifier.md
 
+## Resolver Bootstrap (Every Mode)
+
+`gsd_run` is used in initial and re-verification mode alike, so it is defined here, before Step 0, not inside a mode-specific step. Each Bash call is a fresh shell, so a `gsd_run` function defined in one call does not exist in the next: every Bash snippet below that calls `gsd_run` (in any step, in any mode) must begin with this resolver block in the same call. If `gsd-tools.cjs` cannot be found, never search the filesystem (no `find /`, no `find "$HOME"`): use the runtime config directory's `gsd-core/bin/gsd-tools.cjs` (`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/gsd-tools.cjs` on Claude Code) or stop and report.
+
+@~/.claude/gsd-core/references/gsd-run-resolver.md
+
 ## Step 0: Check for Previous Verification
 
 ```bash
@@ -107,8 +113,6 @@ if [ -e "${_VERIF[0]}" ]; then cat "${_VERIF[@]}"; fi
 Set `is_re_verification = false`, proceed with Step 1.
 
 ## Step 1: Load Context (Initial Mode Only)
-
-@~/.claude/gsd-core/references/gsd-run-resolver.md
 
 ```bash
 ls "$PHASE_DIR"/*-PLAN.md 2>/dev/null
@@ -251,10 +255,12 @@ overrides:
 Use `gsd-tools query` for artifact verification against must_haves in PLAN frontmatter:
 
 ```bash
-ARTIFACT_RESULT=$(gsd_run query verify.artifacts "$PLAN_PATH")
+ARTIFACT_RESULT=$(gsd_run query verify.artifacts "$PLAN_PATH") && ARTIFACT_EXIT=0 || ARTIFACT_EXIT=$?
 ```
 
 Parse JSON result: `{ all_passed, passed, total, artifacts: [{path, exists, issues, passed}] }`
+
+The exit status follows the verdict (#5170): `0` = every artifact passed; `1` = negative verdict (`all_passed: false`), the JSON is still authoritative, so map each artifact below; `66` (`NO_INPUT`) = the plan declares no `must_haves.artifacts`, report Step 4 as not applicable, never VERIFIED; `69` (`UNAVAILABLE`) = the plan file is missing or unreadable (the JSON carries `error`), report Step 4 as unevaluated, never VERIFIED; any other status = the verb did not run.
 
 For each artifact in result:
 - `exists=false` → MISSING
@@ -327,10 +333,12 @@ Key links are critical connections. If broken, the goal fails even with all arti
 Use `gsd-tools query` for key link verification against must_haves in PLAN frontmatter:
 
 ```bash
-LINKS_RESULT=$(gsd_run query verify.key-links "$PLAN_PATH")
+LINKS_RESULT=$(gsd_run query verify.key-links "$PLAN_PATH") && LINKS_EXIT=0 || LINKS_EXIT=$?
 ```
 
 Parse JSON result: `{ all_verified, verified, total, links: [{from, to, via, verified, detail}] }`
+
+The exit status follows the verdict (#5170): `0` = every link verified; `1` = negative verdict (`all_verified: false`), the JSON is still authoritative; `66` (`NO_INPUT`) = the plan declares no `must_haves.key_links`, nothing to verify; `69` (`UNAVAILABLE`) = the plan file is missing or unreadable, report Step 5 as unevaluated, never WIRED.
 
 For each link:
 - `verified=true` → WIRED
@@ -388,7 +396,8 @@ SUMMARY_FILES=$(gsd_run query summary-extract "$PHASE_DIR"/*-SUMMARY.md --fields
 # Option 2: Verify commits exist (if commit hashes documented)
 COMMIT_HASHES=$(grep -oE "[a-f0-9]{7,40}" "$PHASE_DIR"/*-SUMMARY.md | head -10)
 if [ -n "$COMMIT_HASHES" ]; then
-  COMMITS_VALID=$(gsd_run query verify.commits $COMMIT_HASHES)
+  # Exit 0 = every hash is a commit, exit 1 = at least one is not (read the JSON); 69 = not a git repo (could not look).
+  COMMITS_VALID=$(gsd_run query verify.commits $COMMIT_HASHES) && COMMITS_EXIT=0 || COMMITS_EXIT=$?
 fi
 
 # Fallback: grep for files
@@ -482,11 +491,19 @@ If the project has a database layer (detect: `prisma/`, `migrations/`, `alembic/
 
 1. **Schema change without migration:**
    ```bash
+   # The phase's changed files come from the ONE evaluation-scope resolver (ADR-5057 §4) — never a hand-derived commit range
+SCOPE_JSON=$(gsd_run check evaluation-scope --phase "$PHASE_NUM" --raw 2>/dev/null) || true  # exit 69 = unresolvable: JSON still printed or empty
+# One field of the resolver's JSON; arrays print one element per line, an absent field prints nothing.
+scope_field() {
+  printf '%s' "$SCOPE_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s)[process.argv[1]];process.stdout.write(Array.isArray(v)?v.join("\n"):v==null?"":String(v))}catch{process.exit(1)}})' "$1" 2>/dev/null
+}
+SCOPE_STATUS=$(scope_field status); DIFF_BASE=$(scope_field rangeBase); SCOPE_FILES=$(scope_field files)
+
    # Check if model/schema files were modified
-   SCHEMA_FILES=$(git diff --name-only HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD | grep -E "(schema\.prisma|models/|entities/|\.entity\.(ts|py)|alembic/)")
-   
+   SCHEMA_FILES=$(printf '%s\n' "$SCOPE_FILES" | grep -E "(schema\.prisma|models/|entities/|\.entity\.(ts|py)|alembic/)")
+
    # Check if migration files were added
-   MIGRATION_FILES=$(git diff --name-only HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD | grep -E "(migrations/|prisma/migrations/|alembic/versions/)")
+   MIGRATION_FILES=$(printf '%s\n' "$SCOPE_FILES" | grep -E "(migrations/|prisma/migrations/|alembic/versions/)")
    ```
    - If schema files changed but no migration added: ⚠️ Warning — "Schema files modified but no migration found. Verify this is a non-schema change or add a migration."
 
@@ -557,6 +574,16 @@ cargo test "$TEST_NAME" -- --exact   # pytest -k "$TEST_NAME" · npx vitest run 
 
 Quality gates must never regress. Check that this phase's changes did not loosen any existing quality standards.
 
+**Ratchet scope.** Every diff below is taken against the phase's `rangeBase` from the ONE evaluation-scope resolver (ADR-5057 §4) — never a hand-derived `HEAD~N..HEAD` range. Each Bash call is a fresh shell, so resolve it in the same call as the diffs:
+```bash
+SCOPE_JSON=$(gsd_run check evaluation-scope --phase "$PHASE_NUM" --raw 2>/dev/null) || true  # exit 69 = unresolvable
+scope_field() {
+  printf '%s' "$SCOPE_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s)[process.argv[1]];process.stdout.write(Array.isArray(v)?v.join("\n"):v==null?"":String(v))}catch{process.exit(1)}})' "$1" 2>/dev/null
+}
+DIFF_BASE=$(scope_field rangeBase)
+```
+If `DIFF_BASE` is empty the scope is unresolvable: report "ratchet checks skipped — scope unresolvable" rather than a clean result.
+
 **Coverage ratchet:**
 If the project has coverage tracking configured:
 ```bash
@@ -564,17 +591,17 @@ If the project has coverage tracking configured:
 grep -r "coverageThreshold\|min_coverage\|fail_under\|coverage.*minimum" package.json jest.config.* vitest.config.* pyproject.toml .coveragerc 2>/dev/null
 ```
 - If coverage thresholds exist, verify they were not lowered in this phase's changes
-- Check git diff for threshold changes: `git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- *coverage* *jest* *vitest* *pyproject*`
+- Check git diff for threshold changes: `git diff "$DIFF_BASE" -- *coverage* *jest* *vitest* *pyproject*` (`DIFF_BASE` from the resolver block under **Ratchet scope** below)
 - If thresholds decreased: 🛑 Blocker — "Coverage threshold reduced from X% to Y%. Ratchet violation."
 
 **Type strictness ratchet:**
 Check that TypeScript/Python strict mode settings were not loosened:
 ```bash
 # TypeScript
-git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- tsconfig*.json | grep -E "^\+.*\"strict\":\s*false|^\+.*\"skipLibCheck\":\s*true|^\+.*\"any\""
+git diff "$DIFF_BASE" -- tsconfig*.json | grep -E "^\+.*\"strict\":\s*false|^\+.*\"skipLibCheck\":\s*true|^\+.*\"any\""
 
 # Python
-git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- mypy.ini pyproject.toml setup.cfg | grep -E "^\+.*strict\s*=\s*false|^\+.*ignore_errors\s*=\s*true"
+git diff "$DIFF_BASE" -- mypy.ini pyproject.toml setup.cfg | grep -E "^\+.*strict\s*=\s*false|^\+.*ignore_errors\s*=\s*true"
 ```
 - If strict settings loosened: 🛑 Blocker — "Type strictness reduced. Ratchet violation."
 
@@ -582,7 +609,7 @@ git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- mypy.ini pypr
 Check that lint configurations were not relaxed:
 ```bash
 # Look for new rule disables added in this phase
-git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- .eslintrc* eslint.config.* .ruff.toml ruff.toml pyproject.toml biome.json | grep -E "^\+.*(\"off\"|\"0\"|rule.*disable|ignore|noqa|eslint-disable|@ts-ignore|@ts-expect-error|type:\s*ignore)"
+git diff "$DIFF_BASE" -- .eslintrc* eslint.config.* .ruff.toml ruff.toml pyproject.toml biome.json | grep -E "^\+.*(\"off\"|\"0\"|rule.*disable|ignore|noqa|eslint-disable|@ts-ignore|@ts-expect-error|type:\s*ignore)"
 ```
 - New rule disables without justifying comments: ⚠️ Warning — "Lint rule disabled: {rule}. Ratchet principle: rules should not be relaxed."
 - Bulk disables (e.g., entire file `eslint-disable`): 🛑 Blocker
@@ -590,7 +617,7 @@ git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- .eslintrc* es
 **CI gate ratchet:**
 Check that CI workflow files were not simplified:
 ```bash
-git diff HEAD~$(git log --oneline $PHASE_COMMITS | wc -l)..HEAD -- .github/workflows/ | grep -E "^\-.*run:|^\-.*- name:" | head -20
+git diff "$DIFF_BASE" -- .github/workflows/ | grep -E "^\-.*run:|^\-.*- name:" | head -20
 ```
 - If CI steps were removed without corresponding additions: ⚠️ Warning — "CI steps removed. Verify this was intentional."
 
@@ -791,7 +818,7 @@ Classify status using this decision tree IN ORDER (most restrictive first):
 
 **A ⚠️ PRESENT_BEHAVIOR_UNVERIFIED truth is never FAILED and never VERIFIED.** It does not trigger gaps_found (the code is present and wired) and is not counted as verified (behavior unexercised). On its own it routes to human_needed; when a higher-precedence gaps_found also applies, the status stays gaps_found and the item is preserved in the always-on `behavior_unverified_items` list so it is never lost. Either way it stays a *per-truth* state — the overall-status vocabulary is unchanged, with no new status value.
 
-> **Shared status seam**: the status vocabulary (`passed`, `gaps_found`, `human_needed`) and the per-status routing (next action and next command for each value) are owned by `src/verification.cts` via `gsd_run query verification.status`. This agent is the single emitter of the frontmatter status field; consumers (ship.md, execute-phase.md) read routing from that query instead of re-deriving it.
+> **Shared status seam**: the status vocabulary (`passed`, `gaps_found`, `human_needed` — the writer subset of the closed `VERIFICATION_STATUS` enum) and the per-status routing are owned by `src/verification.cts` via `gsd_run query verification.status`. Any other value is a hard error there (#5118); the `<output>` self-check catches it. This agent is the single emitter of the frontmatter status field; consumers (ship.md, execute-phase.md) read routing from that query instead of re-deriving it.
 
 **Score (presence- vs behavior-verified split):**
 
@@ -891,7 +918,7 @@ Deferred items are informational only — they do not require closure plans.
 USER_STORY_VALID=$(gsd_run query user-story.validate --story "$PHASE_GOAL" --pick valid)
 ```
 
-If `valid != true`, refuse to verify. Surface the discrepancy and ask the user to run `/gsd mvp-phase ${PHASE}` to set a proper User Story goal. The verb owns the canonical regex `/^As a .+, I want to .+, so that .+\.$/` and surfaces per-error guidance in `errors[]` plus slot extractions in `slots`. Do NOT attempt to verify against a non-User Story goal under MVP mode — the User Flow Coverage section would be low-quality.
+If `valid != true`, refuse to verify. Surface the discrepancy and ask the user to run `/gsd:mvp-phase ${PHASE}` to set a proper User Story goal. The verb owns the canonical regex `/^As a .+, I want to .+, so that .+\.$/` and surfaces per-error guidance in `errors[]` plus slot extractions in `slots`. Do NOT attempt to verify against a non-User Story goal under MVP mode — the User Flow Coverage section would be low-quality.
 
 **Mode is all-or-nothing per phase** (PRD decision Q1, inherited from Phase 1). The MVP Mode Verification rules apply to the whole phase or not at all.
 
@@ -905,7 +932,7 @@ If `valid != true`, refuse to verify. Surface the discrepancy and ask the user t
 
 **ALWAYS use the Write tool to create files** — never use `Bash(cat << 'EOF')` or heredoc commands for file creation.
 
-**#4155:** `covered_files`: every phase PLAN/SUMMARY (+superseded, nested `plans/`), changed impl file — ROOT-relative; planning-root docs are inert (#4623). `gsd_run query verification.fingerprint {phaseDir} {file}...`, copy output — never hand-write `covered_digest`.
+**#4155 / #5095:** the fingerprint command adds the phase's own PLAN/SUMMARY files automatically (+superseded, nested `plans/`) and never counts the report itself — list only the changed implementation files (and any other evidence), ROOT-relative; planning-root docs are inert (#4623). `gsd_run query verification.fingerprint {phaseDir} {file}...`, copy the command's `covered_files` and `covered_digest` output verbatim — never hand-write either.
 
 Create `.planning/phases/{phase_dir}/{phase_num}-VERIFICATION.md`:
 
@@ -916,7 +943,7 @@ verified: YYYY-MM-DDTHH:MM:SSZ
 status: passed | gaps_found | human_needed
 score: N/M must-haves verified
 covered_files: [...]
-covered_digest: "v2:sha256:..."
+covered_digest: "v3:sha256:..."
 behavior_unverified: 0 # Count of ⚠️ PRESENT_BEHAVIOR_UNVERIFIED truths (present + wired, behavior not exercised); each is detailed in behavior_unverified_items below (and in human_verification when status is human_needed)
 overrides_applied: 0 # Count of PASSED (override) items included in score
 overrides: # Only if overrides exist — carried forward or newly added
@@ -1096,6 +1123,19 @@ _The footer is defense-in-depth, not a silver bullet. A "verified, single-pass, 
 _Verified: {timestamp}_
 _Verifier: Claude (gsd-verifier)_
 ```
+
+## Self-check the written status (#5118)
+
+After writing VERIFICATION.md, read it back through its owner:
+
+```bash
+gsd_run query verification.status "{phaseDir}" --pick status
+```
+
+Gate on the exit code only. Non-zero is the write-time hard error (stderr names the value and the
+accepted `passed | gaps_found | human_needed`): fix the frontmatter `status` to the Step 9 decision
+and re-run before returning. A printed value that differs from yours (e.g. `stale`) is routing,
+not an error — never edit `status` to match it.
 
 ## Return to Orchestrator
 

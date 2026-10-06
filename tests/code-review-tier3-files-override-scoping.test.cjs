@@ -55,6 +55,8 @@ const { GIT_FIXTURE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const { createTempDir, cleanup } = require('./helpers.cjs');
 
 const WORKFLOW_PATH = path.join(__dirname, '..', 'gsd-core', 'workflows', 'code-review.md');
+const TOOLS_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
+const TIER3_ANCHOR = '**Tier 3 — Phase evaluation scope';
 
 /**
  * Extract the FIRST ```bash fence appearing after `startAnchor` and before
@@ -114,13 +116,15 @@ function buildFixture(tmpDir) {
  */
 function runTier3(tmpDir, { filesOverride, seedReviewFiles }) {
   const content = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
-  const tier3 = extractFirstBashBlockAfter(content, '**Tier 3 — Git diff fallback', '**Post-processing');
+  const tier3 = extractFirstBashBlockAfter(content, TIER3_ANCHOR, '**Post-processing');
 
   const seedInit = `REVIEW_FILES=(${seedReviewFiles.map((f) => `"${f}"`).join(' ')})`;
 
   const script = [
     '#!/usr/bin/env bash',
     'set -uo pipefail',
+    // The workflow's own launcher defines gsd_run; the fixture points it at this checkout's CLI.
+    `gsd_run() { node "${TOOLS_PATH}" "$@"; }`,
     `FILES_OVERRIDE="${filesOverride || ''}"`,
     seedInit,
     'PHASE_DIR=".planning/phases/03-demo"',
@@ -167,7 +171,7 @@ function runTier3(tmpDir, { filesOverride, seedReviewFiles }) {
 
 describe('#4460: code-review.md Tier 3 does not widen an explicit --files override', () => {
   const workflowContent = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
-  const tier3Fence = extractFirstBashBlockAfter(workflowContent, '**Tier 3 — Git diff fallback', '**Post-processing');
+  const tier3Fence = extractFirstBashBlockAfter(workflowContent, TIER3_ANCHOR, '**Post-processing');
 
   test('the #2666 cross-check elif references FILES_OVERRIDE (the gate exists)', () => {
     const crossCheckIdx = tier3Fence.indexOf('#2666 cross-check');
@@ -216,6 +220,47 @@ describe('#4460: code-review.md Tier 3 does not widen an explicit --files overri
         ['src/alpha.js', 'src/beta.js', 'src/delta.js', 'src/epsilon.js', 'src/gamma.js'],
         `without --files, the cross-check must still widen a partial scope, got: ${JSON.stringify(files)}\ndiagnostics:\n${diagnostics || '(none)'}`,
       );
+    } finally {
+      cleanup(tmpDir);
+    }
+  });
+});
+
+describe('#3926 / #5164: Tier 3 scopes to the phase\'s own commits, not a range', () => {
+  const workflowContent = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
+  const tier3Fence = extractFirstBashBlockAfter(workflowContent, TIER3_ANCHOR, '**Post-processing');
+
+  test('the fence asks the resolver and derives no range or phase-start anchor of its own', () => {
+    assert.ok(/gsd_run check evaluation-scope --phase "\$\{PADDED_PHASE\}"/.test(tier3Fence), 'Tier 3 must ask the evaluation-scope resolver');
+    assert.ok(!/git (?:diff|log)/.test(tier3Fence), 'Tier 3 must not run its own git diff / git log');
+    assert.ok(!tier3Fence.includes('--diff-filter=A'), 'Tier 3 must not hand-roll the phase-start anchor');
+  });
+
+  test('real execution: the scope is the union of the task commits; an interleaved commit is named, not scoped', () => {
+    const tmpDir = fs.realpathSync.native(createTempDir('gsd-3926-'));
+    try {
+      seedFixtureRepo(tmpDir);
+      writeAndCommit(tmpDir, 'README.md', '# init\n', 'chore: init');
+      writeAndCommit(tmpDir, '.planning/phases/03-demo/03-CONTEXT.md', 'context\n', 'docs(03): context');
+      const sha = (rel, message) => {
+        writeAndCommit(tmpDir, rel, `${rel}\n`, message);
+        return gitOrThrow(['rev-parse', 'HEAD'], { cwd: tmpDir, timeoutMs: GIT_FIXTURE_TIMEOUT_MS }).trim();
+      };
+      const alpha = sha('src/alpha.js', 'feat(03-01): add alpha');
+      sha('src/quick-task.js', 'fix(quick): an unrelated quick task interleaved in the phase window');
+      const beta = sha('src/beta.js', 'feat(03-01): add beta');
+      writeAndCommit(
+        tmpDir,
+        '.planning/phases/03-demo/03-01-SUMMARY.md',
+        `# Summary\n\n## Task Commits\n\n1. **Task 1: alpha** - \`${alpha}\`\n2. **Task 2: beta** - \`${beta}\`\n\n## Next\n`,
+        'docs(03-01): summary',
+      );
+      writeAndCommit(tmpDir, 'src/later-phase.js', 'later\n', 'feat(04-01): a later phase');
+
+      const { files, diagnostics } = runTier3(tmpDir, { filesOverride: '', seedReviewFiles: [] });
+      assert.deepEqual(files, ['src/alpha.js', 'src/beta.js'], `got: ${JSON.stringify(files)}\ndiagnostics:\n${diagnostics}`);
+      assert.match(diagnostics, /NOT this phase's task commits/);
+      assert.match(diagnostics, /src\/quick-task\.js/);
     } finally {
       cleanup(tmpDir);
     }

@@ -45,7 +45,8 @@ Load execution context (paths only to minimize orchestrator context):
 @~/.claude/gsd-core/references/gsd-run-resolver.md
 
 ```bash
-INIT=$(gsd_run query init.execute-phase "${PHASE}")
+GSD_WS=$(echo " $ARGUMENTS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+INIT=$(gsd_run query init.execute-phase ${GSD_WS:+--ws=${GSD_WS##* }} "${PHASE}")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
 
@@ -76,7 +77,7 @@ PHASE=$(echo "$PLAN_PATH" | grep -oE '[0-9]+[A-Z]?(\.[0-9]+)*-[0-9]+')
 Auto-approve: `⚡ Execute {phase}-{plan}-PLAN.md [Plan X of Y for Phase Z]` → parse_segments.
 </if>
 
-<if mode="interactive" OR="custom with gates.execute_next_plan true">
+<if mode="interactive" AND="gates.execute_next_plan != false">
 Present plan identification, wait for confirmation.
 </if>
 </step>
@@ -187,7 +188,7 @@ Pattern B only (verify-only checkpoints). Skip for A/C.
 
    After ALL segments: aggregate files/deviations/decisions → create SUMMARY.md → self-check:
    - Verify key-files.created exist on disk with `[ -f ]`
-   - Check `git log --oneline --all --grep="{phase}-{plan}"` returns ≥1 commit
+   - Check `gsd_run check evaluation-scope --plan "{phase}-{plan}" --commits-only --raw` returns `commits` with ≥1 entry (commits on THIS branch only — #5164; a commit that lives only on another branch does not satisfy the check; exit `69` means the scope could not be resolved, which is a failed self-check, never "no commits yet")
    - Re-run ALL `<acceptance_criteria>` from every task — if any fail, fix before finalizing SUMMARY
    - Re-run the plan-level `<verification>` commands — log results in SUMMARY
    - Append `## Self-Check: PASSED` or `## Self-Check: FAILED` to SUMMARY
@@ -548,21 +549,14 @@ fi
 If .planning/codebase/ doesn't exist: skip.
 
 ```bash
-# #4459: a phase number is unique within a MILESTONE, not a repository. The
-# former commit-subject grep had no milestone bound, and its `--reverse |
-# head -1` deliberately selected the OLDEST matching subject — on a
-# milestone that reuses this phase number, that drags in the PREVIOUS
-# milestone's same-numbered phase's commits too. The phase's own directory
-# is the unique identity: base = the parent of the first commit that added
-# anything under the phase directory — the same anchor code-review.md's
-# structural-pre-pass step already uses for the identical problem (#3995).
-PHASE_START=$(git log --format="%H" --diff-filter=A -- ".planning/phases/XX-name" 2>/dev/null | tail -1)
-if [ -n "$PHASE_START" ] && git rev-parse "${PHASE_START}^" >/dev/null 2>&1; then
-  DIFF_BASE="${PHASE_START}^"
-else
-  DIFF_BASE="${PHASE_START:-HEAD}"
-fi
-git diff --name-only ${DIFF_BASE}..HEAD 2>/dev/null || true
+# #5164: the files this phase changed come from the evaluation-scope resolver (ADR-5057 §4):
+# the union of the phase's own commits' file sets (planning artifacts and lockfiles excluded),
+# on THIS branch only. A `base..HEAD` range would also fold in every unrelated commit landed
+# in the window (#3926, #4459). The resolver widens to the phase-directory range, and says so
+# in its `status`/`reason`, when the phase has no recorded task commits.
+# Exit 69 (UNAVAILABLE) is "could not look", not "no files changed": say so rather than print nothing.
+SCOPE_JSON=$(gsd_run check evaluation-scope --phase-dir ".planning/phases/XX-name" --raw 2>/dev/null) && SCOPE_RC=0 || SCOPE_RC=$?
+if [ "$SCOPE_RC" -ne 0 ]; then echo "Warning: evaluation scope unavailable (exit ${SCOPE_RC}); no changed-file list, so the map update below is skipped, not 'nothing changed'." >&2; else printf '%s' "$SCOPE_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s).changedFiles.join('\n'))}catch{}})" || true; fi
 ```
 
 Update only structural changes: new src/ dir → STRUCTURE.md | deps → STACK.md | file pattern → CONVENTIONS.md | API client → INTEGRATIONS.md | config → STACK.md | renamed → update paths. Skip code-only/bugfix/content changes.
@@ -589,7 +583,7 @@ SUMMARY_COUNT=$(echo "$PHASE_COUNTS" | jq -r '.summary_count // 0')
 |-----------|-------|--------|
 | summaries < plans | **A: More plans** | Find next PLAN without SUMMARY — skip any plan whose `plan_id` matches a non-terminal async-job manifest (`external_job_waiting`; see `identify_plan`). Yolo: auto-continue. Interactive: show next plan, suggest `/gsd:execute-phase {phase}` + `/gsd:verify-work`. STOP here. |
 | summaries = plans, current < highest phase | **B: Phase done** | Show completion, suggest `/gsd:plan-phase {Z+1}` + `/gsd:verify-work {Z}` + `/gsd:discuss-phase {Z+1}` |
-| summaries = plans, current = highest phase | **C: Milestone done** | Show banner, suggest `/gsd:complete-milestone` + `/gsd:verify-work` + `/gsd-add-phase` |
+| summaries = plans, current = highest phase | **C: Milestone done** | Show banner, suggest `/gsd:complete-milestone` + `/gsd:verify-work` + `/gsd:phase` |
 
 All routes: `/clear` first for fresh context.
 </step>

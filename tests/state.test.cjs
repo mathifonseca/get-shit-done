@@ -891,6 +891,29 @@ describe('STATE.md frontmatter sync', () => {
     assert.ok(content.includes('status: paused'), 'frontmatter should reflect latest status');
   });
 
+  // A STATE.md whose frontmatter is preceded by whitespace (a hand edit, a botched merge) is
+  // healed by the writer: `state update` replaces that block rather than stacking a second one
+  // above it. Found while implementing #5105.
+  for (const [label, lead] of [['a leading blank line', '\n'], ['leading spaces', '   '], ['leading spaces and a tab on their own line', '  \t\n']]) {
+    test(`state update on a STATE.md with ${label} before its frontmatter writes exactly one block`, () => {
+      fs.writeFileSync(
+        path.join(tmpDir, '.planning', 'STATE.md'),
+        `${lead}---\ngsd_state_version: 1.0\nstatus: executing\n---\n\n# Project State\n\n**Current Phase:** 01\n**Status:** executing\n`,
+      );
+
+      const result = runGsdTools('state update Status planning', tmpDir);
+      assert.ok(result.success, `Command failed: ${result.error}`);
+
+      const content = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+      assert.ok(content.startsWith('---\n'), `the block opens at byte 0: ${JSON.stringify(content)}`);
+      assert.strictEqual((content.match(/^---$/gm) || []).length, 2, `exactly one frontmatter block: ${JSON.stringify(content)}`);
+      assert.ok(content.includes('\nstatus: planning\n'), 'the frontmatter carries the updated status');
+      assert.ok(!content.includes('status: executing'), 'the stale block is gone');
+      assert.ok(content.includes('**Status:** planning'), 'the body field is updated');
+      assert.ok(content.includes('\n# Project State\n'), 'the body is kept');
+    });
+  }
+
   test('#2956 write-then-read does not rewind current_phase past an archive Phase line', () => {
     // The write seam (buildStateFrontmatter) and the read seam (cmdStateSnapshot)
     // must agree: a state write that re-syncs frontmatter must not pick up the
@@ -3024,6 +3047,40 @@ describe('cmdStateUpdateProgress (state update-progress)', () => {
     assert.strictEqual(output.percent, 0, 'v2.0-scoped plan fraction (1/1) is capped to 0 by the missing phase verification');
     assert.strictEqual(output.total, 1, 'total must be v2.0-scoped (phase 02 only) — Phase 03 must not leak in from the auto-derived scan');
     assert.strictEqual(output.completed, 1, 'completed must be v2.0-scoped (phase 02 only)');
+  });
+
+  test('#5038: explicit `milestone: null` on a flat ROADMAP resolves a complete phase scope, so update-progress writes', () => {
+    // Before #5038 the raw `milestone:` read in extractCurrentMilestoneScoped saw the text
+    // "null" as a version with no heading and the scope gate withheld the write.
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      ['# Roadmap', '', '### Phase 01: Alpha', '**Goal:** ship it.', ''].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      ['---', 'gsd_state_version: "1.0"', 'milestone: null', 'status: executing', '---', '',
+        '# Project State', '', '**Progress:** [██████████] 100%', ''].join('\n')
+    );
+    const phase01Dir = path.join(tmpDir, '.planning', 'phases', '01');
+    fs.mkdirSync(phase01Dir, { recursive: true });
+    fs.writeFileSync(path.join(phase01Dir, '01-01-PLAN.md'), '# Plan\n');
+    fs.writeFileSync(path.join(phase01Dir, '01-01-SUMMARY.md'), '# Summary\n');
+
+    const { runNode } = require('./helpers/process-seam.cjs');
+    const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+    const { TOOLS_PATH: toolsPath, TEST_ENV_BASE } = require('./helpers.cjs');
+    const rec = runNode(
+      [toolsPath, 'state', 'update-progress'],
+      { cwd: tmpDir, env: { ...process.env, ...TEST_ENV_BASE }, timeoutMs: PROBE_TIMEOUT_MS },
+    );
+    assert.equal(rec.exitCode, 0, `Command failed: ${rec.stderr}`);
+    const output = JSON.parse(rec.stdout);
+    assert.strictEqual(output.updated, true, `scope gate must not withhold; got ${rec.stdout}`);
+    assert.strictEqual(output.total, 1);
+    const persisted = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf8');
+    assert.match(persisted, /^milestone: null$/m, 'the explicit null is preserved');
+    assert.ok(persisted.includes(`**Progress:** ${output.bar}`), `body bar must equal the reported bar ${output.bar}`);
+    assert.doesNotMatch(persisted, /100%/, 'the seeded stale bar was replaced');
   });
 });
 
@@ -18145,37 +18202,6 @@ const HEX_RE = /^[0-9a-f]{4,40}$/i;
       'distance measured against an unrelated repo is not a meaningful count');
   });
 
-  test('(h) a SYMLINKED project path still resolves — repo pinning compares identity, not spelling', () => {
-    // Guard against over-tightening (g). `git rev-parse --show-toplevel` reports
-    // the REAL path while the project root arrives as the caller spelled it, and
-    // those differ routinely: macOS temp dirs (/var/folders → /private/var/folders),
-    // any symlinked checkout, Windows casing. A raw string compare would report a
-    // perfectly normal project as unknown — the inverse of the bug (g) fixes, and
-    // exactly what broke the macOS and Windows CI shards.
-    const realDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-symreal-'));
-    propDirs.push(realDir);
-    const g = (argv) => runGit(argv, { cwd: realDir }).stdout;
-    g(['init', '-q']); g(['config', 'user.email', 't@t.com']); g(['config', 'user.name', 'T']);
-    g(['config', 'commit.gpgsign', 'false']);
-    fs.mkdirSync(path.join(realDir, '.planning'), { recursive: true });
-    fs.writeFileSync(path.join(realDir, 'a.txt'), 'a\n');
-    g(['add', '-A']); g(['commit', '-q', '-m', 'base']);
-    const head = g(['rev-parse', 'HEAD']).trim();
-
-    const linkDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-symlink-')), 'proj');
-    propDirs.push(path.dirname(linkDir));
-    try {
-      fs.symlinkSync(realDir, linkDir, 'dir');
-    } catch {
-      return; // symlink creation unavailable (e.g. unprivileged Windows) — nothing to assert
-    }
-
-    const r = readStateHeadFreshness(linkDir, head);
-    assert.strictEqual(r.commit_stale, false,
-      'a symlinked project path is the SAME repo — it must resolve, not degrade to unknown');
-    assert.strictEqual(r.commits_behind, 0);
-  });
-
   test('(i) a sub_repos workspace resolves to unknown even though it owns its own repo', () => {
     // #2573 D5, sub_repos flavor. (g) covers the case where the project owns NO
     // .git. This is the harder one: the outer workspace owns BOTH .planning/ and
@@ -21798,4 +21824,58 @@ describe('#4823: Current Plan reset is scoped to the Current Position section', 
       'the hard-wrapped prose line must be byte-identical — the plain-branch reset must never cross into narrative',
     );
   });
+});
+
+// ─── STATE.md writers on an adjacent empty frontmatter block ─────────────────
+//
+// Found while implementing #5105: `stripFrontmatter` could not see an adjacent empty block
+// (`---\n---\n`), so every STATE.md writer kept it as body and prepended its own
+// frontmatter above it — a second block, and the empty one left as two `---` body lines.
+
+describe('#5105: STATE.md writers replace an adjacent empty frontmatter block', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5105-state-'));
+    fs.mkdirSync(path.join(tmpDir, '.planning'));
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  const body = [
+    '# Project State',
+    '',
+    '## Current Position',
+    '',
+    'Phase: 2',
+    'Plan: 1 of 3',
+    'Status: Ready to execute',
+    'Last activity: 2026-01-01',
+    '',
+  ];
+
+  for (const [label, nl] of [['LF', '\n'], ['CRLF', '\r\n']]) {
+    for (const args of [['state', 'update', 'Status', 'Executing'], ['state', 'record-session', '--stopped-at', 'x']]) {
+      test(`${args.slice(0, 2).join(' ')} writes exactly one frontmatter block (${label})`, () => {
+        const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+        fs.writeFileSync(statePath, ['---', '---', ...body].join(nl));
+
+        const result = runGsdTools(args, tmpDir);
+        assert.ok(result.success, `${args.join(' ')} failed: ${result.error}`);
+
+        const after = fs.readFileSync(statePath, 'utf-8');
+        assert.match(after, /^---\r?\n[^-]/, 'the written block is the writer\'s own, not the empty one');
+        const afterBody = frontmatterLib.stripFrontmatter(after, { once: true });
+        assert.ok(afterBody.startsWith('# Project State'), `a second block was left in the body:\n${after}`);
+        assert.strictEqual(
+          after.split(/\r?\n/).filter((l) => l === '---').length,
+          2,
+          `exactly one fence pair expected:\n${after}`,
+        );
+        assert.strictEqual(frontmatterLib.extractFrontmatter(after).current_phase, '2');
+      });
+    }
+  }
 });

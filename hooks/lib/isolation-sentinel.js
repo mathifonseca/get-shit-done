@@ -23,8 +23,8 @@
 // explicit fallback for the per-plan submodule-degrade override and shares
 // the exact same atomic-write implementation.
 //
-// Sentinel path: `<cwd>/.gsd/dispatch-isolation-sentinel.json`. `.gsd` is
-// gitignored (root `.gitignore`'s bare `.gsd` entry matches at any depth),
+// Sentinel path: `<cwd>/.gsd/dispatch-isolation-sentinel.json`. The writer
+// seeds `.gsd/.gitignore` so this stays ignored in user projects too,
 // and lives inside the checkout that ran the workflow — concurrent worktrees
 // of the same repo are separate directories on disk, so each gets its own
 // sentinel with no cross-worktree collision, no lock file needed.

@@ -206,10 +206,15 @@ describe('B. check verify.schema-drift — CLI route', () => {
 
     // Write a PLAN.md with files_modified
     const schemaEntry = hasSchemaFile ? 'prisma/schema.prisma' : 'src/index.ts';
+    // `files_modified` is a FRONTMATTER field (#5170 reads it through the Frontmatter Module, #4562):
+    // a plan carries it in its `---` block, the shape production plans have.
     const planContent = [
-      '# 01 Plan',
-      '',
+      '---',
+      'phase: 01-setup',
+      'plan: 01',
       `files_modified: [${schemaEntry}]`,
+      '---',
+      '# 01 Plan',
       '',
     ].join('\n');
     fs.writeFileSync(path.join(dir, '.planning', 'phases', '01-setup', '01-PLAN.md'), planContent);
@@ -447,8 +452,11 @@ describe('D. check ui.safety-gate — CLI subprocess route', () => {
     const dir = makeTmpDir();
     initGitRepo(dir);
 
-    // Create planning dirs
+    // Create planning dirs. The phase carries a committed PLAN (a phase that was planned): the
+    // evaluation-scope resolver (#5164) anchors a phase's scope at the commit that first added
+    // anything under its directory, and git does not track an empty directory.
     fs.mkdirSync(path.join(dir, '.planning', 'phases', '01-phase'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.planning', 'phases', '01-phase', '01-01-PLAN.md'), '# Plan\n');
 
     // Write ROADMAP.md with a frontend Phase 1 section.
     // getRoadmapPhaseWithFallback requires ## or ### heading (not #) for phase lookup.

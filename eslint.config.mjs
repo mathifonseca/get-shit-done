@@ -41,6 +41,8 @@ import noExactCaseEnvAccess from './eslint-rules/no-exact-case-env-access.cjs';
 import noAdhocTimeoutLiteral from './eslint-rules/no-adhoc-timeout-literal.cjs';
 import noRenderedTextLengthAssert from './eslint-rules/no-rendered-text-length-assert.cjs';
 import noUnconfinedPathJoin from './eslint-rules/no-unconfined-path-join.cjs';
+import noVerificationStatusLiteral from './eslint-rules/no-verification-status-literal.cjs';
+import noRuntimeNameLiteral from './eslint-rules/no-runtime-name-literal.cjs';
 
 const unconfinedPathJoinAllowlist = require('./eslint-rules/no-unconfined-path-join.allowlist.json');
 
@@ -76,6 +78,8 @@ const localPlugin = {
     'no-adhoc-timeout-literal': noAdhocTimeoutLiteral,
     'no-rendered-text-length-assert': noRenderedTextLengthAssert,
     'no-unconfined-path-join': noUnconfinedPathJoin,
+    'no-verification-status-literal': noVerificationStatusLiteral,
+    'no-runtime-name-literal': noRuntimeNameLiteral,
   },
 };
 
@@ -130,6 +134,35 @@ export default tseslint.config(
       'gsd-core/bin/lib/planning-document.cjs',
       // #2401: tsc-generated runtime artifact — lint the src/verify-command-grounding.cts source.
       'gsd-core/bin/lib/verify-command-grounding.cjs',
+      // #5139 (epic #5056 Phase 6): tsc-generated runtime artifacts of the gate modules — lint the
+      // src/gate-*.cts, src/decision-coverage-support.cts and src/check-auto-mode.cts sources.
+      'gsd-core/bin/lib/check-auto-mode.cjs',
+      'gsd-core/bin/lib/decision-coverage-support.cjs',
+      'gsd-core/bin/lib/gate-args.cjs',
+      'gsd-core/bin/lib/gate-config.cjs',
+      'gsd-core/bin/lib/gate-decision-coverage-plan.cjs',
+      'gsd-core/bin/lib/gate-decision-coverage-verify.cjs',
+      // #5164 (epic #5056 Phase 7): the evaluation-scope resolver, a gate support module.
+      'gsd-core/bin/lib/gate-evaluation-scope.cjs',
+      // #5170 (epic #5056 Phase 8): typed gate evidence and the verdict-to-exit mapping.
+      'gsd-core/bin/lib/gate-evidence.cjs',
+      'gsd-core/bin/lib/gate-exit.cjs',
+      'gsd-core/bin/lib/gate-api-coverage-verify-pre.cjs',
+      'gsd-core/bin/lib/gate-gap-analysis-plan-post.cjs',
+      'gsd-core/bin/lib/gate-predicate.cjs',
+      'gsd-core/bin/lib/gate-phase-context.cjs',
+      'gsd-core/bin/lib/gate-tdd-red-evidence.cjs',
+      'gsd-core/bin/lib/gate-tdd-review-checkpoint.cjs',
+      'gsd-core/bin/lib/gate-ui-plan.cjs',
+      'gsd-core/bin/lib/gate-ui-safety.cjs',
+      // #5219 (epic #5056, ADR-5057 §4 arm C): the four drift / prohibition gates, moved out of verify.cts.
+      'gsd-core/bin/lib/gate-schema-drift.cjs',
+      'gsd-core/bin/lib/gate-codebase-drift.cjs',
+      'gsd-core/bin/lib/gate-context-drift.cjs',
+      'gsd-core/bin/lib/gate-prohibition-enforcement.cjs',
+      'gsd-core/bin/lib/gate-verdict.cjs',
+      'gsd-core/bin/lib/gate-verify-command-paths.cjs',
+      'gsd-core/bin/lib/gate-verify-failure-directions.cjs',
       'gsd-core/bin/lib/cli-exit.cjs',
       'gsd-core/bin/lib/external-job.cjs',
       'gsd-core/bin/lib/edge-probe.cjs',
@@ -138,6 +171,8 @@ export default tseslint.config(
       'gsd-core/bin/lib/prohibition-enforcement.cjs',
       // #3770: tsc-generated runtime artifact — lint the src/tdd-red-evidence.cts source.
       'gsd-core/bin/lib/tdd-red-evidence.cjs',
+      // #4692: tsc-generated — lint the src/report-parser.cts source.
+      'gsd-core/bin/lib/report-parser.cjs',
       // #4984: tsc-generated — lint the src/pr-branch-patterns.cts source.
       'gsd-core/bin/lib/pr-branch-patterns.cjs',
       // #4984: tsc-generated — lint the src/undo-commit-selection.cts source.
@@ -304,6 +339,7 @@ export default tseslint.config(
       'gsd-core/bin/lib/phases-command-router.cjs',
       'gsd-core/bin/lib/verify-command-router.cjs',
       'gsd-core/bin/lib/verification.cjs',
+      'gsd-core/bin/lib/phase-status.cjs',
       'gsd-core/bin/lib/verification-command-router.cjs',
       'gsd-core/bin/lib/eval.cjs',
       'gsd-core/bin/lib/eval-command-router.cjs',
@@ -331,6 +367,8 @@ export default tseslint.config(
       'gsd-core/bin/lib/docs.cjs',
       'gsd-core/bin/lib/check-command-router.cjs',
       'gsd-core/bin/lib/frontmatter.cjs',
+      'gsd-core/bin/lib/frontmatter-fence.cjs',
+      'gsd-core/bin/lib/frontmatter-splice.cjs',
       'gsd-core/bin/lib/learnings.cjs',
       'gsd-core/bin/lib/gsd2-import.cjs',
       'gsd-core/bin/lib/profile-pipeline.cjs',
@@ -485,6 +523,33 @@ export default tseslint.config(
       // #3624 (epic #3411 Phase 4): flag an exact-case env-var read off a
       // non-process.env receiver. See CONTEXT.md DEFECT.WINDOWS-EXACT-CASE-ENV-ACCESS.
       'local/no-exact-case-env-access': 'error',
+      // #5118 (ADR-5057 Phase 4): the verification-status vocabulary is a
+      // closed enum owned by src/verification.cts (VERIFICATION_STATUS); a
+      // literal compared against a verification status elsewhere in src/ is a
+      // re-derivation. The rule exempts the owner by path.
+      'local/no-verification-status-literal': 'error',
+      // #5169 (ADR-5057 Phase 10): the runtime descriptor owns every
+      // runtime-specific fact; comparing a runtime identifier to a registered
+      // runtime-id literal re-derives one. Exempts the owner by path.
+      'local/no-runtime-name-literal': 'error',
+    },
+  },
+
+  // #5169: the same rule on the two non-.cts surfaces that hold install and
+  // hook logic — the hand-written installer and the shipped hook scripts.
+  {
+    files: ['bin/install.js', 'hooks/**/*.js'],
+    plugins: {
+      local: localPlugin,
+    },
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: {
+        ...globals.node,
+      },
+    },
+    rules: {
+      'local/no-runtime-name-literal': 'error',
     },
   },
 
@@ -884,6 +949,71 @@ export default tseslint.config(
         args: 'none',
         varsIgnorePattern: '^_',
         caughtErrors: 'none',
+      }],
+    },
+  },
+
+  // ── #5139 (epic #5056, ADR-5057 §4 first bullet): a gate returns a GateVerdict ─────────────
+  // A gate module decides and RETURNS; only the command router formats output. So a gate module
+  // (`src/gate-*.cts`), the decision-coverage support module and the auto-mode state reader may
+  // not import any io module (`./io.cjs` by name, or any `**/io.cjs` / `**/io` path: `output()` /
+  // `error()` / `ERROR_REASON`), and perform no direct console / stdout / stderr write
+  // (`no-console`; `process.stdout` / `process.stderr` are not touched). `@typescript-eslint`'s
+  // import variant is used because it also covers the `import x = require('./io.cjs')` form this
+  // repo's .cts sources use. tests/check-router-gate-boundaries.test.cjs replays this exact
+  // setting over violating snippets and over the real files.
+  {
+    files: ['src/gate-*.cts', 'src/decision-coverage-support.cts', 'src/check-auto-mode.cts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': ['error', {
+        paths: [{
+          name: './io.cjs',
+          message: 'A gate module returns a GateVerdict / GateUsageFailure (src/gate-verdict.cts); only the command router imports ./io.cjs and formats output (#5139).',
+        }],
+        patterns: [{
+          group: ['**/io.cjs', '**/io'],
+          message: 'A gate module imports no io module: it returns a GateVerdict / GateUsageFailure (src/gate-verdict.cts) and only the command router formats output (#5139).',
+        }],
+      }],
+      'no-console': 'error',
+      'no-restricted-properties': ['error',
+        { object: 'process', property: 'stdout', message: 'A gate module performs no direct stdout write: it returns a GateVerdict and only the command router formats output (#5139).' },
+        { object: 'process', property: 'stderr', message: 'A gate module performs no direct stderr write: it returns a GateVerdict / GateUsageFailure and only the command router formats output (#5139).' },
+      ],
+    },
+  },
+
+  // The router parses argv and formats; it reads no file and runs no subprocess (design D6.1). Every
+  // gate that needs either lives in a gate module. The named shell-projection imports are the
+  // exec/git/file-read helpers; the module's pure path helpers stay importable.
+  {
+    files: ['src/check-command-router.cts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': ['error', {
+        paths: [
+          // Every spelling: the bare and `node:` names, and the promise API.
+          ...['fs', 'node:fs', 'fs/promises', 'node:fs/promises'].map((name) => ({
+            name,
+            message: 'The command router parses argv and formats; a gate module reads files (#5139).',
+          })),
+          ...['child_process', 'node:child_process'].map((name) => ({
+            name,
+            message: 'The command router runs no subprocess; a gate module does, through the bounded exec seam (#5139).',
+          })),
+          {
+            name: './shell-command-projection.cjs',
+            importNames: ['execTool', 'execGit', 'platformReadSync', 'platformWriteSync'],
+            message: 'The command router runs no subprocess and reads no file; a gate module does (#5139).',
+          },
+        ],
+        // ADR-5057 §4 unrepresentable-by-construction (#5219): the router imports a verb's logic only
+        // from a gate module, so a verb implemented elsewhere (verify.cts, a producer's own router) and
+        // wired in here is a lint failure, not a review catch. The non-gate imports are the output
+        // seam, the exit/verdict seams (`gate-*`) and the two gate-support modules the router reads.
+        patterns: [{
+          group: ['./*', '../*', '!./gate-*.cjs', '!./io.cjs', '!./check-auto-mode.cjs', '!./decision-coverage-support.cjs', '!./shell-command-projection.cjs'],
+          message: 'The command router dispatches to gate modules (src/gate-*.cts) only; implement the verb as a gate module that returns a GateResult (ADR-5057 §4, #5219).',
+        }],
       }],
     },
   },

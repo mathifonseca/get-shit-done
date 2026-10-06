@@ -12,6 +12,7 @@
 const _require: NodeRequire = require;
 const path = _require('node:path') as typeof import('node:path');
 const { tryWithinRootLexical } = _require('./security.cjs') as typeof import('./security.cjs');
+const { hostBehaviorsFor } = _require('./runtime-name-policy.cjs') as typeof import('./runtime-name-policy.cjs');
 
 // #2870: InstallScope is owned by install-scope.cts, not re-declared here.
 // `isGlobalScope` centralizes the `scope === 'global'` boolean projection
@@ -218,7 +219,7 @@ function createRuntimeArtifactInstallPlan(args: CreateRuntimeArtifactInstallPlan
   // `undefined` here) — `isGlobalScope` projects it to the boolean
   // `_computePathPrefix`'s existing `isGlobal: boolean` API requires.
   const isGlobal = isGlobalScope(scope);
-  const isOpencode = layout.runtime === 'opencode';
+  const isOpencode = hostBehaviorsFor(layout.runtime).opencodePathPrefix === true;
   const isWindowsHost = (platform ?? process.platform) === 'win32';
   // #4377: descriptor-derived local dir name, so an opted-in local install
   // emits a project-relative prefix instead of this checkout's absolute path.

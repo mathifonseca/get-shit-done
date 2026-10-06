@@ -38,7 +38,9 @@ const CLAUDE_AXES = CLAUDE_CAP.runtime.hostIntegration;
 // Requiring the installer (not as main) never runs the CLI; GSD_TEST_MODE is set
 // defensively to match the install-test convention.
 process.env.GSD_TEST_MODE = process.env.GSD_TEST_MODE || '1';
-const installMod = require('../bin/install.js');
+// #5169: the single host-behaviors accessor and its #338 fail-safe floor live in
+// the runtime-name-policy owner module, not in bin/install.js.
+const { hostBehaviorsFor, FALLBACK_HOST_BEHAVIORS } = require('../gsd-core/bin/lib/runtime-name-policy.cjs');
 
 // -- AC2: driven through the public interface (imperative adapter) -----------
 
@@ -160,8 +162,8 @@ test('bin/install.js contains no `runtime === "claude"` / `runtime !== "claude"`
 // reference host must degrade CLOSED (safe) for its privacy-critical keys.
 
 test('claude #338-critical host behaviors degrade CLOSED when the capability registry cannot load', () => {
-  // Simulate a broken bundle: registry is undefined.
-  const degraded = installMod._resolveHostBehaviors('claude', undefined);
+  // Simulate a broken bundle: the registry is null (it failed to load).
+  const degraded = hostBehaviorsFor('claude', null);
   assert.equal(degraded.settingsFileByScope.local, 'settings.local.json',
     '#338: a claude LOCAL install must still route to the gitignored settings.local.json');
   assert.equal(degraded.settingsFileByScope.global, 'settings.json');
@@ -171,17 +173,17 @@ test('claude #338-critical host behaviors degrade CLOSED when the capability reg
 
 test('with the registry present, claude host behaviors come from the live descriptor (superset of the fail-safe floor)', () => {
   const reg = require('../gsd-core/bin/lib/capability-registry.cjs');
-  const declared = installMod._resolveHostBehaviors('claude', reg);
+  const declared = hostBehaviorsFor('claude', reg);
   assert.equal(declared.settingsFileByScope.local, 'settings.local.json');
   assert.equal(declared.localInstallStyle, 'legacy-flat');
   assert.equal(declared.authorsCanonicalWorkflow, true);
   // The fail-safe floor is a strict subset of what the descriptor declares.
-  for (const k of Object.keys(installMod.FALLBACK_HOST_BEHAVIORS.claude)) {
+  for (const k of Object.keys(FALLBACK_HOST_BEHAVIORS.claude)) {
     assert.ok(k in declared, `descriptor must still declare the #338-critical key '${k}'`);
   }
 });
 
 test('a non-reference runtime has no fail-safe fallback (degrades to the generic path)', () => {
-  assert.deepEqual(installMod._resolveHostBehaviors('opencode', undefined), {});
-  assert.deepEqual(installMod._resolveHostBehaviors('codex', undefined), {});
+  assert.deepEqual(hostBehaviorsFor('opencode', null), {});
+  assert.deepEqual(hostBehaviorsFor('codex', null), {});
 });

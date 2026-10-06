@@ -10,7 +10,7 @@
  * was declaration-only. This module is the generic evaluation path.
  *
  * The workflow gate-dispatch calls this evaluator (via the `gsd_run check predicate`
- * subcommand in check-command-router) for any gate whose `check` carries a
+ * subcommand, implemented by gate-predicate.cts) for any gate whose `check` carries a
  * `predicate` instead of a `query`. The evaluator dispatches by `predicate.kind`
  * and returns the existing `{ block, message }` gate contract. A THROWN error
  * (malformed predicate / unknown kind) is mapped by the CLI wrapper to a

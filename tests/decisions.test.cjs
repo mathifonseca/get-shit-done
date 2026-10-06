@@ -401,7 +401,8 @@ describe('parseDecisions — parser QA matrix', () => {
  * These exercise cmdDecisionCoveragePlan via the real CLI (check decision-coverage-plan).
  *
  * Naming: check.decision-coverage-plan is invoked as `query check.decision-coverage-plan`.
- * The gate lives in check-command-router.cts; outcome flows from decisions.cts extractDecisions.
+ * The gate lives in gate-decision-coverage-plan.cts (routed by check-command-router.cts); outcome
+ * flows from decisions.cts extractDecisions.
  */
 
 function writeContextFile(phaseDir, content) {
@@ -668,7 +669,7 @@ describe('FIX B: parse-miss on malformed D-NN bullet → could-not-parse (#1372)
     // Uses extractDecisions directly to confirm gate-layer behavior
     const md = '<decisions>\n- **D-01:** Use OAuth 2.0\n- **D-02 malformed no colon or dash** text\n</decisions>';
     const result = extractDecisions(md);
-    // The check-command-router uses outcome === 'could-not-parse' && decisions.length where
+    // The gate (gate-decision-coverage-plan.cts) uses outcome === 'could-not-parse' && decisions.length where
     // trackable.length === 0 → passed:false. Confirm outcome propagates correctly.
     assert.strictEqual(result.outcome, 'could-not-parse');
     // D-01 was parsed (it was valid); the result still contains it for context
@@ -2534,7 +2535,7 @@ describe('check.decision-coverage-verify — phase-prefixed decisions are readab
  * follow-up to #4130, merged as #4357).
  *
  * Convention mirrored from the ONE flag-driven sibling check verb
- * (`check predicate`, src/check-command-router.cts): `--flag value` pairs
+ * (`check predicate`, src/gate-predicate.cts): `--flag value` pairs
  * parsed with parsePredicateFlags semantics, `--context <path>` supplying the
  * CONTEXT.md path, the flag WINNING over a same-purpose positional, and the
  * positional form kept working (no sibling deprecates positionals; the

@@ -552,6 +552,108 @@ describe('roadmap-parser: extractCurrentMilestone', () => {
     assert.ok(result.includes('Phase 1: Alpha'), 'selected milestone phases retained');
   });
 
+  // #5007 (Phase 6 / ADR-4910 §8): the preamble strip's phase-number token was
+  // tightened from the generic `[\w][\w.-]*` to the real PHASE_NUMBER_TOKEN_SOURCE
+  // grammar (digits, optional trailing letter, dotted subphases) when the strip
+  // moved onto phaseHeadingPrefixSrcFor. Prove real phase-number shapes —
+  // plain digits and a decimal subphase — still match and strip correctly.
+  test('#5007 — preamble strip still removes a decimal-subphase heading after the token tightening', () => {
+    writeState(tmpDir, { milestone: 'v9.0' });
+    const content = [
+      '# ROADMAP',
+      '',
+      '## Preamble',
+      '',
+      '### Phase 04.1: DecimalGhost',
+      '',
+      '**Goal:** should be stripped',
+      '',
+      '## 🚧 v9.0 Current',
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** do alpha',
+      '',
+    ].join('\n');
+    writeRoadmap(tmpDir, content);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = extractCurrentMilestone(roadmap, tmpDir);
+    assert.ok(!result.includes('DecimalGhost'), 'a decimal subphase (`04.1`) still matches PHASE_NUMBER_TOKEN_SOURCE and is stripped');
+    assert.ok(result.includes('Phase 1: Alpha'), 'selected milestone phases retained');
+  });
+
+  // #5007: the SAME strip regex is also reached from extractCurrentMilestoneScoped's
+  // <details>-fallback branch (no version-bearing heading anywhere in the document,
+  // the current milestone is identified only via a <summary> tag inside a <details>
+  // block) — no prior pinning test exercised this branch directly. Cover it here so
+  // the token-tightening is verified against BOTH call sites of the shared const,
+  // not just the preambleWithoutPhaseDetails site above.
+  test('#5007 — <details>-fallback branch strips preamble phase blocks (plain and decimal) after the token tightening', () => {
+    writeState(tmpDir, { milestone: 'v9.0' });
+    const content = [
+      '# ROADMAP',
+      '',
+      '## Preamble',
+      '',
+      '### Phase 3: PreambleGhost',
+      '',
+      '**Goal:** should be stripped',
+      '',
+      '### Phase 04.1: PreambleDecimalGhost',
+      '',
+      '**Goal:** should also be stripped',
+      '',
+      '<details>',
+      '<summary>v9.0 Archived</summary>',
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** do alpha',
+      '',
+      '</details>',
+      '',
+    ].join('\n');
+    writeRoadmap(tmpDir, content);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = extractCurrentMilestone(roadmap, tmpDir);
+    assert.ok(!result.includes('PreambleGhost'), 'plain-digit preamble phase block is stripped on the <details>-fallback branch');
+    assert.ok(!result.includes('PreambleDecimalGhost'), 'decimal-subphase preamble phase block is stripped on the <details>-fallback branch');
+    assert.ok(result.includes('Phase 1: Alpha'), 'the archived phase inside the located <details> block is retained');
+    assert.ok(result.includes('<summary>v9.0 Archived</summary>'), 'the summary tag that located the block is retained');
+  });
+
+  // #5007 (Phase 6 / ADR-4910 §8): currentSectionHasPhaseDetails (the boolean
+  // gate deciding whether the preamble strip runs at all) migrated off its own
+  // hand-rolled `#{2,4}\s*Phase\s+\S` literal. The #3235 tests above already
+  // pin the TRUE branch (current section has its own phase details, preamble
+  // is stripped); this pins the FALSE branch directly via extractCurrentMilestone
+  // (the #2947 test elsewhere in this file exercises the same false branch
+  // only indirectly, through the CLI's phase_count assertion).
+  test('#5007 — currentSectionHasPhaseDetails false branch: preamble phases preserved when the current section has none of its own', () => {
+    writeState(tmpDir, { milestone: 'v9.0' });
+    const content = [
+      '# ROADMAP',
+      '',
+      '## Phases',
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** do alpha',
+      '',
+      '## v9.0 Progress',
+      '',
+      '### v9.0 phase progress',
+      '',
+      '| Phase | Status |',
+      '|-------|--------|',
+      '| 1     | Planned |',
+    ].join('\n');
+    writeRoadmap(tmpDir, content);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = extractCurrentMilestone(roadmap, tmpDir);
+    assert.ok(result.includes('Phase 1: Alpha'), 'preamble phase details survive when the selected section has none of its own');
+  });
+
   // The fixture below carries its own `## Phase Details` heading in the preamble.
   // The LF-only sibling test above can't catch a CRLF-specific regression in the
   // `[^\n]*` / `\n?` tail of the Phase Details strip regex — those tail tokens are
@@ -3893,5 +3995,92 @@ describe('roadmap-parser: extractPhaseFieldMultiline — #4837 structural bounda
       'REQ-01, REQ-02',
     );
     assert.strictEqual(extractPhaseFieldMultiline('no field here\n', 'Goal'), null);
+  });
+});
+
+// ─── classifyMilestoneScalar / explicit-null milestone (#5038) ─────────────────
+
+describe('roadmap-parser: classifyMilestoneScalar (#5038)', () => {
+  const { classifyMilestoneScalar } = roadmapParser;
+  const NULL_SPELLINGS = ['null', 'Null', 'NULL', '~'];
+  const pad = fc.string({ unit: fc.constantFrom(' ', '\t'), maxLength: 3 });
+
+  test('every null spelling, with optional quotes and a trailing comment, is an explicit null', () => {
+    fc.assert(fc.property(
+      fc.constantFrom(...NULL_SPELLINGS),
+      fc.constantFrom('', "'", '"'),
+      fc.option(fc.string({ unit: fc.constantFrom('a', 'b', ' ', '#', '1'), maxLength: 8 }), { nil: undefined }),
+      pad,
+      pad,
+      (spelling, quote, comment, lead, trail) => {
+        const raw = `${lead}${quote}${spelling}${quote}${comment === undefined ? '' : ` #${comment}`}${trail}`;
+        assert.deepStrictEqual(classifyMilestoneScalar(raw), { explicitNull: true, version: null });
+      },
+    ));
+  });
+
+  test('any other token is a version equal to the trimmed input', () => {
+    fc.assert(fc.property(
+      fc.string({ unit: fc.constantFrom('v', '1', '2', '.', '-', 'a', 'n', 'u', 'l', '#'), minLength: 1, maxLength: 10 }),
+      pad,
+      pad,
+      (token, lead, trail) => {
+        fc.pre(!NULL_SPELLINGS.includes(token));
+        // A `#` only starts a comment after whitespace, so none of these are null.
+        const result = classifyMilestoneScalar(`${lead}${token}${trail}`);
+        assert.deepStrictEqual(result, { explicitNull: false, version: token });
+      },
+    ));
+  });
+
+  test('`#` boundary: `null#x` is a version, `null #x` is null', () => {
+    assert.deepStrictEqual(classifyMilestoneScalar('null#x'), { explicitNull: false, version: 'null#x' });
+    assert.deepStrictEqual(classifyMilestoneScalar('null #x'), { explicitNull: true, version: null });
+  });
+
+  test('blank or non-string input is absent, not null', () => {
+    for (const raw of ['', '   ', undefined, null]) {
+      assert.deepStrictEqual(classifyMilestoneScalar(raw), { explicitNull: false, version: null });
+    }
+  });
+});
+
+describe('roadmap-parser: sectioned ROADMAP with explicit `milestone: null` (#5038)', () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = createTempProject(); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  const sectioned = [
+    '# Roadmap',
+    '',
+    '- 🚧 **v1.1 Current** - in progress',
+    '',
+    '## v1.1 Current',
+    '',
+    '### Phase 2: Second',
+    '',
+    '## v1.0 Earlier',
+    '',
+    '### Phase 1: First',
+    '',
+  ].join('\n');
+
+  test('control: a bound milestone resolves a raw range', () => {
+    writeState(tmpDir, { milestone: 'v1.1' });
+    assert.ok(roadmapParser.currentMilestoneRawRanges(sectioned, tmpDir), 'bound milestone yields ranges');
+  });
+
+  test('explicit null does not fall back to the in-progress bullet (currentMilestoneRawRanges)', () => {
+    writeState(tmpDir, { milestone: 'null' });
+    assert.strictEqual(roadmapParser.currentMilestoneRawRanges(sectioned, tmpDir), null);
+  });
+
+  test('explicit null does not narrow extractCurrentMilestone to the bullet milestone', () => {
+    writeState(tmpDir, { milestone: 'v1.1' });
+    const bound = extractCurrentMilestone(sectioned, tmpDir);
+    writeState(tmpDir, { milestone: 'null' });
+    const unbound = extractCurrentMilestone(sectioned, tmpDir);
+    assert.ok(!bound.includes('Phase 1: First'), 'control narrows to v1.1');
+    assert.ok(unbound.includes('Phase 1: First'), 'explicit null leaves the whole document, not the v1.1 slice');
   });
 });

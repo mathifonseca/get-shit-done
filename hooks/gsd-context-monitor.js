@@ -201,6 +201,29 @@ function writeSentinel(target, payload) {
   } catch (e) { /* best effort — see above */ }
 }
 
+// The calendar day the CRITICAL auto-record writes into STATE.md (#4905): the
+// operator's LOCAL day through the clock seam, which honors GSD_NOW_MS under
+// GSD_TEST_MODE, like every other date GSD stamps into planning files. The
+// clock is compiled into gsd-core/bin/lib/, so it is reached through the
+// self-healing build seam (#3582). If the library is missing and cannot
+// self-build, the host's local day stands in — still never the UTC day.
+function localDayStamp() {
+  try {
+    const { ensureRuntimeBuild } = require('../gsd-core/bin/ensure-runtime-build.cjs');
+    ensureRuntimeBuild();
+    return require('../gsd-core/bin/lib/clock.cjs').realClock.localToday();
+  } catch {
+    const now = new Date();
+    return [now.getFullYear(), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0')].join('-');
+  }
+}
+
+// The Stopped At breadcrumb for /gsd:resume-work (#1974). usedPct is coerced to
+// a safe number in case the bridge file is malformed.
+function criticalStoppedAt(usedPct) {
+  return `context exhaustion at ${Number(usedPct) || 0}% (${localDayStamp()})`;
+}
+
 let input = '';
 // Assigned by main(); the handler below clears it. Declared out here rather
 // than inside main() because the handler closes over it.
@@ -464,9 +487,7 @@ const handleStdinEnd = () => {
         // Using __dirname makes this work on Claude Code, OpenCode, Gemini,
         // Kilo, etc. without hardcoding ~/.claude/.
         const gsdTools = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
-        // Coerce usedPct to a safe number in case bridge file is malformed
-        const safeUsedPct = Number(usedPct) || 0;
-        const stoppedAt = `context exhaustion at ${safeUsedPct}% (${new Date().toISOString().split('T')[0]})`;
+        const stoppedAt = criticalStoppedAt(usedPct);
         spawn(
           process.execPath,
           [gsdTools, 'state', 'record-session', '--stopped-at', stoppedAt],
@@ -560,8 +581,10 @@ if (require.main === module) {
   main();
 }
 
-// Exported for the #4285 property test only. The two constants ride along so a
-// test asserts the fallback pair against the SOURCE of truth rather than
-// re-hardcoding 35/25 — a test carrying its own copy of the defaults would stay
-// green if the constants were edited.
-module.exports = { resolveThresholds, WARNING_THRESHOLD, CRITICAL_THRESHOLD };
+// Exported for tests only. resolveThresholds and the two constants serve the
+// #4285 property test; the constants ride along so a test asserts the fallback
+// pair against the SOURCE of truth rather than re-hardcoding 35/25 — a test
+// carrying its own copy of the defaults would stay green if the constants were
+// edited. criticalStoppedAt lets the #4905 test pin the breadcrumb's day
+// without waiting on the detached record-session writer (#3726).
+module.exports = { resolveThresholds, WARNING_THRESHOLD, CRITICAL_THRESHOLD, criticalStoppedAt };

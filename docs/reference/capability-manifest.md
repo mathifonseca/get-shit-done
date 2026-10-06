@@ -194,10 +194,11 @@ Adding a key is a reviewed first-party change, which is [ADR-1016](../adr/1016-r
 
 > **History.** `hostBehaviors` went unvalidated until [#2801](https://github.com/open-gsd/gsd-core/issues/2801), and this page previously described it as a deliberate open seam sanctioned by ADR-1016. That attribution was wrong — ADR-1016 does not mention `hostBehaviors` at all. See the [ADR-1016 amendment](../adr/1016-runtime-capability-descriptor.md#amendment-2026-08-09-hostbehaviors-is-closed-2801).
 
-The vocabulary holds 59 keys; 39 of them are set by exactly one capability. This table is not exhaustive — it lists the keys with the widest reuse so a reader can pattern-match new ones against the same shape:
+The vocabulary holds 75 keys; 52 of them are set by exactly one capability. This table is not exhaustive — it lists the keys with the widest reuse so a reader can pattern-match new ones against the same shape:
 
 | Key | Capabilities declaring it |
 |---|---|
+| `contentRewriteProfile` | 14 |
 | `reapplyCommand` | 9 |
 | `skipSharedHooksInstall` | 8 |
 | `frontmatterDialect` | 5 |
@@ -207,6 +208,27 @@ The vocabulary holds 59 keys; 39 of them are set by exactly one capability. This
 | `nativePlugin` | 3 |
 | `skipUpdateBannerCommand` | 3 |
 | `verificationStyle` | 3 |
+
+#### Host behaviors that replaced a runtime-name test ([#5169](https://github.com/open-gsd/gsd-core/issues/5169))
+
+Install and hook code does not compare a runtime id to a literal; it reads one of these keys through `hostBehaviorsFor(runtime)` (`src/runtime-name-policy.cts`). `local/no-runtime-name-literal` fails the lint on a new comparison.
+
+| Key | Type | Declared by | What it controls |
+|---|---|---|---|
+| `contentRewriteProfile` | string | 14 runtimes | Which path-rewrite profile the content-rewrite engine applies: `slash-own-tilde`, `slash-bare-own-tilde`, `slash-lookahead-own-tilde`, `slash-lookahead-nested-own-devin`, `slash-lookahead-own-derived`, `slash-bare-own-derived`, `slash-bare-own-tilde-bare`, `attribution-only`, `slash-tilde-restore`, `branded-lookahead-own-derived`, `slash-bare`. Omitted: no path rewrites. Hosts that share a body share a profile. |
+| `skipRuntimeDefaultsStamp` | boolean | `claude` | Skip the non-Claude runtime-identity stamp. |
+| `skipCompactAgents` | boolean | `claude` | Do not stage `*.compact.md` agent variants. |
+| `omitBashRunnerOnWindows` | boolean | `claude` | Emit a shell hook as the bare script path on Windows. |
+| `specRootSkillPass` | boolean | `claude` | Run the global spec-root reference pass over staged skills. |
+| `restoreAtRefTildeInAgents` / `restoreAtRefTildeInSpecTree` | boolean | `claude` | Restore `@~/` include references in agent bodies / the spec tree. |
+| `legacyFlatSkillsCleanup`, `bareStemSkillsCleanup`, `categoryContainerCleanup` | boolean | `hermes` | The Hermes pre-nesting cleanups on install and uninstall. |
+| `opencodePathPrefix` | boolean | `opencode` | Use the OpenCode path-prefix form. |
+| `requiresSubagentPair` | boolean | `kimi` | An agent counts as installed only when both its persona YAML and prompt file exist. |
+| `reclaimsKimiLegacyHooksRoot` | boolean | `kimi-code` | Honor `--reclaim-kimi-legacy`. |
+| `rewriteClaudeAtIncludes` | boolean | `codex` | Rewrite `@~/.claude/…` includes in installed files to the Codex root. |
+| `bakesStaticAgentModel`, `bakedAgentFileExtensions` | boolean, string[] | `codex`, `kilo`, `opencode` | The runtime bakes the resolved model into agent files at install time; the stale-bake guard watches the listed extensions. |
+
+The path and label accessors (`getDirName`, `getRuntimeLabel`, `getGlobalConfigHomeFragment`, `getGlobalConfigDir`, `getGlobalSkillsBase`) **refuse** an id that is not registered (`UnknownRuntimeError`) instead of returning Claude Code's values; an empty id is the generic "no runtime" path and keeps its defaults. `hostBehaviorsFor` itself answers `{}` for an unregistered or retired label — no declared behaviors, the generic path — because guard and hook code read it on user-supplied labels.
 
 **`reviewerCli` has been removed.** It was a boolean that marked a runtime capability as also being a reviewer lane. [ADR-2782](../adr/2782-reviewer-lane-capability-surface.md) replaced it with the [`reviewer` body](#reviewer-body-role-reviewer-or-on-any-role); it survived one release (1.9.0 → 1.10.0) as a derived legacy alias and was deleted in Phase 7 ([#2801](https://github.com/open-gsd/gsd-core/issues/2801)). No shipped capability declares it.
 

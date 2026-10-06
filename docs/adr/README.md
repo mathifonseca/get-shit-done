@@ -228,7 +228,7 @@ These govern the system as it stands. Cite these.
 | [ADR-1235](1235-descriptor-driven-agent-conversion-migration.md) | Migrate agent conversion to the descriptor-driven install path | Accepted | — |
 | [ADR-1239](1239-gsd-embeddable-orchestration-engine.md) | GSD as an Embeddable Orchestration Engine | Accepted | — |
 | [ADR-1244](1244-capability-ecosystem.md) | Capability Ecosystem: third-party authoring, versioned manifests, and URL import/upgrade/remove | Accepted | — |
-| [ADR-1372](1372-markdown-sectionizer-seam.md) | Canonical markdown-structure parsing — the `markdown-sectionizer` seam | Accepted | — |
+| [ADR-1372](1372-markdown-sectionizer-seam.md) | Canonical markdown-structure parsing — the `markdown-sectionizer` seam | Accepted | [ADR-4910](4910-planning-document-seam.md) |
 | [ADR-1411](1411-resolution-provenance.md) | Resolution must report provenance, not fall open silently | Accepted | — |
 | [ADR-1508](1508-runtime-artifact-conversion-module.md) | Runtime Artifact Conversion Module owns per-runtime content rewriting | Accepted | — |
 | [ADR-1517](1517-reviewer-instances-config-surface.md) | Reviewer instances — bounded config surface for same-adapter multi-model review | Accepted | — |
@@ -244,7 +244,7 @@ These govern the system as it stands. Cite these.
 | [ADR-1990](1990-existing-code-onboarding.md) | Existing Code Onboarding Module owns deterministic repo-state detection and onboarding route selection | Accepted | — |
 | [ADR-2008](2008-command-exit-zero-gate.md) | Generic gate-predicate evaluator | Accepted | — |
 | [ADR-2121](2121-phase-identifier-parsing-consolidation.md) | Phase-Identifier Parsing Consolidation | Accepted | — |
-| [ADR-2143](2143-markdown-table-and-mutation-consolidation.md) | Markdown Table Model, Bounded Mutation, and Fail-Loud Consolidation (#1372 part 2) | Accepted | — |
+| [ADR-2143](2143-markdown-table-and-mutation-consolidation.md) | Markdown Table Model, Bounded Mutation, and Fail-Loud Consolidation (#1372 part 2) | Accepted | [ADR-4910](4910-planning-document-seam.md) |
 | [ADR-2164](2164-statusline-scope-boundary.md) | Statusline draws its data boundary at local, read-only sources | Accepted | — |
 | [ADR-2207](2207-status-field-lifecycle-ownership.md) | STATE.md `Status` lifecycle — phase-completion writes an intermediate state; milestone-close owns termination | Accepted | — |
 | [ADR-2313](2313-codex-passive-model-posture.md) | Codex Adopts the Passive / Session-Only Model Posture | Accepted | — |
@@ -271,6 +271,9 @@ These govern the system as it stands. Cite these.
 | [ADR-4593](4593-macos-conformance-tier-architecture.md) | A macOS-specific conformance-tier classifier, separate from the Windows-oriented one | Accepted | — |
 | [ADR-4630](4630-dispatch-identity-and-isolation-decision-seam.md) | One Canonical Dispatch-Identity Owner and a Recorded Isolation Decision | Accepted | — |
 | [ADR-4641](4641-windows-selector-consolidation.md) | One Windows test selector, and a proportional ceiling on the conformance tier | Accepted | — |
+| [ADR-4780](4780-labeled-arguments-block.md) | Command templates label the user's arguments in a standing `&lt;arguments&gt;` block | Accepted | — |
+| [ADR-4910](4910-planning-document-seam.md) | Planning documents are read and written through one parse → mutate → serialize seam | Accepted | — |
+| [ADR-5057](5057-one-owner-per-workflow-verdict.md) | One owner per workflow verdict — phase status, verification, gates, runtime activation, planning writes | Accepted | — |
 
 ### Proposed
 
@@ -292,7 +295,6 @@ Decided in principle, not yet ratified. Do not cite as settled architecture.
 | [ADR-3942](3942-emitted-drift-ack-commit-trailer.md) | The emitted-drift acknowledgment is PR-lifetime data — it belongs in a commit trailer, not the working tree | Proposed | — |
 | [ADR-4629](4629-state-write-intent-beyond-frontmatter.md) | STATE.md write intent beyond frontmatter — bounded, verified writes | Proposed | — |
 | [ADR-4650](4650-path-containment-and-filename-classification-seam.md) | One path-containment predicate and one filename-classification helper | Proposed | — |
-| [ADR-4910](4910-planning-document-seam.md) | Planning documents are read and written through one parse → mutate → serialize seam | Proposed | — |
 
 ### Superseded, Retired, and Legacy
 

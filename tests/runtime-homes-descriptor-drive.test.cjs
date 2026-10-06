@@ -130,10 +130,19 @@ describe('descriptor-driven equivalence: defaults (no env vars, no probe hits)',
     });
   }
 
-  test('unknown runtime falls back to ~/.claude (CLAUDE_CONFIG_DIR unset)', () => {
+  test('an unknown runtime REFUSES instead of resolving to ~/.claude (#5169)', () => {
     const saved = clearAllEnvKeys();
     try {
-      assert.strictEqual(getGlobalConfigDir('totally-unknown-runtime-xyz'), path.join(HOME, '.claude'));
+      assert.throws(() => getGlobalConfigDir('totally-unknown-runtime-xyz'), { name: 'UnknownRuntimeError' });
+    } finally {
+      restoreEnvKeys(saved);
+    }
+  });
+
+  test('an absent runtime id resolves to the generic ~/.claude default (#5169)', () => {
+    const saved = clearAllEnvKeys();
+    try {
+      assert.strictEqual(getGlobalConfigDir(''), path.join(HOME, '.claude'));
     } finally {
       restoreEnvKeys(saved);
     }
@@ -1069,21 +1078,27 @@ describe('descriptor-driven equivalence: grok (not in registry)', () => {
   });
 });
 
-// ── GOLDEN UNKNOWN RUNTIME (Claude fallback) ──────────────────────────────────
+// ── UNKNOWN RUNTIME REFUSES (#5169; formerly the Claude fallback) ─────────────
 
-describe('descriptor-driven equivalence: unknown runtime fallback', () => {
-  test('unknown runtime → ~/.claude default', () => {
+describe('descriptor-driven equivalence: unknown runtime refuses', () => {
+  test('an unknown runtime refuses, with no CLAUDE_CONFIG_DIR set', () => {
     const saved = clearAllEnvKeys();
     try {
-      assert.strictEqual(getGlobalConfigDir('no-such-runtime'), path.join(HOME, '.claude'));
+      assert.throws(() => getGlobalConfigDir('no-such-runtime'), { name: 'UnknownRuntimeError' });
     } finally {
       restoreEnvKeys(saved);
     }
   });
 
-  test('unknown runtime → CLAUDE_CONFIG_DIR if set', () => {
+  test('an unknown runtime refuses even when CLAUDE_CONFIG_DIR is set (the Claude override never answers for another runtime)', () => {
     withEnv({ CLAUDE_CONFIG_DIR: '/custom/claude-for-unknown' }, () => {
-      assert.strictEqual(String(getGlobalConfigDir('no-such-runtime')).replace(/\\/g, '/'), '/custom/claude-for-unknown');
+      assert.throws(() => getGlobalConfigDir('no-such-runtime'), { name: 'UnknownRuntimeError' });
+    });
+  });
+
+  test('an absent runtime id resolves to CLAUDE_CONFIG_DIR when set (the generic path)', () => {
+    withEnv({ CLAUDE_CONFIG_DIR: '/custom/claude-for-absent' }, () => {
+      assert.strictEqual(String(getGlobalConfigDir('')).replace(/\\/g, '/'), '/custom/claude-for-absent');
     });
   });
 });
@@ -1251,9 +1266,14 @@ describe('bug #3126: runtime-homes getGlobalConfigDir — defaults', () => {
       }
     });
   }
-  test('unknown runtime falls back to ~/.claude', () => {
+  test('an unknown runtime REFUSES instead of falling back to ~/.claude (#5169)', () => {
     withEnv('CLAUDE_CONFIG_DIR', undefined, () => {
-      assert.strictEqual(getGlobalConfigDir('unknown-xyz'), path.join(os.homedir(), '.claude'));
+      assert.throws(() => getGlobalConfigDir('unknown-xyz'), { name: 'UnknownRuntimeError' });
+    });
+  });
+  test('an absent runtime id keeps the generic ~/.claude default (#5169)', () => {
+    withEnv('CLAUDE_CONFIG_DIR', undefined, () => {
+      assert.strictEqual(getGlobalConfigDir(''), path.join(os.homedir(), '.claude'));
     });
   });
 });

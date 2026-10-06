@@ -67,6 +67,16 @@ export function escapeRegex(value: string): string {
   return (escapeBuiltin ?? escapeMetachars)(value);
 }
 
+/**
+ * Escape `value` for a POSIX extended regular expression (e.g. `git log --extended-regexp
+ * --grep=…`). Always the plain backslash-escape of every ERE metacharacter, never
+ * `RegExp.escape`: that built-in writes a leading digit as `\x31`, which ERE does not read as a
+ * digit. #5139 (a plan id interpolated into a git `--grep` pattern).
+ */
+export function escapeEre(value: string): string {
+  return escapeMetachars(value);
+}
+
 export function literalPattern(value: string, flags?: string): RegExp {
   return new RegExp(escapeRegex(value), flags);
 }

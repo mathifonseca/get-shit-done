@@ -1,7 +1,7 @@
 @~/.claude/gsd-core/references/response-language-directive.md
 
 <purpose>
-Review source files changed during a phase for bugs, security issues, and code quality problems. Computes file scope (--files override > SUMMARY.md > git diff fallback), checks config gate, spawns gsd-code-reviewer agent, commits REVIEW.md, and presents results to user. When --fix is passed, delegates to code-review-fix.md after review to auto-apply findings via gsd-code-fixer.
+Review source files changed during a phase for bugs, security issues, and code quality problems. Computes file scope (--files override > SUMMARY.md > phase evaluation scope), checks config gate, spawns gsd-code-reviewer agent, commits REVIEW.md, and presents results to user. When --fix is passed, delegates to code-review-fix.md after review to auto-apply findings via gsd-code-fixer.
 </purpose>
 
 <required_reading>
@@ -19,7 +19,7 @@ Read all files referenced by the invoking prompt's execution_context before star
 Parse arguments and load project state:
 
 ```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { _gsd_at "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { set -- "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}" "$HOME/.gemini/antigravity-ide" "$HOME/.gemini/antigravity-cli" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}" "${CLINE_CONFIG_DIR:-$HOME/.cline}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}" "${CODEX_HOME:-$HOME/.codex}" "${COPILOT_CONFIG_DIR:-${COPILOT_HOME:-$HOME/.copilot}}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}" "${HERMES_HOME:-$HOME/.hermes}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}" "${KIMI_CONFIG_DIR:-$HOME/.config/agents}" "$HOME/.agents" "${KIMI_CODE_HOME:-$HOME/.kimi-code}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}" "${TRAE_CONFIG_DIR:-$HOME/.trae}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}" "${ZCODE_CONFIG_DIR:-$HOME/.zcode}" "${GROK_AGENTS_HOME:-$HOME/.agents}"; for _h; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
 PHASE_ARG="${1}"
 
 # Parse all code-review flags into a structured IR via code-review-flags.cjs.
@@ -47,9 +47,10 @@ FILES_OVERRIDE=$(echo "$FLAGS_JSON" | node -e "process.stdout.write(JSON.parse(r
 FIX_PARAM=""
 if [ "$FIX_FLAG" = "true" ]; then FIX_PARAM="--fix"; fi
 
-INIT=$(gsd_run query init.code-review "${PHASE_ARG}" $FIX_PARAM)
+GSD_WS=$(echo " $ARGUMENTS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+INIT=$(gsd_run query init.code-review ${GSD_WS:+--ws=${GSD_WS##* }} "${PHASE_ARG}" $FIX_PARAM)
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
-AGENT_SKILLS_REVIEWER=$(gsd_run query agent-skills gsd-code-reviewer)
+AGENT_SKILLS_REVIEWER=$(gsd_run query agent-skills gsd-code-reviewer ${GSD_WS:+--ws=${GSD_WS##* }})
 # #2072: resolve the routed model so model_overrides / models.verification are honored
 # (the resolver maps gsd-code-reviewer → phaseType "verification"); thread it below.
 REVIEWER_MODEL=$(gsd_run query resolve-model gsd-code-reviewer --raw)
@@ -223,116 +224,106 @@ NODE
     done
     
     if [ ${#REVIEW_FILES[@]} -eq 0 ]; then
-      echo "Warning: SUMMARY artifacts found but contained no file paths. Falling back to git diff."
+      echo "Warning: SUMMARY artifacts found but contained no file paths. Falling back to the phase evaluation scope."
     fi
   fi
 fi
 ```
 
-**Tier 3 — Git diff fallback (per D-02) and SUMMARY/diff cross-check (per #2666):**
+**Tier 3 — Phase evaluation scope (per D-02, #5164) and SUMMARY/scope cross-check (per #2666):**
 
-If no SUMMARY.md files found OR no files extracted from them, fall back to the git diff.
-Additionally, whenever a reliable diff base is available, cross-check the SUMMARY scope
-against the diff and warn about (then add) any changed files the SUMMARY extractor did not
-surface — so a partial SUMMARY result can no longer silently mask the rest of the phase.
+If no SUMMARY.md files found OR no files extracted from them, fall back to the phase's evaluation scope.
+Additionally, whenever the resolver returns a scope, cross-check the SUMMARY scope against it and warn
+about (then add) any in-scope files the SUMMARY extractor did not surface — so a partial SUMMARY result
+can no longer silently mask the rest of the phase.
+
+The scope is computed by the ONE resolver, `check evaluation-scope` (ADR-5057 §4, #5164) — this step
+derives no commit range of its own. The resolver returns the UNION of the phase's own commits' file
+sets (the `## Task Commits` rows of the phase's SUMMARYs), restricted to commits reachable from `HEAD`
+(a commit that lives only on another branch is named, never counted), with planning artifacts and
+lockfiles excluded. A range (`base..HEAD`) is deliberately not used: it keeps every interleaved
+non-phase commit in its window (#3926, #4563). The resolver also reports, by name rather than by
+count, what the union dropped: `outsideUnion` (changed in the phase window by other commits) and
+`unreachable` (task commits not on this branch). When the union is empty — a phase with no SUMMARY,
+no task rows, or only planning paths — the resolver widens to the phase-directory range and says so
+(`status: degraded`, `reason`); an unreadable phase or repository is `unresolvable`, never an empty
+scope that reports success. Its `rangeBase` (the parent of the commit that first added the phase
+directory, or `LAST_REVIEW_COMMIT` when a prior review exists — #3661) is `DIFF_BASE`, kept only for
+the reviewer lanes that need an anchor sha.
 ```bash
-# Compute diff base from phase commits — fail closed if no reliable base found.
-# #3503: anchor the grep to GSD's own conventional-commit phase scopes — the
-# subject-line formats this system itself emits (docs(phase-N): from
-# execute-phase.md, plan scopes feat(N-MM):/test(N-MM): from references/tdd.md,
-# bare phase scopes docs(N):). The #2989/#3191 prose anchor "[Pp]hase N"
-# matched free prose in ANY commit body — planning commits forward-reference
-# later phases ("deferred to Phase N per D-09"), doc commits use "### Phase N"
-# as a format example — and tail -1 (oldest match) turned each false positive
-# into a base unboundedly before the phase, while GSD's own scope commits
-# never contain the literal "Phase N" at all. The ^ anchor makes this a
-# subject-line match, so commit-body prose can never capture the base.
-# Workflows emit the UNPADDED roadmap phase number (docs(phase-6):) while
-# PADDED_PHASE is zero-padded ("06") — accept both spellings.
-# #3191: stay POSIX-ERE portable — the boundary is the closing paren + colon,
-# never \b (not a POSIX ERE token; under --extended-regexp it silently matches
-# nothing on macOS regex(3), making this fallback dead on Apple platforms).
-# #3995: a phase number is unique within a MILESTONE, not a repository. The
-# former message grep had no milestone bound, and its tail -1 deliberately
-# selected the OLDEST matching subject — dragging in previous milestones'
-# same-numbered phases and taking a 7-file phase to a 3388-file scope (plus
-# the >50 depth downgrade). The phase's own directory is the unique identity:
-# base = the parent of the first commit that added anything under PHASE_DIR
-# (the same anchor class git-base-branch's phaseStartCommit uses for
-# complexity triggering). Message subjects demonstrably do not carry enough
-# information to identify a phase — this was the grep's fifth failure.
-# KNOWN RESIDUAL: git log -- <dir> does not follow renames, so a LATER
-# milestone that reuses BOTH number and slug re-creates the same literal
-# path and the oldest A-commit is the previous occupant's. Number+slug
-# reuse is the narrow trigger; the reported archived-milestone case (dirs
-# move under milestones/ on archive) is closed.
-PHASE_START=$(git log --format="%H" --diff-filter=A -- "${PHASE_DIR}" 2>/dev/null | tail -1)
-DIFF_BASE=""
-if [ -n "$LAST_REVIEW_COMMIT" ]; then
-  # #3661: a prior review exists — narrow the diff base to since that review
-  # (wave-scoped) instead of the whole phase.
-  DIFF_BASE="$LAST_REVIEW_COMMIT"
-elif [ -n "$PHASE_START" ]; then
-  if git rev-parse "${PHASE_START}^" >/dev/null 2>&1; then
-    DIFF_BASE="${PHASE_START}^"
-  else
-    DIFF_BASE="${PHASE_START}"
-  fi
+# Exit 69 (UNAVAILABLE) is the resolver saying "could not look" (`status: unresolvable`): its JSON
+# carries the reason and is kept. Any other non-zero status means the command did not run: no JSON.
+SCOPE_RC=0
+SCOPE_JSON=$(gsd_run check evaluation-scope --phase "${PADDED_PHASE}" ${LAST_REVIEW_COMMIT:+--since "$LAST_REVIEW_COMMIT"} --raw 2>/dev/null) || SCOPE_RC=$?
+if [ "$SCOPE_RC" -ne 0 ] && [ "$SCOPE_RC" -ne 69 ]; then SCOPE_JSON=""; fi
+# One field of the resolver's JSON; arrays print one element per line, an absent field prints nothing.
+scope_field() {
+  printf '%s' "$SCOPE_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s)[process.argv[1]];process.stdout.write(Array.isArray(v)?v.join("\n"):v==null?"":String(v))}catch{process.exit(1)}})' "$1" 2>/dev/null
+}
+SCOPE_STATUS=$(scope_field status); [ -n "$SCOPE_STATUS" ] || SCOPE_STATUS="unresolvable"
+SCOPE_REASON=$(scope_field reason)
+SCOPE_SOURCE=$(scope_field source)
+DIFF_BASE=$(scope_field rangeBase)
+SCOPE_FILES=$(scope_field files)
+
+if [ "$SCOPE_STATUS" != "resolved" ]; then
+  echo "Warning: evaluation scope is ${SCOPE_STATUS}${SCOPE_REASON:+ (${SCOPE_REASON})}; the file scope below comes from wider evidence or is unavailable."
+fi
+SCOPE_OUTSIDE=$(scope_field outsideUnion)
+if [ -n "$SCOPE_OUTSIDE" ]; then
+  echo "Changed in the phase window by commits that are NOT this phase's task commits (not in scope):"
+  printf '%s\n' "$SCOPE_OUTSIDE" | sed 's/^/  - /'
+fi
+SCOPE_UNREACHABLE=$(scope_field unreachable)
+if [ -n "$SCOPE_UNREACHABLE" ]; then
+  echo "Task commits not reachable from HEAD (another branch, or dropped by a rebase):"
+  printf '%s\n' "$SCOPE_UNREACHABLE" | sed 's/^/  - /'
+fi
+SCOPE_MISSING=$(scope_field missingOnDisk)
+if [ -n "$SCOPE_MISSING" ]; then
+  echo "Scoped paths that no longer exist on disk (not reviewed):"
+  printf '%s\n' "$SCOPE_MISSING" | sed 's/^/  - /'
 fi
 
 if [ ${#REVIEW_FILES[@]} -eq 0 ]; then
-  # Full git-diff fallback (per D-02): SUMMARY scoping yielded nothing.
-  if [ -n "$DIFF_BASE" ]; then
-    # Run git diff with specific exclusions (per D-03)
-    DIFF_FILES=$(git diff --name-only "${DIFF_BASE}..HEAD" -- . \
-      ':!.planning/' ':!ROADMAP.md' ':!STATE.md' \
-      ':!*-SUMMARY.md' ':!*-VERIFICATION.md' ':!*-PLAN.md' \
-      ':!package-lock.json' ':!yarn.lock' ':!Gemfile.lock' ':!poetry.lock' 2>/dev/null)
-
+  # Full fallback (per D-02): SUMMARY scoping yielded nothing.
+  if [ -n "$SCOPE_FILES" ]; then
     while IFS= read -r file; do
       [ -n "$file" ] && REVIEW_FILES+=("$file")
-    done <<< "$DIFF_FILES"
+    done <<< "$SCOPE_FILES"
 
-    echo "File scope: ${#REVIEW_FILES[@]} files from git diff (base: ${DIFF_BASE})"
+    echo "File scope: ${#REVIEW_FILES[@]} files from ${SCOPE_SOURCE} (base: ${DIFF_BASE:-<none>})"
   else
-    # Fail closed — no reliable diff base found. Do not use arbitrary HEAD~N.
-    echo "Warning: No phase commits found for '${PADDED_PHASE}'. Cannot determine reliable diff scope."
+    # Fail closed — the resolver found no reviewable files. Do not use arbitrary HEAD~N.
+    echo "Warning: No evaluation scope found for '${PADDED_PHASE}' (${SCOPE_STATUS}${SCOPE_REASON:+: ${SCOPE_REASON}}). Cannot determine reliable scope."
     echo "Use --files flag to specify files explicitly: /gsd:code-review ${PHASE_ARG} --files=file1,file2,..."
   fi
-elif [ -z "$FILES_OVERRIDE" ] && [ -n "$DIFF_BASE" ]; then
+elif [ -z "$FILES_OVERRIDE" ] && [ -n "$SCOPE_FILES" ]; then
   # #4460: gated on FILES_OVERRIDE being unset — without this, REVIEW_FILES is
   # already non-empty under --files (Tier 1 filled it), so this elif was
   # reached anyway and the #2666 cross-check below appended the whole phase
-  # diff onto an explicit user-supplied file list, contradicting line 144's
-  # "Skip SUMMARY/git scoping entirely when --files is provided" and Tier 2's
-  # own --files guard (line 150).
+  # scope onto an explicit user-supplied file list, contradicting "Skip
+  # SUMMARY/git scoping entirely when --files is provided" and Tier 2's
+  # own --files guard.
   # #2666 cross-check: SUMMARY yielded a non-empty (possibly partial) scope.
-  # Warn about — and add — any changed files the SUMMARY extractor did not surface,
+  # Warn about — and add — any in-scope files the SUMMARY extractor did not surface,
   # so a partial result can no longer silently ship an incomplete review scope.
-  DIFF_FILES=$(git diff --name-only "${DIFF_BASE}..HEAD" -- . \
-    ':!.planning/' ':!ROADMAP.md' ':!STATE.md' \
-    ':!*-SUMMARY.md' ':!*-VERIFICATION.md' ':!*-PLAN.md' \
-    ':!package-lock.json' ':!yarn.lock' ':!Gemfile.lock' ':!poetry.lock' 2>/dev/null)
 
-  # Build a newline-delimited list of already-scoped files for exact membership
-  # testing (portable — bash 3.2 on macOS has no associative arrays). grep -Fxq
-  # matches the WHOLE line exactly, so a short basename (e.g. root `Dockerfile`)
-  # does NOT substring-match a longer scoped path (e.g. `docker/Dockerfile`).
-  IN_SCOPE=$(printf '%s\n' "${REVIEW_FILES[@]}")
-
+  # Exact whole-line membership (portable — bash 3.2 has no associative arrays). grep -Fxq
+  # matches the WHOLE line, so a short basename (e.g. root `Dockerfile`) does NOT
+  # substring-match a longer scoped path (e.g. `docker/Dockerfile`).
   MISSING_FROM_SUMMARY=()
   while IFS= read -r file; do
     [ -z "$file" ] && continue
-    # Exact whole-line match; grep nonzero-exit => not in scope.
     if printf '%s\n' "${REVIEW_FILES[@]}" | grep -Fxq -- "$file" 2>/dev/null; then
       : # already scoped
     else
       MISSING_FROM_SUMMARY+=("$file"); REVIEW_FILES+=("$file")
     fi
-  done <<< "$DIFF_FILES"
+  done <<< "$SCOPE_FILES"
 
   if [ ${#MISSING_FROM_SUMMARY[@]} -gt 0 ]; then
-    echo "Warning: SUMMARY scope was missing ${#MISSING_FROM_SUMMARY[@]} changed file(s) the git diff surfaced; adding them to the review scope:"
+    echo "Warning: SUMMARY scope was missing ${#MISSING_FROM_SUMMARY[@]} in-scope file(s) the evaluation scope surfaced; adding them to the review scope:"
     printf '  - %s\n' "${MISSING_FROM_SUMMARY[@]}"
   fi
 fi
@@ -340,7 +331,7 @@ fi
 
 **Post-processing (all tiers):**
 
-1. **Expand tilde paths:** SUMMARY.md `key-files` entries may record a `~/...`-prefixed path (e.g. `~/.claude/gsd-core/workflows/verify-work.md`). Bash only tilde-expands a literal `~` written in source text, never one arriving as the value of an already-expanded variable, so every later `[ -f "$file" ]` check must see a real, expanded path or it misclassifies the file as deleted.
+1. **Expand tilde paths:** SUMMARY.md `key-files` entries may record a `~/...`-prefixed path. Bash only tilde-expands a literal `~` written in source text, never one arriving as the value of an already-expanded variable, so every later `[ -f "$file" ]` check must see a real, expanded path or it misclassifies the file as deleted.
 ```bash
 EXPANDED_FILES=()
 for file in "${REVIEW_FILES[@]}"; do
@@ -370,21 +361,24 @@ done
 REVIEW_FILES=("${FILTERED_FILES[@]}")
 ```
 
-3. **Filter deleted files:** Remove paths that don't exist on disk
+3. **Filter deleted files:** Remove paths that don't exist on disk, and name each one (#5164) — a count hides whether the dropped file held the phase's entire deliverable
 ```bash
 EXISTING_FILES=()
+DELETED_FILES=()
 DELETED_COUNT=0
 for file in "${REVIEW_FILES[@]}"; do
   if [ -f "$file" ]; then
     EXISTING_FILES+=("$file")
   else
     DELETED_COUNT=$((DELETED_COUNT + 1))
+    DELETED_FILES+=("$file")
   fi
 done
 REVIEW_FILES=("${EXISTING_FILES[@]}")
 
 if [ $DELETED_COUNT -gt 0 ]; then
-  echo "Filtered $DELETED_COUNT deleted files from review scope"
+  echo "Filtered $DELETED_COUNT deleted files from review scope:"
+  printf '  - %s\n' "${DELETED_FILES[@]}"
 fi
 ```
 
@@ -406,7 +400,7 @@ if [ -n "$FILES_OVERRIDE" ]; then
 elif [ -n "$SUMMARIES" ] && [ ${#REVIEW_FILES[@]} -gt 0 ]; then
   TIER="SUMMARY.md"
 else
-  TIER="git diff"
+  TIER="${SCOPE_SOURCE:-evaluation scope}"
 fi
 echo "File scope: ${#REVIEW_FILES[@]} files from ${TIER}"
 
@@ -529,7 +523,7 @@ else
   exit 1
 fi
 ```
-This `if`/`else`/`fi` is the entire guard: when `DEPTH_OK` is not the literal string `true`, execution never reaches the `DEPTH_FIELDS`/`REVIEW_DEPTH` extraction — the `else` branch prints the errors, prints the final `Error:` line above, and `exit 1`s out of the fenced block, so `REVIEW_DEPTH` is never set. Exit workflow. Do NOT spawn agent or create REVIEW.md.
+This `if`/`else`/`fi` is the entire guard: unless `DEPTH_OK` is the literal string `true`, the `else` branch prints the errors and `exit 1`s out of the fenced block, so the `DEPTH_FIELDS`/`REVIEW_DEPTH` extraction is never reached and `REVIEW_DEPTH` is never set. Exit workflow. Do NOT spawn agent or create REVIEW.md.
 </step>
 
 <step name="check_empty_scope">
@@ -553,7 +547,7 @@ fi
 <step name="structural_pre_pass">
 Optional structural cross-module pass powered by fallow.
 
-Parse `fallow_enabled`, `fallow_scope`, `fallow_profile`, `fallow_mcp`, `fallow_max_crap` from the init JSON as `FALLOW_ENABLED`, `FALLOW_SCOPE`, `FALLOW_PROFILE`, `FALLOW_MCP`, `FALLOW_MAX_CRAP`. These are resolved once by `init.code-review` at init time — consuming the pre-resolved values here (instead of a `config-get` call inside this step) avoids gating this section's own inclusion on a fact its own body would otherwise compute (see `state:fallow-enabled` in docs/reference/workflow-fragments.md).
+Parse `fallow_enabled`, `fallow_scope`, `fallow_profile`, `fallow_mcp`, `fallow_max_crap` from the init JSON as `FALLOW_ENABLED`, `FALLOW_SCOPE`, `FALLOW_PROFILE`, `FALLOW_MCP`, `FALLOW_MAX_CRAP`. These are resolved once by `init.code-review` at init time — consuming the pre-resolved values here avoids gating this section's own inclusion on a fact its own body would compute (see `state:fallow-enabled` in docs/reference/workflow-fragments.md).
 
 Defaults are fail-closed and opt-in:
 - `enabled=false` (skip entirely)
@@ -950,7 +944,7 @@ If `--files` validation fails unexpectedly on macOS, install coreutils or use ab
 - [ ] Capability gate checked (`workflow.code_review` config key)
 - [ ] --fix/--all/--auto flags parsed via code-review-flags.cjs typed IR (not ad-hoc bash)
 - [ ] Depth resolved with validation (quick|standard|deep)
-- [ ] File scope computed with 3 tiers: --files > SUMMARY.md > git diff
+- [ ] File scope computed with 3 tiers: --files > SUMMARY.md > phase evaluation scope
 - [ ] Malformed/missing SUMMARY.md handled gracefully with fallback
 - [ ] Deleted files filtered from scope
 - [ ] Files deduplicated and sorted

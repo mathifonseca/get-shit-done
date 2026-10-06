@@ -45,7 +45,7 @@ import planningWorkspace = require('./planning-workspace.cjs');
 const { planningPaths } = planningWorkspace;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatter = require('./frontmatter.cjs');
-const { extractFrontmatter } = frontmatter;
+const { extractFrontmatter, frontmatterBlock } = frontmatter;
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- phase-lifecycle.cjs is an export= CommonJS module
 import phaseLifecycle = require('./phase-lifecycle.cjs');
 const { deriveProgressFromRoadmap } = phaseLifecycle;
@@ -61,6 +61,10 @@ const { readStateHeadFreshness } = stateMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import unusableInput = require('./unusable-input.cjs');
 const { warnUnusableInput, UNUSABLE_REASON } = unusableInput;
+// #5118: the verification-status owner's frontmatter-only report check.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import verificationMod = require('./verification.cjs');
+const { findVerificationStatusError } = verificationMod;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -355,11 +359,19 @@ function detectVerifyFailed(cwd: string, currentPhaseRaw: string | null): boolea
   } catch {
     return false;
   }
+  // #5118: this phase's VERIFICATION report `status` is judged by its owner
+  // (src/verification.cts, the same frontmatter-only, containment-checked
+  // locator every reader shares) — an out-of-set value is the owner's hard
+  // error here as at every other reader, never a silent "not failed". The
+  // body `STATUS:` marker scan below is this probe's own signal.
+  const statusError = findVerificationStatusError([latestDir]);
+  if (statusError) throw statusError;
   const candidates = files.filter((f) => /summary|verif(?:y|ication)|uat/i.test(f));
   for (const name of candidates) {
     let content = '';
+    const filePath = path.join(latestDir, name);
     try {
-      content = fs.readFileSync(path.join(latestDir, name), 'utf-8');
+      content = fs.readFileSync(filePath, 'utf-8');
     } catch {
       continue;
     }
@@ -383,7 +395,10 @@ function readStateFile(statePath: string): {
     return null;
   }
   const fm = extractFrontmatter(content, statePath) as Record<string, unknown>;
-  const body = content.replace(/^---[\s\S]*?---\s*/, '');
+  // The body starts after the block `extractFrontmatter` just read (the one fence owner), so a
+  // `---` inside a value, a BOM, or an adjacent empty block cannot cut it somewhere else.
+  const block = frontmatterBlock(content);
+  const body = block ? block.rest.replace(/^\s+/, '') : content;
   return { fm, body };
 }
 

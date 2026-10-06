@@ -375,25 +375,45 @@ describe('#4709 AC#1 — set membership, never a prefix or substring match', () 
     '  CONSTRUCTOR  ',
   ];
 
+  // #5169 (ADR-5057 §5) tightened the OTHER axis: an id that is not registered
+  // now refuses with UnknownRuntimeError on the path/label accessors, so these
+  // ids can no longer be asserted "does not throw". What this block exists to
+  // pin is unchanged and stays load-bearing: none of them is a RETIRED id, so
+  // none may throw the RETIREMENT error — set membership, never a substring.
   for (const id of MUST_NOT_THROW) {
-    test(`${JSON.stringify(id)} does NOT throw — it is not a retired runtime id`, () => {
+    test(`${JSON.stringify(id)} is NOT a retired runtime id — no accessor throws the retirement error for it`, () => {
+      assert.strictEqual(isRetiredRuntimeId(id), false, `isRetiredRuntimeId must be false for ${JSON.stringify(id)}`);
       for (const { label, call } of ACCESSORS) {
-        assert.doesNotThrow(() => call(id), `${label} must not throw for ${JSON.stringify(id)}`);
+        try {
+          call(id);
+        } catch (err) {
+          assert.notStrictEqual(err && err.code, 'GSD_RETIRED_RUNTIME',
+            `${label} must not throw RetiredRuntimeError for ${JSON.stringify(id)}`);
+          assert.strictEqual(err && err.code, 'GSD_UNKNOWN_RUNTIME',
+            `${label}: the only refusal an unretired id may meet is UnknownRuntimeError, got ${String(err && err.name)}`);
+        }
       }
     });
   }
 });
 
-describe('#4709 AC#1 — unknown and empty ids keep their documented fallback', () => {
-  // This is the decision the maintainer chose to PRESERVE, and it is what
-  // separates the chosen fix from the literal reading of AC#1 ("reject a
-  // non-canonical runtime id"). A patch that later tightens the guard to
-  // reject every non-canonical id turns these red, with the reason attached.
-  test('a genuinely unknown runtime id still resolves to the safe defaults', () => {
-    assert.strictEqual(getRuntimeLabel('notarealruntime'), 'Claude Code');
+describe('#4709 AC#1 / #5169 — unknown ids refuse on the Claude-valued accessors; the cross-agent default and the empty id are kept', () => {
+  // #4709 chose to PRESERVE the documented fallback for an unknown id, and this
+  // block said that a patch tightening the guard would turn it red "with the
+  // reason attached". That patch is #5169: ADR-5057 §5 (the Phase 10 design
+  // lock) rules that every descriptor accessor refuses an id it does not know
+  // rather than answering with Claude Code's values (#4632). What survives from
+  // the #4709 decision is exactly what is NOT a Claude Code value:
+  // getProjectInstructionFile's cross-agent `AGENTS.md` default (#1529) and the
+  // empty id's explicit "no runtime selected" branch.
+  test('a genuinely unknown runtime id REFUSES on the label, fragment and config-dir accessors', () => {
+    assert.throws(() => getRuntimeLabel('notarealruntime'), { name: 'UnknownRuntimeError' });
+    assert.throws(() => getGlobalConfigHomeFragment('notarealruntime'), { name: 'UnknownRuntimeError' });
+    assert.throws(() => getGlobalConfigDir('notarealruntime'), { name: 'UnknownRuntimeError' });
+  });
+
+  test('an unknown runtime id keeps the cross-agent AGENTS.md default (#1529 — not a Claude Code value)', () => {
     assert.strictEqual(getProjectInstructionFile('notarealruntime'), 'AGENTS.md');
-    assert.strictEqual(getGlobalConfigHomeFragment('notarealruntime'), "'.claude'");
-    assert.doesNotThrow(() => getGlobalConfigDir('notarealruntime'));
   });
 
   test('empty string keeps its explicit documented branch', () => {

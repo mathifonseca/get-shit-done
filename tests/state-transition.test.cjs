@@ -2144,6 +2144,31 @@ describe('ADR-1769 Phase 6: patch transition — field updates', () => {
     assert.deepStrictEqual(result.data && result.data.updated, []);
     assert.deepStrictEqual(result.data && result.data.failed, ['stopped_at']);
   });
+
+  // #5007 (Phase 6 / ADR-4910 amendment): `patchCore`'s `field`/`value` pair
+  // is fully caller-supplied at runtime (Record<string, string>) — it can
+  // target ANY body field, bold or plain, with ANY value, including one
+  // containing the PlanningDoc boldField grammar's own trailing-separator
+  // token (` — `). Before the `setFieldValue` widening, a patch value
+  // shaped like this reaching a genuinely BOLD field would have been
+  // silently dropped (stateReplaceField's migrated bold branch found the
+  // field, staged the write, and setFieldValue's default round-trip check
+  // refused it — reported as `failed`, exactly as if no field existed).
+  // This pins the fix: the write now succeeds byte-for-byte.
+  test('#5007: patching a bold field with a value containing the trailing separator succeeds (was silently dropped pre-widening)', () => {
+    const input = ['# State', '', '**Core value:** Something else', ''].join('\n');
+    const result = transitionCore(
+      input,
+      { kind: 'patch', patches: { 'Core value': 'Ship the seam — narrow, not delete the guard' } },
+      deps,
+    );
+    assert.deepStrictEqual(result.data && result.data.updated, ['Core value']);
+    assert.deepStrictEqual(result.data && result.data.failed, []);
+    assert.strictEqual(
+      stateExtractField(result.content, 'Core value'),
+      'Ship the seam — narrow, not delete the guard',
+    );
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

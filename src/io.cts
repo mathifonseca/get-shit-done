@@ -131,6 +131,84 @@ function writeAllSync(fd: number, data: string): void {
 }
 
 /**
+ * Temporarily patch `fs.writeSync` so everything written to fd 1 (stdout) is
+ * captured into a string instead of reaching the real stdout, run `run`, then
+ * restore the original `fs.writeSync` and resolve with what was captured.
+ *
+ * The ONE shared helper (#5105 S9) for "run a nested command and read its own
+ * JSON envelope back as data instead of letting it reach the real stdout" —
+ * used by gsd-tools.cjs's `--pick`/`@file:` resolution and by `uat.cts`'s
+ * `cmdUatCompleteSession` (which needs `cmdCommit`'s result object without
+ * emitting cmdCommit's own envelope as a second line of output). A single
+ * definition means both callers see the same Buffer/string/encoding handling
+ * and the same throw-mid-write flush behavior, rather than two hand-rolled
+ * monkeypatches drifting apart.
+ *
+ * On a throw from `run`, whatever was captured before the throw is flushed to
+ * the REAL stdout — the wrapped command may have already written its own
+ * JSON envelope and THEN thrown to set a non-zero exit code (e.g. a
+ * capability set/disable on an unknown id); without this flush that output
+ * would be silently discarded, since the success-path flush at the call site
+ * never runs on a throw. The error still propagates so the exit code is
+ * preserved.
+ */
+function captureStdoutSyncWrites(run: () => unknown): Promise<string> {
+  const originalWriteSync = fs.writeSync;
+  let captured = '';
+
+  fs.writeSync = ((fd: number, data: unknown, ...rest: unknown[]): number => {
+    if (fd === 1) {
+      if (Buffer.isBuffer(data)) {
+        captured += data.toString('utf-8');
+        return data.length;
+      }
+      const text = String(data);
+      captured += text;
+      let encoding: BufferEncoding = 'utf-8';
+      if (typeof rest[1] === 'string') encoding = rest[1] as BufferEncoding;
+      return Buffer.byteLength(text, encoding);
+    }
+    return (originalWriteSync as (...a: unknown[]) => number).call(fs, fd, data, ...rest);
+  });
+
+  const restore = (): void => {
+    fs.writeSync = originalWriteSync;
+  };
+
+  return Promise.resolve()
+    .then(() => run())
+    .then(() => {
+      restore();
+      return captured;
+    }, (err: unknown) => {
+      restore();
+      if (captured) {
+        try { (originalWriteSync as (...a: unknown[]) => number).call(fs, 1, captured); } catch { /* best-effort flush */ }
+      }
+      throw err;
+    });
+}
+
+/**
+ * Resolve `output()`'s `@file:<path>` redirection (emitted for a >50KB JSON
+ * payload) back to the real content, or return `captured` unchanged when it
+ * is not that shape.
+ *
+ * #5105 review finding 7: the ONE definition, shared by gsd-tools.cjs's
+ * `--pick`/CLI-passthrough resolution and by `uat.cts`'s
+ * `cmdUatCompleteSession` (which reads `cmdCommit`'s captured result back
+ * without emitting cmdCommit's own envelope as a second stdout line) — same
+ * reasoning as `captureStdoutSyncWrites` just below: one definition means
+ * both callers agree on the trailing-newline-free prefix and the read
+ * encoding, rather than two hand-rolled `startsWith('@file:')` checks
+ * drifting apart.
+ */
+function resolveAtFileOutput(captured: string): string {
+  if (!captured.startsWith('@file:')) return captured;
+  return fs.readFileSync(captured.slice('@file:'.length), 'utf-8');
+}
+
+/**
  * The wire form of a JSON result: the exact bytes `output()` emits for it.
  *
  * Exported because a caller that has to reason about the size of its own
@@ -306,6 +384,16 @@ const ERROR_REASON = Object.freeze({
   // exit 0. See .gsd/phase/feat-3884-failure-is-a-value/40-design.md.
   PICK_FIELD_ABSENT: 'pick_field_absent',
   PICK_OUTPUT_NOT_JSON: 'pick_output_not_json',
+  // summary-extract (#5013): the SUMMARY's frontmatter fence exists but failed
+  // to parse (extractFrontmatter's FRONTMATTER_UNPARSEABLE marker) — a
+  // distinct failure from "no frontmatter"/"field absent", never a silent
+  // demotion to empty fields at exit 0.
+  SUMMARY_EXTRACT_UNPARSEABLE: 'summary_extract_unparseable',
+  // verification (#5118, ADR-5057 Phase 4): a *-VERIFICATION.md frontmatter
+  // `status` outside the closed writer set (`passed | gaps_found |
+  // human_needed`) — verification.cts's VerificationStatusError, translated
+  // once, centrally, by gsd-tools.cjs. Never read as "no result" at exit 0.
+  VERIFICATION_STATUS_INVALID: 'verification_status_invalid',
   // generic
   USAGE: 'usage',
   UNKNOWN: 'unknown',
@@ -354,15 +442,45 @@ type ErrorReasonValue = typeof ERROR_REASON[keyof typeof ERROR_REASON];
  * more than one line or introduce an unescaped `"`. Callers embedding the
  * result MUST NOT add their own surrounding quotes — that would
  * double-quote it.
+ *
+ * #5118 security review: `JSON.stringify` leaves characters that render
+ * invisibly or reorder the text around them untouched — DEL and the C1
+ * controls (U+007F–U+009F), the line/paragraph separators (U+2028–U+2029),
+ * zero-width and directional marks (U+200B–U+200F), the bidi embeddings and
+ * overrides (U+202A–U+202E), the bidi isolates (U+2066–U+2069) and the BOM
+ * (U+FEFF). Each is escaped as `\uXXXX` so the token reads exactly as its
+ * code points are, whoever renders it.
  */
+const INVISIBLE_OR_BIDI_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x7f, 0x9f],
+  [0x2028, 0x2029],
+  [0x200b, 0x200f],
+  [0x202a, 0x202e],
+  [0x2066, 0x2069],
+  [0xfeff, 0xfeff],
+];
+
+/** Code points as `\uXXXX` escape text (source stays ASCII; no literal invisible characters). */
+function toUnicodeEscape(codePoint: number): string {
+  return `\\u${codePoint.toString(16).padStart(4, '0')}`;
+}
+
+const INVISIBLE_OR_BIDI_RE = new RegExp(
+  `[${INVISIBLE_OR_BIDI_RANGES.map(([lo, hi]) => `${toUnicodeEscape(lo)}-${toUnicodeEscape(hi)}`).join('')}]`,
+  'g',
+);
+
 function formatDiagnosticToken(value: string): string {
-  return JSON.stringify(value);
+  return JSON.stringify(value).replace(
+    INVISIBLE_OR_BIDI_RE,
+    (ch) => toUnicodeEscape(ch.charCodeAt(0)),
+  );
 }
 
 /**
  * Map an ERROR_REASON wire value onto a declared outcome name (#3912,
- * ADR-3889 §4). Closed over the 25-member enum: every reason gets an
- * explicit entry below, so a 26th member added without a mapping falls
+ * ADR-3889 §4). Closed over the 27-member enum: every reason gets an
+ * explicit entry below, so a 28th member added without a mapping falls
  * through to the `?? 'FAIL'` default rather than silently mis-projecting —
  * and tests/A1 iterates `Object.values(ERROR_REASON)`, so that default is
  * exactly what makes an unmapped addition visible instead of invisible.
@@ -412,6 +530,14 @@ const REASON_TO_OUTCOME: Readonly<Record<string, string>> = Object.freeze({
   // supposed to be there and was not; a prerequisite of the query failed.
   [ERROR_REASON.PICK_FIELD_ABSENT]: 'UNAVAILABLE',
   [ERROR_REASON.PICK_OUTPUT_NOT_JSON]: 'UNAVAILABLE',
+  // #5013: the SUMMARY's frontmatter fence exists but failed to parse — the
+  // prerequisite of the query (readable frontmatter) is what's broken, same
+  // shape as PICK_FIELD_ABSENT/PICK_OUTPUT_NOT_JSON just above.
+  [ERROR_REASON.SUMMARY_EXTRACT_UNPARSEABLE]: 'UNAVAILABLE',
+  // #5118: the verification report exists but its `status` is not a verdict
+  // the reader accepts — a broken prerequisite of the query, the same shape
+  // as SUMMARY_EXTRACT_UNPARSEABLE just above.
+  [ERROR_REASON.VERIFICATION_STATUS_INVALID]: 'UNAVAILABLE',
 
   // Self-failure: the run itself broke, not its inputs.
   [ERROR_REASON.SDK_FAIL_FAST]: 'INTERNAL',
@@ -460,4 +586,6 @@ export = {
   getJsonErrorMode,
   error,
   formatDiagnosticToken,
+  captureStdoutSyncWrites,
+  resolveAtFileOutput,
 };

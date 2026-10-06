@@ -39,6 +39,7 @@ const {
   collectSection,
   iterateBullets,
   updateBullet,
+  updateHeading,
   extractTaggedBlocks,
   stripTaggedBlocks,
   replaceSection,
@@ -1998,3 +1999,80 @@ describe('deleteSection', () => {
 // Parity guard removed in T5 (ADR-1372): uat-predicate now imports stripFencedCode
 // from the seam directly, so comparing the seam to itself is tautological.
 // The seam's stripFencedCode correctness is already covered by the tests above.
+
+// ─── updateHeading + updateBullet lineIndex (ADR-5057 §6, Phase 13, #5217) ─────
+
+describe('updateHeading (ADR-5057 §6, Phase 13)', () => {
+  const swapTo = (to) => () => to;
+
+  test('rewrites exactly the first accepted heading line, every other byte verbatim', () => {
+    const content = '# Roadmap\n\n### Phase 1: Setup\nbody\n### Phase 2: Next\n';
+    const out = updateHeading(content, (h) => h.text.startsWith('Phase 1'), swapTo('### Phase 1-01: Setup'));
+    assert.equal(out, '# Roadmap\n\n### Phase 1-01: Setup\nbody\n### Phase 2: Next\n');
+  });
+
+  test('a heading inside a fenced block is never offered to match', () => {
+    const content = '```\n### Phase 1: Fenced\n```\n### Phase 1: Real\n';
+    const seen = [];
+    const out = updateHeading(
+      content,
+      (h, _raw, idx) => {
+        seen.push(idx);
+        return true;
+      },
+      swapTo('### CHANGED'),
+    );
+    assert.deepEqual(seen, [3]);
+    assert.equal(out, '```\n### Phase 1: Fenced\n```\n### CHANGED\n');
+  });
+
+  test('CRLF document: rawLine carries the \\r, untouched lines keep their terminators', () => {
+    const content = '### A\r\n### B\r\ntext\n### C';
+    const rawLines = [];
+    const out = updateHeading(
+      content,
+      (h, raw) => {
+        rawLines.push(raw);
+        return h.text === 'B';
+      },
+      (raw) => raw.replace('B', 'Bee'),
+    );
+    assert.deepEqual(rawLines, ['### A\r', '### B\r']);
+    assert.equal(out, '### A\r\n### Bee\r\ntext\n### C');
+  });
+
+  test('lineIndex disambiguates two headings with identical text', () => {
+    const content = '## v1\n### Phase 1: Same\n## v2\n### Phase 1: Same\n';
+    const out = updateHeading(content, (_h, _raw, idx) => idx === 3, swapTo('### Phase 2-01: Same'));
+    assert.equal(out, '## v1\n### Phase 1: Same\n## v2\n### Phase 2-01: Same\n');
+  });
+
+  test('last line without a trailing newline is rewritten without gaining one', () => {
+    assert.equal(updateHeading('# A\n### B', (h) => h.text === 'B', swapTo('### C')), '# A\n### C');
+  });
+
+  test('bounded no-op: no match, non-string transform result, empty or non-string content', () => {
+    const content = '### A\n';
+    assert.equal(updateHeading(content, () => false, swapTo('x')), content);
+    assert.equal(updateHeading(content, () => true, () => 42), content);
+    assert.equal(updateHeading('', () => true, swapTo('x')), '');
+    assert.equal(updateHeading(undefined, () => true, swapTo('x')), undefined);
+  });
+
+  test('property: a rewrite that returns the line unchanged is byte-identical', () => {
+    fc.assert(
+      fc.property(fc.array(fc.constantFrom('# H', '### Phase 1: x', 'text', '', '```', '- [ ] item'), { maxLength: 12 }), (lines) => {
+        const content = lines.join('\n');
+        assert.equal(updateHeading(content, () => true, (raw) => raw), content);
+      }),
+    );
+  });
+});
+
+describe('updateBullet match receives the physical line index (Phase 13)', () => {
+  test('lineIndex equals the content.split("\\n") index of the bullet opening line', () => {
+    const content = 'intro\n- [ ] a\n\n- [ ] a\n';
+    const out = updateBullet(content, (_t, _raw, idx) => idx === 3, (raw) => raw.replace('[ ]', '[x]'));
+    assert.equal(out, 'intro\n- [ ] a\n\n- [x] a\n');
+  });
+});

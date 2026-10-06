@@ -513,25 +513,20 @@ describe('CR-WORKFLOW: code review workflow structure', () => {
         'Tier 2 unchanged-since-last-review guard must `continue` (skip) the summary, not just log');
     });
 
-    test('G5: tier3PrefersLastReviewCommitOverPhaseStartDerivation', () => {
+    test('G5: tier3HandsLastReviewCommitToTheEvaluationScopeResolver', () => {
       const content = fs.readFileSync(path.join(WORKFLOWS_DIR, 'code-review.md'), 'utf-8');
       const codeBlocks = extractBashBlocks(content);
-      // #3995 replaced the old commit-message-grep PHASE_COMMITS derivation with
-      // PHASE_START (git log --diff-filter=A -- "${PHASE_DIR}") — a phase number is
-      // only unique within a milestone, not the whole repo, so #3661's fallback
-      // chain rides on whichever derivation is current rather than pinning the old name.
+      // #5164 (ADR-5057 §4): the diff base is the evaluation-scope resolver's `rangeBase`, which is
+      // the phase-start anchor (#3995: the parent of the commit that first added the phase dir) or
+      // — when a prior review exists (#3661) — that review's commit itself, passed as `--since`.
+      // Tier 3 derives neither by hand any more.
       const tier3Block = codeBlocks.find(block =>
-        block.includes('DIFF_BASE=""') && block.includes('PHASE_START'));
-      assert.ok(tier3Block, 'code-review.md Tier 3 DIFF_BASE derivation block not found');
+        block.includes('gsd_run check evaluation-scope') && block.includes('DIFF_BASE=$(scope_field rangeBase)'));
+      assert.ok(tier3Block, 'code-review.md Tier 3 resolver block not found');
 
-      const lastReviewIdx = tier3Block.indexOf('if [ -n "$LAST_REVIEW_COMMIT" ]; then');
-      const phaseStartElifIdx = tier3Block.indexOf('elif [ -n "$PHASE_START" ]; then');
-      assert.ok(lastReviewIdx !== -1, 'Tier 3 DIFF_BASE must check LAST_REVIEW_COMMIT');
-      assert.ok(phaseStartElifIdx !== -1, 'Tier 3 DIFF_BASE must fall back to PHASE_START via elif (#3995 derivation unchanged)');
-      assert.ok(lastReviewIdx < phaseStartElifIdx,
-        'LAST_REVIEW_COMMIT must be checked BEFORE the PHASE_START fallback, so a prior review narrows the diff base');
-      assert.ok(/DIFF_BASE="\$LAST_REVIEW_COMMIT"/.test(tier3Block),
-        'Tier 3 must set DIFF_BASE directly from LAST_REVIEW_COMMIT when present (no ^ parent offset)');
+      assert.ok(tier3Block.includes('${LAST_REVIEW_COMMIT:+--since "$LAST_REVIEW_COMMIT"}'),
+        'Tier 3 must hand LAST_REVIEW_COMMIT to the resolver as --since, so a prior review narrows the scope and the base (#3661)');
+      assert.ok(!tier3Block.includes('PHASE_START'), 'Tier 3 must not derive a phase-start anchor of its own');
     });
 
     test('G6: tier2GuardIsNoOpWhenLastReviewCommitEmpty', () => {
@@ -1067,8 +1062,9 @@ describe('CR-INTEGRATION: workflow integration points', () => {
   });
 
   test('execute-phase.md resolves code-review capability hook', () => {
-    const content = fs.readFileSync(path.join(WORKFLOWS_DIR, 'execute-phase.md'), 'utf-8');
-    // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored workflow markdown, bounded prose, not adversarial input
+    // #5118: code_review_gate moved into the shared verification step that
+    // execute-phase (and verify-work) include — read the workflow with its steps.
+    const content = require('./helpers.cjs').readWorkflowCombined(path.join(WORKFLOWS_DIR, 'execute-phase.md'));
     const gateMatch = content.match(/<step name="code_review_gate"[^>]*>([\s\S]*?)<\/step>/);
     assert.ok(gateMatch, 'execute-phase.md missing code_review_gate step');
     const gateContent = gateMatch[1];

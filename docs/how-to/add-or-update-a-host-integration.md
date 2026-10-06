@@ -127,11 +127,17 @@ yields the same truth value**, so behavior is unchanged and only the brittle cou
    (`validateRuntimeBody`) is lenient toward these host-behavior keys; they carry install policy, not the
    closed negotiated axes.
 
-3. **Replace each branch with a descriptor read.** `bin/install.js` exposes a `_hostBehaviors(runtime)`
-   helper (reads `_capabilityRegistry.runtimes[runtime].runtime.hostBehaviors`, `{}` if absent). Rewrite
-   `if (runtime === 'claude')` → `if (_hostBehaviors(runtime).permissionsSchema === 'claude')`, and
-   `if (runtime !== 'claude')` → `if (!_hostBehaviors(runtime).authorsCanonicalWorkflow)`. Only the host
-   declares the key, so every other runtime keeps the generic path.
+3. **Replace each branch with a descriptor read.** `hostBehaviorsFor(runtime)` in
+   `src/runtime-name-policy.cts` is the one accessor (reads
+   `capability-registry.runtimes[runtime].runtime.hostBehaviors`; `{}` for an empty or unregistered
+   id, #5169 — the path and label accessors, by contrast, throw `UnknownRuntimeError` for an id that is
+   not registered). Rewrite
+   `if (runtime === 'claude')` → `if (hostBehaviorsFor(runtime).permissionsSchema === 'claude')`, and
+   `if (runtime !== 'claude')` → `if (!hostBehaviorsFor(runtime).authorsCanonicalWorkflow)`. Only the host
+   declares the key, so every other runtime keeps the generic path. A new key must also join
+   `KNOWN_HOST_BEHAVIORS` in `capability-validator.cjs` (sorted), then `npm run gen:capability-registry`.
+   `local/no-runtime-name-literal` fails `npm run lint` on any runtime-id comparison left in install or
+   hook code; fix the finding by declaring a key, never by adding an allow comment.
 
 4. **Route install/uninstall through the public adapter.** Replace the direct
    `installRuntimeArtifacts(...)` / `uninstallRuntimeArtifacts(...)` calls with
@@ -180,6 +186,23 @@ upgrades (multi-event hook bus; negotiated `dispatch.background`) this PR adds.
 >
 > Declaring an `agents` entry also takes effect on the **surface** path (`/gsd-surface --materialize`)
 > immediately, not only on install — the two paths are intentionally converged.
+
+## 8. Make the shell launcher find the host's install (#5169)
+
+The launcher's `_gsd_homes` candidate list is **generated** from each runtime's `configHome`
+descriptor, so a new runtime needs no launcher edit — only a regeneration:
+
+1. Declare `runtime.configHome` on the descriptor (`dot-home`, `dot-home-nested`, `xdg` or
+   `generic-agents-root`; `none` contributes nothing).
+2. Run `npm run build:lib && npm run gen:capability-registry && npm run sync:launcher`. The last step
+   rewrites `_gsd_homes` in `gsd-core/workflows/_runtime-launcher.snippet.sh` and the preamble in every
+   workflow and agent file that carries it.
+3. Commit the regenerated files. `tests/launcher-homes-derivation.test.cjs` fails if the snippet
+   differs from the descriptors, and it runs the real shell function against a fixture home for every
+   runtime to prove the launcher and the JS resolver pick the same install.
+
+If a runtime installs somewhere the descriptor cannot express, fix the descriptor; do not edit the
+snippet by hand — the next sync overwrites it.
 
 ---
 

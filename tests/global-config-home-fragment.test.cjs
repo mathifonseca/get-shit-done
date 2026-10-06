@@ -11,7 +11,8 @@
  *   1. Each of the 13 table runtimes returns its exact verbatim source fragment
  *      (byte-identical to the prior chain — golden install parity asserts the
  *      generated hook output is unchanged).
- *   2. claude + unknown + empty fall back to the default "'.claude'" fragment.
+ *   2. claude + empty return the default "'.claude'" fragment; an unknown id
+ *      refuses (UnknownRuntimeError, #5169).
  *   3. antigravity is intentionally NOT in the table (handled dynamically by the
  *      caller via resolveAntigravityGlobalDir).
  *   4. Drift guard: every registry runtime EXCEPT {claude, antigravity} has a
@@ -70,13 +71,13 @@ test('getGlobalConfigHomeFragment: golden map matches for all 14 table runtimes'
   }
 });
 
-test('getGlobalConfigHomeFragment fallback: claude/unknown/empty return the default fragment', () => {
+test('getGlobalConfigHomeFragment: claude/empty return the default fragment; an unknown runtime REFUSES (#5169)', () => {
   assert.strictEqual(getGlobalConfigHomeFragment('claude'), "'.claude'",
     'claude must return the default fragment (it is special-cased as the default)');
-  assert.strictEqual(getGlobalConfigHomeFragment('unknown'), "'.claude'",
-    'unknown runtime must return the default fragment');
   assert.strictEqual(getGlobalConfigHomeFragment(''), "'.claude'",
     'empty input must return the default fragment');
+  assert.throws(() => getGlobalConfigHomeFragment('unknown'), { name: 'UnknownRuntimeError' },
+    'an unknown runtime must refuse rather than splice Claude Code\'s home into generated hook code');
 });
 
 test('drift guard: every registry runtime except {claude, antigravity} has a table entry (add-a-host tax removed)', () => {

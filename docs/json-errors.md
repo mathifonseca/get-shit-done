@@ -187,7 +187,7 @@ caller, byte-identical to pre-#3912 behavior. See
 ### `error(message, reason)`
 
 `error()`'s `reason` argument now maps onto a declared outcome name (`USAGE`, `NO_INPUT`,
-`UNAVAILABLE`, `INTERNAL`, or `FAIL`) via a fixed table over all 25 `ERROR_REASON` members.
+`UNAVAILABLE`, `INTERNAL`, or `FAIL`) via a fixed table over all 27 `ERROR_REASON` members.
 
 - **Under `v1`, the mapping is recorded but never projected.** `error()` still throws
   `ExitError(1)` unconditionally, exactly as before — stderr and the exit code are byte-identical to
@@ -240,6 +240,25 @@ last-write-wins: a clean payload clears a prior `DEGRADED` declaration in the sa
 `runMain` clears the cell on every exit regardless of which branch produced the final code, so a
 later `runMain` call in the same process never inherits a stale declaration.
 
+### Gate verbs — the exit status follows the verdict (#5170)
+
+A gate verb declares its outcome from the verdict it built, through one total function
+(`gateExitOutcome`), never by choosing a code itself. Two modes:
+
+- **Status mode** — callers branch on `$?`: `phase uat-passed`, `verify artifacts`,
+  `verify plan-structure`, `verify phase-completeness`, `verify references`, `verify commits`,
+  `verify key-links`. A positive verdict exits `0`, a negative one `1` (the JSON is unchanged and
+  still authoritative), a scope that was read and is genuinely empty exits `66` (`NO_INPUT`), and a
+  verb that **could not look** exits `69` (`UNAVAILABLE`).
+- **Payload mode** — the verdict is read from stdout and a non-zero exit means the command failed:
+  every `check <verb>` and the three drift verbs `verify schema-drift`, `verify codebase-drift` and
+  `verify context-drift` (the capability gate dispatch routes a non-zero exit by `onError`, so a
+  blocking verdict must stay exit `0`). Only "could not look" exits `69`. The full exit table and
+  verb list are in [CLI Tools: Gate verb exit statuses](CLI-TOOLS.md#gate-verb-exit-statuses-5170).
+
+`69` is never a pass and never `0`: an unreadable file, an unresolvable phase, a path that cannot be
+examined. A document that exists but is empty was read (`found ''`), so it is not "File not found".
+
 ## Error code taxonomy
 
 Codes are frozen constants in `gsd-core/bin/lib/core.cjs` under
@@ -286,6 +305,7 @@ text (unstable).
 |------|-------------|
 | `phase_not_found` | Phase directory lookup returns no match |
 | `summary_no_planning` | Summary operation when no `.planning/` directory exists |
+| `verification_status_invalid` | A phase's `*-VERIFICATION.md` frontmatter `status` is outside the closed set `passed \| gaps_found \| human_needed` (for example `verified`, `Passed`, `stale`, or a non-string value). Emitted, with stdout empty, by every surface that reads the report — `verification status`, `phase uat-passed`, `phase complete`, `roadmap analyze`, `state sync`, `planning inspect`, `init *`, `smart-entry`, `audit-open`, `audit-uat`. The message names the report file, the value, and the accepted values, and states the recovery: set the report's `status:` to an accepted value, or delete the report and re-run the phase's verification. `validate health` reports the file as warning `W030` instead (#5118) |
 
 ### Estimate errors
 

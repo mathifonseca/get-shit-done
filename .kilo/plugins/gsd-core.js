@@ -207,6 +207,38 @@ function mapToolInput(args) {
  */
 const warnedMissingHooks = new Set();
 
+// A hook this adapter kills on timeout has no exit status, so runHook below
+// reports it as exit 0 — an ALLOW. For a guard that blocks, a bound shorter
+// than the guard's own worst case therefore silently disables the gate. The
+// two guards that probe git (worktree path, workflow force-add) run up to
+// BLOCKING_GUARD_MAX_SEQUENTIAL_PROBES sequential probes of
+// BLOCKING_GUARD_PROBE_TIMEOUT_MS each (hooks/lib/git-probe.js, #5180), so
+// their bound is that product plus a margin for node start/kill/reap. Read
+// from the staged hooks/lib so it can never drift from the guards' own budget;
+// the fallback is used only when that lib is missing from a partial install,
+// and is sized for the same worst case.
+const GIT_PROBING_GUARDS = new Set([
+  "gsd-worktree-path-guard.js",
+  "gsd-workflow-guard.js",
+]);
+const GIT_PROBING_GUARD_MARGIN_MS = 5000;
+const GIT_PROBING_GUARD_FALLBACK_TIMEOUT_MS = 20000;
+
+function gitProbingGuardTimeoutMs() {
+  try {
+    const probe = require(path.join(HOOKS_DIR, "lib", "git-probe.js"));
+    const worstCaseMs =
+      probe.BLOCKING_GUARD_MAX_SEQUENTIAL_PROBES *
+      probe.BLOCKING_GUARD_PROBE_TIMEOUT_MS;
+    if (Number.isFinite(worstCaseMs) && worstCaseMs > 0) {
+      return worstCaseMs + GIT_PROBING_GUARD_MARGIN_MS;
+    }
+  } catch {
+    // hooks/lib/git-probe.js unavailable — use the fallback below.
+  }
+  return GIT_PROBING_GUARD_FALLBACK_TIMEOUT_MS;
+}
+
 function runHook(hookFile, payload, opts = {}) {
   const hookPath = path.join(HOOKS_DIR, hookFile);
   if (!fs.existsSync(hookPath)) {
@@ -224,7 +256,9 @@ function runHook(hookFile, payload, opts = {}) {
     }
     return { stdout: "", exitCode: 0, timedOut: false };
   }
-  const timeout = opts.timeout ?? 8000;
+  const timeout =
+    opts.timeout ??
+    (GIT_PROBING_GUARDS.has(hookFile) ? gitProbingGuardTimeoutMs() : 8000);
   let result;
   try {
     result = spawnSync(process.execPath, [hookPath], {
@@ -331,11 +365,55 @@ function handleHookResult(hookResult, output) {
 // Frontmatter helpers (for config registration)
 // ---------------------------------------------------------------------------
 
+// A self-contained copy of `locateFrontmatterFence` (src/frontmatter-fence.cts, the
+// one frontmatter fence owner). Kept here, not required from the built
+// gsd-core/bin/lib/frontmatter-fence.cjs, because this plugin must load in every
+// layout it is copied to — including a package/git-spec tree, which may carry no
+// built bin/lib. Found while implementing #5105: tests/frontmatter-fence.test.cjs
+// ("kept frontmatter fence copies agree with the owner") pins this copy to the owner
+// over a fixture corpus and a property test, and
+// scripts/lint-frontmatter-fence-drift.cjs allowlists exactly this function.
+function locateFrontmatterFence(text) {
+  if (typeof text !== "string") {
+    throw new TypeError(`locateFrontmatterFence: expected a string, got ${typeof text}`);
+  }
+  const closingFenceLine = /^---[ \t]*$/;
+  const lenientClosingFenceLine = /^-{4,}[ \t]*$/;
+  const bom = text.charCodeAt(0) === 0xfeff ? text.slice(0, 1) : "";
+  const start = bom.length;
+  let eol;
+  if (text.startsWith("---\r\n", start)) eol = "\r\n";
+  else if (text.startsWith("---\n", start)) eol = "\n";
+  else return null;
+  const openEnd = start + 3 + eol.length;
+  const closedAt = (lineStart, lineEnd) => {
+    let bodyEnd = openEnd;
+    if (lineStart > openEnd) {
+      bodyEnd = lineStart - 1;
+      if (bodyEnd > openEnd && text[bodyEnd - 1] === "\r") bodyEnd -= 1;
+    }
+    return { bom, eol, openEnd, closed: true, closingStart: lineStart, closingFenceEnd: lineEnd, bodyEnd };
+  };
+  let lenient = null;
+  let lineStart = openEnd;
+  while (lineStart <= text.length) {
+    const newline = text.indexOf("\n", lineStart);
+    const lineEnd = newline === -1 ? text.length : newline > lineStart && text[newline - 1] === "\r" ? newline - 1 : newline;
+    const line = text.slice(lineStart, lineEnd);
+    if (closingFenceLine.test(line)) return closedAt(lineStart, lineEnd);
+    if (lenient === null && lenientClosingFenceLine.test(line)) lenient = [lineStart, lineEnd];
+    if (newline === -1) break;
+    lineStart = newline + 1;
+  }
+  if (lenient !== null) return closedAt(lenient[0], lenient[1]);
+  return { bom, eol, openEnd, closed: false, closingStart: -1, closingFenceEnd: -1, bodyEnd: text.length };
+}
+
 function parseFrontmatter(content) {
-  const m = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-  if (!m) return { frontmatter: {}, body: content };
+  const fence = locateFrontmatterFence(content);
+  if (!fence || !fence.closed) return { frontmatter: {}, body: content };
   const fm = {};
-  for (const line of m[1].split("\n")) {
+  for (const line of content.slice(fence.openEnd, fence.bodyEnd).split(/\r?\n/)) {
     const i = line.indexOf(":");
     if (i > 0) {
       let v = line.slice(i + 1).trim();
@@ -343,7 +421,8 @@ function parseFrontmatter(content) {
       fm[line.slice(0, i).trim()] = v;
     }
   }
-  return { frontmatter: fm, body: m[2] };
+  // The body is everything past the closing fence line and its line ending.
+  return { frontmatter: fm, body: content.slice(fence.closingFenceEnd).replace(/^\r?\n/, "") };
 }
 
 // Rewrite @~/.claude/ includes to point at the repo root.
@@ -777,6 +856,7 @@ GsdCorePlugin._internals = {
   IS_PACKAGE_TREE,
   mapToolName,
   mapToolInput,
+  locateFrontmatterFence,
   parseFrontmatter,
   rewriteContent,
   isGsdManagedFile,

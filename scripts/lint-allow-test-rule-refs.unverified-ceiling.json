@@ -1,4 +1,4 @@
 {
-  "$comment": "Fork: upstream's value is 283. +2 for tests/lens-engine.test.cjs and tests/teach-phase.test.cjs — fork-only suites whose `source-text-is-the-product (#1190)` marker was audited at the v1.15.0 sync (they assert shipped workflow/agent prose). Tighten-only.",
-  "maxFiles": 285
+  "$comment": "Fork: upstream's value is 284. +2 for tests/lens-engine.test.cjs and tests/teach-phase.test.cjs — fork-only suites whose `source-text-is-the-product (#1190)` marker was audited at the v1.15.0 sync (they assert shipped workflow/agent prose). Tighten-only.",
+  "maxFiles": 286
 }

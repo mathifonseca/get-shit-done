@@ -84,6 +84,26 @@ const RETIRED_RUNTIME_SPELLINGS: ReadonlyMap<string, string> = new Map(
  */
 export const RETIRED_RUNTIME_IDS: ReadonlySet<string> = new Set(RETIRED_RUNTIME_DETAILS.keys());
 
+/**
+ * Error thrown when a non-empty runtime id that is neither registered nor a
+ * known non-registry host reaches a descriptor accessor (ADR-5057 §5, #5169).
+ * Before this, such an id silently resolved to Claude Code's values.
+ */
+export class UnknownRuntimeError extends Error {
+  readonly code = 'GSD_UNKNOWN_RUNTIME';
+
+  readonly runtimeId: string;
+
+  constructor(runtimeId: string) {
+    super(
+      `Runtime "${runtimeId}" is not registered in the capability registry. `
+        + 'Refusing to resolve it, because the previous behaviour silently returned Claude Code\'s values.',
+    );
+    this.name = 'UnknownRuntimeError';
+    this.runtimeId = runtimeId;
+  }
+}
+
 /** Error thrown when a retired runtime id reaches a resolution accessor. */
 export class RetiredRuntimeError extends Error {
   readonly code = 'GSD_RETIRED_RUNTIME';
@@ -119,6 +139,136 @@ export function assertNotRetiredRuntime(runtime: unknown): void {
   const detail = RETIRED_RUNTIME_DETAILS.get(id);
   if (detail === undefined) return;
   throw new RetiredRuntimeError(id, detail);
+}
+
+/**
+ * Legacy runtime ids that have a genuine, dedicated resolution branch in
+ * `runtime-homes.cts` but no capability-registry descriptor (#3024). They are
+ * KNOWN ids: every accessor resolves them rather than refusing. Enumerated by
+ * hand and MUST stay in lockstep with `getGlobalConfigDir`'s hardcoded
+ * branches — add an id only after confirming it has a real dedicated branch.
+ */
+export const LEGACY_NON_REGISTRY_RUNTIME_HOMES: Readonly<Record<string, { env: string; dir: readonly string[] }>> =
+  Object.freeze({
+    // Grok's agents home: `GROK_AGENTS_HOME`, else `~/.agents` (dir = path segments under $HOME).
+    grok: Object.freeze({ env: 'GROK_AGENTS_HOME', dir: Object.freeze(['.agents']) }),
+  });
+
+export const LEGACY_NON_REGISTRY_RUNTIME_IDS: ReadonlySet<string> = new Set(
+  Object.keys(LEGACY_NON_REGISTRY_RUNTIME_HOMES),
+);
+
+/**
+ * A runtime descriptor's `hostBehaviors` bag. Open-valued on purpose: the closed
+ * KEY vocabulary is enforced by the capability validator
+ * (`KNOWN_HOST_BEHAVIORS`), and each consumer reads the keys it owns.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type HostBehaviors = Record<string, any>;
+
+type RegistryRuntimes = Record<string, { runtime?: { hostBehaviors?: Record<string, unknown> } } | undefined>;
+
+/** The capability registry's `runtimes` map, or `null` when it fails to load. */
+function loadRegistryRuntimes(): RegistryRuntimes | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const reg = require('./capability-registry.cjs') as { runtimes?: RegistryRuntimes } | undefined;
+    return (reg && reg.runtimes) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when `runtime` is a registered runtime id (own property of the registry
+ * `runtimes` map — never an inherited key such as `__proto__`/`constructor`)
+ * or one of {@link LEGACY_NON_REGISTRY_RUNTIME_IDS}. Raw-id match: no trimming,
+ * no case folding, no alias expansion.
+ */
+export function isKnownRuntimeId(runtime: unknown): boolean {
+  if (typeof runtime !== 'string' || runtime.length === 0) return false;
+  const runtimes = loadRegistryRuntimes();
+  if (runtimes && Object.prototype.hasOwnProperty.call(runtimes, runtime)) return true;
+  return LEGACY_NON_REGISTRY_RUNTIME_IDS.has(runtime);
+}
+
+/**
+ * The ONE refusal every descriptor accessor shares (ADR-5057 §5, #5169).
+ * No-op for an absent id (`''`, non-string): that is the documented
+ * "no runtime selected" generic path. A retired id throws
+ * {@link RetiredRuntimeError}; any other non-empty id that is not known throws
+ * {@link UnknownRuntimeError} instead of silently resolving to Claude Code's
+ * values. When the registry itself failed to load, unknown-ness cannot be
+ * proven, so the check degrades to a no-op (the #338 floor in
+ * {@link hostBehaviorsFor} still protects the reference host).
+ */
+export function assertKnownRuntime(runtime: unknown): void {
+  if (typeof runtime !== 'string' || runtime.length === 0) return;
+  assertNotRetiredRuntime(runtime);
+  if (loadRegistryRuntimes() === null) return;
+  if (!isKnownRuntimeId(runtime)) throw new UnknownRuntimeError(runtime);
+}
+
+/**
+ * The #338-privacy fail-safe floor: host behaviors for the two hosts whose
+ * generic fallthrough would be WRONG if the registry failed to load. Moved
+ * here from `bin/install.js` so the registry-load-failure degrade lives in the
+ * single host-behaviors accessor instead of one of three copies (#5169).
+ */
+export const FALLBACK_HOST_BEHAVIORS: Readonly<Record<string, Readonly<Record<string, unknown>>>> = Object.freeze({
+  claude: Object.freeze({
+    settingsFileByScope: Object.freeze({ local: 'settings.local.json', global: 'settings.json' }),
+    permissionsSchema: 'claude',
+    sourceMarkerFile: '.gsd-source',
+    hyphenNameAgentBody: true,
+    legacyCommandsGsdInstallMigration: true,
+    legacyCommandsGsdUninstall: 'global',
+  }),
+  // antigravity's global config dir is resolved dynamically (env-overridable,
+  // multi-segment); this floor keeps that routing intact if the registry fails
+  // to load instead of falling through to the wrong '.claude' fragment (#2096).
+  antigravity: Object.freeze({ globalDirResolver: 'antigravity' }),
+});
+
+/**
+ * The single accessor for a runtime's host behaviors
+ * (capabilities/<runtime>/capability.json -> runtime.hostBehaviors). Replaces
+ * the three private `_hostBehaviors` copies in `bin/install.js`,
+ * `install-engine.cts` and `runtime-artifact-conversion.cts`.
+ *
+ * - absent id (`''`, non-string) → `{}` (generic path).
+ * - registered id → the descriptor's `hostBehaviors` (or `{}` when it declares
+ *   none).
+ * - known non-registry id (`grok`) → `{}`.
+ * - registry failed to load → the #338 floor for the ids it covers, else `{}`.
+ * - any other id (unregistered, retired, a prototype key) → `{}`: no declared
+ *   behaviors, which is the GENERIC path — never Claude Code's behaviors.
+ *
+ * Unlike the path/label accessors (`getDirName`, `getGlobalConfigDir`, …), whose
+ * fallthrough answer is Claude Code's value and therefore a silent wrong answer
+ * (#4632), an absent behavior is the correct answer for a label GSD does not
+ * know — and this accessor is read by guard and hook code on user-supplied
+ * runtime labels (stale config, a retired id), where a throw would crash the
+ * session rather than skip a behavior. ADR-5057 §5 Phase 10 amendment.
+ *
+ * `registry` is injectable so the load-failure branch is unit-testable.
+ */
+export function hostBehaviorsFor(
+  runtime: unknown,
+  registry?: { runtimes?: RegistryRuntimes } | null,
+): HostBehaviors {
+  if (typeof runtime !== 'string' || runtime.length === 0) return {};
+  const floor = (): HostBehaviors =>
+    Object.prototype.hasOwnProperty.call(FALLBACK_HOST_BEHAVIORS, runtime)
+      ? FALLBACK_HOST_BEHAVIORS[runtime]
+      : {};
+  const runtimes = registry === undefined ? loadRegistryRuntimes() : (registry && registry.runtimes) || null;
+  if (runtimes === null) return floor();
+  if (Object.prototype.hasOwnProperty.call(runtimes, runtime)) {
+    const declared = runtimes[runtime]?.runtime?.hostBehaviors;
+    return declared ? declared : floor();
+  }
+  return {};
 }
 
 const FALLBACK_ALIASES: Readonly<Record<string, string[]>> = {
@@ -296,7 +446,7 @@ export const NO_LOCAL_CONFIG_DIR_SENTINEL = '(no-local-config-dir)';
 export function getDirName(runtime: string): string {
   // Same silent-wrong-answer class as the four accessors AC#1 names: this
   // returned '.claude' for a retired id, and it feeds runtimeConfigDir.
-  assertNotRetiredRuntime(runtime);
+  assertKnownRuntime(runtime);
   if (!runtime) return '.claude';
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { runtimes } = require('./capability-registry.cjs') as {
@@ -368,7 +518,7 @@ const RUNTIME_LABELS: Readonly<Record<string, string>> = {
  * 'Claude Code'. Sibling to `getDirName`; pure (no I/O).
  */
 export function getRuntimeLabel(runtime: string): string {
-  assertNotRetiredRuntime(runtime);
+  assertKnownRuntime(runtime);
   if (!runtime) return 'Claude Code';
   const label = RUNTIME_LABELS[runtime];
   return typeof label === 'string' && label.length > 0 ? label : 'Claude Code';
@@ -425,7 +575,7 @@ const GLOBAL_CONFIG_HOME_FRAGMENTS: Readonly<Record<string, string>> = {
  * dynamically). Pure: no I/O. Sibling to `getDirName` / `getRuntimeLabel`.
  */
 export function getGlobalConfigHomeFragment(runtime: string): string {
-  assertNotRetiredRuntime(runtime);
+  assertKnownRuntime(runtime);
   if (!runtime) return DEFAULT_CONFIG_HOME_FRAGMENT;
   const frag = GLOBAL_CONFIG_HOME_FRAGMENTS[runtime];
   return typeof frag === 'string' && frag.length > 0 ? frag : DEFAULT_CONFIG_HOME_FRAGMENT;
@@ -474,25 +624,8 @@ export function runtimeFlags(runtime: string): Readonly<Record<string, boolean>>
   return Object.freeze(flags);
 }
 
-/**
- * The `/gsd-new-project` invocation syntax per runtime — the post-install
- * "next step" command string. Most runtimes use the default `/gsd-new-project`;
- * a few hosts need a different surface syntax. Collapses the 14-line
- * `if (runtime === 'x') command = ...` chain in bin/install.js's next-step
- * message (ADR-1239 Phase B / #1679 AC2). Pure: no I/O.
- */
-const DEFAULT_NEW_PROJECT_COMMAND = '/gsd-new-project';
-const RUNTIME_NEW_PROJECT_COMMANDS: Readonly<Record<string, string>> = {
-  codex: '$gsd-new-project',
-  cursor: 'gsd-new-project (mention the skill name)',
-  kimi: '/skill:gsd-new-project',
-};
-
-export function getRuntimeNewProjectCommand(runtime: string): string {
-  // Deliberately NOT retirement-guarded: this value does not vary by runtime
-  // in a way that makes a retired id a WRONG answer, so throwing here would
-  // cost callers a crash without correcting anything.
-  if (!runtime) return DEFAULT_NEW_PROJECT_COMMAND;
-  const c = RUNTIME_NEW_PROJECT_COMMANDS[runtime];
-  return typeof c === 'string' && c.length > 0 ? c : DEFAULT_NEW_PROJECT_COMMAND;
-}
+// The `/gsd-new-project` next-step command is no longer a per-runtime table
+// here: it is generated from the runtime's registered trigger surface by
+// `resolveAdvertisedNewProject` (runtime-artifact-layout.cts, #5215, ADR-5057
+// §5 Phase 12), so what the installer advertises cannot differ from what a
+// runtime registered.

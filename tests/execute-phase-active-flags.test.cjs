@@ -34,8 +34,8 @@ describe('execute-phase command: active flags are explicit', () => {
       'objective should state that documented flags are not automatically active'
     );
     assert.ok(
-      objectiveMatch[1].includes('appears in `$ARGUMENTS`'),
-      'objective should tie flag activation to literal $ARGUMENTS presence'
+      objectiveMatch[1].includes('appears in the `<arguments>` block'),
+      'objective should tie flag activation to literal presence in the labeled <arguments> block (#4780)'
     );
   });
 
@@ -46,7 +46,7 @@ describe('execute-phase command: active flags are explicit', () => {
       'context should clearly label flags as documentation only'
     );
     assert.ok(
-      content.includes('Active flags must be derived from `$ARGUMENTS`'),
+      content.includes('Active flags must be derived from the `<arguments>` block'),
       'context should have a separate active-flags section'
     );
   });
@@ -58,7 +58,7 @@ describe('execute-phase command: active flags are explicit', () => {
       'context should forbid inferring flags from documentation alone'
     );
     assert.ok(
-      content.includes('`--interactive` is active only if the literal `--interactive` token is present in `$ARGUMENTS`'),
+      content.includes('`--interactive` is active only if the literal `--interactive` token is present in the `<arguments>` block'),
       'context should apply the same active-flag rule to --interactive'
     );
     assert.ok(
@@ -524,7 +524,11 @@ describe('#3177: execute-phase.md states Claude Code dispatch truthfully', () =>
   test('the Codex orchestrator rule is not swept by the Claude Code correction', () => {
     // Row 5 — negative space. Codex dispatch IS synchronous. A regex sweep for
     // "return its result" would introduce a NEW falsehood here; this catches that.
-    const text = workflowText();
+    // #5118: the verifier dispatch (and its Codex wait rule) moved into the
+    // shared step execute-phase includes (execute-phase/steps/verify-phase-goal.md);
+    // the #3177 contract is about every Codex wait rule the orchestrator
+    // follows, wherever it lives — read the workflow with its steps.
+    const text = require('./helpers.cjs').readWorkflowCombined(WORKFLOW);
     const codexRules = text
       .split('\n')
       .filter((l) => l.includes('ORCHESTRATOR RULE — CODEX RUNTIME'));

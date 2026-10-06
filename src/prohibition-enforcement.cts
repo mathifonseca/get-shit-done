@@ -43,10 +43,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-// Import the leaf I/O module directly (core.cjs re-export spine retired in epic #1267).
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-import io = require('./io.cjs');
-const { output, error, ERROR_REASON } = io;
 import { dispositionForProhibition } from './probe-core.cjs';
 import type { ProhibitionDisposition } from './probe-core.cjs';
 
@@ -820,55 +816,7 @@ export function runProhibitionEnforcement(
   };
 }
 
-/**
- * Parse a `{ prohibition, check, mode }` request from a JSON file path or inline `--json` string.
- * Returns null on any parse failure (the caller surfaces a structured error, never a throw).
- */
-function parseRequest(args: string[]): { prohibition: unknown; check: CheckDescriptor | null; mode?: string } | null {
-  // args[0] = 'check', args[1] = 'prohibition-enforcement', args[2] = <json-file-path | --json>
-  const jsonFlagIdx = args.indexOf('--json');
-  let payload = '';
-  if (jsonFlagIdx !== -1 && typeof args[jsonFlagIdx + 1] === 'string') {
-    payload = args[jsonFlagIdx + 1];
-  } else if (typeof args[2] === 'string' && args[2]) {
-    try {
-      payload = fs.readFileSync(args[2], 'utf-8');
-    } catch {
-      return null;
-    }
-  } else {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(payload) as Record<string, unknown>;
-    const checkRaw = parsed['check'];
-    const check: CheckDescriptor | null = (checkRaw && typeof checkRaw === 'object')
-      ? (checkRaw as CheckDescriptor)
-      : null;
-    const modeRaw = parsed['mode'];
-    const mode = typeof modeRaw === 'string' ? modeRaw : undefined;
-    return { prohibition: parsed['prohibition'] ?? null, check, ...(mode ? { mode } : {}) };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * CLI surface: `gsd_run check prohibition-enforcement <request.json>` (or `--json '<inline>'`).
- * Parses the request, runs the producer, and emits the result as JSON. Honors the no-throw
- * contract: malformed input -> structured `error(...)`, never an uncaught throw.
- */
-export function routeProhibitionEnforcement(args: string[], raw: boolean): void {
-  const req = parseRequest(args);
-  if (!req) {
-    error(
-      'prohibition-enforcement requires a JSON request: check prohibition-enforcement <request.json> | --json \'{"prohibition":{...},"check":{...}}\'',
-      ERROR_REASON.SDK_MISSING_ARG,
-    );
-    return;
-  }
-  const result = runProhibitionEnforcement(req.prohibition, req.check, req.mode ? { mode: req.mode } : {});
-  output(result, raw, undefined);
-}
+// The `check prohibition-enforcement` CLI surface (request parsing and the advisory verdict) is the gate
+// module `src/gate-prohibition-enforcement.cts` (#5219, ADR-5057 §4); this module is the producer.
 
 export {};

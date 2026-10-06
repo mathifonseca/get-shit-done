@@ -13,7 +13,7 @@ const { cleanup } = require('./helpers.cjs');
 const { createFixture, seedWorkstream } = require('./fixtures/index.cjs');
 const { buildWorkstreamInventory, isCompletedInventory, pickRollupWinners } = require('../gsd-core/bin/lib/workstream-inventory-builder.cjs');
 const { inspectWorkstream } = require('../gsd-core/bin/lib/workstream-inventory.cjs');
-const { VERIFIER_STATUSES } = require('../gsd-core/bin/lib/verification.cjs');
+const { VERIFIER_STATUSES, VerificationStatusError } = require('../gsd-core/bin/lib/verification.cjs');
 const { phaseKeyFromDir, phaseKeyFromProse, phaseKeyFromToken, normalizePhaseName } = require('../gsd-core/bin/lib/phase-id.cjs');
 const fc = require('fast-check');
 
@@ -708,7 +708,7 @@ describe('#2562 — milestone scoping boundaries (one phase-key derivation)', ()
   // `complete: verification.status === 'passed'`), mirrored here for every
   // verifier status other than 'passed'.
   test('parity: every verifier status other than passed blocks completeness', () => {
-    const nonPassing = VERIFIER_STATUSES.filter(s => s !== 'passed');
+    const nonPassing = [...VERIFIER_STATUSES].filter(s => s !== 'passed');
     assert.ok(nonPassing.length > 0, 'guard: the verifier must emit a non-passing status');
     for (const status of nonPassing) {
       const inv = buildWorkstreamInventory({
@@ -1296,7 +1296,10 @@ describe('#2645 — deleting a verification report must not raise completeness',
   // "unless the last real verdict was passed/unknown". Disclosed in this
   // phase's changeset.
   test('property: after the report goes missing, the phase is NEVER complete regardless of prior history (disk-strict; #2645 memory retired)', () => {
-    const REAL_STATUSES = ['passed', 'gaps_found', 'human_needed', 'unknown'];
+    // #5118: a report carries only the closed writer subset — a status outside it
+    // (the `unknown` this generator used to draw) is a hard `verification_status_invalid`
+    // error, not an observable verdict, so it is not part of the history space.
+    const REAL_STATUSES = [...VERIFIER_STATUSES];
     fc.assert(fc.property(
       fc.array(fc.constantFrom(...REAL_STATUSES), { minLength: 1, maxLength: 6 }),
       (sequence) => {
@@ -1382,6 +1385,50 @@ describe('#2645 — deleting a verification report must not raise completeness',
     assert.equal(inv.phases[0].status, 'in_progress',
       'a corrupt ledger for an adopted workstream must fail closed, not silently permit completion');
     assert.equal(inv.completed_phases, 0, 'the percentage must not rise just because the ledger became unreadable');
+  });
+
+  // #5118 review G: the ledger-local `unrecorded` state was deleted — its only
+  // reader (phaseStatusFromFacts) never told it apart from `missing`. An
+  // adopted ledger with no entry for a phase reads exactly like a never-adopted
+  // one: the SAME wire status (never complete under disk-strict).
+  test('#5118: an adopted ledger with no entry for this phase reads the same as no ledger at all', () => {
+    const makeWs = (name, adopt) => {
+      const wsDir = seedWorkstream(tmpDir, { name });
+      fs.writeFileSync(path.join(wsDir, 'STATE.md'), FLAT_STATE);
+      fs.writeFileSync(path.join(wsDir, 'ROADMAP.md'), flatRoadmap(['| 1. Foo | 1/1 | In Progress | - |']));
+      writePhase(wsDir, '1-foo', { plans: 1, summaries: 1 });
+      if (adopt) fs.writeFileSync(path.join(wsDir, '.verification-ledger.json'), JSON.stringify({ '99': 'passed' }));
+      return inspectWorkstream(tmpDir, name, { active: null });
+    };
+    const adopted = makeWs('ws-5118-adopted', true);
+    const pristine = makeWs('ws-5118-pristine', false);
+    assert.deepEqual(adopted.phases.map((p) => p.status), pristine.phases.map((p) => p.status));
+    assert.equal(adopted.completed_phases, 0);
+  });
+
+  // #5118 review B: this inspection WRITES the ledger, so a report whose
+  // `status` is outside the closed set fails it before the write.
+  test('#5118: an out-of-set report fails the inspection before the ledger is written', () => {
+    const wsDir = seedWorkstream(tmpDir, { name: 'ws-5118-out-of-set' });
+    fs.writeFileSync(path.join(wsDir, 'STATE.md'), FLAT_STATE);
+    fs.writeFileSync(path.join(wsDir, 'ROADMAP.md'), flatRoadmap([
+      '| 1. Foo | 1/1 | In Progress | - |',
+      '| 2. Bar | 1/1 | In Progress | - |',
+    ]));
+    writePhase(wsDir, '1-foo', { plans: 1, summaries: 1, verification: 'gaps_found' });
+    writePhase(wsDir, '2-bar', { plans: 1, summaries: 1, verification: 'verified' });
+    const ledgerPath = path.join(wsDir, '.verification-ledger.json');
+    assert.throws(
+      () => inspectWorkstream(tmpDir, 'ws-5118-out-of-set', { active: null }),
+      (err) => err instanceof VerificationStatusError && err.reason === 'verification_status_invalid' && /2-bar/.test(err.file),
+      'the inspection fails with the owner\'s own error, naming the refused report',
+    );
+    assert.equal(fs.existsSync(ledgerPath), false, 'nothing persisted — not even phase 1\'s real verdict');
+
+    // CONTROL: the same workstream with the report fixed inspects and writes.
+    fs.writeFileSync(path.join(wsDir, 'phases', '2-bar', '02-VERIFICATION.md'), '---\nstatus: passed\n---\n');
+    assert.doesNotThrow(() => inspectWorkstream(tmpDir, 'ws-5118-out-of-set', { active: null }));
+    assert.equal(fs.existsSync(ledgerPath), true);
   });
 
   // Row 13 — "delete the ledger" case #1: the ledger file is removed, but

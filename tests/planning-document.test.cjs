@@ -23,10 +23,16 @@ try {
 } catch (err) {
   throw new Error(`Could not require ${MODULE_PATH}. Run "npm run build:lib" first. Underlying: ${err.message}`);
 }
-const { parsePlanningDoc, findField, readNode, setFieldValue, hasUnreadableNodes, serialize, PLANNING_ARTIFACTS } = mod;
+const {
+  parsePlanningDoc, findField, readNode, setFieldValue, hasUnreadableNodes, serialize, PLANNING_ARTIFACTS,
+  readFrontmatterField, readFrontmatterFieldFromSource, replaceProse,
+} = mod;
 
 const artifactsMod = require(ARTIFACTS_PATH);
 const { isCanonicalPlanningFile, CANONICAL_EXACT } = artifactsMod;
+
+const FRONTMATTER_PATH = '../gsd-core/bin/lib/frontmatter.cjs';
+const { extractFrontmatter } = require(FRONTMATTER_PATH);
 
 const ARTIFACT = 'STATE.md';
 const EM_DASH = '—';
@@ -777,5 +783,314 @@ describe('row 30: setFieldValue refuses a value containing the trailing separato
     const outcome = serialize(doc);
     assert.strictEqual(outcome.ok, true);
     assert.strictEqual(outcome.value, source);
+  });
+});
+
+// ─── Row 32: setFieldValue has NO separator-widening escape hatch (#5007) ──────
+//
+// #4917's review finding 2 (the round-trip check row 30 above pins) is: a
+// value containing the grammar's own ` — ` separator token gets silently
+// TRUNCATED on serialize, because `parseBoldFieldLine` always splits `rest`
+// at the FIRST ` — ` it finds — there is no substring/position rule that can
+// tell "the caller's atomic value happens to contain ` — `" apart from "the
+// caller meant value + a separate trailing annotation": both are the
+// identical input shape to the reader. Narrowing the round-trip check's
+// regex can never fix this safely — see setFieldValue's own comment.
+//
+// An earlier version of #5007 added a `{ allowSeparator: true }` option that
+// spliced the caller's value across the FULL rest-of-line span instead of
+// just `valueSpan`, reasoning that skipping the reparse-and-split made
+// finding 2's failure mode "structurally impossible". A failing-first
+// reproduction proved that reasoning wrong: the option only avoided the
+// refusal AT WRITE TIME. The bytes it wrote were correct, but
+// `parseBoldFieldLine` splits on ` — ` unconditionally on every READ, with
+// no escaping/metadata in this grammar to tell the two cases apart — so the
+// NEXT fresh `parsePlanningDoc` of that exact text (not the in-memory doc
+// the option's own tests checked) silently re-truncated the value via
+// `findField`/`readNode`, reporting a confident `ok: true` and no error.
+// That is finding 2 itself, just moved one parse cycle downstream of where
+// the check could catch it. The option was removed; this seam now has
+// exactly ONE write path, and it round-trips safely by refusing outright,
+// not by silently mis-splitting.
+describe('row 32: setFieldValue has no way to accept a separator-containing value', () => {
+  test('a value containing " — " is refused (finding 2 stays fixed) — setFieldValue has no options parameter', () => {
+    const source = ['**Phase:** 1', '**Owner:** alice', ''].join('\n');
+    const doc = parseOk(source);
+    const id = findField(doc, 'Phase');
+
+    const result = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE`);
+    assert.strictEqual(result.ok, false, 'the round-trip check must still refuse — finding 2 pin');
+
+    // Regression pin: a 3rd "options" argument (the removed allowSeparator
+    // shape) must have NO effect — proves the escape hatch cannot silently
+    // be reintroduced by a caller who copies the old call shape.
+    const withIgnoredOptions = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE`, { allowSeparator: true });
+    assert.strictEqual(withIgnoredOptions.ok, false, 'a stray options arg must not reopen the refusal');
+  });
+
+  // ROUND-TRIP CORRUPTION PROOF (why the removed option was unsafe, kept as
+  // a permanent regression pin against reintroducing it under any name):
+  // this grammar has no escaping convention, so ANY line whose rest-of-line
+  // text contains " — " — however it got written — is split at the FIRST
+  // occurrence on every parse. There is no way for a value legitimately
+  // containing that token to round-trip through parsePlanningDoc/findField/
+  // readNode; the only representable-by-construction contract this seam can
+  // offer is refuse-at-write, which is what setFieldValue does.
+  test('a line whose rest-of-line text contains " — " is ALWAYS split on (re)parse — the grammar has no escape', () => {
+    // Simulates what a full-rest-of-line write (with no reparse/refusal)
+    // would have produced on disk, bypassing setFieldValue entirely to
+    // isolate the parser's own behaviour from any writer.
+    const written = ['**Phase:** 1 — COMPLETE', '**Owner:** alice', ''].join('\n');
+
+    const reparsed = parseOk(written);
+    const id = findField(reparsed, 'Phase');
+    const read = readNode(reparsed, id);
+
+    assert.strictEqual(read.ok, true);
+    assert.notStrictEqual(
+      read.value,
+      '1 — COMPLETE',
+      'reparsing must NOT recover the full atomic value — proves no safe round-trip exists in this grammar',
+    );
+    assert.strictEqual(read.value, '1', 'the grammar unconditionally truncates at the first " — "');
+  });
+});
+
+// ─── #5026: readFrontmatterField / readFrontmatterFieldFromSource ──────────────
+//
+// ADR-4910 §1 absorption seam: a frontmatter-key reader composing
+// `frontmatter.cts`'s `extractFrontmatter` rather than reimplementing YAML
+// parsing. Two entry points share one lookup-and-shape helper internally
+// (`lookupFrontmatterField`, not exported — its behavior is asserted only
+// through these two public functions, which is the point: one owner, two
+// doors) — `readFrontmatterField` locates the frontmatter span via an
+// already-parsed `PlanningDoc`'s `FrontmatterNode`; `readFrontmatterFieldFromSource`
+// locates it directly off raw source text, with no `PlanningDoc`/artifact-kind
+// gate, for a caller (`plan-document.cts`) with content but no canonical
+// `.planning/`-root filename to gate on.
+
+describe('#5026: readFrontmatterField — key present/absent, no-frontmatter, malformed', () => {
+  const source = ['---', 'wave: 3', 'depends_on: [01-first, 02-second]', '---', '', '**Alpha:** one', ''].join('\n');
+
+  test('frontmatter present, key present: value matches extractFrontmatter on the same source', () => {
+    const doc = parseOk(source);
+    const read = readFrontmatterField(doc, 'wave');
+    const direct = extractFrontmatter(source);
+    assert.strictEqual(read.ok, true);
+    assert.deepStrictEqual(read.value, direct['wave']);
+    assert.strictEqual(read.value, '3');
+  });
+
+  test('frontmatter present, an array-valued key present: value matches extractFrontmatter verbatim', () => {
+    const doc = parseOk(source);
+    const read = readFrontmatterField(doc, 'depends_on');
+    const direct = extractFrontmatter(source);
+    assert.strictEqual(read.ok, true);
+    assert.deepStrictEqual(read.value, direct['depends_on']);
+    assert.deepStrictEqual(read.value, ['01-first', '02-second']);
+  });
+
+  test('frontmatter present, key absent: not-found, matching extractFrontmatter\'s own absent-key contract (undefined)', () => {
+    const doc = parseOk(source);
+    const read = readFrontmatterField(doc, 'nonexistent');
+    const direct = extractFrontmatter(source);
+    assert.strictEqual(direct['nonexistent'], undefined);
+    assert.strictEqual(read.ok, false);
+    assert.strictEqual(read.reason, 'field-not-found');
+  });
+
+  test('no frontmatter node at all: { ok: false, reason: \'no-frontmatter\' }', () => {
+    const doc = parseOk('**Alpha:** one\n');
+    assert.strictEqual(doc.nodes.some((n) => n.kind === 'frontmatter'), false);
+    const read = readFrontmatterField(doc, 'wave');
+    assert.deepStrictEqual(read, { ok: false, reason: 'no-frontmatter', span: { start: 0, end: 0 } });
+  });
+
+  test('malformed/unparseable frontmatter: matches extractFrontmatter\'s own FRONTMATTER_UNPARSEABLE contract', () => {
+    const malformed = ['---', 'wave: [1, 2', 'depends_on: 01-first', '---', '', '**Alpha:** one', ''].join('\n');
+    const doc = parseOk(malformed);
+    // Cross-check against frontmatter.cjs's own marker directly, proving the
+    // seam's 'unparseable-frontmatter' reason is a faithful translation of it.
+    const direct = extractFrontmatter(malformed);
+    const { FRONTMATTER_UNPARSEABLE } = require(FRONTMATTER_PATH);
+    assert.strictEqual(Object.getOwnPropertySymbols(direct).includes(FRONTMATTER_UNPARSEABLE), true);
+
+    const read = readFrontmatterField(doc, 'wave');
+    assert.strictEqual(read.ok, false);
+    assert.strictEqual(read.reason, 'unparseable-frontmatter');
+  });
+
+  test('an unterminated frontmatter fence is unreachable through this function: parsePlanningDoc fails the whole document first', () => {
+    const unterminated = ['---', 'wave: 3', 'depends_on: x', 'this fence is never closed', ''].join('\n');
+    const result = parsePlanningDoc(unterminated, ARTIFACT);
+    assert.strictEqual(result.ok, false);
+  });
+});
+
+describe('#5026: readFrontmatterFieldFromSource — same contract, no PlanningDoc/artifact gate', () => {
+  const source = ['---', 'wave: 3', 'depends_on: [01-first, 02-second]', '---', '', 'body text', ''].join('\n');
+
+  test('frontmatter present, key present: value matches extractFrontmatter on the same source', () => {
+    const read = readFrontmatterFieldFromSource(source, 'wave');
+    const direct = extractFrontmatter(source);
+    assert.strictEqual(read.ok, true);
+    assert.deepStrictEqual(read.value, direct['wave']);
+  });
+
+  test('frontmatter present, key absent: field-not-found', () => {
+    const read = readFrontmatterFieldFromSource(source, 'nonexistent');
+    assert.strictEqual(read.ok, false);
+    assert.strictEqual(read.reason, 'field-not-found');
+  });
+
+  test('no frontmatter fence at all: { ok: false, reason: \'no-frontmatter\' }', () => {
+    const read = readFrontmatterFieldFromSource('just prose, no fence', 'wave');
+    assert.deepStrictEqual(read, { ok: false, reason: 'no-frontmatter', span: { start: 0, end: 0 } });
+  });
+
+  test('malformed/unparseable frontmatter: unparseable-frontmatter, same as readFrontmatterField', () => {
+    const malformed = ['---', 'wave: [1, 2', '---', '', 'body', ''].join('\n');
+    const read = readFrontmatterFieldFromSource(malformed, 'wave');
+    assert.strictEqual(read.ok, false);
+    assert.strictEqual(read.reason, 'unparseable-frontmatter');
+  });
+
+  test('an OPENED-but-never-closed fence IS reachable here (unlike readFrontmatterField) and reads as field-not-found', () => {
+    const unterminated = ['---', 'wave: 3', 'depends_on: x', 'this fence is never closed', ''].join('\n');
+    const direct = extractFrontmatter(unterminated);
+    assert.strictEqual(direct['wave'], undefined, 'extractFrontmatter itself treats an unterminated fence as no frontmatter');
+    const read = readFrontmatterFieldFromSource(unterminated, 'wave');
+    assert.strictEqual(read.ok, false);
+    assert.strictEqual(read.reason, 'field-not-found');
+  });
+
+  test('no PlanningDoc/artifact-kind gate: a filename `parsePlanningDoc` would refuse still reads correctly', () => {
+    // '01-PLAN.md' is not a canonical .planning/-root artifact (isCanonicalPlanningFile
+    // returns false for it), so parsePlanningDoc(source, '01-PLAN.md') would fail at the
+    // document level — this function needs no artifact name at all.
+    assert.strictEqual(isCanonicalPlanningFile('01-PLAN.md'), false);
+    const gated = parsePlanningDoc(source, '01-PLAN.md');
+    assert.strictEqual(gated.ok, false);
+
+    const read = readFrontmatterFieldFromSource(source, 'wave');
+    assert.strictEqual(read.ok, true);
+    assert.strictEqual(read.value, '3');
+  });
+});
+
+describe('#5026 follow-up: readFrontmatterField / readFrontmatterFieldFromSource parity', () => {
+  // Both entry points are two doors onto one shared lookup-and-shape owner
+  // (`lookupFrontmatterField`) — this pins that they can never silently
+  // diverge (CLAUDE.md's "Generative Fix Divergence" defect class) by parsing
+  // the SAME underlying document both ways: once via `parsePlanningDoc` into a
+  // `doc` (read through `readFrontmatterField`), once passed raw as `source`
+  // (read through `readFrontmatterFieldFromSource`) — and asserting both
+  // agree, key by key, across present/array/absent/malformed shapes.
+  const source = [
+    '---',
+    'wave: 3',
+    'depends_on: [01-first, 02-second]',
+    'autonomous: true',
+    '---',
+    '',
+    '**Alpha:** one',
+    '',
+  ].join('\n');
+  const malformed = ['---', 'wave: [1, 2', 'depends_on: 01-first', '---', '', '**Alpha:** one', ''].join('\n');
+  const noFrontmatter = '**Alpha:** one\n';
+
+  function assertParity(text, key) {
+    const doc = parseOk(text);
+    const viaDoc = readFrontmatterField(doc, key);
+    const viaSource = readFrontmatterFieldFromSource(text, key);
+    assert.deepStrictEqual(
+      viaDoc,
+      viaSource,
+      `readFrontmatterField(doc, ${JSON.stringify(key)}) and readFrontmatterFieldFromSource(source, ${JSON.stringify(key)}) diverged`,
+    );
+  }
+
+  test('present scalar key: both entry points agree', () => {
+    assertParity(source, 'wave');
+  });
+
+  test('present array-valued key: both entry points agree', () => {
+    assertParity(source, 'depends_on');
+  });
+
+  test('absent key: both entry points agree (field-not-found)', () => {
+    assertParity(source, 'nonexistent');
+  });
+
+  test('no frontmatter at all: both entry points agree (no-frontmatter)', () => {
+    assertParity(noFrontmatter, 'wave');
+  });
+
+  test('malformed/unparseable frontmatter: both entry points agree (unparseable-frontmatter)', () => {
+    assertParity(malformed, 'wave');
+  });
+});
+
+// ─── replaceProse (ADR-5057 §6, Phase 13, #5217) ───────────────────────────────
+
+describe('replaceProse: verbatim cross-reference rewrite through the seam', () => {
+  const sourceOf = (result) => {
+    assert.strictEqual(result.ok, true, `expected ok: ${JSON.stringify(result)}`);
+    const out = serialize(result.value);
+    assert.strictEqual(out.ok, true);
+    return out.value;
+  };
+
+  test('replaces every occurrence outside fenced code and leaves fenced code verbatim', () => {
+    const source = 'Phase 1: Setup\nsee Phase 1: Setup again Phase 1:\n```\nPhase 1: in a fence\n```\nend\n';
+    const out = sourceOf(replaceProse(parseOk(source, 'PROJECT.md'), 'Phase 1:', 'Phase 1-01:'));
+    assert.strictEqual(
+      out,
+      'Phase 1-01: Setup\nsee Phase 1-01: Setup again Phase 1-01:\n```\nPhase 1: in a fence\n```\nend\n',
+    );
+  });
+
+  test('frontmatter lines are rewritten too (STATE.md keeps phase refs there)', () => {
+    const source = '---\nstopped_at: "Phase 2: Auth"\n---\n\nbody\n';
+    const out = sourceOf(replaceProse(parseOk(source), 'Phase 2:', 'Phase 1-02:'));
+    assert.strictEqual(out, '---\nstopped_at: "Phase 1-02: Auth"\n---\n\nbody\n');
+  });
+
+  test('CRLF terminators are preserved byte-for-byte', () => {
+    const source = 'a Phase 1: x\r\nb\r\nc Phase 1: y';
+    const out = sourceOf(replaceProse(parseOk(source), 'Phase 1:', 'P:'));
+    assert.strictEqual(out, 'a P: x\r\nb\r\nc P: y');
+  });
+
+  test('absent literal: the same doc comes back, source byte-identical', () => {
+    const doc = parseOk('nothing here\n');
+    const result = replaceProse(doc, 'Phase 9:', 'x');
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.value.source, doc.source);
+  });
+
+  test('refuses an empty `from`, a multi-line `from` or `to`, and a doc with staged field edits', () => {
+    const doc = parseOk('**Plans:** a\ntext\n');
+    assert.strictEqual(replaceProse(doc, '', 'x').ok, false);
+    assert.strictEqual(replaceProse(doc, 'a\nb', 'x').ok, false);
+    assert.strictEqual(replaceProse(doc, 'text', 'x\ny').ok, false);
+    const staged = setFieldValue(doc, findField(doc, 'Plans'), 'b');
+    assert.strictEqual(staged.ok, true);
+    assert.strictEqual(replaceProse(staged.value, 'text', 'x').ok, false);
+  });
+
+  test('property: equals a naive substitution when the document has no fence, and re-parses', () => {
+    const piece = fc.constantFrom('Phase 1:', 'Phase 2:', 'text', ' ', '\n', '\r\n', '- [ ] ', '**Plans:** x');
+    fc.assert(
+      fc.property(fc.array(piece, { maxLength: 20 }), (parts) => {
+        const source = parts.join('');
+        const parsed = parsePlanningDoc(source, 'PROJECT.md');
+        fc.pre(parsed.ok);
+        const result = replaceProse(parsed.value, 'Phase 1:', 'Phase 1-01:');
+        assert.strictEqual(result.ok, true);
+        assert.strictEqual(result.value.source, source.split('Phase 1:').join('Phase 1-01:'));
+        assert.strictEqual(serialize(result.value).value, result.value.source);
+      }),
+    );
   });
 });

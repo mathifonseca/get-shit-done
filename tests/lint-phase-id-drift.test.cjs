@@ -8,6 +8,7 @@ const {
   findNameValidityDrift,
   findBranchSlugFallbackDrift,
   findPhaseHeadingScanLiteralDrift,
+  scanMarkdownPhaseHeadingScanLiteral,
   findShellPhaseArithDrift,
   findSingleSegmentPhaseRegexDrift,
   scanMarkdownSingleSegmentPhaseRegex,
@@ -101,6 +102,11 @@ test('findPhaseHeadingScanLiteralDrift does NOT flag a sanctioned site', () => {
     '    const phasePattern = new RegExp(`#{2,4}\\\\s*Phase\\\\s+(\\\\d+)`, \'gi\');',
   ].join('\n');
   assert.deepEqual(findPhaseHeadingScanLiteralDrift(text), []);
+});
+
+test('scanMarkdownPhaseHeadingScanLiteral against the real repo tree reports zero violations (#5007 fixed)', () => {
+  const violations = scanMarkdownPhaseHeadingScanLiteral(ROOT);
+  assert.deepEqual(violations, []);
 });
 
 test('findShellPhaseArithDrift flags $((10#...)) base-10-forced arithmetic', () => {

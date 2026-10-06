@@ -19,7 +19,7 @@ function parseMvpPhaseContract(content) {
   const lowerLines = lines.map(line => line.toLowerCase());
   const askCount = lowerLines.filter(line => line.includes('askuserquestion') || line.includes('vscode_askquestions')).length;
   const spidrStepIndex = lowerLines.findIndex(line => line.includes('## 4. spidr splitting check'));
-  const planPhaseStepIndex = lowerLines.findIndex(line => line.includes('## 7. delegate to /gsd plan-phase'));
+  const planPhaseStepIndex = lowerLines.findIndex(line => line.includes('## 7. delegate to /gsd:plan-phase'));
 
   return {
     hasStatusGuard: lowerLines.some(line => line.includes('in_progress') || line.includes('completed')),
@@ -64,7 +64,7 @@ describe('mvp-phase workflow', () => {
     assert.ok(contract.hasGoalLine, 'workflow must update the **Goal:** line');
   });
 
-  test('delegates to /gsd plan-phase after ROADMAP write', () => {
+  test('delegates to /gsd:plan-phase after ROADMAP write', () => {
     assert.ok(contract.planPhaseStepIndex >= 0, 'plan-phase delegation step must be present');
     assert.ok(contract.spidrStepIndex >= 0, 'SPIDR check step must be present');
     assert.ok(contract.planPhaseStepIndex > contract.spidrStepIndex, 'plan-phase delegation must come AFTER SPIDR check');

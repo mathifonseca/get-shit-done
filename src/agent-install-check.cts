@@ -15,7 +15,7 @@ import path from 'node:path';
 import modelProfiles = require('./model-profiles.cjs');
 const { MODEL_PROFILES } = modelProfiles;
 import { getGlobalConfigDir } from './runtime-homes.cjs';
-import { getDirName, NO_LOCAL_CONFIG_DIR_SENTINEL } from './runtime-name-policy.cjs';
+import { getDirName, hostBehaviorsFor, NO_LOCAL_CONFIG_DIR_SENTINEL } from './runtime-name-policy.cjs';
 // #3242 — model-catalog is a genuine leaf (only node:path + its own JSON), which is
 // exactly why Phase 1 (#3241) moved isAnthropicFlavoredModel there: this module can
 // consume it without dragging model-resolver's config-loader chain into a
@@ -556,7 +556,10 @@ function agentFileExists(agentsDir: string, name: string, runtime: string): bool
   // kimi requires BOTH the persona yaml and the prompt md (same as checkAgentsInstalled).
   const kimiYaml = path.join(agentsDir, 'subagents', `${name}.yaml`);
   const kimiPrompt = path.join(agentsDir, 'subagents', `${name}.md`);
-  return runtime === 'kimi' && fs.existsSync(kimiYaml) && fs.existsSync(kimiPrompt);
+  // #5169: descriptor-declared (`hostBehaviors.requiresSubagentPair`); a label
+  // that is not a registered runtime declares nothing, so it never requires the pair.
+  return hostBehaviorsFor(runtime).requiresSubagentPair === true
+    && fs.existsSync(kimiYaml) && fs.existsSync(kimiPrompt);
 }
 
 /**

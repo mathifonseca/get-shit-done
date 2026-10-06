@@ -22,7 +22,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { cleanup } = require('./helpers.cjs');
+const { cleanup, createTempDir } = require('./helpers.cjs');
 
 const {
   VENDORED,
@@ -48,6 +48,26 @@ function re2jsRow() {
   const row = VENDORED.find((r) => r.name === 're2js');
   assert.ok(row, 'expected a re2js row in VENDORED');
   return row;
+}
+
+for (const name of ['tap-parser', 'saxes']) {
+  test(`#4692: ${name} bundle and license notices are reproducible and drift is rejected`, (t) => {
+    const row = VENDORED.find((entry) => entry.name === name);
+    assert.ok(row);
+    assert.deepEqual(checkRow(row), []);
+    const dir = createTempDir('parser-vendor-');
+    t.after(() => cleanup(dir));
+    const copy = path.join(dir, `${name}.cjs`);
+    fs.copyFileSync(resolvePath(row.vendoredCjs), copy);
+    fs.copyFileSync(resolvePath(`${row.vendoredCjs}.LICENSE.txt`), `${copy}.LICENSE.txt`);
+    const scratch = { ...row, vendoredCjs: copy };
+    fs.appendFileSync(copy, '\n// accidental edit\n');
+    assert.ok(checkRow(scratch).some((finding) => finding.includes(`${copy} !=`)));
+    assert.deepEqual(fixRow(scratch), []);
+    fs.writeFileSync(`${copy}.LICENSE.txt`, 'missing upstream notices\n');
+    assert.ok(checkRow(scratch).some((finding) => finding.includes('.LICENSE.txt !=')));
+    assert.deepEqual(fixRow(scratch), []);
+  });
 }
 
 describe('resolvePath: absolute-input safety does not change repo-relative resolution', () => {

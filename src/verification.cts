@@ -45,7 +45,11 @@ import coreUtilsMod = require('./core-utils.cjs');
 import planningScopeMod = require('./planning-scope.cjs');
 import { execGit } from './shell-command-projection.cjs';
 import { formatGsdSlash, resolveRuntime } from './runtime-slash.cjs';
-import { isContainedIn } from './security.cjs';
+import { isContainedIn, requireSafePath, PathAcceptance } from './security.cjs';
+import { escapeRegex } from './pattern.cjs';
+import { tokenizeHeadings, collectSection } from './markdown-sectionizer.cjs';
+import { parseMarkdownTable } from './markdown-table.cjs';
+import { parseNamedArgsOrExit } from './command-arg-projection.cjs';
 
 const { output, error } = io;
 const { extractPhaseToken, scopeToPhase } = phaseId;
@@ -54,97 +58,285 @@ const { normalizeLineEndings } = coreUtilsMod;
 const { SCOPE } = planningScopeMod;
 type Scope = planningScopeMod.Scope;
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// ─── The closed VerificationStatus enum (#5118, ADR-5057 §1 / Phase 4) ────────
 
-/** The set of status values that the gsd-verifier agent emits. */
-const VERIFIER_STATUSES: ReadonlyArray<string> = ['passed', 'gaps_found', 'human_needed'];
+/**
+ * The closed verification-status vocabulary. This module is its ONE owner:
+ * every other `src/` site imports `VERIFICATION_STATUS` / `VerificationStatus`
+ * (the ESLint rule `local/no-verification-status-literal` keeps a spelled
+ * literal out of `src/`), every workflow reads the owner's query fields, and
+ * the prose writer contract (`agents/gsd-verifier.md`,
+ * `templates/verification-report.md`) is parity-locked to `VERIFIER_STATUSES`.
+ *
+ * `unknown` is not a member (#5118): it existed only to pass an out-of-set
+ * report value along (#4817's `status: verified` → `/gsd-execute-phase`). An
+ * out-of-set report value is now a `VerificationStatusError`, thrown where it
+ * is read.
+ *
+ * Reader-only members — never valid in a report's frontmatter:
+ *   - `stale`               the covered inputs moved after the verifier ran
+ *   - `missing`             the phase directory exists and holds no report, or
+ *                           the report has no `status` (the verify step never ran)
+ *   - `unparseable`         the report exists but its frontmatter is not YAML
+ *                           (#4806) — this one meaning only
+ *   - `phase_dir_not_found` there was no phase directory to look in (ADR-5057
+ *                           amendment 2, #4987) — a usage error, never
+ *                           `execute-phase`
+ *
+ * An out-of-set report status is NOT a member either: the reader throws, and
+ * `isPhaseComplete`'s no-throw projection of it is `status: null` with scope
+ * UNREADABLE and `statusError` set (never `unparseable`).
+ */
+const VERIFICATION_STATUS = Object.freeze({
+  PASSED: 'passed',
+  GAPS_FOUND: 'gaps_found',
+  HUMAN_NEEDED: 'human_needed',
+  STALE: 'stale',
+  MISSING: 'missing',
+  UNPARSEABLE: 'unparseable',
+  PHASE_DIR_NOT_FOUND: 'phase_dir_not_found',
+} as const);
 
-// ─── Routing table ────────────────────────────────────────────────────────────
+type VerificationStatus = typeof VERIFICATION_STATUS[keyof typeof VERIFICATION_STATUS];
 
-interface VerificationRoute {
-  status: string;
-  next_action: string;
-  next_command: string;
+/** The writer contract: the only values a report's frontmatter `status` may carry. */
+type VerifierStatus =
+  | typeof VERIFICATION_STATUS.PASSED
+  | typeof VERIFICATION_STATUS.GAPS_FOUND
+  | typeof VERIFICATION_STATUS.HUMAN_NEEDED;
+
+/** The set of status values the gsd-verifier agent writes — a frozen subset of the enum. */
+const VERIFIER_STATUSES: ReadonlySet<VerifierStatus> = Object.freeze(new Set<VerifierStatus>([
+  VERIFICATION_STATUS.PASSED,
+  VERIFICATION_STATUS.GAPS_FOUND,
+  VERIFICATION_STATUS.HUMAN_NEEDED,
+]));
+
+const VERIFICATION_STATUS_VALUES: ReadonlySet<string> = new Set<string>(Object.values(VERIFICATION_STATUS));
+
+/** True exactly when `v` is a member of the closed enum (exact match, no case folding). */
+function isVerificationStatus(v: unknown): v is VerificationStatus {
+  return typeof v === 'string' && VERIFICATION_STATUS_VALUES.has(v);
 }
 
 /**
- * Canonical routing table for verification statuses.
- *
- * This is the single source of truth — ship.md and execute-phase.md will
- * later import from here instead of embedding their own message strings.
- *
- * INTERNAL SENTINELS: 'missing' and 'unknown' are operational states constructed
- * internally — the verifier (gsd-verifier.md) never emits them. The verifier only
- * emits values in VERIFIER_STATUSES (passed|gaps_found|human_needed). The guard in
- * readVerificationStatus excludes 'missing' and 'unknown' from raw-status table
- * lookup so they can only be reached via internal construction paths.
- *
- * For 'gaps_found', next_command is built at call time in readVerificationStatus
- * by substituting the phase number — it is NOT stored as a function in the table.
- *
- * #2617: `next_command` here holds a BARE command name (`execute-phase`), never a
- * prefixed one. Every return path projects it through `formatGsdSlash` with the
- * caller's runtime, so Codex sees `$gsd-execute-phase` and slash-hyphen runtimes
- * see `/gsd-execute-phase`. Storing a prefixed literal is what leaked the
- * hard-coded (and deprecated) `/gsd:` colon form to every runtime.
+ * Fail where the value is produced (the same rule as phase-status.cts's
+ * `assertPhaseStatus`): a non-member is a `TypeError` naming the call site.
  */
-const VERIFICATION_ROUTING_TABLE: Record<string, VerificationRoute> = {
-  passed: {
-    status: 'passed',
+function assertVerificationStatus(v: unknown, where: string): asserts v is VerificationStatus {
+  if (!isVerificationStatus(v)) {
+    throw new TypeError(
+      `${where}: ${describeRawStatus(v)} is not a VerificationStatus (expected one of ${[...VERIFICATION_STATUS_VALUES].join(', ')})`,
+    );
+  }
+}
+
+/** The rendered raw-status token is cut to this many characters (#5118 security review). */
+const RAW_STATUS_TOKEN_LIMIT = 120;
+
+/**
+ * Render an untrusted status value as one quoted, control-free token
+ * (io.formatDiagnosticToken escapes C0/C1 controls, line/paragraph
+ * separators, zero-width and bidi-override characters and the BOM as
+ * `\uXXXX`), truncated to RAW_STATUS_TOKEN_LIMIT characters plus
+ * `…(N more)` — a report is agent-written text, and its echo reaches every
+ * workflow's LLM context through the error message.
+ */
+function describeRawStatus(raw: unknown): string {
+  let text: string;
+  if (typeof raw === 'string') {
+    text = raw;
+  } else {
+    let json: string | undefined;
+    try {
+      json = JSON.stringify(raw);
+    } catch {
+      json = undefined;
+    }
+    text = json ?? String(raw);
+  }
+  const rendered = io.formatDiagnosticToken(text);
+  if (rendered.length <= RAW_STATUS_TOKEN_LIMIT) return rendered;
+  // The cut must land on a boundary: never inside a `\uXXXX` escape the
+  // formatter emitted (a fragment such as `\u00` would read as a different
+  // character) and never between the halves of a surrogate pair (a lone
+  // surrogate is not valid text). Back off to the start of either.
+  let cut = RAW_STATUS_TOKEN_LIMIT;
+  const partialEscape = /\\u[0-9a-fA-F]{0,3}$/.exec(rendered.slice(0, cut));
+  if (partialEscape) {
+    cut -= partialEscape[0].length;
+  } else {
+    const last = rendered.charCodeAt(cut - 1);
+    if (last >= 0xd800 && last <= 0xdbff) cut -= 1;
+  }
+  // JSON also emits two-character escapes (`\n`, `\t`, `\"`, `\\`): an odd
+  // trailing run of backslashes is the first half of one, so drop it too.
+  const trailingBackslashes = /\\+$/.exec(rendered.slice(0, cut));
+  if (trailingBackslashes && trailingBackslashes[0].length % 2 === 1) cut -= 1;
+  return `${rendered.slice(0, cut)}…(${rendered.length - cut} more)`;
+}
+
+/** `VerificationStatusError.code` — import this constant wherever the code is matched. */
+const VERIFICATION_STATUS_ERROR_CODE = 'ERR_VERIFICATION_STATUS_OUT_OF_SET';
+
+/**
+ * A report whose frontmatter `status` is outside the writer set
+ * (`VERIFIER_STATUSES`) — a string that is not a member (`verified`, `Passed`,
+ * a reader-only member such as `stale`), or a non-string value (`5`, `true`,
+ * a list). Thrown by the reader, never folded into another status (#4817).
+ *
+ * It carries its own ERROR_REASON (`reason`, `verification_status_invalid`) —
+ * the one owner of that mapping: a CLI surface fails with `error(err.message,
+ * err.reason)`, and the command-routing hub returns it as a pure Result whose
+ * `kind` is that reason. `isPhaseComplete` maps it to its UNREADABLE scope
+ * (`status: null`, `statusError`) so its no-throw contract holds.
+ */
+class VerificationStatusError extends Error {
+  readonly code = VERIFICATION_STATUS_ERROR_CODE;
+  readonly reason = io.ERROR_REASON.VERIFICATION_STATUS_INVALID;
+  readonly rawStatus: unknown;
+  readonly file: string;
+  readonly accepted: readonly VerifierStatus[];
+
+  constructor(rawStatus: unknown, file: string) {
+    const accepted = [...VERIFIER_STATUSES];
+    super(
+      `Verification report ${io.formatDiagnosticToken(file)} has status ${describeRawStatus(rawStatus)}, ` +
+      `which is outside the closed set — accepted values: ${accepted.join(' | ')}. ` +
+      `Recovery: set the report's frontmatter \`status:\` to one of ${accepted.join(' | ')}, ` +
+      "or delete the report and re-run the phase's verification.",
+    );
+    this.name = 'VerificationStatusError';
+    this.rawStatus = rawStatus;
+    this.file = file;
+    this.accepted = accepted;
+  }
+}
+
+/**
+ * The CLI projection of a VerificationStatusError — its own message and its
+ * own `.reason` (the one owner of the reason mapping). Every CLI surface that
+ * refuses a report (a thrown error at the entry seam, or an aggregate
+ * carrying one in its result) fails through here; nothing restates the reason.
+ */
+function failOnVerificationStatusError(err: VerificationStatusError): never {
+  return error(err.message, err.reason);
+}
+
+/**
+ * The carry rule every aggregate shares: the FIRST refused report is the one
+ * an aggregate fails with. Keeps `carried` once set; otherwise takes
+ * `candidate` (a later report never displaces an earlier one).
+ */
+function firstStatusError<E extends VerificationStatusError>(
+  carried: E | null | undefined,
+  candidate: E | null | undefined,
+): E | undefined {
+  return carried ?? candidate ?? undefined;
+}
+
+/**
+ * The owner's frontmatter-only judgement of a report's `status` — the one
+ * place a VERIFICATION report's `status` scalar is read (#5118: phase.cts,
+ * audit.cts and uat-predicate.cts used to read it themselves). Returns the
+ * writer-set member, or `null` when the report carries no status (absent key,
+ * `null`, an empty string, or an unparseable block — the caller routes
+ * those). Throws `VerificationStatusError` for anything else, including a
+ * non-string value.
+ *
+ * `fm` is `extractFrontmatter`'s result for the report at `filePath`.
+ */
+function reportStatusOf(fm: Record<string, unknown>, filePath: string): VerifierStatus | null {
+  if ((fm as unknown as Record<symbol, unknown>)[FRONTMATTER_UNPARSEABLE] === true) return null;
+  const raw = fm['status'];
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return null;
+    if ((VERIFIER_STATUSES as ReadonlySet<string>).has(trimmed)) return trimmed as VerifierStatus;
+    throw new VerificationStatusError(trimmed, filePath);
+  }
+  throw new VerificationStatusError(raw, filePath);
+}
+
+// ─── The one routing table ─────────────────────────────────────────────────────
+
+type RouteCommand = '' | 'execute-phase' | 'plan-phase' | 'verify-work';
+
+interface VerificationRoute {
+  next_action: string;
+  /** BARE command name (#2617) — projected per runtime by `routeResult`. */
+  command: RouteCommand;
+  /** Argument tail appended after the phase number (`gaps_found`'s ` --gaps`). */
+  tail: '' | ' --gaps';
+}
+
+/**
+ * VERIFICATION_ROUTES — the one routing table (#5118). Keyed by exactly the
+ * enum (`Record<VerificationStatus, …>`: a missing or extra key is a compile
+ * error); the key IS the status, so entries carry no `status` field. Every
+ * result `readVerificationStatus` returns is projected from this table by
+ * `routeResult` — no return site hard-codes a command.
+ *
+ * #2617: `command` holds a BARE command name (`execute-phase`), never a
+ * prefixed one; `routeResult` projects it through `formatGsdSlash` with the
+ * caller's runtime, so Codex sees `$gsd-execute-phase` and slash-hyphen
+ * runtimes see `/gsd-execute-phase`.
+ *
+ * `stale` has ONE route: `execute-phase`. Its regenerating action is the
+ * shared step `gsd-core/workflows/execute-phase/steps/verify-phase-goal.md`
+ * (execute-phase's verify_phase_goal, which verify-work's stale arm includes
+ * too): it re-runs the verifier, which regenerates VERIFICATION.md and its
+ * digest (#4682, #4887).
+ */
+const VERIFICATION_ROUTES: Readonly<Record<VerificationStatus, Readonly<VerificationRoute>>> = Object.freeze({
+  passed: Object.freeze<VerificationRoute>({
     next_action: 'Verification passed — continue.',
-    next_command: '',
-  },
-  gaps_found: {
-    status: 'gaps_found',
+    command: '',
+    tail: '',
+  }),
+  gaps_found: Object.freeze<VerificationRoute>({
     next_action: 'Gaps found. Plan the fixes, then re-run execute-phase before shipping.',
-    // next_command is computed at call time; this entry is never returned directly.
-    next_command: '',
-  },
-  human_needed: {
-    status: 'human_needed',
+    command: 'plan-phase',
+    tail: ' --gaps',
+  }),
+  human_needed: Object.freeze<VerificationRoute>({
     next_action: "Human verification required. Complete the manual tests in the phase's *-UAT.md, then re-run the verify step until status is passed.",
-    // #2617: was '' — next_action told the user to "re-run the verify step" but
-    // named no command, while init.cts's parallel projector emitted
-    // `verify-work <N>` for this same state. The two surfaces disagreed on
-    // whether a next command existed at all; init's answer was the useful one,
-    // and init now delegates here rather than re-deriving it.
-    next_command: 'verify-work',
-  },
-  stale: {
-    status: 'stale',
-    // #4682: staleness means covered source files changed after the verifier
-    // last ran — the only remedy is re-running the verifier.
-    // /gsd-verify-work never rewrites VERIFICATION.md, so advising it from
-    // here was an advice loop. execute-phase resumes at the verification
-    // gates and re-runs the verifier (its resume tree routes a stale report
-    // to re-verification), which regenerates VERIFICATION.md and its digest.
+    // #2617: init's projector and this table used to disagree on whether a
+    // next command existed at all; `verify-work <N>` is the useful answer.
+    command: 'verify-work',
+    tail: '',
+  }),
+  stale: Object.freeze<VerificationRoute>({
+    // #4682 / #5118: the only remedy for a stale report is re-running the
+    // verifier; /gsd-verify-work on its own never rewrites VERIFICATION.md.
     next_action: 'Verification is stale — covered source files changed after the verifier last ran. Re-run execute-phase for this phase: it resumes at the verification gates and re-runs the verifier, regenerating VERIFICATION.md and its digest. verify-work alone cannot refresh a stale report.',
-    next_command: 'execute-phase',
-  },
-  // INTERNAL SENTINEL: constructed when no *-VERIFICATION.md file exists or when
-  // the file has no parseable frontmatter status. Never emitted by the verifier.
-  missing: {
-    status: 'missing',
+    command: 'execute-phase',
+    tail: '',
+  }),
+  // The phase directory exists and holds no report, or the report has no
+  // `status`: the verify step never completed (#2868).
+  missing: Object.freeze<VerificationRoute>({
     next_action: 'No verification report found — the verify step never completed. Running execute-phase is safe here: it resumes at the verification gates and does not re-run plans that already have a SUMMARY.md (see #2868).',
-    next_command: 'execute-phase',
-  },
+    command: 'execute-phase',
+    tail: '',
+  }),
   // #4806: the report EXISTS but its frontmatter is not parseable YAML —
-  // fundamentally different from "missing" (the verify step DID run; re-running
-  // execute-phase cannot fix a YAML typo). Consumers treat any non-'passed'
-  // status as blocking, so this value fails safe while telling the truth.
-  unparseable: {
-    status: 'unparseable',
+  // re-running execute-phase cannot fix a YAML typo in an existing report.
+  unparseable: Object.freeze<VerificationRoute>({
     next_action: "The *-VERIFICATION.md frontmatter is not parseable YAML — fix the syntax error in the report itself. Re-running execute-phase cannot fix a YAML typo in an existing report.",
-    next_command: '',
-  },
-  // INTERNAL SENTINEL: constructed when the file has a status value not in
-  // VERIFIER_STATUSES. Never emitted by the verifier.
-  unknown: {
-    status: 'unknown',
-    next_action: '', // filled in dynamically with the raw value
-    next_command: 'execute-phase',
-  },
-};
+    command: '',
+    tail: '',
+  }),
+  // ADR-5057 amendment 2 / #4987: there was nothing to look in — a usage
+  // error, never execute-phase (which would re-run a phase that may already be
+  // archived under .planning/milestones/).
+  phase_dir_not_found: Object.freeze<VerificationRoute>({
+    next_action: 'Usage error: the phase directory does not exist — pass an existing phase directory (resolve it with find-phase; phases archived by complete-milestone live under .planning/milestones/v<X.Y>-phases/).',
+    command: '',
+    tail: '',
+  }),
+});
 
 /**
  * Project a BARE command name (plus optional argument tail) into the surface the
@@ -165,7 +357,11 @@ function projectNextCommand(bare: string, runtime: string, tail = ''): string {
 interface FsLike {
   readdirSync(dir: string): string[];
   readFileSync(filePath: string, encoding: 'utf-8'): string;
-  statSync(filePath: string): { mtimeMs: number; isFile(): boolean };
+  /**
+   * #5118: `isDirectory` lets the reader tell "no phase directory at this path"
+   * (`phase_dir_not_found`) from "a directory with no report" (`missing`).
+   */
+  statSync(filePath: string): { mtimeMs: number; isFile(): boolean; isDirectory(): boolean };
 }
 
 /**
@@ -222,11 +418,301 @@ function normalizeRel(p: string): string {
   return path.posix.normalize(toPosix(p));
 }
 
-/** Canonicalize a covered-files list: normalize, de-duplicate, sort — the SAME
- *  transform computeCoveredDigest and cmdVerificationFingerprint both need
- *  (the digest's own key order; the CLI's own `covered_files` JSON output). */
-function canonicalizeCoveredFiles(files: readonly string[]): string[] {
-  return Array.from(new Set(files.map(normalizeRel))).sort();
+/**
+ * Canonicalize a covered-files list: normalize, de-duplicate, sort — the SAME
+ * transform computeCoveredDigest and cmdVerificationFingerprint both need
+ * (the digest's own key order; the CLI's own `covered_files` JSON output).
+ *
+ * #5095 (ADR-5057 Phase 2): `opts.version >= 3` additionally drops any
+ * report-shaped path (`isVerificationReportPath`) — a report is never an
+ * input to its own digest (#4857). Versionless callers (the default) keep
+ * the pre-#5095 behaviour: normalize/dedupe/sort only, no filtering.
+ */
+function canonicalizeCoveredFiles(files: readonly string[], opts: { version?: number } = {}): string[] {
+  const normalized = files.map(normalizeRel);
+  const filtered = opts.version !== undefined && opts.version >= 3
+    ? normalized.filter((f) => !isVerificationReportPath(f))
+    : normalized;
+  return Array.from(new Set(filtered)).sort();
+}
+
+/**
+ * #5095 (ADR-5057 Phase 2, #4857): a covered-input path names a verification
+ * REPORT — basename `VERIFICATION.md` or ending `-VERIFICATION.md`
+ * (case-sensitive, as `resolveVerificationFile` is) — as opposed to any other
+ * evidence. `computeCoveredDigest(projectRoot, coveredFiles)` never receives
+ * the report's OWN path as a distinguished value — the report writes its own
+ * digest into its own frontmatter, so a comparison inside that function is
+ * structurally impossible (it would need to know, while computing a value,
+ * what that value is about to become). The filter therefore lives here, one
+ * function up from the digest, as a PATTERN match on shape, not a path
+ * identity check. Matches `docs/VERIFICATION.md` (same basename) but not
+ * `VERIFICATION-NOTES.md` or `07-VERIFICATION.md.bak` (different basename).
+ */
+function isVerificationReportPath(rel: string): boolean {
+  const basename = path.posix.basename(toPosix(rel));
+  return basename === 'VERIFICATION.md' || basename.endsWith('-VERIFICATION.md');
+}
+
+/**
+ * #5095 (ADR-5057 Phase 2, amendment 1 / R4, revised R7): the real filesystem
+ * scopes a covered-input path may be confined to. `realRoot` is the checkout
+ * itself. `planningScopes` is every ANCHORED planning scope the Planning
+ * Workspace Module's layout admits (`planning-workspace.cts`'s
+ * `planningDir`: `.planning`, `.planning/<project>`,
+ * `.planning/workstreams/<ws>`, `.planning/<project>/workstreams/<ws>`) —
+ * derived from the PROJECT ROOT alone, NEVER from a caller's `phaseDir`, so a
+ * symlinked `.planning/workstreams/<ws>/phases`, `.planning/<project>/phases`,
+ * or the whole `.planning/<project>` / `.planning/workstreams/<ws>` scope
+ * maps its artifacts to that scope's OWN spelling — never collapsing onto, or
+ * being dropped from, the top-level `.planning/phases/<phase>/…` shape the
+ * pre-R7 single scope root only recognised (see `enumeratePlanningScopes`
+ * for the enumeration and its security refusal of a dangerous scope root).
+ * Each scope carries its lexical, project-root-relative spelling (`lexRel`,
+ * posix) and its realpath (`real`, `null` when the directory does not exist
+ * or was refused). Real `fs.realpathSync` throughout — never the
+ * caller-injected `FsLike` seam (see computeCoveredDigest's own doc for why:
+ * these are trusted anchors the caller derived, not attacker-influenced
+ * covered-input data).
+ */
+interface PlanningScope {
+  /** Project-root-relative, posix-normalized spelling, e.g. `.planning/workstreams/ws1`. */
+  lexRel: string;
+  /** Realpath of `lexRel`, or `null` when it does not exist or was refused as dangerous. */
+  real: string | null;
+}
+
+interface ContainmentRoots {
+  realRoot: string | null;
+  planningScopes: PlanningScope[];
+}
+
+/**
+ * #5095 (R7): enumerate every anchored planning scope the Planning Workspace
+ * Module's layout admits, by walking the REAL directory tree rooted at
+ * `<projectRoot>/.planning` — never the caller's `phaseDir` (the pre-R7 bug:
+ * admitting a scope root on `basename(phaseDir's parent) === 'phases'` alone
+ * made any directory named `phases` anywhere an admissible root). Only
+ * directories are admitted, and a project/workstream segment failing
+ * `planningDir`'s own `BAD_SEGMENT` rule (a path separator or `..`) is
+ * skipped — the identical validation `planningDir` itself enforces, so every
+ * scope this function admits is one `planningDir` could also resolve to.
+ * `workstreams` is reserved as a layout segment (never itself a project
+ * name), so the walk cannot derive the same scope twice under two labels.
+ * Each planning BASE contributes two scopes — the base itself, and its own
+ * `phases/` subdirectory — since `phases/` may be independently symlinked to
+ * a per-project/per-workstream store while the base directory stays real
+ * (the #4894 layout, generalized to every base shape); the longest-`lexRel`
+ * -wins rule in `mapRealPathToRootRelative` / `bestPlanningScopeForRel` then
+ * prefers the `phases` scope for anything living under it.
+ *
+ * Security: a scope whose realpath is the filesystem root, or an ANCESTOR of
+ * `realRoot` itself, is refused outright (`real: null`) — an
+ * attacker-controlled `.planning -> /` (or `-> ..`) symlink must never become
+ * an admissible containment root.
+ */
+
+function enumeratePlanningScopes(projectRoot: string, realRoot: string | null): PlanningScope[] {
+  const BAD_SEGMENT = /[/\\]|\.\./;
+  const listDirs = (dirAbs: string): string[] => {
+    try {
+      return fs
+        .readdirSync(dirAbs, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !BAD_SEGMENT.test(e.name))
+        .map((e) => e.name);
+    } catch {
+      return [];
+    }
+  };
+  const realOf = (p: string): string | null => {
+    let real: string;
+    try {
+      real = fs.realpathSync(p);
+    } catch {
+      return null;
+    }
+    if (path.dirname(real) === real) return null; // filesystem root
+    if (realRoot !== null && real !== realRoot && isContainedIn(realRoot, real)) return null; // ancestor of realRoot
+    return real;
+  };
+
+  // Every planning BASE (a directory `planningDir` itself would resolve to)
+  // contributes TWO scopes: the base itself (for a direct child like
+  // `ROADMAP.md`/`config.json`) and its OWN `phases/` subdirectory (for phase
+  // artifacts) — kept separate because `phases/` may be independently
+  // symlinked to a per-project/per-workstream store while the base directory
+  // stays real (the #4894 layout, generalized to every base shape). The
+  // longest-`lexRel`-wins rule elsewhere then prefers the `phases` scope for
+  // anything under it.
+  const addBase = (lexRel: string, baseAbs: string): void => {
+    scopes.push({ lexRel, real: realOf(baseAbs) });
+    scopes.push({ lexRel: `${lexRel}/phases`, real: realOf(path.join(baseAbs, 'phases')) });
+  };
+
+  const scopes: PlanningScope[] = [];
+  const planningAbs = path.join(projectRoot, '.planning');
+  const planningBaseReal = realOf(planningAbs);
+  scopes.push({ lexRel: '.planning', real: planningBaseReal });
+  scopes.push({ lexRel: '.planning/phases', real: realOf(path.join(planningAbs, 'phases')) });
+
+  // #5095 (R7(c) follow-up, security): when `.planning` itself was refused as
+  // a dangerous root (filesystem root, or an ancestor of `realRoot` — see
+  // `realOf` above), NEVER walk its `workstreams`/project subdirectories to
+  // mint further scopes. `listDirs`/`path.join` operate on the LEXICAL,
+  // still-symlinked `planningAbs`, so with `.planning -> /` every entry of
+  // the real filesystem root (`/etc`, `/usr`, ...) would otherwise surface as
+  // an admissible `.planning/<project>` scope — legitimizing an attacker- or
+  // container-controlled root-filesystem directory as a containment root the
+  // instant it happens to share a name with something reachable from `/`.
+  // Each such child is realpath-resolved on its OWN merits (not an ancestor
+  // of `realRoot`, not the filesystem root itself), so it silently passes the
+  // per-scope refusal check even though its only claim to legitimacy is
+  // having been discovered by listing a root the outer check already
+  // rejected. Refusing to enumerate here is what makes that refusal actually
+  // stick.
+  if (planningBaseReal === null) return scopes;
+
+  for (const ws of listDirs(path.join(planningAbs, 'workstreams'))) {
+    addBase(`.planning/workstreams/${ws}`, path.join(planningAbs, 'workstreams', ws));
+  }
+
+  for (const project of listDirs(planningAbs)) {
+    if (project === 'workstreams') continue;
+    const projectAbs = path.join(planningAbs, project);
+    addBase(`.planning/${project}`, projectAbs);
+    for (const ws of listDirs(path.join(projectAbs, 'workstreams'))) {
+      addBase(`.planning/${project}/workstreams/${ws}`, path.join(projectAbs, 'workstreams', ws));
+    }
+  }
+
+  return scopes;
+}
+
+function resolveContainmentRoots(projectRoot: string): ContainmentRoots {
+  let realRoot: string | null;
+  try {
+    realRoot = fs.realpathSync(projectRoot);
+  } catch {
+    realRoot = null;
+  }
+  return { realRoot, planningScopes: enumeratePlanningScopes(projectRoot, realRoot) };
+}
+
+function bestPlanningScopeForRel(rel: string, planningScopes: readonly PlanningScope[]): PlanningScope | null {
+  let best: PlanningScope | null = null;
+  for (const scope of planningScopes) {
+    if (
+      (rel === scope.lexRel || rel.startsWith(`${scope.lexRel}/`)) && // allow-handrolled-containment: lexical PREFIX selection among candidate scope spellings (posix segment-boundary), not a resolved-path containment decision — the realpath check happens separately via isContainedIn on scope.real
+      (best === null || scope.lexRel.length > best.lexRel.length)
+    ) {
+      best = scope;
+    }
+  }
+  return best;
+}
+
+/**
+ * #5095 (R7): map an already-`realpathSync`-resolved target back to a
+ * root-relative, posix-normalized spelling. The ANCHORED scope with the
+ * LONGEST `lexRel` whose `real` contains the target wins — so a nested scope
+ * (e.g. `.planning/workstreams/ws1`) is preferred over the top-level
+ * `.planning` scope for a target reachable through both, and a
+ * same-named-but-different-store phase under the nested scope is never
+ * mapped onto the root scope's spelling. Falls back to a bare
+ * project-root-relative path when the target lives inside `realRoot` but no
+ * scope's real claims it; else `null` (fail closed — the caller must not
+ * guess a spelling for a path it cannot place).
+ */
+function mapRealPathToRootRelative(
+  real: string,
+  realRoot: string,
+  planningScopes: readonly PlanningScope[],
+): string | null {
+  let best: PlanningScope | null = null;
+  for (const scope of planningScopes) {
+    if (
+      scope.real !== null &&
+      isContainedIn(real, scope.real) &&
+      (best === null || scope.lexRel.length > best.lexRel.length)
+    ) {
+      best = scope;
+    }
+  }
+  if (best !== null) {
+    const rel = normalizeRel(path.relative(best.real as string, real));
+    return rel === '' || rel === '.' ? best.lexRel : `${best.lexRel}/${rel}`;
+  }
+  if (isContainedIn(real, realRoot)) {
+    return normalizeRel(path.relative(realRoot, real));
+  }
+  return null;
+}
+
+/**
+ * #5095 (R2/R3): the single owner of "which artifacts a fingerprint must
+ * cover" — every live `*-PLAN.md`/`*-SUMMARY.md` in `phaseDir`
+ * (`scanPhasePlans`'s `allPlanFiles` + `summaryFiles`, BEFORE the
+ * `status:superseded` exclusion — row 17: a superseded plan still needs a
+ * matching digest entry, the same set `allCurrentArtifactsCovered` checks),
+ * minus anything report-shaped (R3: a plan-scan match that is ALSO
+ * report-shaped, e.g. `07-PLAN-01-VERIFICATION.md`, must never enter the
+ * covered set on either side). Each surviving candidate is realpath-resolved
+ * and mapped back to a root-relative spelling via `mapRealPathToRootRelative`
+ * — NEVER a literal `../`-relative path — so the #4894 `--project-dir` shape
+ * (the phase directory passed as its OWN real path, inside an out-of-repo
+ * store) still produces sensible `.planning/…` covered_files.
+ *
+ * Fails closed: an incomplete/unreadable phase-dir scan, an unreadable
+ * artifact, or an artifact whose realpath escapes both known roots make the
+ * WHOLE result unusable (`{ ok: false, reason }`) — a caller must not vouch
+ * for a fingerprint over a set it could not fully resolve.
+ */
+type PhaseArtifactPathsResult =
+  | { ok: true; paths: string[]; scope: Scope; mappedPhaseDir: string | null }
+  | { ok: false; reason: string };
+
+function phaseArtifactPaths(phaseDir: string, projectRoot: string): PhaseArtifactPathsResult {
+  const roots = resolveContainmentRoots(projectRoot);
+  if (roots.realRoot === null) {
+    return { ok: false, reason: `project root is unreadable: ${projectRoot}` };
+  }
+  const scan = scanPhasePlans(phaseDir) as { allPlanFiles: string[]; summaryFiles: string[]; scope: Scope };
+  // Fail closed on a non-COMPLETE scan (unreadable phase dir, or an
+  // unreadable nested plans/ dir) — a partial scan's invisible contents can
+  // never be proven covered (mirrors allCurrentArtifactsCovered's own
+  // fail-closed contract).
+  if (scan.scope !== SCOPE.COMPLETE) {
+    return { ok: false, reason: `phase directory scan is incomplete (scope: ${scan.scope}): ${phaseDir}` };
+  }
+  const candidates = [...scan.allPlanFiles, ...scan.summaryFiles].filter(
+    (f) => !isVerificationReportPath(f),
+  );
+  const paths: string[] = [];
+  for (const f of candidates) {
+    let real: string;
+    try {
+      real = fs.realpathSync(path.join(phaseDir, f));
+    } catch {
+      return { ok: false, reason: `phase artifact is unreadable: ${f}` };
+    }
+    const mapped = mapRealPathToRootRelative(real, roots.realRoot, roots.planningScopes);
+    if (mapped === null) {
+      return { ok: false, reason: `phase artifact escapes the project root: ${f}` };
+    }
+    paths.push(mapped);
+  }
+  // #5095 (R2): the phase dir's own mapped spelling, fed to `sharedRootsFor`
+  // so a workstream/project ROADMAP under an out-of-repo store is still
+  // recognized as a shared planning document even when `phaseDir` itself was
+  // addressed by its real (non-`.planning`-spelled) path.
+  let mappedPhaseDir: string | null = null;
+  try {
+    const realPhaseDir = fs.realpathSync(phaseDir);
+    mappedPhaseDir = mapRealPathToRootRelative(realPhaseDir, roots.realRoot, roots.planningScopes);
+  } catch {
+    mappedPhaseDir = null;
+  }
+  return { ok: true, paths, scope: scan.scope, mappedPhaseDir };
 }
 
 // ─── #4155: covered-input fingerprint ──────────────────────────────────────────
@@ -240,16 +726,34 @@ function canonicalizeCoveredFiles(files: readonly string[]): string[] {
  *   v1 (#4155) — every covered path's whole bytes, uniformly.
  *   v2 (#4623) — repo-wide planning documents (`isSharedPlanningDoc`) are
  *                excluded from the hash by construction.
+ *   v3 (#5095, ADR-5057 Phase 2) — v2 PLUS: (a) report-shaped declared paths
+ *                (`isVerificationReportPath`) are filtered before hashing — a
+ *                report is never an input to its own digest (#4857); (b) the
+ *                hashed set is the declared list UNIONED with the phase's own
+ *                live `*-PLAN.md`/`*-SUMMARY.md` artifacts
+ *                (`phaseArtifactPaths`), computed identically on both the
+ *                emit (`cmdVerificationFingerprint`) and check
+ *                (`readVerificationStatus`) sides — a plan/summary added
+ *                after fingerprinting moves the digest itself, with no
+ *                separate live-directory rescan needed (#4817); (c)
+ *                containment additionally admits a `.planning`-spelled path
+ *                whose realpath sits in one of the anchored planning scopes
+ *                `resolveContainmentRoots` enumerates (`.planning`,
+ *                `.planning/<project>`, `.planning/workstreams/<ws>`,
+ *                `.planning/<project>/workstreams/<ws>`), covering a
+ *                per-project/per-workstream store symlink (amendment 1,
+ *                revised R7).
  *
  * A stored digest names its own version (`v<N>:sha256:…`), and
  * `readVerificationStatus` recomputes under the STORED version rather than
  * this constant — so bumping it does not flip every already-verified phase
- * to `stale` on upgrade. A legacy v1 report keeps v1 semantics, shared
- * documents included, until it is re-fingerprinted; only a version outside
+ * to `stale` on upgrade. A legacy v1/v2 report keeps its own semantics
+ * (shared documents included for v1; no report filter or artifact union for
+ * either) until it is re-fingerprinted; only a version outside
  * `KNOWN_FINGERPRINT_VERSIONS` is unrecomputable and fails closed.
  */
-const FINGERPRINT_VERSION = 2;
-const KNOWN_FINGERPRINT_VERSIONS: ReadonlySet<number> = new Set([1, 2]);
+const FINGERPRINT_VERSION = 3;
+const KNOWN_FINGERPRINT_VERSIONS: ReadonlySet<number> = new Set([1, 2, 3]);
 
 /**
  * #4623: the planning roots whose DIRECT children are repo-wide planning
@@ -316,6 +820,38 @@ function isSharedPlanningDoc(rel: string, roots: readonly string[] = ['.planning
 }
 
 /**
+ * #5095 (R2): `sharedPlanningRoots` extended with the phase's own MAPPED
+ * (root-relative, posix) directory when one is available —
+ * `phaseArtifactPaths`'s `mappedPhaseDir` — so a workstream/project ROADMAP
+ * under an out-of-repo store is still recognized as shared even when
+ * `phaseDir` was addressed by its real, non-`.planning`-spelled path (the
+ * #4894 `--project-dir` shape). Falls back to the existing absolute-path
+ * derivation (`sharedPlanningRoots(projectRoot, phaseDir)`) when no mapped
+ * spelling is available — byte-for-behaviour identical to the pre-#5095
+ * seam for every caller that has no artifact-derivation step of its own.
+ */
+function sharedRootsFor(
+  projectRoot: string,
+  phaseDir: string | null | undefined,
+  mappedPhaseDir: string | null,
+): string[] {
+  const roots = sharedPlanningRoots(projectRoot, phaseDir);
+  if (mappedPhaseDir) {
+    const phasesDir = path.posix.dirname(mappedPhaseDir);
+    const planningDir = path.posix.dirname(phasesDir);
+    if (
+      path.posix.basename(phasesDir) === 'phases' &&
+      (planningDir === '.planning' || planningDir.startsWith('.planning/')) &&
+      !planningDir.includes('/../') &&
+      !roots.includes(planningDir)
+    ) {
+      roots.push(planningDir);
+    }
+  }
+  return roots;
+}
+
+/**
  * #4623: the fingerprint version a stored `covered_digest` was computed
  * under, or `null` when the prefix is absent, malformed, or names a version
  * this build cannot recompute (an unknown version is a mismatch by
@@ -364,67 +900,116 @@ function parseFingerprintVersion(digest: string): number | null {
  * confined to `.planning/`) would reject every implementation-file read and
  * report EVERY fingerprinted phase permanently `stale` regardless of actual
  * drift — the bug this comment now documents against regressing. The
- * `realRel`-vs-`realRoot` re-check a few lines below already does the real
- * confinement work (against `projectRoot`, the correct boundary for this
- * data), so no security property is lost by bypassing a narrower seam here.
+ * per-file re-check a few lines below already does the real confinement
+ * work — against `projectRoot` for an implementation path, and against the
+ * ANCHORED planning scope `bestPlanningScopeForRel` selects for a
+ * `.planning`-spelled one (`resolveContainmentRoots`'s `planningScopes`,
+ * #5095 R7) — so no security property is lost by bypassing a narrower seam
+ * here.
+ *
+ * #5095 (R7): `computeCoveredDigest` delegates to `deriveCoveredDigest`,
+ * which additionally returns the exact canonical `files` set it hashed
+ * over (declared ∪ the phase's own live artifacts) — the single derivation
+ * both `computeCoveredDigest`'s callers and `cmdVerificationFingerprint`'s
+ * emitted `covered_files` now share, closing the double-derivation race
+ * window where the emitted list and the hashed set were computed by two
+ * separate `phaseArtifactPaths` calls.
  */
-function computeCoveredDigest(
+type CoveredDigestDerivation =
+  | { ok: true; digest: string | null; files: string[]; mappedPhaseDir: string | null }
+  | { ok: false; reason: string };
+
+function deriveCoveredDigest(
   projectRoot: string,
   coveredFiles: readonly string[],
   version: number = FINGERPRINT_VERSION,
   opts: { phaseDir?: string | null } = {},
-): string | null {
+): CoveredDigestDerivation {
   // #4623: `version` selects the input shape to hash under — the CURRENT
   // one for a fresh fingerprint (the CLI verb), or the STORED one when
   // `readVerificationStatus` recomputes against a report's own digest.
-  // `opts.phaseDir` lets v2 recognise the phase's own planning root
+  // `opts.phaseDir` lets v2+ recognise the phase's own planning root
   // (`sharedPlanningRoots`); without it only `.planning/` itself is shared.
-  if (!KNOWN_FINGERPRINT_VERSIONS.has(version)) return null;
-  const uniqueSorted = canonicalizeCoveredFiles(coveredFiles);
-  if (uniqueSorted.length === 0) return null;
-  const sharedRoots = version >= 2 ? sharedPlanningRoots(projectRoot, opts.phaseDir) : [];
+  if (!KNOWN_FINGERPRINT_VERSIONS.has(version)) return { ok: true, digest: null, files: [], mappedPhaseDir: null };
+
+  // #5095 (R1, ADR-5057 Phase 2): for v3+ with a known phaseDir, the hashed
+  // set is the declared list UNIONED with the phase's own live artifacts —
+  // computed here, ONCE, on BOTH the emit and check sides, rather than
+  // separately in the CLI emitter and again in here (#5095 R7: the prior
+  // shape ran `phaseArtifactPaths` twice on the emit path — once in
+  // `cmdVerificationFingerprint` to build the emitted `covered_files`, again
+  // in here to hash — a race window where a plan/summary added between the
+  // two calls could make the emitted list and the hashed set disagree). A
+  // plan/summary added after fingerprinting therefore moves the digest
+  // directly; `--raw` / MCP callers that write their own declared list
+  // (without enumerating plans/summaries) still match, because the checker
+  // adds the identical union. An artifact-resolution failure makes the WHOLE
+  // fingerprint unresolvable (fail closed).
+  let declared = canonicalizeCoveredFiles(coveredFiles, { version });
+  let artifactMappedPhaseDir: string | null = null;
+  if (version >= 3 && opts.phaseDir) {
+    const artifacts = phaseArtifactPaths(opts.phaseDir, projectRoot);
+    if (!artifacts.ok) return { ok: false, reason: artifacts.reason };
+    artifactMappedPhaseDir = artifacts.mappedPhaseDir;
+    declared = canonicalizeCoveredFiles([...declared, ...artifacts.paths], { version });
+  }
+  if (declared.length === 0) return { ok: true, digest: null, files: declared, mappedPhaseDir: artifactMappedPhaseDir };
+
+  const sharedRoots = version >= 2 ? sharedRootsFor(projectRoot, opts.phaseDir, artifactMappedPhaseDir) : [];
   let hashed = 0;
 
-  // Canonicalize the root ONCE — every candidate's realpath is checked against
-  // this, not the possibly-symlinked `projectRoot` argument itself. Always via
-  // the REAL fs, never fsImpl: `projectRoot` is a trusted anchor the CALLER
-  // derived (resolveProjectRoot), not attacker-influenced covered-input data —
-  // routing it through a caller-scoped containment seam (e.g. #4155's
+  // Canonicalize the roots ONCE — every candidate's realpath is checked
+  // against these, not the possibly-symlinked `projectRoot`/`.planning`
+  // arguments themselves. Always via the REAL fs, never fsImpl: `projectRoot`
+  // is a trusted anchor the CALLER derived (resolveProjectRoot), not
+  // attacker-influenced covered-input data — routing it through a
+  // caller-scoped containment seam (e.g. #4155's
   // containmentEnforcingVerificationFs, confined to `.planning/`, a proper
   // SUBSET of `projectRoot`) would reject the root itself and fail every
   // lookup regardless of whether the covered files are legitimate.
-  let realRoot: string;
-  try {
-    realRoot = fs.realpathSync(projectRoot);
-  } catch {
-    return null;
-  }
+  const roots = resolveContainmentRoots(projectRoot);
+  if (roots.realRoot === null) return { ok: true, digest: null, files: declared, mappedPhaseDir: artifactMappedPhaseDir };
 
   const parts: string[] = [];
-  for (const rel of uniqueSorted) {
+  for (const rel of declared) {
     // `normalizeRel` (already applied by `canonicalizeCoveredFiles` above)
     // collapses internal `..` segments before `rel` ever reaches here
     // (`a/../../b` → `../b`), so this start-of-string check is already the
     // full lexical confinement test — no separate post-`path.resolve`
     // re-check can observe a different answer.
-    if (rel === '' || rel === '..' || rel.startsWith('../') || path.isAbsolute(rel)) return null;
+    if (rel === '' || rel === '..' || rel.startsWith('../') || path.isAbsolute(rel)) {
+      return { ok: true, digest: null, files: declared, mappedPhaseDir: artifactMappedPhaseDir };
+    }
+    // #5095 (R7): a `.planning`-spelled path may resolve inside the checkout
+    // root OR the LONGEST-prefix anchored planning scope that claims it
+    // (`bestPlanningScopeForRel`) — every other path is confined to the
+    // checkout root alone, exactly as before.
+    const firstSegment = rel.split('/')[0];
+    const admissibleRoots =
+      firstSegment === '.planning'
+        ? [roots.realRoot, bestPlanningScopeForRel(rel, roots.planningScopes)?.real ?? null].filter(
+            (r): r is string => r !== null,
+          )
+        : [roots.realRoot];
     const resolved = path.resolve(projectRoot, rel);
     let bytes: Buffer;
     try {
-      // A regular file INSIDE projectRoot can still be a symlink whose TARGET
-      // escapes it — statSync/readFileSync follow symlinks, so the lexical
-      // confinement check above is not enough. realpathSync resolves the
-      // actual target; re-confining against realRoot closes that gap.
+      // A regular file INSIDE a known root can still be a symlink whose
+      // TARGET escapes every known root — statSync/readFileSync follow
+      // symlinks, so the lexical confinement check above is not enough.
+      // realpathSync resolves the actual target; re-confining against the
+      // admissible roots closes that gap.
       const real = fs.realpathSync(resolved);
-      // Both operands are already realpath-resolved (this fn's own realpathSync calls
-      // above), so the shared containment comparison applies directly (ADR-4650) —
-      // no re-resolution through assertWithinRoot/tryWithinRoot, which would redo work
-      // this function already owns for its exists-vs-escaped tri-state.
-      if (!isContainedIn(real, realRoot)) {
-        return null;
+      // Every operand is already realpath-resolved (this fn's own
+      // realpathSync calls above), so the shared containment comparison
+      // applies directly (ADR-4650) — no re-resolution through
+      // assertWithinRoot/tryWithinRoot, which would redo work this function
+      // already owns for its exists-vs-escaped tri-state.
+      if (!admissibleRoots.some((root) => isContainedIn(real, root))) {
+        return { ok: true, digest: null, files: declared, mappedPhaseDir: artifactMappedPhaseDir };
       }
       const st = fs.statSync(real);
-      if (!st.isFile()) return null;
+      if (!st.isFile()) return { ok: true, digest: null, files: declared, mappedPhaseDir: artifactMappedPhaseDir };
       // #4623 (v2+): a repo-wide planning document is VALIDATED exactly as
       // every other covered path — confined, present, a regular file; the
       // fail-closed contract above is unchanged — but its bytes contribute
@@ -435,7 +1020,7 @@ function computeCoveredDigest(
       if (isSharedPlanningDoc(rel, sharedRoots)) continue;
       bytes = fs.readFileSync(real);
     } catch {
-      return null;
+      return { ok: true, digest: null, files: declared, mappedPhaseDir: artifactMappedPhaseDir };
     }
     const fileHash = crypto.createHash('sha256').update(bytes).digest('hex');
     parts.push(`${rel}\n${fileHash}\n`);
@@ -445,13 +1030,33 @@ function computeCoveredDigest(
   // evidence in it at all — a constant digest over the header would satisfy
   // the fingerprint pair while grounding the verification in nothing. Fail
   // closed, the same way an empty declaration does.
-  if (version >= 2 && hashed === 0) return null;
+  if (version >= 2 && hashed === 0) {
+    return { ok: true, digest: null, files: declared, mappedPhaseDir: artifactMappedPhaseDir };
+  }
 
   const aggregate = crypto
     .createHash('sha256')
     .update(`v${version}\n${parts.join('')}`, 'utf-8')
     .digest('hex');
-  return `v${version}:sha256:${aggregate}`;
+  return { ok: true, digest: `v${version}:sha256:${aggregate}`, files: declared, mappedPhaseDir: artifactMappedPhaseDir };
+}
+
+/**
+ * #4155/#5095: recompute the deterministic content fingerprint over a
+ * verifier's declared covered-input set, returning JUST the digest string
+ * (or `null` if unresolvable) — the signature every existing caller
+ * (`readVerificationStatus`, tests) already depends on. Thin wrapper over
+ * `deriveCoveredDigest`, collapsing its `{ ok: false, reason }` arm to `null`
+ * exactly as the pre-#5095 single-function shape did.
+ */
+function computeCoveredDigest(
+  projectRoot: string,
+  coveredFiles: readonly string[],
+  version: number = FINGERPRINT_VERSION,
+  opts: { phaseDir?: string | null } = {},
+): string | null {
+  const result = deriveCoveredDigest(projectRoot, coveredFiles, version, opts);
+  return result.ok ? result.digest : null;
 }
 
 /**
@@ -583,25 +1188,185 @@ function defaultPhaseCleanCommitTimesMs(
   return commitTimes;
 }
 
+interface RouteResultContext {
+  runtime: string;
+  /** ` <N>` (leading space) or `''` — see readVerificationStatus's derivation. */
+  phaseArg: string;
+  staleCheckIndeterminate?: boolean;
+  /** A usage-error message (`phase_dir_not_found` names the path it looked at). */
+  message?: string;
+}
+
 /**
- * Build a 'missing' result from the routing table.
- * Used for two early-return paths: no *-VERIFICATION.md file found, and
- * file present but no parseable frontmatter status.
+ * The one result builder (#5118): every `VerificationStatusResult` is
+ * projected from `VERIFICATION_ROUTES[status]` here — `route` (the bare
+ * command) and `next_command` (its runtime projection, #2617) come from the
+ * same table entry, so they cannot disagree.
  */
-function missingResult(runtime: string, phaseArg: string): VerificationStatusResult {
-  const route = VERIFICATION_ROUTING_TABLE['missing'];
+function routeResult(status: VerificationStatus, ctx: RouteResultContext): VerificationStatusResult {
+  const entry = VERIFICATION_ROUTES[status];
   return {
-    status: route.status,
-    next_action: route.next_action,
-    next_command: projectNextCommand(route.next_command, runtime, phaseArg),
+    status,
+    next_action: entry.next_action,
+    next_command: projectNextCommand(entry.command, ctx.runtime, `${ctx.phaseArg}${entry.tail}`),
+    route: entry.command,
+    ...(ctx.message !== undefined ? { message: ctx.message } : {}),
+    ...(ctx.staleCheckIndeterminate ? { staleCheckIndeterminate: true } : {}),
   };
+}
+
+/**
+ * ADR-5057 amendment 2 (#4987): true only when there is no phase DIRECTORY at
+ * `phaseDir` — `stat` fails with ENOENT / ENOTDIR (a dangling symlink stats as
+ * ENOENT), or it succeeds on something that is not a directory (a regular
+ * file). Any other stat failure — EACCES, or a code-less containment error
+ * from an injected FsLike (planning-inspect's seam) — is NOT "not found": the
+ * caller falls through to the existing readdir path (`missing`).
+ */
+function isPhaseDirNotFound(fsImpl: FsLike, phaseDir: string): boolean {
+  let st: ReturnType<FsLike['statSync']>;
+  try {
+    st = fsImpl.statSync(phaseDir);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
+  }
+  return typeof st?.isDirectory === 'function' && !st.isDirectory();
+}
+
+function phaseDirNotFoundMessage(phaseDir: string): string {
+  return `Usage error: phase directory not found at ${io.formatDiagnosticToken(phaseDir)}`;
+}
+
+/**
+ * The PHASES ROOT a phase directory must live under: the parent of `phaseDir`
+ * in its own (unresolved) spelling. It is the fixed anchor of the containment
+ * check — a phase directory symlinked outside the project resolves outside, so
+ * containing a report against that directory's OWN realpath alone would admit
+ * the escape (both resolve outside). A phases root that is itself a symlinked
+ * per-scope store resolves consistently on both sides of the comparison.
+ */
+function planningContainmentRoot(phaseDir: string): string {
+  return path.dirname(path.resolve(phaseDir));
+}
+
+/**
+ * True when the phase directory really lives under its phases root AND
+ * `filePath` really lives inside that phase directory (symlinks followed on
+ * both). Either escape reads `missing`. Unresolvable → false.
+ */
+function isReportContained(phaseDir: string, filePath: string): boolean {
+  try {
+    const realDir = fs.realpathSync(phaseDir);
+    return isContainedIn(realDir, fs.realpathSync(planningContainmentRoot(phaseDir)))
+      && isContainedIn(fs.realpathSync(filePath), realDir);
+  } catch {
+    return false;
+  }
+}
+
+/** What the frontmatter-only locator found for a phase directory. */
+type LocatedReport =
+  | { kind: 'phase_dir_not_found' }
+  | { kind: 'missing' }
+  | { kind: 'unparseable' }
+  | { kind: 'status'; status: VerifierStatus; filePath: string; fm: Record<string, unknown> };
+
+/**
+ * #5118: steps 0-2 of `readVerificationStatus` — no phase directory
+ * (`phase_dir_not_found`), no report or no `status` (`missing`), a report
+ * whose frontmatter is not YAML (`unparseable`), or the report's writer-set
+ * status. Reads only the report's frontmatter (no staleness check, no git).
+ * THROWS `VerificationStatusError` for a status outside the writer set — the
+ * one judgement (`reportStatusOf`) every reader shares.
+ */
+function locatePhaseReport(phaseDir: string, fsImpl: FsLike, convention?: string | null): LocatedReport {
+  if (isPhaseDirNotFound(fsImpl, phaseDir)) return { kind: 'phase_dir_not_found' };
+
+  const baseName = path.basename(phaseDir);
+  let verificationFile: string | null = null;
+  try {
+    const entries = fsImpl.readdirSync(phaseDir);
+    // #3492: pin selection to THIS phase's own token so a stray cross-phase
+    // or sentinel-numbered canonically-shaped file cannot outrank this phase's
+    // own report. #612: bracket directories resolve with the convention-aware
+    // token. #4187: keep the bare report tier aligned with every other reader.
+    const resolutionToken = convention === 'bracket'
+      ? extractPhaseToken(baseName, convention)
+      : extractPhaseToken(baseName);
+    verificationFile = resolveVerificationFile(entries, {
+      allowBare: true,
+      phaseToken: resolutionToken,
+      phaseDirName: baseName,
+      convention,
+    });
+  } catch {
+    // Directory unreadable → treat as missing
+    verificationFile = null;
+  }
+  if (!verificationFile) return { kind: 'missing' };
+
+  // extractFrontmatter anchors at byte 0, so body `status:` lines are ignored.
+  const filePath = path.join(phaseDir, verificationFile);
+  // #5118 security review (containment): a report whose real path escapes its
+  // own phase directory (a symlink out of the project) is refused BEFORE a
+  // byte of it is read — it reads `missing`, and no value from it can ever
+  // reach a message (the out-of-set error echoes the report's `status`). An
+  // injected FsLike (planning-inspect's containment seam) enforces its own
+  // containment by throwing, which the read below folds to `missing` too.
+  if (fsImpl === defaultFsImpl && !isReportContained(phaseDir, filePath)) return { kind: 'missing' };
+  let fm: Record<string, unknown> = {};
+  try {
+    // #3707-CR: normalize line endings at this read boundary so a lone-CR
+    // report's `---\r…\r---` fence still matches extractFrontmatter's check.
+    const content = normalizeLineEndings(fsImpl.readFileSync(filePath, 'utf-8'));
+    fm = extractFrontmatter(content, filePath);
+    // #4806: an unparseable frontmatter block is NOT "missing" — the file
+    // exists and verification ran; the caller is sent to fix the YAML.
+    if ((fm as unknown as Record<symbol, unknown>)[FRONTMATTER_UNPARSEABLE] === true) {
+      return { kind: 'unparseable' };
+    }
+  } catch {
+    // An unreadable report reads as carrying no status (`missing`).
+    fm = {};
+  }
+
+  // #5118: judged OUTSIDE the parse `try`, so an out-of-set value can never be
+  // swallowed into `missing`.
+  const status = reportStatusOf(fm, filePath);
+  if (status === null) return { kind: 'missing' };
+  return { kind: 'status', status, filePath, fm };
+}
+
+/**
+ * #5118 (ADR-5057 Phase 4, "no write before the error"): the first report
+ * among `phaseDirs` whose `status` is outside the closed set, or `null`.
+ * Frontmatter-only (the same locator `readVerificationStatus` runs), so a
+ * command that WRITES validates every report it will read BEFORE its first
+ * write and fails having written nothing.
+ */
+function findVerificationStatusError(
+  phaseDirs: readonly string[],
+  deps: { fs?: FsLike; convention?: string | null } = {},
+): VerificationStatusError | null {
+  const fsImpl: FsLike = deps.fs ?? defaultFsImpl;
+  for (const phaseDir of phaseDirs) {
+    try {
+      locatePhaseReport(phaseDir, fsImpl, deps.convention);
+    } catch (err) {
+      if (err instanceof VerificationStatusError) return err;
+      throw err;
+    }
+  }
+  return null;
 }
 
 interface ResolveVerificationFileOptions {
   /**
-   * #3473 F2: three OTHER hand-rolled selection sites (`src/commands.cts`
-   * determinePhaseStatus and two `verification_path` projectors in
-   * `src/init.cts`) additionally accept a BARE `VERIFICATION.md` — a form
+   * #3473 F2: three OTHER hand-rolled selection sites (`src/commands.cts`'s
+   * phase-status ladder — since folded into the Phase Status Module, #5060 —
+   * and two `verification_path` projectors in `src/init.cts`) additionally
+   * accept a BARE `VERIFICATION.md` — a form
    * this module's own two callers (`findStaleVerificationSummary`,
    * `readVerificationStatus`) had never accepted, because a bare filename
    * carries no phase token and `.endsWith('-VERIFICATION.md')` structurally
@@ -611,7 +1376,8 @@ interface ResolveVerificationFileOptions {
    *
    * #4187: that historical asymmetry was drift, not contract. Six call sites
    * grew around the shared resolver and four opted in
-   * (`cmdVerificationResolveFile`, `determinePhaseStatus`, both init
+   * (`cmdVerificationResolveFile`, `src/commands.cts`'s phase-status ladder —
+   * since folded into the Phase Status Module, #5060 — and both init
    * `verification_path` projectors) — the two module-internal status-path
    * call sites (`readVerificationStatus`, `findStaleVerificationSummary`)
    * did not, so `query verification.resolve-file` resolved a bare report in
@@ -851,9 +1617,19 @@ interface ReadVerificationStatusOptions {
 }
 
 interface VerificationStatusResult {
-  status: string;
+  status: VerificationStatus;
   next_action: string;
+  /** The runtime-projected, human-facing command (#2617) — `''` when there is none. */
   next_command: string;
+  /**
+   * #5118: the BARE command the owner routes this status to (`''`,
+   * `execute-phase`, `plan-phase`, `verify-work`), from the same
+   * VERIFICATION_ROUTES entry as `next_command`. A workflow branches on this —
+   * never on a runtime-specific `/gsd-…` string, never on the status word.
+   */
+  route: RouteCommand;
+  /** #5118: the usage-error message on `phase_dir_not_found` (names the path it looked at). */
+  message?: string;
   /**
    * True when the internal staleness check (findStaleVerificationSummary)
    * could not run to completion (an fs / scanPhasePlans / clock failure) —
@@ -951,7 +1727,16 @@ function findStaleVerificationSummary(
  * 2. Extract `status` from FRONTMATTER ONLY via the shared extractFrontmatter
  *    parser (DEFECT.FRONTMATTER-SCALAR-BROAD-GREP fix — parser anchors at byte 0).
  *    If no frontmatter block or no `status` key → status 'missing'.
- * 3. Map to routing table. Unknown non-empty value → status 'unknown'.
+ * 3. Route through VERIFICATION_ROUTES (`routeResult`). A status outside the
+ *    writer set (`VERIFIER_STATUSES`) — any other string, case variant,
+ *    reader-only member, or non-string value — THROWS `VerificationStatusError`
+ *    (#5118). The throw sits outside the parse `try`, and before the
+ *    `gaps_found` short-circuit and the staleness check, so it can neither be
+ *    folded into `missing` nor masked by `stale` (#4817 Part 2).
+ *
+ * #5118 / ADR-5057 amendment 2: a path with no phase DIRECTORY behind it
+ * (ENOENT, ENOTDIR, a non-directory) reads `phase_dir_not_found` — a usage
+ * error with no next command — not `missing` (#4987).
  *
  * The internal staleness check can itself fail (fs / scanPhasePlans / clock
  * error); when it does, `status` is routed as if nothing were stale (the
@@ -990,87 +1775,27 @@ function readVerificationStatus(
   // that already know the number (init) pass it explicitly and always get it.
   const phaseArgSource = opts.phaseNumber ?? (/^\d+(\.\d+)*$/.test(derivedPhaseNumber) ? derivedPhaseNumber : '');
   const phaseArg = phaseArgSource ? ` ${phaseArgSource}` : '';
+  const route = (status: VerificationStatus, extra: Partial<RouteResultContext> = {}): VerificationStatusResult =>
+    routeResult(status, { runtime, phaseArg, ...extra });
 
-  // 1. Find *-VERIFICATION.md
-  let verificationFile: string | null = null;
-  try {
-    const entries = fsImpl.readdirSync(phaseDir);
-    // #3492: pin selection to THIS phase's own token so a stray cross-phase
-    // or sentinel-numbered canonically-shaped file cannot outrank this phase's
-    // own report. #612: derive a separate convention-aware RESOLUTION token
-    // for bracket directories while the routed command argument above stays
-    // convention-less and milestone-unambiguous. #4187: keep the bare report
-    // tier aligned with every other verification reader.
-    const resolutionToken = opts.convention === 'bracket'
-      ? extractPhaseToken(baseName, opts.convention)
-      : phaseToken;
-    verificationFile = resolveVerificationFile(entries, {
-      allowBare: true,
-      phaseToken: resolutionToken,
-      phaseDirName: baseName,
-      convention: opts.convention,
-    });
-  } catch {
-    // Directory unreadable → treat as missing
-    verificationFile = null;
+  // Steps 0-2 (no phase dir → usage error; find the report; parse its
+  // frontmatter and judge `status`) are the frontmatter-only locator shared
+  // with the pre-write validator (`findVerificationStatusError`). An
+  // out-of-set status THROWS VerificationStatusError out of the locator —
+  // before the gaps_found short-circuit and the staleness check below, so
+  // `stale` can never mask it (#4817 Part 2).
+  const located = locatePhaseReport(phaseDir, fsImpl, opts.convention);
+  if (located.kind === 'phase_dir_not_found') {
+    return route(VERIFICATION_STATUS.PHASE_DIR_NOT_FOUND, { message: phaseDirNotFoundMessage(phaseDir) });
   }
-
-  if (!verificationFile) {
-    return missingResult(runtime, phaseArg);
-  }
-
-  // 2. Read and parse frontmatter using the shared parser.
-  // extractFrontmatter anchors at byte 0, so body `status:` lines are ignored.
-  const filePath = path.join(phaseDir, verificationFile);
-  let rawStatus: string | null = null;
-  let fm: ReturnType<typeof extractFrontmatter> = {};
-  try {
-    // #3707-CR follow-up MINOR 1: normalize line endings at this read
-    // boundary — this function's own `readFileSync` is the equivalent seam
-    // `planning.inspect`'s `buildUatRows`/`readDocument` route through for
-    // UAT/REQUIREMENTS documents, but `readVerificationStatus` had no such
-    // normalization of its own. A lone-CR VERIFICATION.md's `---\r...\r---`
-    // frontmatter fence never matched `extractFrontmatter`'s byte-0
-    // `---\n`/`---\r\n` check, so `status: passed` was read as absent and
-    // this function reported 'missing' — under-reporting a completed
-    // verification as if the step never ran, the fail-safe direction but the
-    // same root cause as the false-clean class fixed elsewhere in #3707-CR.
-    const content = normalizeLineEndings(fsImpl.readFileSync(filePath, 'utf-8'));
-    fm = extractFrontmatter(content, filePath);
-    // #4806: an unparseable frontmatter block is NOT "missing" — the file
-    // exists and verification ran. Report a distinct status so the caller is
-    // sent to fix the YAML, not to re-run execute-phase.
-    if ((fm as unknown as Record<symbol, unknown>)[FRONTMATTER_UNPARSEABLE] === true) {
-      return {
-        status: 'unparseable',
-        next_action: "The *-VERIFICATION.md frontmatter is not parseable YAML — fix the syntax error in the report itself. Re-running execute-phase cannot fix a YAML typo in an existing report.",
-        next_command: '',
-      };
-    }
-    const statusVal = fm['status'];
-    // status is always a scalar string in a well-formed VERIFICATION.md frontmatter;
-    // only accept string values — arrays and objects are not valid status values.
-    if (typeof statusVal === 'string') {
-      const trimmed = statusVal.trim();
-      rawStatus = trimmed.length > 0 ? trimmed : null;
-    }
-  } catch {
-    rawStatus = null;
-  }
-
-  if (!rawStatus) {
-    return missingResult(runtime, phaseArg);
-  }
+  if (located.kind === 'missing') return route(VERIFICATION_STATUS.MISSING);
+  if (located.kind === 'unparseable') return route(VERIFICATION_STATUS.UNPARSEABLE);
+  const { status: reportStatus, fm } = located;
 
   // gaps_found takes priority over stale — gap closure is the correct next
   // step regardless of whether summaries are newer than the verification file.
-  if (rawStatus === 'gaps_found') {
-    const entry = VERIFICATION_ROUTING_TABLE['gaps_found'];
-    return {
-      status: entry.status,
-      next_action: entry.next_action,
-      next_command: projectNextCommand('plan-phase', runtime, `${phaseArg} --gaps`),
-    };
+  if (reportStatus === VERIFICATION_STATUS.GAPS_FOUND) {
+    return route(VERIFICATION_STATUS.GAPS_FOUND);
   }
 
   // #4155: a report that declares a covered-input fingerprint is checked by
@@ -1107,19 +1832,32 @@ function readVerificationStatus(
     // runs once the digest itself has already matched.
     //
     // #4623: recompute under the STORED digest's own version, not the
-    // current constant — a v1 report written before the shared-document
-    // exclusion keeps v1 semantics rather than going stale on upgrade. An
+    // current constant — a v1/v2 report written before a later semantics
+    // change keeps its own semantics rather than going stale on upgrade. An
     // unknown version parses to `null`, which `computeCoveredDigest`
     // refuses (returns `null`), so the compare below fails closed.
+    const projectRoot = resolveProjectRoot(phaseDir);
     const storedVersion =
       hasWellFormedFingerprint && typeof coveredDigestVal === 'string'
         ? parseFingerprintVersion(coveredDigestVal)
         : null;
-    isStale =
-      !hasWellFormedFingerprint ||
-      storedVersion === null ||
-      computeCoveredDigest(resolveProjectRoot(phaseDir), coveredFilesVal, storedVersion, { phaseDir }) !== coveredDigestVal ||
-      !allCurrentArtifactsCovered(phaseDir, coveredFilesVal);
+    if (!hasWellFormedFingerprint || storedVersion === null) {
+      isStale = true;
+    } else if (storedVersion >= 3) {
+      // #5095 (R1): v3's digest is computed over the declared set UNIONED
+      // with the phase's own live artifacts — a plan/summary added after
+      // fingerprinting already moves the digest itself, so the separate
+      // live-directory re-scan (`allCurrentArtifactsCovered`) is redundant
+      // for v3 and is not run.
+      isStale =
+        computeCoveredDigest(projectRoot, coveredFilesVal, storedVersion, { phaseDir }) !== coveredDigestVal;
+    } else {
+      // v1/v2: unchanged — the digest alone cannot see a plan/summary that
+      // was never declared, so the live-directory re-scan still runs.
+      isStale =
+        computeCoveredDigest(projectRoot, coveredFilesVal, storedVersion, { phaseDir }) !== coveredDigestVal ||
+        !allCurrentArtifactsCovered(phaseDir, coveredFilesVal);
+    }
   } else {
     const staleCheck = findStaleVerificationSummary(
       phaseDir,
@@ -1136,43 +1874,13 @@ function readVerificationStatus(
     staleCheckIndeterminate = !staleCheck.determined;
   }
   if (isStale) {
-    const entry = VERIFICATION_ROUTING_TABLE['stale'];
-    return {
-      status: entry.status,
-      next_action: entry.next_action,
-      // #4682: execute-phase resumes at the verification gates and re-runs
-      // the verifier, regenerating VERIFICATION.md and its digest — the same
-      // routing the `missing` sentinel has used since #2868.
-      next_command: projectNextCommand('execute-phase', runtime, phaseArg),
-    };
+    // #4682 / #5118: the one stale route — execute-phase's verify_phase_goal
+    // step re-runs the verifier, regenerating VERIFICATION.md and its digest.
+    return route(VERIFICATION_STATUS.STALE);
   }
 
-  // 3. Route — exclude internal sentinels from raw-file lookup (they are
-  // constructed internally above, never written by the verifier).
-  if (
-    rawStatus in VERIFICATION_ROUTING_TABLE &&
-    rawStatus !== 'missing' &&
-    rawStatus !== 'unknown' &&
-    rawStatus !== 'stale' &&
-    rawStatus !== 'gaps_found'
-  ) {
-    const entry = VERIFICATION_ROUTING_TABLE[rawStatus];
-    return {
-      status: entry.status,
-      next_action: entry.next_action,
-      next_command: projectNextCommand(entry.next_command, runtime, phaseArg),
-      ...(staleCheckIndeterminate ? { staleCheckIndeterminate: true } : {}),
-    };
-  }
-
-  // Unknown value
-  const unknownRoute = VERIFICATION_ROUTING_TABLE['unknown'];
-  return {
-    status: unknownRoute.status,
-    next_action: `Unexpected verification status '${rawStatus}'. If this is an intentional non-standard marker (e.g. a hand-set failed/superseded state), no action is needed. Otherwise, run execute-phase to regenerate verification — it will not re-run plans that already have a SUMMARY.md.`,
-    next_command: projectNextCommand(unknownRoute.next_command, runtime, phaseArg),
-    ...(staleCheckIndeterminate ? { staleCheckIndeterminate: true } : {}),
-  };
+  // 3. Route the writer-set member through the one table.
+  return route(reportStatus, { staleCheckIndeterminate });
 }
 
 interface IsPhaseCompleteDeps {
@@ -1191,9 +1899,32 @@ interface IsPhaseCompleteDeps {
   convention?: string | null;
 }
 
+/**
+ * #5118: `isPhaseComplete`'s projection of a report whose `status` is outside
+ * the closed set — NOT a VerificationStatus (`unparseable` keeps its one
+ * meaning: the frontmatter does not parse). `status: null`, no route, and the
+ * error's own message as `next_action`.
+ */
+interface InvalidVerificationReading {
+  status: null;
+  next_action: string;
+  next_command: '';
+  route: '';
+}
+
+/** What `isPhaseComplete` read: a routed VerificationStatus, or the out-of-set projection. */
+type PhaseVerificationReading = VerificationStatusResult | InvalidVerificationReading;
+
 interface PhaseCompletionValue {
   complete: boolean;
-  verification: VerificationStatusResult;
+  verification: PhaseVerificationReading;
+  /**
+   * #5118: set exactly when `verification.status` is `null` — the report's
+   * `status` is outside the closed set. The owner keeps its no-throw contract
+   * (scope UNREADABLE); every aggregate carries this error in its own result
+   * and its CLI surface fails with the error's own `.reason`.
+   */
+  statusError?: VerificationStatusError;
 }
 
 /**
@@ -1207,11 +1938,18 @@ interface PhaseCompletionValue {
  * `*-VERIFICATION.md` is complete (#3168). A ROADMAP checkbox has no machine
  * authority and is never consulted — this function never reads ROADMAP.md.
  *
- * `complete` is exactly `verification.status === 'passed'`. `verification`
- * carries the FULL routing result (status/next_action/next_command), so a
- * caller can distinguish a failing verdict (`gaps_found`/`human_needed`/
- * `stale`/`unknown`) from an absent one (`missing`) — both are "not
- * complete", but they are not the same non-answer.
+ * `complete` is exactly `verification.status === VERIFICATION_STATUS.PASSED`.
+ * `verification` carries the FULL routing result
+ * (status/next_action/next_command/route), so a caller can distinguish a
+ * failing verdict (`gaps_found`/`human_needed`/`stale`) from an absent one
+ * (`missing`) — both are "not complete", but they are not the same
+ * non-answer.
+ *
+ * #5118: a report whose `status` is outside the closed set does NOT throw
+ * out of here (ADR-5057 :223 — the no-throw contract Phases 2–4 preserve): it
+ * degrades to scope UNREADABLE, `verification.status` is `null` (route `''`,
+ * the error's message as `next_action`), `complete` is false, and
+ * `value.statusError` holds the typed error for the caller to carry.
  *
  * `scope` is UNREADABLE when `phaseDir` itself could not be listed — this is
  * INDEPENDENT of readVerificationStatus's own no-throw fail-open contract for
@@ -1237,18 +1975,28 @@ function isPhaseComplete(
     readable = false;
   }
 
-  const verification = readVerificationStatus(phaseDir, {
-    fs: deps.fs,
-    phaseCleanCommitTimesMs: deps.phaseCleanCommitTimesMs,
-    runtime: deps.runtime,
-    phaseNumber: deps.phaseNumber,
-    convention: deps.convention,
-  });
+  let verification: PhaseVerificationReading;
+  let statusError: VerificationStatusError | undefined;
+  try {
+    verification = readVerificationStatus(phaseDir, {
+      fs: deps.fs,
+      phaseCleanCommitTimesMs: deps.phaseCleanCommitTimesMs,
+      runtime: deps.runtime,
+      phaseNumber: deps.phaseNumber,
+      convention: deps.convention,
+    });
+  } catch (err) {
+    if (!(err instanceof VerificationStatusError)) throw err;
+    statusError = err;
+    readable = false;
+    verification = { status: null, next_action: err.message, next_command: '', route: '' };
+  }
 
   return {
     value: {
-      complete: verification.status === 'passed',
+      complete: verification.status === VERIFICATION_STATUS.PASSED,
       verification,
+      ...(statusError ? { statusError } : {}),
     },
     scope: readable ? SCOPE.COMPLETE : SCOPE.UNREADABLE,
   };
@@ -1257,6 +2005,13 @@ function isPhaseComplete(
 /**
  * CLI command handler: resolve phaseDir against cwd, call readVerificationStatus,
  * emit via io.output().
+ *
+ * #5118: an out-of-set report status throws `VerificationStatusError` out of
+ * here with nothing on stdout; gsd-tools.cjs translates it (once, centrally)
+ * into ERROR_REASON `verification_status_invalid`. A nonexistent phase
+ * directory is an ANSWER (`phase_dir_not_found`, `route: ''`, a `message`,
+ * no `error` field — so `--pick status` prints it and the run is not
+ * DEGRADED), not a failure.
  *
  * @param cwd         - Current working directory (used to resolve phaseDirArg).
  * @param phaseDirArg - Phase directory path (absolute or relative to cwd).
@@ -1287,6 +2042,11 @@ function cmdVerificationStatus(cwd: string, phaseDirArg: string | undefined, raw
  * bare path string (possibly empty) so `VAR=$(gsd_run query
  * verification.resolve-file "$PHASE_DIR" --raw)` is directly assignable.
  *
+ * #5118 (#4987 item 2): a path with no phase directory behind it adds the
+ * marker `status: "phase_dir_not_found"` and a `message` — never an `error`
+ * field (that would declare DEGRADED) — so it is distinguishable from an
+ * existing directory with no report, where `""` alone keeps its meaning.
+ *
  * @param cwd         - Current working directory (used to resolve phaseDirArg).
  * @param phaseDirArg - Phase directory path (absolute or relative to cwd).
  * @param raw         - Whether to emit raw (non-JSON) output.
@@ -1297,6 +2057,18 @@ function cmdVerificationResolveFile(cwd: string, phaseDirArg: string | undefined
     return;
   }
   const phaseDir = path.resolve(cwd, phaseDirArg);
+  if (isPhaseDirNotFound(defaultFsImpl, phaseDir)) {
+    output(
+      {
+        verification_file: '',
+        status: VERIFICATION_STATUS.PHASE_DIR_NOT_FOUND,
+        message: phaseDirNotFoundMessage(phaseDir),
+      },
+      raw,
+      '',
+    );
+    return;
+  }
   let verificationPath = '';
   try {
     const entries = fs.readdirSync(phaseDir);
@@ -1397,9 +2169,16 @@ function parseFingerprintFileArgs(tokens: readonly string[]): { files: string[] 
  * @param raw         - Whether to emit raw (non-JSON) output: just the
  *                       `covered_digest` string, so `VAR=$(gsd_run query
  *                       verification.fingerprint "$PHASE_DIR" ... --raw)` is
- *                       directly assignable. `covered_files` is unambiguous
- *                       from the caller's own input list in that mode, so
- *                       only the computed digest needs a raw form.
+ *                       directly assignable. #5095 (ADR-5057 Phase 2): `raw`
+ *                       returning only the digest is safe even though the
+ *                       emitted `covered_files` is a SUPERSET of the caller's
+ *                       declared list — the v3 digest is computed over
+ *                       `canonicalize(declared ∪ phaseArtifactPaths)` on BOTH
+ *                       the emit side (here) and the check side
+ *                       (`readVerificationStatus`), so a `--raw` caller that
+ *                       writes its OWN declared list (without enumerating
+ *                       plans/summaries) alongside the raw digest still
+ *                       matches — the checker adds the identical union.
  */
 function cmdVerificationFingerprint(
   cwd: string,
@@ -1435,26 +2214,48 @@ function cmdVerificationFingerprint(
     return;
   }
   const projectRoot = resolveProjectRoot(phaseDir);
-  // canonicalizeCoveredFiles here is for the emitted `covered_files` field —
-  // computeCoveredDigest canonicalizes its own `coveredFiles` argument
-  // internally too (it must, for callers like readVerificationStatus that
-  // pass raw, un-canonicalized frontmatter values), so passing an
-  // already-canonical list keeps that internal pass a cheap no-op rather
-  // than a second meaningfully different canonicalization.
-  const uniqueSorted = canonicalizeCoveredFiles(files);
-  const digest = computeCoveredDigest(projectRoot, uniqueSorted, FINGERPRINT_VERSION, { phaseDir });
+  // canonicalizeCoveredFiles here is for `deriveCoveredDigest`'s
+  // `coveredFiles` argument — it canonicalizes internally too (it must, for
+  // callers like readVerificationStatus that pass raw, un-canonicalized
+  // frontmatter values), so passing an already-canonical list keeps that
+  // internal pass a cheap no-op rather than a second meaningfully different
+  // canonicalization.
+  const declaredCanonical = canonicalizeCoveredFiles(files, { version: FINGERPRINT_VERSION });
+  // #5095 (R1/R2/R7, ADR-5057 Phase 2): ONE call derives both the emitted
+  // `covered_files` (`.files`, the declared set unioned with the phase's own
+  // live artifacts) and the hashed digest (`.digest`) — the CLI no longer
+  // runs `phaseArtifactPaths` itself and again inside the digest computation,
+  // which used to leave a race window where the two calls could see a
+  // different phase directory and disagree. An artifact-resolution failure
+  // fails the WHOLE command (fail closed: the emitter cannot vouch for a set
+  // it could not fully see).
+  const derivation = deriveCoveredDigest(projectRoot, declaredCanonical, FINGERPRINT_VERSION, { phaseDir });
+  if (!derivation.ok) {
+    error(`could not compute fingerprint — ${derivation.reason}`);
+    return;
+  }
+  const unionSorted = derivation.files;
+  if (unionSorted.length === 0) {
+    error('at least one covered file required for verification.fingerprint');
+    return;
+  }
+  const digest = derivation.digest;
   if (digest === null) {
     // #4623: name the one null that is NOT a bad path — a declaration made
-    // only of shared planning documents hashes nothing under v2, and the
-    // generic message below would send the caller looking for a missing file
-    // that is not missing. Discriminated AFTER the v2 attempt, and only when a
-    // v1 pass over the same list (which hashes, and therefore validates, every
-    // path) succeeds: an all-shared list with a missing or directory member is
-    // a bad path first, and gets the generic message.
-    const sharedRoots = sharedPlanningRoots(projectRoot, phaseDir);
+    // only of shared planning documents (with no other evidence) hashes
+    // nothing under v2+, and the generic message below would send the caller
+    // looking for a missing file that is not missing. Discriminated AFTER
+    // the versioned attempt, and only when a v1 pass over the same list
+    // (which hashes, and therefore validates, every path) succeeds: an
+    // all-shared list with a missing or directory member is a bad path
+    // first, and gets the generic message. #5095 (R5): a phase WITH real
+    // artifacts never reaches this branch — the union above already supplied
+    // evidence — so this error is reachable only when every declared path is
+    // a shared planning doc AND the phase has no plans/summaries of its own.
+    const sharedRoots = sharedRootsFor(projectRoot, phaseDir, derivation.mappedPhaseDir);
     if (
-      uniqueSorted.every((f) => isSharedPlanningDoc(f, sharedRoots)) &&
-      computeCoveredDigest(projectRoot, uniqueSorted, 1) !== null
+      unionSorted.every((f) => isSharedPlanningDoc(f, sharedRoots)) &&
+      computeCoveredDigest(projectRoot, unionSorted, 1) !== null
     ) {
       error(
         `could not compute fingerprint — every covered file is a repo-wide planning document (direct children of ${sharedRoots.join(', ')} never enter the digest); declare the phase's own artifacts and implementation files`,
@@ -1464,13 +2265,305 @@ function cmdVerificationFingerprint(
     error('could not compute fingerprint — a covered file is missing, unreadable, or escapes the project root');
     return;
   }
-  output({ covered_files: uniqueSorted, covered_digest: digest }, raw, digest);
+  output({ covered_files: unionSorted, covered_digest: digest }, raw, digest);
 }
 
-export = {
+// ─── verification.append-audit (#5105 R3) ──────────────────────────────────
+
+/**
+ * Render a single `## <heading> <date>` block followed by a `| Metric |
+ * Count |` table over `rows` — the exact shape `secure-phase.md` /
+ * `validate-phase.md` compose by hand today (#4887 Defect 2, #4981).
+ */
+function renderAuditBlock(heading: string, date: string, rows: Record<string, unknown>): string {
+  const lines = [`## ${heading} ${date}`, '', '| Metric | Count |', '|---|---|'];
+  for (const [k, v] of Object.entries(rows)) lines.push(`| ${k} | ${String(v)} |`);
+  return lines.join('\n') + '\n';
+}
+
+interface AuditAppendResult {
+  appended: boolean;
+  content: string;
+}
+
+/**
+ * #5105 (S4): parse a block body's `| Metric | Count |`-shaped table into a
+ * plain metric→count string map, addressed by the table's ACTUAL first/second
+ * column (never a hard-coded `Metric`/`Count` name) so a legacy block with
+ * different header text still compares. Whitespace/separator-width tolerant
+ * by construction — `parseMarkdownTable` trims every cell and accepts any
+ * `-{1,}` delimiter width. Returns `null` when the body carries no parseable
+ * 2+-column table (no prior block to compare against).
+ */
+function parseAuditTableRows(bodyText: string): Record<string, string> | null {
+  const parsed = parseMarkdownTable(bodyText);
+  if (!parsed.ok || parsed.value.columns.length < 2) return null;
+  const [metricCol, countCol] = parsed.value.columns;
+  const map: Record<string, string> = {};
+  for (const row of parsed.value.rows) {
+    map[row[metricCol]] = String(row[countCol]).trim();
+  }
+  return map;
+}
+
+/** Order-insensitive equality over two metric→count maps. */
+function auditRowsEqual(live: Record<string, string> | null, candidate: Record<string, string>): boolean {
+  if (!live) return false;
+  const liveKeys = Object.keys(live);
+  const candidateKeys = Object.keys(candidate);
+  if (liveKeys.length !== candidateKeys.length) return false;
+  return liveKeys.every((k) => Object.prototype.hasOwnProperty.call(candidate, k) && live[k] === candidate[k]);
+}
+
+/**
+ * #5105 R3 — pure core of `verification.append-audit`.
+ *
+ * Finds the LAST `## <heading> <date>` block in `content` — a level-2
+ * heading whose text matches `^<heading> (\d{4}-\d{2}-\d{2})\b` — via the
+ * shared, fence-aware `tokenizeHeadings`/`collectSection` primitives (#5105
+ * S6) instead of a hand-rolled `^## ` scan: a `## <heading> <date>`-looking
+ * line inside a fenced code block is not a heading and cannot be selected,
+ * and a heading whose trailing word ISN'T a date (e.g. the template's bare
+ * `## Security Audit Trail`) is not matched either (#5105 S4 — the anchored
+ * heading date shape, not `(\S+)`, is what excludes it).
+ *
+ * Comparison (#5105 S4) is over the block's PARSED table rows
+ * (`parseAuditTableRows`/`auditRowsEqual`) — whitespace/separator-width
+ * insensitive, order-insensitive, and tolerant of an optional blank line
+ * after the heading — never a byte-for-byte body string compare. Identical
+ * rows on the last block → `{ appended: false }`, no write. Different rows
+ * (or no prior block) → appends the new block at the end and returns
+ * `{ appended: true }`.
+ *
+ * Deliberately compares against the LAST block only, never any earlier one —
+ * a re-audit that regresses back to an earlier count must still append.
+ *
+ * `date` defaults through the `clock` seam (default: the global `Date`
+ * constructor) rather than a bare `new Date()` call, so a caller can pin the
+ * date deterministically — directly (pass `clock`) or via `node:test`
+ * `mock.timers` (which replaces global `Date`, picked up automatically since
+ * the default is evaluated per call).
+ */
+function planAuditAppend(
+  content: string,
+  { heading, rows, date, clock = Date }: { heading: string; rows: Record<string, unknown>; date?: string; clock?: DateConstructor },
+): AuditAppendResult {
+  const resolvedDate = date ?? new clock().toISOString().slice(0, 10);
+  const escapedHeading = escapeRegex(heading);
+  const headingRe = new RegExp(`^${escapedHeading} (\\d{4}-\\d{2}-\\d{2})\\b`);
+  const matchingHeadings = tokenizeHeadings(content).filter((h) => h.level === 2 && headingRe.test(h.text));
+  const newBlock = renderAuditBlock(heading, resolvedDate, rows);
+
+  const newRowsMap: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rows)) newRowsMap[k] = String(v);
+
+  if (matchingHeadings.length > 0) {
+    const last = matchingHeadings[matchingHeadings.length - 1];
+    const section = collectSection(content, (h) => h.offset === last.offset);
+    const liveRows = section ? parseAuditTableRows(section.body) : null;
+    if (auditRowsEqual(liveRows, newRowsMap)) {
+      return { appended: false, content };
+    }
+  }
+
+  const trimmed = content.replace(/\s+$/, '');
+  const appendedContent = (trimmed.length > 0 ? trimmed + '\n\n' : '') + newBlock;
+  return { appended: true, content: appendedContent };
+}
+
+/** Reject a `\r`, `\n`, or `|` — any of the three would corrupt the rendered heading/table shape. */
+function hasForbiddenAuditChar(s: string): boolean {
+  return /[\r\n|]/.test(s);
+}
+
+/** `rows` values must be a non-negative integer, as either a JSON number or an all-digit string. */
+function isNonNegativeIntegerValue(v: unknown): boolean {
+  if (typeof v === 'number') return Number.isInteger(v) && v >= 0;
+  if (typeof v === 'string') return /^\d+$/.test(v);
+  return false;
+}
+
+/** Reject a value carrying leading/trailing whitespace — a heading or row key
+ * with padding would not match `parseMarkdownTable`'s trimmed reads on a
+ * later append, so the same key would silently fail to be recognized as the
+ * "already present" row (re-review finding 6). */
+function hasLeadingOrTrailingWhitespace(s: string): boolean {
+  return s !== s.trim();
+}
+
+/** True calendar-date check for `--date` (re-review finding 9): rejects an
+ * out-of-range month/day (e.g. `2026-99-99`) or a day that does not exist in
+ * that month (e.g. `2026-02-30`), which `/^\d{4}-\d{2}-\d{2}$/` alone lets
+ * through — `Date.UTC` normalizes overflow instead of raising, so the parsed
+ * fields must be compared back against the input. */
+function isRealCalendarDate(date: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!m) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const d = new Date(Date.UTC(year, month - 1, day));
+  return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+}
+
+/**
+ * #5105 S3 — validate `verification.append-audit` input shape before it ever
+ * reaches `planAuditAppend`/the file. `--rows` being valid JSON (checked by
+ * the caller before this runs) is necessary but not sufficient: a newline,
+ * `\r`, or `|` in the heading or any row key/value would corrupt the
+ * rendered `## heading date` line or `| key | value |` row, and a non-integer
+ * or negative count is not a countable metric.
+ */
+function validateAuditAppendInput(
+  heading: string,
+  rows: Record<string, unknown>,
+  date: string | undefined,
+): { ok: true } | { ok: false; reason: string } {
+  if (hasForbiddenAuditChar(heading)) {
+    return { ok: false, reason: '--heading must not contain a newline, carriage return, or |' };
+  }
+  if (hasLeadingOrTrailingWhitespace(heading)) {
+    return { ok: false, reason: '--heading must not have leading or trailing whitespace' };
+  }
+  for (const [key, value] of Object.entries(rows)) {
+    if (hasForbiddenAuditChar(key)) {
+      return { ok: false, reason: `--rows key ${JSON.stringify(key)} must not contain a newline, carriage return, or |` };
+    }
+    if (hasLeadingOrTrailingWhitespace(key)) {
+      return { ok: false, reason: `--rows key ${JSON.stringify(key)} must not have leading or trailing whitespace` };
+    }
+    if (typeof value === 'string' && hasForbiddenAuditChar(value)) {
+      return { ok: false, reason: `--rows value for ${JSON.stringify(key)} must not contain a newline, carriage return, or |` };
+    }
+    if (!isNonNegativeIntegerValue(value)) {
+      return { ok: false, reason: `--rows value for ${JSON.stringify(key)} must be a non-negative integer` };
+    }
+  }
+  if (date !== undefined && !isRealCalendarDate(date)) {
+    return { ok: false, reason: '--date must be a real calendar date in YYYY-MM-DD form' };
+  }
+  return { ok: true };
+}
+
+/**
+ * #5105 S2 — case-insensitive re-implementation of `isVerificationReportPath`'s
+ * shape. That helper is deliberately case-SENSITIVE (matching
+ * `resolveVerificationFile`'s own convention — see its doc comment), so it
+ * cannot be reused directly for a containment refusal that must catch a
+ * lowercase `07-verification.md` too.
+ */
+function isVerificationReportBasenameCI(basename: string): boolean {
+  const lower = basename.toLowerCase();
+  return lower === 'verification.md' || lower.endsWith('-verification.md');
+}
+
+/** #5105 S2 — the only two shapes `verification.append-audit` may target. */
+function isAllowedAuditTargetBasenameCI(basename: string): boolean {
+  const lower = basename.toLowerCase();
+  return lower.endsWith('-security.md') || lower.endsWith('-validation.md');
+}
+
+/**
+ * CLI command handler (#5105 R3): `verification.append-audit <file>
+ * --heading <H> --rows '<json {metric:count}>' [--date <YYYY-MM-DD>]`.
+ *
+ * Never reads or writes `covered_files`/`covered_digest` (#4981 invariant
+ * 5) — a genuinely changed count publishes and stales any report that covers
+ * `file`; nothing here ever restamps it.
+ *
+ * #5105 S2: `file` is resolved through the same `requireSafePath(...,
+ * PathAcceptance.AbsoluteInsideRoot)` seam `uat.complete-session` uses —
+ * refusing an absolute-outside-root target or a `../` escape by throwing
+ * before any read/write is attempted (uncaught here, matching every other
+ * `requireSafePath` call site in this codebase — a top-level command
+ * dispatcher turns the throw into a failed exit). The REAL (symlink-resolved)
+ * basename is then checked twice, case-insensitively: it must not be a
+ * verification report itself, and it must be a `*-SECURITY.md` or
+ * `*-VALIDATION.md` file — the only two artifact kinds this command may
+ * mutate.
+ */
+function cmdVerificationAppendAudit(
+  cwd: string,
+  fileArg: string | undefined,
+  argTokens: readonly string[],
+  raw: boolean,
+): void {
+  if (!fileArg) {
+    error('file required for verification.append-audit');
+    return;
+  }
+  const { heading, rows: rowsArg, date: dateArg } = parseNamedArgsOrExit(
+    argTokens as string[],
+    { valueFlags: ['heading', 'rows', 'date'], positionals: 0 },
+    error,
+  );
+  if (!heading) {
+    error('--heading required for verification.append-audit');
+    return;
+  }
+  if (!rowsArg) {
+    error('--rows required for verification.append-audit');
+    return;
+  }
+  let rows: Record<string, unknown>;
+  try {
+    const parsedRows: unknown = JSON.parse(rowsArg as string);
+    if (!parsedRows || typeof parsedRows !== 'object' || Array.isArray(parsedRows)) {
+      throw new Error('not an object');
+    }
+    rows = parsedRows as Record<string, unknown>;
+  } catch {
+    error('--rows must be a JSON object for verification.append-audit');
+    return;
+  }
+  const date = (dateArg as string | null) ?? undefined;
+  const validation = validateAuditAppendInput(heading as string, rows, date);
+  if (!validation.ok) {
+    error(validation.reason);
+    return;
+  }
+
+  const resolvedPath = requireSafePath(fileArg, cwd, 'verification.append-audit file', PathAcceptance.AbsoluteInsideRoot);
+  const realBasename = path.basename(resolvedPath);
+  if (isVerificationReportBasenameCI(realBasename)) {
+    error('verification.append-audit refuses a verification report path');
+    return;
+  }
+  if (!isAllowedAuditTargetBasenameCI(realBasename)) {
+    error('verification.append-audit target must be a *-SECURITY.md or *-VALIDATION.md file');
+    return;
+  }
+
+  let content: string;
+  try {
+    content = fs.readFileSync(resolvedPath, 'utf-8');
+  } catch {
+    error(`file not found: ${fileArg}`);
+    return;
+  }
+  const result = planAuditAppend(content, { heading: heading as string, rows, date });
+  if (result.appended) {
+    fs.writeFileSync(resolvedPath, result.content);
+  }
+  output({ appended: result.appended }, raw);
+}
+
+const verificationModule = {
+  VERIFICATION_STATUS,
   VERIFIER_STATUSES,
-  VERIFICATION_ROUTING_TABLE,
+  VERIFICATION_ROUTES,
+  isVerificationStatus,
+  assertVerificationStatus,
+  VerificationStatusError,
+  VERIFICATION_STATUS_ERROR_CODE,
+  failOnVerificationStatusError,
+  firstStatusError,
+  reportStatusOf,
+  isReportContained,
+  routeResult,
+  findVerificationStatusError,
   defaultPhaseCleanCommitTimesMs,
+  resolvePhaseArtifactFile,
   resolveVerificationFile,
   resolveUatFile,
   findStaleVerificationSummary,
@@ -1481,7 +2574,20 @@ export = {
   computeCoveredDigest,
   sharedPlanningRoots,
   isSharedPlanningDoc,
+  isVerificationReportPath,
   parseFingerprintVersion,
   parseFingerprintFileArgs,
   cmdVerificationFingerprint,
+  planAuditAppend,
+  cmdVerificationAppendAudit,
 };
+// Namespace merge (same binding name as the value above) is how this
+// `export =` module exposes the closed enum's TYPES beside its runtime export
+// (the planning-scope.cts precedent): `import type v = require(...)` then
+// `v.VerificationStatus`.
+// eslint-disable-next-line @typescript-eslint/no-namespace
+declare namespace verificationModule {
+  export { VerificationStatus, VerifierStatus, VerificationStatusResult, RouteCommand, PhaseVerificationReading };
+}
+
+export = verificationModule;

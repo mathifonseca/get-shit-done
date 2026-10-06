@@ -34,7 +34,7 @@ const {
   computeMigrationPlan,
   applyMigration,
   computeDependsOnRewrites,
-  applyRoadmapEdits,
+  rewriteRoadmapLines,
 } = require('../gsd-core/bin/lib/roadmap-upgrade.cjs');
 const { readVerificationStatus } = require('../gsd-core/bin/lib/verification.cjs');
 const { scopeToPhase, matchPhaseDirs, isSentinelPhaseId, parsePhaseId, renderPhaseId } = require('../gsd-core/bin/lib/phase-id.cjs');
@@ -1078,6 +1078,56 @@ describe('roadmap upgrade --convention bracket', () => {
       assert.deepEqual(unresolved, []);
       assert.equal(level.get('01-01'), 0);
       assert.equal(level.get('01-02'), 1);
+    });
+
+    // Found while implementing #5105: a PLAN.md whose frontmatter the shared writer
+    // refuses to splice (here a duplicate key) still fails the migration closed, and
+    // the error names the full file path and the writer's refusal code.
+    test('an unreconcilable PLAN.md fails closed naming its path and the refusal code', (t) => {
+      const phaseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-bracket-unreconcilable-'));
+      t.after(() => cleanup(phaseDir));
+      const dependent = '---\nphase: "03A"\nplan: "02"\nplan: "02"\ndepends_on: ["03a-01"]\n---\n\nSecond.\n';
+      fs.writeFileSync(path.join(phaseDir, '03A-01-PLAN.md'), '---\nphase: "03A"\nplan: "01"\n---\n', 'utf8');
+      fs.writeFileSync(path.join(phaseDir, '03A-02-PLAN.md'), dependent, 'utf8');
+
+      assert.throws(
+        () => computeDependsOnRewrites(phaseDir, '03A', '01', [
+          { oldName: '03A-01-PLAN.md', newName: '01-01-PLAN.md' },
+          { oldName: '03A-02-PLAN.md', newName: '01-02-PLAN.md' },
+        ]),
+        (err) => {
+          assert.equal(err.code, 'FRONTMATTER_KEYS_UNRECONCILABLE');
+          assert.ok(err.message.includes(JSON.stringify(path.join(phaseDir, '03A-02-PLAN.md'))), err.message);
+          assert.ok(err.message.includes('FRONTMATTER_KEYS_UNRECONCILABLE'), err.message);
+          return true;
+        },
+      );
+      assert.equal(fs.readFileSync(path.join(phaseDir, '03A-02-PLAN.md'), 'utf8'), dependent);
+    });
+
+    // Found while implementing #5105: a depends_on block list with a comment between its
+    // items cannot be rewritten without dropping that comment, so the migration fails closed
+    // naming the PLAN.md and FRONTMATTER_COMMENT_WOULD_BE_LOST, and leaves the file untouched.
+    test('a PLAN.md whose depends_on list holds a comment between items fails closed naming its path', (t) => {
+      const phaseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-bracket-dep-comment-'));
+      t.after(() => cleanup(phaseDir));
+      const dependent = '---\nphase: "03A"\nplan: "02"\ndepends_on:\n  - "03a-01"\n  # ordering note: keep\n  - "external-01"\n---\n\nSecond.\n';
+      fs.writeFileSync(path.join(phaseDir, '03A-01-PLAN.md'), '---\nphase: "03A"\nplan: "01"\n---\n', 'utf8');
+      fs.writeFileSync(path.join(phaseDir, '03A-02-PLAN.md'), dependent, 'utf8');
+
+      assert.throws(
+        () => computeDependsOnRewrites(phaseDir, '03A', '01', [
+          { oldName: '03A-01-PLAN.md', newName: '01-01-PLAN.md' },
+          { oldName: '03A-02-PLAN.md', newName: '01-02-PLAN.md' },
+        ]),
+        (err) => {
+          assert.equal(err.code, 'FRONTMATTER_COMMENT_WOULD_BE_LOST');
+          assert.ok(err.message.includes(JSON.stringify(path.join(phaseDir, '03A-02-PLAN.md'))), err.message);
+          assert.ok(err.message.includes('FRONTMATTER_COMMENT_WOULD_BE_LOST'), err.message);
+          return true;
+        },
+      );
+      assert.equal(fs.readFileSync(path.join(phaseDir, '03A-02-PLAN.md'), 'utf8'), dependent);
     });
 
     function setupDependsOnRewriteFixture() {
@@ -3399,7 +3449,7 @@ describe('roadmap upgrade --convention bracket', () => {
   // line lost its trailing `\r` (checklist bullets kept theirs, since their
   // rewrite slices the line's own remainder instead of reassembling
   // captured regex groups), leaving a mixed-EOL file despite
-  // applyRoadmapEdits' own "preserve every terminator" contract.
+  // the roadmap rewrite's own "preserve every terminator" contract.
   describe('preserves CRLF line terminators on converted headings (#4144 round 6 W-CRLF)', () => {
     test('every line stays CRLF after apply, including converted headings', () => {
       const cwd = materializeEmptyFixture('crlf');
@@ -3818,7 +3868,7 @@ describe('roadmap upgrade --convention bracket', () => {
 //
 // What this drives: the REAL planner (`computeMigrationPlan(cwd, { convention:
 // 'bracket' })`) against a generated `.planning/` tree, and the REAL roadmap
-// writer (`applyRoadmapEdits` — the same function `applyMigration` writes
+// writer (`rewriteRoadmapLines` — the same function `applyMigration` writes
 // through), never a hand-rolled line-replacer. `applyMigration` itself is not
 // driven here: its real run demands a clean git tree, and a `git init` +
 // commit per generated case would put this suite in minutes rather than
@@ -3955,7 +4005,7 @@ describe('roadmap upgrade --convention bracket: transform properties', () => {
         assert.ok(!plan1.alreadyMigrated, 'planner reported nothing to migrate');
         assert.ok(plan1.roadmapEdits.length > 0, 'planner produced no edits');
 
-        const migrated = applyRoadmapEdits(content, plan1.roadmapEdits);
+        const migrated = rewriteRoadmapLines(content, plan1.roadmapEdits);
         const before = content.split('\n');
         const afterLines = migrated.split('\n');
 
@@ -4028,7 +4078,7 @@ describe('roadmap upgrade --convention bracket: transform properties', () => {
         const plan2 = planFor(migrated, spec.projectCode);
         assert.equal(plan2.alreadyMigrated, true);
         assert.equal(plan2.roadmapEdits.length, 0);
-        assert.equal(applyRoadmapEdits(migrated, plan2.roadmapEdits), migrated);
+        assert.equal(rewriteRoadmapLines(migrated, plan2.roadmapEdits), migrated);
       }),
     );
 

@@ -174,6 +174,34 @@ describe('deriveProgressFromRoadmap', () => {
   });
 });
 
+describe('Phase Status Module consumers (#5060)', () => {
+  test('deriveProgressFromRoadmap counts prose-bearing Complete rows and excludes the 999.1 sentinel row', () => {
+    // #5060: two prose-bearing Complete rows (both must be counted) plus a
+    // Not-started data row and a Complete sentinel row (must NOT be counted)
+    // — the old code's "prose row not counted" bug and "sentinel row counted"
+    // bug cancel out under a single prose-bearing Complete row, so a fixture
+    // with only one such row (completedPhases: 1) passes on both the OLD and
+    // NEW code and cannot tell them apart. Two prose-bearing Complete rows
+    // make the two effects additive instead of cancelling: OLD counts 1
+    // (misses both prose rows, counts the sentinel), NEW counts 2 (counts
+    // both prose rows, excludes the sentinel).
+    const roadmap = [
+      '## Progress',
+      '',
+      '| Phase | Plans Complete | Status | Completed |',
+      '| --- | --- | --- | --- |',
+      '| 1. A | 1/1 | Complete — shipped | 2026-09-20 |',
+      '| 2. B | 1/1 | Complete (verified) | 2026-09-21 |',
+      '| 3. C | 0/1 | Not started | - |',
+      '| 999.1. Backlog | 0/0 | Complete | - |',
+    ].join('\n');
+
+    const result = deriveProgressFromRoadmap(roadmap);
+    assert.equal(result.completedPhases, 2, `both prose-bearing Complete rows must be counted, got ${result.completedPhases}`);
+    assert.equal(result.totalPhases, 3, `sentinel row must not be counted, got ${result.totalPhases}`);
+  });
+});
+
 describe('clampPercent', () => {
   test('computes a normal percentage', () => {
     assert.equal(clampPercent(1, 2), 50);

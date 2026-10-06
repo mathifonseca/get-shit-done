@@ -7,7 +7,9 @@
 // binary on PATH) — every such instruction must use the `gsd_run` resolver the
 // same files already define. #725 fixed this only for the Codex install-
 // conversion pipeline; the Claude-facing SOURCE shipped the bare calls verbatim
-// until #2751 normalized them.
+// until #2751 normalized them. #4995 extends this to skills/*/SKILL.md, the
+// generated Claude Code plugin-skill mirror of commands/gsd/*.md — see the
+// SCAN_DIRS comment below for why it was excluded before and is not anymore.
 //
 // A pure regex cannot perfectly distinguish an imperative ("Use `gsd-tools query
 // commit` to commit") from a descriptive mention ("`gsd-tools query commit`
@@ -50,14 +52,23 @@ const ROUTER_PATH = path.join(ROOT, 'gsd-core', 'bin', 'gsd-tools.cjs');
 // `gsd-tools query workstream.list`. Bringing commands/ under this guard therefore
 // needs those two contracts reconciled first; it is not a scan-set widening.
 //
-// skills/ is absent for a different reason: it is generated from commands/ by
-// scripts/gen-plugin-skills.cjs and pinned by lint:generated-sync, so guarding the
-// source guards both, and scanning the generated mirror would double-report every
-// future offender.
+// skills/ WAS excluded on the theory that "it is generated from commands/ ...
+// so guarding the source guards both, and scanning the mirror would
+// double-report every future offender" (#2751/#3809). That theory doesn't
+// hold: commands/ was reverted back OUT of this guard's scan set (see above),
+// so nothing was guarding the skills/ source, and scripts/gen-plugin-skills.cjs
+// performed no bare-command rewrite of its own — 11 sites across 4 files
+// (workstreams.md, quick.md, review-backlog.md, config.md) shipped bare
+// `gsd-tools` straight into skills/*/SKILL.md unseen (#4995). gen-plugin-skills.cjs
+// now rewrites bare gsd-tools -> gsd_run (+ resolver preamble in fenced blocks)
+// at generation time, the same way the Codex conversion pipeline (#725) rewrites
+// its own generated artifact rather than the shared source, so skills/ is
+// included here directly rather than relying on the (never-guarded) source.
 const SCAN_DIRS = [
   'agents',
   path.join('gsd-core', 'workflows'),
   path.join('gsd-core', 'references'),
+  'skills',
 ];
 
 // Derive the verb set the bare-call guard matches against. Most top-level
@@ -109,12 +120,30 @@ const PROSE_ALLOWLIST = [
   { file: 'agents/gsd-phase-researcher.md', line: 33, reason: 'package-legitimacy provenance rule names the command as the source of an OK verdict; descriptive' },
   { file: 'agents/gsd-roadmapper.md', line: 660, reason: 'parenthetical "e.g." naming SDK queries a user *could* run; not an agent instruction (#4134 shifted it from 647: the H1 template section added above moved the line, the mention is unchanged)' },
   { file: 'agents/gsd-intel-updater.md', line: 40, reason: 'cross-platform note names the `gsd-tools intel <subcommand>` CLI surface descriptively ("CLI invocations go through..."); not an agent instruction' },
-  { file: 'gsd-core/workflows/execute-plan.md', line: 420, reason: 'describes the downstream SDK validation step (`validated downstream by ...`); names the mechanism, does not instruct the agent to type it (#4834 shifted it from 419: the delegation @-include replaced the inline preamble above it, the mention is unchanged)' },
+  { file: 'gsd-core/workflows/execute-plan.md', line: 421, reason: 'describes the downstream SDK validation step (`validated downstream by ...`); names the mechanism, does not instruct the agent to type it (#4834 shifted it from 419: the delegation @-include replaced the inline preamble above it, the mention is unchanged; #4772 shifted it from 420: the init fence gained a --ws parse line above, the mention is unchanged)' },
   // #4407: .compact.md variant siblings carry the same descriptive prose as
   // their already-allowlisted canonical line above, at a different line
   // number in a different file.
   { file: 'agents/gsd-intel-updater.compact.md', line: 32, reason: 'compact variant of the already-allowlisted gsd-intel-updater.md:40 cross-platform note; same descriptive mention' },
   { file: 'agents/gsd-roadmapper.compact.md', line: 363, reason: 'compact variant of the already-allowlisted gsd-roadmapper.md:660 parenthetical; same descriptive mention' },
+  // #4995: skills/*/SKILL.md is generated from commands/gsd/*.md and now
+  // scanned directly (see SCAN_DIRS comment above). These 10 sites are
+  // descriptive mentions carried over unchanged from their commands/gsd/
+  // source -- none instruct an agent to run the bare word; the census in
+  // #4995 itself identified 8 of them as prose-only, and this widened guard
+  // additionally caught 2 more of the same shape (gsd-config's routing
+  // TABLE row and gsd-graphify's MVP-mode parenthetical) that the issue's
+  // manual grep methodology did not surface.
+  { file: 'skills/gsd-autonomous/SKILL.md', line: 49, reason: 'parenthetical naming init-command examples ("resolved inside the workflow using..."); not an instruction to run the bare word (#4780 shifted it from 44: the standing <arguments> block was added above it, the mention is unchanged)' },
+  { file: 'skills/gsd-code-review/SKILL.md', line: 50, reason: 'describes how context files are resolved inside the workflow and delegated via <required_reading>; descriptive, not an instruction (#4780 shifted it from 45: the standing <arguments> block was added above it)' },
+  { file: 'skills/gsd-config/SKILL.md', line: 35, reason: 'routing TABLE cell naming which SDK query a flag maps to, one row above the real operative site (already fixed to gsd_run); descriptive reference, not an instruction (#4780 shifted it from 31: the standing <arguments> block was added above it)' },
+  { file: 'skills/gsd-execute-phase/SKILL.md', line: 63, reason: 'describes how context files are resolved inside the workflow; descriptive, not an instruction (#4780 shifted it from 58: the standing <arguments> block was added above it)' },
+  { file: 'skills/gsd-graphify/SKILL.md', line: 192, reason: 'parenthetical naming how MVP-mode is resolved ("resolved via..."); descriptive, not an instruction. gsd-graphify keeps its own load-bearing per-block gsd_run definitions (tests/graphify-visualization.test.cjs extracts and runs each block standalone) and is intentionally NOT one of the #4995 BARE_GSD_TOOLS_STEMS rewrite targets' },
+  { file: 'skills/gsd-health/SKILL.md', line: 21, reason: 'describes what the workflow calls internally ("calls `gsd-tools query validate.context`"); descriptive, not an instruction (#4780 shifted it from 16: the standing <arguments> block was added above it)' },
+  { file: 'skills/gsd-manager/SKILL.md', line: 41, reason: 'parenthetical naming an init-command example; descriptive, not an instruction (#4780 shifted it from 36: the standing <arguments> block was added above it)' },
+  { file: 'skills/gsd-next/SKILL.md', line: 21, reason: 'describes what the launcher reads internally ("reads project + workflow state via `gsd-tools smart-entry --json`"); descriptive, not an instruction (#4780 shifted it from 16: the standing <arguments> block was added above it)' },
+  { file: 'skills/gsd-quick-batch/SKILL.md', line: 116, reason: 'security note naming which query fields are read; descriptive, not an instruction (#4780 shifted it from 104: the standing <arguments> block and the stdin heredoc fence were added above it)' },
+  { file: 'skills/gsd-workstreams/SKILL.md', line: 70, reason: 'describes formatting the JSON output "from gsd-tools query"; descriptive, not an instruction (the 6 real operative sites above it in this same file are the ones #4995 fixed to gsd_run)' },
 ];
 
 // Resolver-snippet definition lines / probes that must never be flagged. A line
@@ -181,13 +210,13 @@ test('verb set was derived from the router (guards against a silent extraction r
   }
 });
 
-test('no command-position bare gsd-tools <verb> survives in agents/ or workflows/ (#2751)', () => {
+test('no command-position bare gsd-tools <verb> survives in agents/, workflows/, references/, or skills/ (#2751, #4995)', () => {
   const offenders = findBareCommandPositionCalls();
   assert.strictEqual(
     offenders.length,
     0,
     'Bare `gsd-tools <verb> <args>` command-position calls must use the `gsd_run` ' +
-      'resolver (they fail with "command not found" on a shim-only install — #2751). ' +
+      'resolver (they fail with "command not found" on a shim-only install — #2751, #4995). ' +
       `Found ${offenders.length} offender(s):\n` +
       offenders.map((o) => `  ${o.loc} [${o.verb}] ${o.text}`).join('\n') +
       '\n\nIf a hit is a descriptive prose mention (not an instruction to run the bare ' +

@@ -1,7 +1,7 @@
 {
   "id": "claude",
   "role": "runtime",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "title": "Claude Code",
   "description": "Anthropic Claude Code — primary development runtime; tier-1 support with full hook surface and skills-based global install.",
   "tier": "core",
@@ -114,7 +114,14 @@
       "skillsGlobalOnboarding": true,
       "legacyCommandsGsdInstallMigration": true,
       "legacyCommandsGsdUninstall": "global",
-      "hyphenNameAgentBody": true
+      "hyphenNameAgentBody": true,
+      "skipCompactAgents": true,
+      "omitBashRunnerOnWindows": true,
+      "specRootSkillPass": true,
+      "restoreAtRefTildeInAgents": true,
+      "restoreAtRefTildeInSpecTree": true,
+      "skipRuntimeDefaultsStamp": true,
+      "contentRewriteProfile": "slash-tilde-restore"
     }
   },
   "reviewer": {

@@ -181,7 +181,7 @@ describe('partitionPredicateArgs (#4130 follow-up)', () => {
 // ─── #4354: `check predicate --phase-dir` containment boundary ───────────────
 //
 // cmdCheckPredicate passes the `--phase-dir` flag VERBATIM into PredicateContext
-// (src/check-command-router.cts) with no containment validation. Both predicate
+// (src/gate-predicate.cts) with no containment validation. Both predicate
 // kinds read/interpolate that value: `artifact-frontmatter-equals` resolves it
 // as `targetDir` for `findPhaseArtifact`, and `command-exit-zero` interpolates
 // it into `${PHASE_DIR}` in the shelled-out command. These tests reproduce the

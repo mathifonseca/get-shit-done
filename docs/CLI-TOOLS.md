@@ -174,6 +174,7 @@ node gsd-tools.cjs phase complete <phase>
 
 # Evaluate HUMAN-UAT results for a phase (markdown-aware; ignores false-positive contexts)
 # Returns JSON: { passed, uat_files[], verification_files[], checks[], blockers[], policy }
+# Exit 0 when passed, 1 when not (#5170); a phase it cannot read is error() with empty stdout
 node gsd-tools.cjs phase uat-passed <phase> [--require-verification]
 
 # Index plans with waves and status
@@ -439,6 +440,39 @@ no `### Phase N` detail section, and no checklist bullet this command can update
 (the checklist-only form) — the command declines with `updated: false` and a
 `missing_phase_details` reason instead of claiming success, and leaves
 `ROADMAP.md` byte-identical.
+
+### Checkbox conflicts (`roadmap analyze`)
+
+`roadmap analyze` derives `current_phase`, `next_phase`, and `completed_phases`
+from each phase's on-disk status (`disk_status`), not from the ROADMAP
+checkbox: a ticked `[x]` is a human annotation with no machine authority
+(ADR-3180 §7.4, [#2957](https://github.com/open-gsd/gsd-core/issues/2957)).
+The two signals can legitimately disagree, for example a backfilled phase that
+has a `SUMMARY.md` and no `PLAN.md` (`disk_status: empty`) or a phase whose
+plans are all summarized but which has no passing `*-VERIFICATION.md`
+(`disk_status: executed`), both ticked `[x]`.
+
+`checkbox_conflict` lists every such phase so a caller is never handed a
+ticked phase, or withheld an unticked-but-verified one, with no signal. It is
+always an array when `ROADMAP.md` exists (empty when every phase agrees). A
+phase is listed when its `roadmap_complete` differs from
+`disk_status === "complete"`. Only phases that have a ROADMAP checkbox are
+compared: a phase declared only by a progress-table row, or by a heading with
+no checklist entry, has no checkbox to disagree with and is never listed
+(its `roadmap_complete` is `false` because there is nothing to read).
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `number` | string | Phase number, as in `phases[].number` |
+| `roadmap_complete` | boolean | The ROADMAP checkbox state (`true` for `[x]`) |
+| `disk_status` | string | The disk-derived status the selectors use |
+| `plan_count` | number | Plans found for the phase |
+| `summary_count` | number | Summaries paired with a plan |
+
+The selectors are unchanged: `checkbox_conflict` only reports the
+disagreement. To treat a phase as done despite its disk status, verify it
+(`verify-phase`) so a passing `*-VERIFICATION.md` exists.
+([#4757](https://github.com/open-gsd/gsd-core/issues/4757))
 
 ### Milestone window scope (`roadmap analyze`)
 
@@ -793,7 +827,93 @@ node gsd-tools.cjs verify artifacts <plan-file>
 node gsd-tools.cjs verify key-links <plan-file>
 ```
 
+**Exit status (#5170).** These verbs are verdict-driven: the JSON on stdout is the verdict and is unchanged, and the exit status follows it, so a caller can branch on `$?`. `0` = positive verdict (`valid` / `complete` / `all_valid` / `all_passed` / `all_verified` is `true`); `1` = negative verdict (read the JSON for what failed); `66` (`NO_INPUT`) = the plan was read and declares nothing to verify (`verify artifacts` with no `must_haves.artifacts`, `verify key-links` with no `must_haves.key_links`); `69` (`UNAVAILABLE`) = the verb could not look (the plan or document is absent or unreadable, the phase did not resolve, the directory is not a git work tree): never a clean exit. A plan file that exists but is empty was read: for `verify artifacts` and `verify key-links` it is `66`, for `verify plan-structure` a negative verdict (`1`). `verify schema-drift` is the exception: it is also the capability gate dispatched as `check verify-schema-drift`, whose consumer reads `.block` from stdout and routes a non-zero exit by `onError`, so a blocking drift verdict stays exit `0` and only "could not look" exits `69`.
+
 `verify key-links` confines each link's `from:`/`to:` to the project directory (#3493): a path that resolves outside the project (via `../` traversal, an absolute path, or a symlink) is never read. That link's `links[]` entry reports `path_rejected: "from"` or `path_rejected: "to"` (whichever field was rejected) alongside `verified: false`, without echoing the underlying path-confinement error (which would embed an absolute host path). A rejected link fails independently — it does not abort evaluation of the other links in the same plan, and does not set `path_rejected` on links whose paths resolve inside the project.
+
+### Gate verb exit statuses (#5170)
+
+The exit status of a gate verb is a function of its verdict (`gateExitOutcome`, [Gate Exit Module](../CONTEXT.md)); no verb picks a code itself. The stdout JSON is authoritative in every row.
+
+| Exit | Outcome | Meaning |
+|---|---|---|
+| `0` | `PASS` | Positive verdict; or, in payload mode, any delivered verdict including a blocking one |
+| `1` | `FAIL` | Negative verdict (status mode only). Also `error()` (a usage or runtime failure), which prints nothing on stdout |
+| `66` | `NO_INPUT` | The evidence was read and the scope it defines is genuinely empty (status mode: `verify artifacts` with no `must_haves.artifacts`, `verify key-links` with no `must_haves.key_links`) |
+| `69` | `UNAVAILABLE` | The gate could not look: the evidence is absent where it must exist, unreadable (`EISDIR`, `EACCES`, `EIO`, an encoding failure), the phase did not resolve, or a plan scan did not see every plan. Never `0` |
+
+| Mode | Verbs | Verdict is carried by | Non-zero exit means |
+|---|---|---|---|
+| Status | `phase uat-passed`, `verify artifacts`, `verify plan-structure`, `verify phase-completeness`, `verify references`, `verify commits`, `verify key-links` | stdout JSON and `$?` (`valid` / `complete` / `all_valid` / `all_passed` / `all_verified` / `passed`) | `1` negative verdict, `66` empty scope, `69` could not look |
+| Payload | every `check <verb>`, `verify schema-drift`, `verify codebase-drift`, `verify context-drift`, `check prohibition-enforcement` | stdout JSON, `.block` | only `69` (or an `error()`): the gate dispatch routes a non-zero status by `onError`, so a blocking verdict stays `0` |
+
+`phase uat-passed` exits `0` when `passed` is `true` and `1` when it is `false` with the JSON on stdout; a phase it cannot read is `error()` (exit `1`, stdout empty), so the two are told apart by whether stdout is empty. `verify commits` outside a git work tree answers `{"error":"Not a git repository"}` with `69`. `verify schema-drift` reads `files_modified` through the Frontmatter Module, so a YAML block sequence and CRLF line endings yield their files (#4562). `verify plan-structure` flags a `! grep -q 'LIT' f` negative gate whose literal also appears in the same task `<action>`, as it does for the positive form (#4541). To handle every status from a script see [Handle gate verb exit statuses](how-to/handle-gate-verb-exit-statuses.md).
+
+### `verify codebase-drift` (structural drift of the codebase map, #2003, #5134)
+
+```bash
+node gsd-tools.cjs verify codebase-drift
+```
+
+Compares the changes since `last_mapped_commit` against the codebase map in `.planning/codebase/` and reports whether the map has drifted past `workflow.drift_threshold`. Warn-only by contract: an internal failure returns a `skipped` payload, never an error. A non-blocking verdict computed from fewer documents than the map has (a map document that could not be read) exits `69` with the payload plus `documents_unreadable`; a blocking verdict stands and exits `0` (payload mode, #5170).
+
+**Territory.** The command reads all seven generated documents (`STACK.md`, `ARCHITECTURE.md`, `STRUCTURE.md`, `CONVENTIONS.md`, `TESTING.md`, `INTEGRATIONS.md`, `CONCERNS.md`). A directory is *mapped* when its path appears, at a path-component boundary, in any of them. `STRUCTURE.md` is still required; the other six are optional, so a partial map works.
+
+**Categories.** Added files are drift outside mapped territory; modified and deleted files are drift inside it (an edit or deletion changes something the map describes).
+
+| Category | Change | Rule |
+|---|---|---|
+| `new_dir` | added file | its directory is not mapped |
+| `barrel` | added file | a barrel export at `(packages\|apps)/*/src/index.*` |
+| `migration` | added file | a migration file |
+| `route` | added file | a route module under `routes/` or `api/` |
+| `modified` | modified file | its directory is mapped |
+| `deleted` | deleted file | its directory is mapped |
+
+A rename counts its old path as `deleted` and its new path as an addition; a typechange counts as `modified`. For an added file the specific category (`migration`, then `route`, then `barrel`) wins over `new_dir`. Every element counts toward `workflow.drift_threshold`.
+
+**Skip reasons** (`skipped: true`, with `reason`): `no-structure-md` (no `STRUCTURE.md`), `cannot-read-structure-md` (`STRUCTURE.md` is not a regular file or is larger than 1 MiB), plus the existing git and baseline reasons. Any other document that is not a regular file or is larger than 1 MiB is unreadable: it is left out and listed in `documents_unreadable`.
+
+**Payload fields added by #5134:**
+
+| Field | Meaning |
+|---|---|
+| `documents_read` | The map documents that were read |
+| `documents_unreadable` | Map documents (other than `STRUCTURE.md`) that were skipped as unreadable |
+| `withheld_paths` | The first 50 paths withheld from output, display-escaped, each capped at 200 characters |
+| `withheld_count` | Total number of withheld paths, before the cap of 50 |
+
+`elements[].path` values are display-escaped: control, bidirectional and zero-width characters are shown as `\uXXXX`.
+
+**Path allowlist.** `affected_paths`, the `--paths` argument and every path listed in `message` pass only through one allowlist: components of ASCII letters, digits, `_`, `.` and `-`, separated by `/`; no `..` component, no lone `.`, not absolute. A path that fails is never printed in `message`; the message instead states `N path(s) withheld: not passed to the mapper or listed (absolute, traversal, whitespace, non-ASCII or shell-metacharacter characters)`. A directory with a non-ASCII or space-containing name is therefore withheld and counted, not silently dropped. `spawn_mapper` is `false` when no safe path remains, so `auto-remap` does not run (an empty `--paths` would remap the whole repository); `action_required` and `directive` are unchanged.
+
+### `verification status` (the verification verdict, #5118)
+
+```bash
+node gsd-tools.cjs verification status <phase-dir> [--pick <field>]
+```
+
+Reads the phase's `*-VERIFICATION.md` frontmatter and answers with one member of a **closed enum**, projected through **one routing table** (`VERIFICATION_ROUTES` in `src/verification.cts`, ADR-5057 Phase 4). Every workflow that needs the verdict reads this answer; none re-reads the report or branches on a status word of its own.
+
+| `status` | Meaning | `route` (bare command) |
+|----------|---------|------------------------|
+| `passed` | Report says `passed` and its covered-input fingerprint is current | `""` (continue) |
+| `gaps_found` | Report says `gaps_found` | `plan-phase` (`next_command` carries `--gaps`) |
+| `human_needed` | Report says `human_needed` | `verify-work` |
+| `stale` | Covered source changed after the verifier ran | `execute-phase` (its shared verification step re-runs the verifier) |
+| `missing` | Phase directory exists but holds no report, or the report has no `status` | `execute-phase` (resumes at the verification gates) |
+| `unparseable` | The report's frontmatter is not YAML | `""` (fix the report itself) |
+| `phase_dir_not_found` | There is no phase directory at that path | `""` (a usage error — see below) |
+
+The JSON result carries `status`, `next_action`, `next_command` (the route projected for the project's runtime, for example `/gsd-execute-phase 3` or `$gsd-execute-phase 3` on Codex), and — additive since #5118 — `route`, the bare command from the same table entry, so the two can never disagree. `message` is present only where a usage error needs one. `staleCheckIndeterminate` is unchanged. The `init *` bundles expose the same bare command as `verification_route` beside `verification_next_command`, and each `planning inspect` phase carries `verification.route` beside `verification.status`.
+
+- **`phase_dir_not_found`** is a usage error, not a verification state: nothing was there to look in (a dangling symlink and a path that is a regular file both read this way). It has no next command — re-running `execute-phase` could re-run a phase already archived under `.planning/milestones/`. Resolve the directory with `find-phase`.
+- **`unknown` no longer exists.** A `status` outside the set used to route as `unknown` to `execute-phase`; that is now the hard error below, and no command emits `unknown`.
+- **A report may carry only `passed`, `gaps_found`, or `human_needed`.** Any other value — `verified`, `Passed`, `stale` (a reader-only member), a number — fails every command that reads the report with `verification_status_invalid`, stdout empty, naming the file, the value (quoted, control characters escaped, truncated at 120 characters) and the accepted values. Recovery: set the report's frontmatter `status:` to one of the accepted values, or delete the report (it then reads `missing` and routes to `execute-phase`, whose verification step regenerates it). `validate health` reports the same file as warning `W030` instead of failing.
+- **No write before the error.** A command that writes (`phase complete`, `phase remove`, `state sync`, `milestone complete`, `milestone archive-quick`, `validate health --repair`) validates every report it will read before its first write, so a refused report leaves `STATE.md`, `ROADMAP.md` and the phase directories untouched.
+- **Exact match, no folding (behavior change).** The check is an exact string match. Case-folded and legacy statuses — `Passed`, `pending`, `partial` — that `phase complete`'s warning pre-scan and `audit-uat` used to fold into a known status now hard-error like any other out-of-set value, on every command; correct the report's `status:` to an accepted value.
+- **`missing` on `verify-work`.** `/gsd-verify-work` runs the regeneration step for a `stale` report, and for a `missing` one only when every plan has a `SUMMARY.md` (the verify step never ran on an executed phase). A `missing` report on a phase that is not fully executed does not dispatch it: the command blocks with `next_command` (`execute-phase`) instead.
+- **Containment.** Two checks, both before any read. The phase directory must resolve under its phases root, and the report (and each `*-UAT.md` and `*-HUMAN-UAT.md`) must resolve inside its phase directory. Anything that escapes (a symlink out of the project) is never read and none of its content reaches any output: an escaped report reads `missing` from `verification status`, an escaped UAT file is treated as absent, and an escaped phase directory reads `missing` from `verification status` but `phase_dir_not_found` from `init verify-work`.
 
 ---
 
@@ -864,7 +984,7 @@ signal absence, because omission is itself something callers come to depend on.
 | `generated_from` | Resolved `cwd` and `.planning/` root (`null` when there is no planning root) |
 | `milestone` | `version`, `name`, and the `scope` of that answer |
 | `active` | `phase`, `plan`, and `status` — three distinct STATE.md facts, each scoped separately |
-| `phases[]` | Per phase: completion, verification, roadmap acceptance, UAT, plan and task rows |
+| `phases[]` | Per phase: completion, verification (`status`, `next_action`, and the additive `route` — see [`verification status`](#verification-status-the-verification-verdict-5118)), roadmap acceptance, UAT, plan and task rows |
 | `orphan_phase_dirs[]` | Directories under `phases/` that the current milestone window does not declare |
 | `requirements[]` | Requirement rows with mapped-phase traceability |
 | `progress` | `accepted_phases` and `completed_plans`, as independent fractions |

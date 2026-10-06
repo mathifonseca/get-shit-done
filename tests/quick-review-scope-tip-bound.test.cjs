@@ -1,16 +1,14 @@
 'use strict';
 
 /**
- * Regression coverage for #4466: quick.md's post-execute review scoping step
- * computes `CHANGED_FILES` as `git diff --name-only "${DIFF_BASE}..HEAD"`.
- * `DIFF_BASE` (the parent of QUICK_COMMITS's oldest entry) is correctly
- * bound to the quick task's start, but the tip is bare HEAD — unbounded.
- * Anything landing on the shared tree between the task's own commits and
- * this review step running (a worktree merge-back, another session sharing
- * the tree) gets folded into the quick task's own review scope.
- *
- * QUICK_COMMITS (newest-first) already holds the correct tip as its first
- * line — the fix reads that instead of using HEAD, no new git call needed.
+ * Regression coverage for #4466 (carried through #5164, epic #5056 Phase 7):
+ * quick.md's post-execute review scoping step must not fold commits that
+ * landed on the shared tree (a worktree merge-back, another session) into
+ * the quick task's own review scope. The step used to diff a range
+ * (`DIFF_BASE..HEAD`, then `DIFF_BASE..QUICK_TIP`); #5164 replaces the range
+ * with the evaluation-scope resolver's UNION of the commits naming the task,
+ * which also excludes an unrelated commit interleaved INSIDE the task's window
+ * — something no bounded range can do.
  *
  * Mirrors the issue's own verified reproduction methodology: extract the
  * fence VERBATIM from quick.md (never reimplemented), run it against a real
@@ -28,6 +26,7 @@ const { GIT_FIXTURE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const { createTempDir, cleanup } = require('./helpers.cjs');
 
 const WORKFLOW_PATH = path.join(__dirname, '..', 'gsd-core', 'workflows', 'quick.md');
+const TOOLS_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 
 function extractFirstBashBlockAfter(content, startAnchor, stopAnchor) {
   const start = content.indexOf(startAnchor);
@@ -67,6 +66,8 @@ function buildFixture(tmpDir) {
   seedFixtureRepo(tmpDir);
   writeAndCommit(tmpDir, 'README.md', '# init\n', 'chore: init');
   writeAndCommit(tmpDir, 'src/quick-a.js', 'quick-a\n', `feat(quick-${QUICK_ID}): the quick task's own work`);
+  writeAndCommit(tmpDir, 'src/interleaved.js', 'interleaved\n', 'fix: an unrelated commit interleaved inside the task window');
+  writeAndCommit(tmpDir, 'src/quick-b.js', 'quick-b\n', `feat(quick-${QUICK_ID}): the quick task's second commit`);
   writeAndCommit(tmpDir, 'src/unrelated.js', 'unrelated\n', 'fix: an unrelated commit from another session on the shared tree');
 }
 
@@ -78,6 +79,8 @@ function runScopingFence(tmpDir) {
     '#!/usr/bin/env bash',
     'set -uo pipefail',
     `quick_id="${QUICK_ID}"`,
+    // The workflow's own launcher defines gsd_run; the fixture points it at this checkout's CLI.
+    `gsd_run() { node "${TOOLS_PATH}" "$@"; }`,
     '{',
     fence,
     '} 1>&2',
@@ -102,26 +105,25 @@ function runScopingFence(tmpDir) {
   return { files, diagnostics: result.stderr };
 }
 
-describe('#4466: quick.md review scoping bounds the tip at the quick task\'s own last commit', () => {
+describe('#4466 / #5164: quick.md review scoping is the union of the quick task\'s own commits', () => {
   const workflowContent = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
   const fence = extractFirstBashBlockAfter(workflowContent, "**Scope files from executor's commits:**", '**Invoke review:**');
 
-  test('the diff uses a bounded tip, not bare HEAD (the gate exists)', () => {
-    assert.ok(
-      /git diff --name-only "\$\{DIFF_BASE\}\.\.\$\{QUICK_TIP\}"/.test(fence),
-      'the scoping fence must diff against a bounded QUICK_TIP, not bare HEAD',
-    );
+  test('the fence asks the evaluation-scope resolver and derives no commit range of its own', () => {
+    assert.ok(/gsd_run check evaluation-scope --quick "\$\{quick_id\}"/.test(fence), 'the scoping fence must call the resolver for the quick task');
+    assert.ok(!/\.\.\s*(?:HEAD|\$\{)/.test(fence), 'the scoping fence must not diff a base..tip range');
+    assert.ok(!/git (?:diff|log)/.test(fence), 'the scoping fence must not run its own git diff / git log');
   });
 
-  test('real execution: a later unrelated commit on the shared tree is excluded from scope (issue #4466 repro)', () => {
+  test('real execution: unrelated commits — interleaved inside the window or landed later — are excluded from scope (issue #4466 repro)', () => {
     const tmpDir = fs.realpathSync.native(createTempDir('gsd-4466-'));
     try {
       buildFixture(tmpDir);
       const { files, diagnostics } = runScopingFence(tmpDir);
       assert.deepEqual(
         files,
-        ['src/quick-a.js'],
-        `quick task's review scope must not include a later unrelated commit, got: ${JSON.stringify(files)}\ndiagnostics:\n${diagnostics || '(none)'}`,
+        ['src/quick-a.js', 'src/quick-b.js'],
+        `quick task's review scope must be exactly its own commits' files, got: ${JSON.stringify(files)}\ndiagnostics:\n${diagnostics || '(none)'}`,
       );
     } finally {
       cleanup(tmpDir);

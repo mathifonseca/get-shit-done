@@ -400,7 +400,8 @@ describe('check tdd.review-checkpoint — CLI subprocess E2E with git fixtures',
   });
 
   test('[crlf] type:tdd plan with CRLF endings is still detected (#2449)', () => {
-    // src/check-command-router.cts:751 used /^---\n...\n---/ which can't match
+    // The pre-#2449 router detection (a `/^---\n...\n---/` frontmatter regex, now
+    // `frontmatterKeyHasValue` in src/frontmatter.cts over the fence owner's block) could not match
     // CRLF frontmatter delimiters, so a CRLF PLAN.md was silently classified
     // as "no type:tdd plans" — output indistinguishable from a phase that
     // genuinely contains no TDD plans. The advisory gate then short-circuited
@@ -429,6 +430,22 @@ describe('check tdd.review-checkpoint — CLI subprocess E2E with git fixtures',
       cleanup(tmpDir);
     }
   });
+
+  // Found while implementing #5105: the `type:` key is read from the frontmatter the one fence
+  // owner finds. The old regex missed a BOM block and closed on a `--- x` line before `type:`,
+  // so both plans were silently classified as "no type:tdd plans".
+  for (const [label, content] of [
+    ['a BOM before the block', `\uFEFF${tddPlan(1, '01-01')}`],
+    ['a `--- x` line before `type:`', '---\nnote: x\n--- x\ntype: tdd\nphase: 1\nslug: 01-01\n---\n# Task: 01-01\n'],
+  ]) {
+    test(`[fence] type:tdd plan with ${label} is detected`, (t) => {
+      const { tmpDir } = createTddGitFixture({ planFiles: [{ dir: '01-phase1', filename: '01-01-PLAN.md', content }] });
+      t.after(() => cleanup(tmpDir));
+      const result = runTools('check tdd.review-checkpoint 1 --raw', tmpDir);
+      assert.ok(result.success, `check should succeed. stderr: ${result.error}`);
+      assert.strictEqual(JSON.parse(result.output).tddPlans, 1);
+    });
+  }
 
   test('[crlf-mixed] type:tdd plan with CRLF frontmatter + LF body is still detected (#2449)', () => {
     // Mixed-endings variant of the [crlf] test: frontmatter delimiters are CRLF

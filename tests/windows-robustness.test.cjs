@@ -264,9 +264,11 @@ describe('bug #685: Windows spawns must set windowsHide:true (no console-window 
     assert.match(region, /windowsHide:\s*true/, 'gsd-workflow-guard git-branch spawn must set windowsHide: true');
   });
 
-  test('check-command-router recentCommitMessages execFileSync sets windowsHide', () => {
-    const region = regionBetween(read('src/check-command-router.cts'), "execFileSync('git', ['log'", '});');
-    assert.match(region, /windowsHide:\s*true/, 'check-command-router git-log execFileSync must set windowsHide: true');
+  test('the execGit seam every evaluation-scope git call goes through sets windowsHide', () => {
+    // The git-log call that lived in decision-coverage-support (#5139) is now an evaluation-scope
+    // resolver call (#5164); the resolver spawns git only through the execGit seam.
+    const region = regionBetween(read('src/shell-command-projection.cts'), "childProcess.spawnSync('git'", '});');
+    assert.match(region, /windowsHide:\s*true/, 'execGit spawnSync must set windowsHide: true');
   });
 
   test('roadmap-upgrade execSync git calls all set windowsHide', () => {

@@ -600,6 +600,71 @@ describe('roadmap analyze disk status variants', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Phase Status Module consumers (#5060)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('roadmap analyze — Phase Status Module consumers (#5060)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('a heading-declared phase with summaries=plans and no verification is disk_status executed, and is current_phase', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+### Phase 1: Foo
+**Goal:** Do the thing
+`
+    );
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-foo');
+    fs.mkdirSync(p1, { recursive: true });
+    fs.writeFileSync(path.join(p1, '01-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(p1, '01-01-SUMMARY.md'), '# Summary');
+
+    const result = runGsdTools('roadmap analyze', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phases[0].disk_status, 'executed', 'an unverified summaries=plans phase must read executed, not partial');
+    assert.strictEqual(output.current_phase, '1', 'current_phase must recognize the executed rung');
+  });
+
+  test('a phase declared only via a Phase/Name table row is disk_status complete when verified', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '| Phase | Name |',
+        '|-------|------|',
+        '| 5 | Real |',
+        '',
+      ].join('\n')
+    );
+    const p5 = path.join(tmpDir, '.planning', 'phases', '05-real');
+    fs.mkdirSync(p5, { recursive: true });
+    fs.writeFileSync(path.join(p5, '05-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(p5, '05-01-SUMMARY.md'), '# Summary');
+    fs.writeFileSync(path.join(p5, 'VERIFICATION.md'), '---\nstatus: passed\n---\n# Verification');
+
+    const result = runGsdTools('roadmap analyze', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const phase5 = output.phases.find((p) => p.number === '5' || p.number === '05');
+    assert.ok(phase5, 'the table-declared phase must appear in output.phases');
+    assert.strictEqual(phase5.disk_status, 'complete', 'a verified table-only phase must read complete, not "ok"');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // roadmap analyze milestone extraction
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1827,13 +1892,14 @@ describe('#4247: roadmap update-plan-progress — checklist-form ROADMAP refuses
     const output = JSON.parse(result.output);
     assert.strictEqual(output.updated, true, 'a matching table row is a writable target');
 
-    // Byte-exact expectation: only the Phase 68 row's three cells change
-    // (` 1/5 ` splice, ` In Progress` padEnd(11), Completed cleared to `  `),
-    // every other byte — including Phase 65/69 prose and the waves section —
-    // is untouched (no blank-line insertion anywhere outside the row).
+    // Byte-exact expectation: only the Phase 68 row's count and status token
+    // change (` 1/5 ` splice, ` In Progress ` padEnd(11); the `-` Completed
+    // placeholder is kept, #4925), every other byte — including Phase 65/69
+    // prose and the waves section — is untouched (no blank-line insertion
+    // anywhere outside the row).
     const expected = roadmap.replace(
       '| 68 | 0/5 | Planned | - |',
-      '| 68 | 1/5 | In Progress|  |',
+      '| 68 | 1/5 | In Progress | - |',
     );
     assert.strictEqual(fs.readFileSync(roadmapPath, 'utf-8'), expected);
   });
@@ -1862,7 +1928,7 @@ describe('#4247: roadmap update-plan-progress — checklist-form ROADMAP refuses
 
     const expected = roadmap.replace(
       '| 68. [Scheduler] | v1.0 | 0/5 | Planned | - |',
-      '| 68. [Scheduler] | v1.0 | 1/5 | In Progress|  |',
+      '| 68. [Scheduler] | v1.0 | 1/5 | In Progress | - |',
     );
     assert.strictEqual(fs.readFileSync(roadmapPath, 'utf-8'), expected);
   });
@@ -2017,6 +2083,211 @@ describe('#4247: roadmap update-plan-progress — checklist-form ROADMAP refuses
     assert.match(written, /- \[ \] \*\*Phase 65: Orchard Layout\*\*/);
     assert.match(written, /- \[ \] \*\*Phase 69: Packhouse\*\*/);
     assert.ok(written.includes('- [x] 68-02: crew assignment'), 'summarized plan row marked');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #4925: update-plan-progress owns the Status cell's leading status TOKEN and
+// the Completed cell's date — never the operator prose around them. It used to
+// overwrite the whole Status cell with a bare token (` In Progress`, no
+// trailing space) and clear the Completed cell to `  ` on every run, silently
+// discarding a maintained record at exit 0.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('#4925: roadmap update-plan-progress — Status-cell prose and the Completed cell survive the row write', () => {
+  let tmpDir;
+  let roadmapPath;
+
+  beforeEach(() => {
+    tmpDir = createTempProject('gsd-4925-roadmap-');
+    roadmapPath = path.join(tmpDir, '.planning', 'ROADMAP.md');
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  /** Normal-form 5-column Progress table (the issue's shape) with a caller-supplied Phase 68 row. */
+  function progressRoadmap(row68) {
+    return [
+      '# Roadmap: T',
+      '',
+      '## Progress',
+      '',
+      '| Phase | Milestone | Plans Complete | Status | Completed |',
+      '|-------|-----------|----------------|--------|-----------|',
+      '| 67. Waves | v1.3 | 2/2 | Complete | 2026-09-01 |',
+      row68,
+      '| 69. Packhouse | v1.3 | 0/2 | Not started | - |',
+      '',
+    ].join('\n');
+  }
+
+  test('Status prose after an unchanged token is kept byte-for-byte and only the Plans count moves (issue repro)', () => {
+    const prose = 'In Progress — 21/21 original plans executed; **gap closure 4/4 DONE** `/gsd-verify-work 68` returned `gaps_found` on 2026-09-21';
+    const roadmap = progressRoadmap(`| 68. Scheduler | v1.3 | 0/5 | ${prose} | — |`);
+    seedPhase68WithPlans(tmpDir, { roadmap });
+
+    const result = runGsdTools('roadmap update-plan-progress 68', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.status, 'In Progress');
+    assert.strictEqual(output.updated, true, 'the Plans count changed');
+
+    const expected = roadmap.replace(
+      `| 68. Scheduler | v1.3 | 0/5 | ${prose} | — |`,
+      `| 68. Scheduler | v1.3 | 1/5 | ${prose} | — |`,
+    );
+    assert.strictEqual(fs.readFileSync(roadmapPath, 'utf-8'), expected);
+  });
+
+  test('a changed status token is replaced in place and the prose after it is kept, escaped pipe included', () => {
+    const roadmap = progressRoadmap('| 68. Scheduler | v1.3 | 0/5 | Planned — waiting on the A \\| B crate decision | - |');
+    seedPhase68WithPlans(tmpDir, { roadmap });
+
+    const result = runGsdTools('roadmap update-plan-progress 68', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    assert.strictEqual(JSON.parse(result.output).updated, true);
+
+    const expected = roadmap.replace(
+      '| 68. Scheduler | v1.3 | 0/5 | Planned — waiting on the A \\| B crate decision | - |',
+      '| 68. Scheduler | v1.3 | 1/5 | In Progress — waiting on the A \\| B crate decision | - |',
+    );
+    assert.strictEqual(fs.readFileSync(roadmapPath, 'utf-8'), expected);
+  });
+
+  test('freeform Status prose with no leading status token is operator-owned and left untouched', () => {
+    const roadmap = progressRoadmap('| 68. Scheduler | v1.3 | 0/5 | Blocked on warehouse slot until 2026-10-01 | - |');
+    seedPhase68WithPlans(tmpDir, { roadmap });
+
+    const result = runGsdTools('roadmap update-plan-progress 68', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const expected = roadmap.replace(
+      '| 68. Scheduler | v1.3 | 0/5 | Blocked on warehouse slot until 2026-10-01 | - |',
+      '| 68. Scheduler | v1.3 | 1/5 | Blocked on warehouse slot until 2026-10-01 | - |',
+    );
+    assert.strictEqual(fs.readFileSync(roadmapPath, 'utf-8'), expected);
+  });
+
+  test('a bare status token still transitions, written with the same padding phase complete uses', () => {
+    const roadmap = progressRoadmap('| 68. Scheduler | v1.3 | 0/5 | Not started | - |');
+    seedPhase68WithPlans(tmpDir, { roadmap });
+
+    const result = runGsdTools('roadmap update-plan-progress 68', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const expected = roadmap.replace(
+      '| 68. Scheduler | v1.3 | 0/5 | Not started | - |',
+      '| 68. Scheduler | v1.3 | 1/5 | In Progress | - |',
+    );
+    assert.strictEqual(fs.readFileSync(roadmapPath, 'utf-8'), expected);
+  });
+
+  test('a stale ISO completion date is still cleared while the phase is not complete', () => {
+    const roadmap = progressRoadmap('| 68. Scheduler | v1.3 | 0/5 | In Progress | 2026-09-01 |');
+    seedPhase68WithPlans(tmpDir, { roadmap });
+
+    const result = runGsdTools('roadmap update-plan-progress 68', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    assert.strictEqual(JSON.parse(result.output).complete, false);
+
+    const expected = roadmap.replace(
+      '| 68. Scheduler | v1.3 | 0/5 | In Progress | 2026-09-01 |',
+      '| 68. Scheduler | v1.3 | 1/5 | In Progress |  |',
+    );
+    assert.strictEqual(fs.readFileSync(roadmapPath, 'utf-8'), expected);
+  });
+
+  test('completing the phase swaps the token, keeps the prose, and stamps the Completed placeholder', () => {
+    const roadmap = progressRoadmap('| 68. Scheduler | v1.3 | 4/5 | In Progress — close-out gate green at 80d13485 | - |');
+    const p68 = seedPhase68WithPlans(tmpDir, { roadmap });
+    for (const n of ['01', '03', '04', '05']) {
+      fs.writeFileSync(path.join(p68, `68-${n}-SUMMARY.md`), '# Summary\n');
+    }
+    fs.writeFileSync(path.join(p68, '68-VERIFICATION.md'), '---\nstatus: passed\n---\n# Verification\n');
+
+    const result = runGsdTools('roadmap update-plan-progress 68', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    assert.strictEqual(JSON.parse(result.output).complete, true);
+
+    const written = fs.readFileSync(roadmapPath, 'utf-8');
+    assert.match(
+      written,
+      /^\| 68\. Scheduler \| v1\.3 \| 5\/5 \| Complete — close-out gate green at 80d13485 \| \d{4}-\d{2}-\d{2} \|$/m,
+    );
+    assert.ok(written.includes('| 67. Waves | v1.3 | 2/2 | Complete | 2026-09-01 |'), 'sibling row untouched');
+    assert.ok(written.includes('| 69. Packhouse | v1.3 | 0/2 | Not started | - |'), 'sibling row untouched');
+  });
+
+  // #5060 — the shared owner's matcher must not treat 'Deferred' as a
+  // lifecycle token for the writer (design.md's rejection of a DEFERRED rung):
+  // a Deferred cell is left byte-identical apart from the Plans count.
+  test('#5060: a Deferred Status cell is left untouched (not a lifecycle token for the writer)', () => {
+    const roadmap = progressRoadmap('| 68. Scheduler | v1.3 | 0/5 | Deferred | - |');
+    seedPhase68WithPlans(tmpDir, { roadmap });
+
+    const result = runGsdTools('roadmap update-plan-progress 68', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const expected = roadmap.replace(
+      '| 68. Scheduler | v1.3 | 0/5 | Deferred | - |',
+      '| 68. Scheduler | v1.3 | 1/5 | Deferred | - |',
+    );
+    assert.strictEqual(fs.readFileSync(roadmapPath, 'utf-8'), expected, 'Deferred cell must be left untouched apart from the Plans count');
+  });
+
+  // #5060 — a lifecycle token spelled with a whitespace run is now recognized
+  // (the reader already collapsed whitespace); the writer normalizes it to
+  // the canonical spelling while keeping the trailing prose.
+  test('#5060: a whitespace-run token (`in  progress`) is normalized to `In Progress`, prose kept', () => {
+    const roadmap = progressRoadmap('| 68. Scheduler | v1.3 | 1/2 | in  progress — see notes | - |');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
+    const p68 = path.join(tmpDir, '.planning', 'phases', '68-scheduler');
+    fs.mkdirSync(p68, { recursive: true });
+    fs.writeFileSync(path.join(p68, '68-01-PLAN.md'), '# Plan 1\n');
+    fs.writeFileSync(path.join(p68, '68-02-PLAN.md'), '# Plan 2\n');
+    fs.writeFileSync(path.join(p68, '68-01-SUMMARY.md'), '# Summary\n');
+
+    const result = runGsdTools('roadmap update-plan-progress 68', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const written = fs.readFileSync(roadmapPath, 'utf-8');
+    assert.ok(
+      written.includes('| 68. Scheduler | v1.3 | 1/2 | In Progress — see notes | - |'),
+      `expected the whitespace-run token normalized to 'In Progress', prose kept; got:\n${written}`,
+    );
+  });
+
+  // #5060: one count source. Before this fix, the `Plans Complete` cell and
+  // `plan_count`/`summary_count` output read `phaseInfo.plans.length` /
+  // `countMatchedSummaries(phaseInfo.plans, phaseInfo.summaries)`, which do
+  // NOT exclude a plan marked `status: superseded` (#2349) — only the
+  // Status-cell ladder's `coverageScan` (`scanPhasePlans`) did. A phase with
+  // one superseded plan therefore reported `1/2` in the Plans Complete cell
+  // while the Status token (derived from the excluding scan) already agreed
+  // the phase was done. Now every output in this verb reads from the same
+  // `scanPhasePlans` count.
+  test('#5060: a superseded plan is excluded from the Plans Complete cell and plan_count, matching the Status-cell ladder', () => {
+    const roadmap = progressRoadmap('| 68. Scheduler | v1.3 | 0/2 | Planned | - |');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
+    const p68 = path.join(tmpDir, '.planning', 'phases', '68-scheduler');
+    fs.mkdirSync(p68, { recursive: true });
+    fs.writeFileSync(path.join(p68, '68-01-PLAN.md'), '# Plan 1\n');
+    fs.writeFileSync(path.join(p68, '68-02-PLAN.md'), '---\nstatus: superseded\n---\n# Plan 2\n');
+    fs.writeFileSync(path.join(p68, '68-01-SUMMARY.md'), '# Summary\n');
+
+    const result = runGsdTools('roadmap update-plan-progress 68', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.plan_count, 1, 'the superseded plan must not count toward plan_count');
+    assert.strictEqual(output.summary_count, 1);
+
+    const written = fs.readFileSync(roadmapPath, 'utf-8');
+    assert.ok(
+      /\| 68\. Scheduler \| v1\.3 \| 1\/1 \|/.test(written),
+      `expected the Plans Complete cell to read 1/1 (not 1/2); got:\n${written}`,
+    );
   });
 });
 
@@ -5898,5 +6169,149 @@ describe('#4906 Phase 2: cmdRoadmapUpdatePlanProgress Plans-line seam migration 
     const line = splitLines(written).find((l) => l.trim().startsWith('**Plans:**'));
     assert.equal(line, `**Plans:** 1/1 plans complete ${annotation}`,
       'CRLF source must not corrupt the offset or strand/duplicate the annotation');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #4965 — roadmap_complete must read each phase's OWN checklist checkbox
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// collectAnalyzePhases's checkboxPattern used an unanchored `-\s*\[(x| )\]\s*.*<label>`
+// fragment: the `.*` let "Phase N" match anywhere in ANY checklist line's free-form
+// description, and `content.match()` returns only the FIRST hit in the whole
+// document — so an earlier, unrelated line whose prose merely mentions "Phase N"
+// shadowed that phase's own checkbox line. Fix: anchor to line start and require
+// the label to be the first thing after the checkbox (tolerating only an optional
+// `**` bold marker), never `.*` free-form prose.
+describe('#4965: roadmap analyze checkbox regex must not read another phase\'s line', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  function writeRoadmapWithChecklist(checklistLines) {
+    const body = [
+      '# Roadmap',
+      '',
+      ...checklistLines,
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** alpha',
+      '',
+      '### Phase 2: Beta',
+      '',
+      '**Goal:** beta',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), body);
+  }
+
+  function analyze() {
+    const result = runGsdTools('roadmap analyze', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    return JSON.parse(result.output);
+  }
+
+  function phase(output, number) {
+    const p = output.phases.find((ph) => ph.number === number);
+    assert.ok(p, `phase ${number} must appear in analyze output; got: ${JSON.stringify(output.phases)}`);
+    return p;
+  }
+
+  // Issue #4965 repro A (false negative): phase 1's own line is UNCHECKED but
+  // mentions "Phase 2" in its description; phase 2's own line is CHECKED.
+  // Buggy behavior: phase 2 reads false (shadowed by phase 1's unticked line,
+  // matched first by the unanchored `.*` pattern).
+  test('#4965 repro A: an earlier unticked line mentioning this phase does not shadow its own ticked line', () => {
+    writeRoadmapWithChecklist([
+      '- [ ] **Phase 1: Alpha** — Extends the Phase 2 store',
+      '- [x] **Phase 2: Beta** — done',
+    ]);
+    const output = analyze();
+    assert.strictEqual(phase(output, '1').roadmap_complete, false, "phase 1's own line is unticked");
+    assert.strictEqual(phase(output, '2').roadmap_complete, true, "phase 2's own line is ticked — must not be shadowed by phase 1's mention of it");
+  });
+
+  // Issue #4965 repro B (false positive): phase 1's own line is CHECKED and
+  // mentions "Phase 2" in its description; phase 2's own line is UNCHECKED.
+  // Buggy behavior: phase 2 reads true (shadowed by phase 1's ticked line).
+  test('#4965 repro B: an earlier ticked line mentioning this phase does not shadow its own unticked line', () => {
+    writeRoadmapWithChecklist([
+      '- [x] **Phase 1: Alpha** — Lands before Phase 2 Beta',
+      '- [ ] **Phase 2: Beta** — not started',
+    ]);
+    const output = analyze();
+    assert.strictEqual(phase(output, '1').roadmap_complete, true, "phase 1's own line is ticked");
+    assert.strictEqual(phase(output, '2').roadmap_complete, false, "phase 2's own line is unticked — must not be shadowed by phase 1's mention of it");
+  });
+
+  // No-decoration checklist bullet (no bold markers) must still match.
+  test('#4965: an undecorated checklist bullet (no ** bold marker) still resolves roadmap_complete', () => {
+    writeRoadmapWithChecklist([
+      '- [x] Phase 1: Alpha',
+      '- [ ] Phase 2: Beta',
+    ]);
+    const output = analyze();
+    assert.strictEqual(phase(output, '1').roadmap_complete, true, 'plain (unbolded) ticked checklist line must still match');
+    assert.strictEqual(phase(output, '2').roadmap_complete, false, 'plain (unbolded) unticked checklist line must still match');
+  });
+
+  // Boundary: two phases on adjacent lines with no blank line between them —
+  // the anchor must still resolve each phase to its OWN line, not bleed into
+  // the neighboring line.
+  test('#4965: adjacent checklist lines with no blank line between them each resolve independently', () => {
+    writeRoadmapWithChecklist([
+      '- [x] **Phase 1: Alpha** — first',
+      '- [x] **Phase 2: Beta** — second, mentions Phase 1 nowhere',
+    ]);
+    const output = analyze();
+    assert.strictEqual(phase(output, '1').roadmap_complete, true);
+    assert.strictEqual(phase(output, '2').roadmap_complete, true);
+  });
+
+  // Parity check (isolated-review finding): the fix reuses
+  // phaseHeadingPrefixSrcFor(LABEL_ONLY, convention) unchanged, so a bracket-
+  // convention project's checklist bullet (`[GSD.02] Phase N: ...`) must still
+  // resolve roadmap_complete correctly — the anchor narrows what comes AFTER
+  // the checkbox, it does not touch the bracket-tolerance the prefix builder
+  // already provides.
+  test('#4965: bracket-convention checklist bullet ([GSD.02] Phase N:) still resolves roadmap_complete', () => {
+    writeRoadmapWithChecklist([
+      '- [x] **[GSD.02] Phase 1: Alpha** — first',
+      '- [ ] **[GSD.02] Phase 2: Beta** — second',
+    ]);
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({ phase_id_convention: 'bracket' }),
+      'utf-8',
+    );
+    const output = analyze();
+    assert.strictEqual(phase(output, '1').roadmap_complete, true, 'bracket-prefixed ticked bullet must still match');
+    assert.strictEqual(phase(output, '2').roadmap_complete, false, 'bracket-prefixed unticked bullet must still match');
+  });
+
+  // Negative space (isolated-review finding, recorded decision — see
+  // 10-diagnosis.md): the old unanchored `.*` accidentally tolerated
+  // decorations between the checkbox and the label — a blockquote marker, an
+  // emoji/badge, non-bold prose padding. The anchor deliberately does NOT
+  // preserve that tolerance (only whitespace + one optional `**` are
+  // allowed) — this is intentional narrowing, matching `cmdRoadmapAnalyze`'s
+  // own already-`**`-only `checklistPattern`, not a new gap. A ticked bullet
+  // decorated this way now resolves to `roadmap_complete: false` instead of
+  // matching by accident.
+  test('#4965: a checklist line decorated beyond an optional ** bold marker no longer matches (intentional)', () => {
+    writeRoadmapWithChecklist([
+      '- [x] \u{1F680} Phase 1: Alpha — emoji before the label, no bold marker',
+      '- [ ] Phase 2: Beta',
+    ]);
+    const output = analyze();
+    assert.strictEqual(phase(output, '1').roadmap_complete, false,
+      'a ticked line decorated with anything beyond an optional ** must NOT match — this is the deliberate narrowing, not a regression');
   });
 });

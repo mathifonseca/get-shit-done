@@ -11,7 +11,7 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { runGsdTools, createTempProject, cleanup, delay } = require('./helpers.cjs');
+const { runGsdTools, createTempDir, createTempProject, cleanup, delay, withIsolatedProcessState, homeSandboxEnv } = require('./helpers.cjs');
 
 // ─── ADR-612 PR-5: phase_id_convention enum validation ──────────────────────
 
@@ -129,6 +129,17 @@ async function ensureConfigReady(tmpDir, attempts = 5) {
   );
 }
 
+/**
+ * Seed `.planning/config.json` with both OS home variables pointed at the
+ * project dir through homeSandboxEnv, so the seed never inherits the
+ * developer's `~/.gsd/defaults.json` (#5016). Every `beforeEach` seed whose
+ * tests assert values a global defaults file can override goes through here,
+ * so the #5016 regression case below guards all of them at once.
+ */
+function seedProjectConfig(dir) {
+  return runGsdTools('config-ensure-section', dir, homeSandboxEnv(dir));
+}
+
 // ─── config-ensure-section ───────────────────────────────────────────────────
 
 describe('config-ensure-section command', () => {
@@ -180,169 +191,6 @@ describe('config-ensure-section command', () => {
     assert.strictEqual(secondOutput.reason, 'already_exists');
   });
 
-  test('detects Brave Search from file-based key', () => {
-    // runGsdTools sandboxes HOME=tmpDir, so brave_api_key is written there —
-    // no real filesystem side effects, cleanup happens via afterEach.
-    const gsdDir = path.join(tmpDir, '.gsd');
-    fs.mkdirSync(gsdDir, { recursive: true });
-    fs.writeFileSync(path.join(gsdDir, 'brave_api_key'), 'test-key', 'utf-8');
-
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.brave_search, true);
-  });
-
-  test('detects Tavily Search from env var', () => {
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, TAVILY_API_KEY: 'test-key' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.tavily_search, true);
-  });
-
-  test('tavily_search is false when env var absent and no key file', () => {
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, TAVILY_API_KEY: '' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.tavily_search, false);
-  });
-
-  test('detects Tavily Search from file-based key', () => {
-    const gsdDir = path.join(tmpDir, '.gsd');
-    fs.mkdirSync(gsdDir, { recursive: true });
-    fs.writeFileSync(path.join(gsdDir, 'tavily_api_key'), 'test-key', 'utf-8');
-
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, TAVILY_API_KEY: '' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.tavily_search, true);
-  });
-
-  test('detects Ref Search from env var', () => {
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, REF_API_KEY: 'test-key' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.ref_search, true);
-  });
-
-  test('ref_search is false when env var absent and no key file', () => {
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, REF_API_KEY: '' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.ref_search, false);
-  });
-
-  test('detects Ref Search from file-based key', () => {
-    const gsdDir = path.join(tmpDir, '.gsd');
-    fs.mkdirSync(gsdDir, { recursive: true });
-    fs.writeFileSync(path.join(gsdDir, 'ref_api_key'), 'test-key', 'utf-8');
-
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, REF_API_KEY: '' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.ref_search, true);
-  });
-
-  test('detects Perplexity from env var', () => {
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, PERPLEXITY_API_KEY: 'test-key' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.perplexity, true);
-  });
-
-  test('perplexity is false when env var absent and no key file', () => {
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, PERPLEXITY_API_KEY: '' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.perplexity, false);
-  });
-
-  test('detects Perplexity from file-based key', () => {
-    const gsdDir = path.join(tmpDir, '.gsd');
-    fs.mkdirSync(gsdDir, { recursive: true });
-    fs.writeFileSync(path.join(gsdDir, 'perplexity_api_key'), 'test-key', 'utf-8');
-
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, PERPLEXITY_API_KEY: '' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.perplexity, true);
-  });
-
-  test('detects Jina from env var', () => {
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, JINA_API_KEY: 'test-key' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.jina, true);
-  });
-
-  test('jina is false when env var absent and no key file', () => {
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, JINA_API_KEY: '' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.jina, false);
-  });
-
-  test('detects Jina from file-based key', () => {
-    const gsdDir = path.join(tmpDir, '.gsd');
-    fs.mkdirSync(gsdDir, { recursive: true });
-    fs.writeFileSync(path.join(gsdDir, 'jina_api_key'), 'test-key', 'utf-8');
-
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir, JINA_API_KEY: '' });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.jina, true);
-  });
-
-  test('merges user defaults from defaults.json', () => {
-    // runGsdTools sandboxes HOME=tmpDir, so defaults.json is written there —
-    // no real filesystem side effects, cleanup happens via afterEach.
-    const gsdDir = path.join(tmpDir, '.gsd');
-    fs.mkdirSync(gsdDir, { recursive: true });
-    fs.writeFileSync(path.join(gsdDir, 'defaults.json'), JSON.stringify({
-      model_profile: 'quality',
-      commit_docs: false,
-    }), 'utf-8');
-
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.model_profile, 'quality', 'model_profile should be overridden');
-    assert.strictEqual(config.commit_docs, false, 'commit_docs should be overridden');
-    assert.ok(config.git && typeof config.git === 'object', 'git should be an object');
-    assert.strictEqual(typeof config.git.branching_strategy, 'string', 'git.branching_strategy should be a string');
-  });
-
-  test('merges nested workflow keys from defaults.json preserving unset keys', () => {
-    // runGsdTools sandboxes HOME=tmpDir, so defaults.json is written there —
-    // no real filesystem side effects, cleanup happens via afterEach.
-    const gsdDir = path.join(tmpDir, '.gsd');
-    fs.mkdirSync(gsdDir, { recursive: true });
-    fs.writeFileSync(path.join(gsdDir, 'defaults.json'), JSON.stringify({
-      workflow: { research: false },
-    }), 'utf-8');
-
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const config = readConfig(tmpDir);
-    assert.strictEqual(config.workflow.research, false, 'research should be overridden');
-    assert.strictEqual(typeof config.workflow.plan_check, 'boolean', 'plan_check should be a boolean');
-    assert.strictEqual(typeof config.workflow.verifier, 'boolean', 'verifier should be a boolean');
-  });
 });
 
 // ─── config-set ──────────────────────────────────────────────────────────────
@@ -352,8 +200,7 @@ describe('config-set command', () => {
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    // Create initial config
-    runGsdTools('config-ensure-section', tmpDir);
+    seedProjectConfig(tmpDir);
   });
 
   afterEach(() => {
@@ -502,7 +349,7 @@ describe('config-set git.protected_branches (#3552)', () => {
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir);
+    seedProjectConfig(tmpDir);
   });
 
   afterEach(() => {
@@ -577,6 +424,34 @@ describe('config-set git.protected_branches (#3552)', () => {
       'git.protected_branches must be absent after unset',
     );
   });
+
+  test('#5016: the seed ignores protected_branches in the ambient ~/.gsd/defaults.json', (t) => {
+    const ambientHome = createTempDir('gsd-5016-ambient-home-');
+    t.after(() => cleanup(ambientHome));
+    fs.mkdirSync(path.join(ambientHome, '.gsd'));
+    fs.writeFileSync(
+      path.join(ambientHome, '.gsd', 'defaults.json'),
+      JSON.stringify({ git: { protected_branches: ['release'] } }),
+    );
+    const controlDir = createTempProject();
+    const seededDir = createTempProject();
+    t.after(() => { cleanup(controlDir); cleanup(seededDir); });
+
+    const [control, seeded] = withIsolatedProcessState(() => {
+      Object.assign(process.env, homeSandboxEnv(ambientHome));
+      return [runGsdTools('config-ensure-section', controlDir), seedProjectConfig(seededDir)];
+    });
+
+    // Positive control: an unsandboxed seed must pick up the canary, or the
+    // assertion below would pass without proving anything.
+    assert.ok(control.success, `Control seed failed: ${control.error}`);
+    assert.deepStrictEqual(readConfig(controlDir).git.protected_branches, ['release']);
+    assert.ok(seeded.success, `Seed failed: ${seeded.error}`);
+    assert.ok(
+      !Object.prototype.hasOwnProperty.call(readConfig(seededDir).git, 'protected_branches'),
+      'seedProjectConfig must not inherit protected_branches from the ambient defaults.json',
+    );
+  });
 });
 
 // ─── config-get ──────────────────────────────────────────────────────────────
@@ -587,7 +462,7 @@ describe('config-get command', () => {
   beforeEach(() => {
     tmpDir = createTempProject();
     // Create config with known values — sandbox HOME to avoid global defaults
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
 
   afterEach(() => {
@@ -595,7 +470,7 @@ describe('config-get command', () => {
   });
 
   test('gets a top-level value', () => {
-    const result = runGsdTools('config-get model_profile', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    const result = runGsdTools('config-get model_profile', tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
@@ -698,7 +573,7 @@ describe('config-new-project command', () => {
       model_profile: 'balanced',
       workflow: { research: true, plan_check: true, verifier: true, nyquist_validation: true },
     });
-    const result = runGsdTools(['config-new-project', choices], tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    const result = runGsdTools(['config-new-project', choices], tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const config = readConfig(tmpDir);
@@ -746,7 +621,7 @@ describe('config-new-project command', () => {
       model_profile: 'quality',
       workflow: { research: false, plan_check: false, verifier: true, nyquist_validation: false },
     });
-    const result = runGsdTools(['config-new-project', choices], tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    const result = runGsdTools(['config-new-project', choices], tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const config = readConfig(tmpDir);
@@ -765,7 +640,7 @@ describe('config-new-project command', () => {
   });
 
   test('works with empty choices — all defaults materialized', () => {
-    const result = runGsdTools(['config-new-project', '{}'], tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    const result = runGsdTools(['config-new-project', '{}'], tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const config = readConfig(tmpDir);
@@ -1158,7 +1033,7 @@ describe('config-set research_before_questions and discuss_mode', () => {
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
 
   afterEach(() => {
@@ -1273,7 +1148,7 @@ describe('config-set-model-profile command', () => {
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
 
   afterEach(() => {
@@ -1294,7 +1169,7 @@ describe('config-set-model-profile command', () => {
   });
 
   test('reports previous profile in output', () => {
-    const result = runGsdTools('config-set-model-profile budget', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    const result = runGsdTools('config-set-model-profile budget', tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const out = JSON.parse(result.output);
@@ -1363,7 +1238,7 @@ describe('config-set workflow.skip_discuss', () => {
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir);
+    seedProjectConfig(tmpDir);
   });
 
   afterEach(() => {
@@ -1404,7 +1279,7 @@ describe('config-set workflow.skip_discuss', () => {
     });
 
     test('skip_discuss is present in config-new-project output', () => {
-      const result = runGsdTools(['config-new-project', '{}'], emptyDir, { HOME: emptyDir, USERPROFILE: emptyDir });
+      const result = runGsdTools(['config-new-project', '{}'], emptyDir, homeSandboxEnv(emptyDir));
       assert.ok(result.success, `Command failed: ${result.error}`);
 
       const config = readConfig(emptyDir);
@@ -1415,7 +1290,7 @@ describe('config-set workflow.skip_discuss', () => {
       const choices = JSON.stringify({
         workflow: { skip_discuss: true },
       });
-      const result = runGsdTools(['config-new-project', choices], emptyDir, { HOME: emptyDir, USERPROFILE: emptyDir });
+      const result = runGsdTools(['config-new-project', choices], emptyDir, homeSandboxEnv(emptyDir));
       assert.ok(result.success, `Command failed: ${result.error}`);
 
       const config = readConfig(emptyDir);
@@ -1440,7 +1315,7 @@ describe('config-set/config-get workflow.use_worktrees', () => {
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
 
   afterEach(() => {
@@ -1488,6 +1363,56 @@ describe('config-set/config-get workflow.use_worktrees', () => {
   });
 });
 
+// ─── config-set/config-get audit.enabled (#4975) ─────────────────────────────
+//
+// `audit.enabled` is the documented config opt-in for the dispatch audit trail
+// (docs/CONFIGURATION.md "Observability"). It was missing from the central
+// schema, so config-set refused it as an unknown key and it could only be set
+// by hand-editing config.json.
+
+describe('config-set/config-get audit.enabled (#4975)', () => {
+  test('config-set accepts audit.enabled and config-get round-trips it as a boolean', (t) => {
+    const tmpDir = createTempProject('gsd-4975-config-');
+    t.after(() => cleanup(tmpDir));
+    const env = homeSandboxEnv(tmpDir);
+
+    for (const value of [true, false]) {
+      const set = runGsdTools(['config-set', 'audit.enabled', String(value)], tmpDir, env);
+      assert.ok(set.success, `config-set audit.enabled ${value} must be accepted: ${set.error}`);
+      const setResult = JSON.parse(set.output);
+      assert.strictEqual(setResult.updated, true);
+      assert.strictEqual(setResult.key, 'audit.enabled');
+      assert.strictEqual(setResult.value, value);
+      assert.strictEqual(readConfig(tmpDir).audit.enabled, value, 'persisted as a real JSON boolean');
+
+      const get = runGsdTools(['config-get', 'audit.enabled'], tmpDir, env);
+      assert.ok(get.success, `config-get audit.enabled must succeed: ${get.error}`);
+      assert.strictEqual(JSON.parse(get.output), value);
+    }
+  });
+
+  test('config-set rejects a non-boolean audit.enabled without modifying config.json', (t) => {
+    const tmpDir = createTempProject('gsd-4975-config-invalid-');
+    t.after(() => cleanup(tmpDir));
+    const env = { ...homeSandboxEnv(tmpDir), GSD_JSON_ERRORS: '1' };
+    writeConfig(tmpDir, { audit: { enabled: false }, sentinel: 'preserve' });
+    const configPath = path.join(tmpDir, '.planning', 'config.json');
+    const before = fs.readFileSync(configPath, 'utf-8');
+
+    // The runtime gate honours only a real `true`, so storing anything else
+    // would be accept-then-ignore.
+    for (const value of ['yes', '1', 'TRUE', 'on', '{"on":true}']) {
+      const result = runGsdTools(['config-set', 'audit.enabled', value], tmpDir, env);
+      assert.strictEqual(result.success, false, `config-set audit.enabled ${value} must be rejected`);
+      const envelope = JSON.parse(result.error);
+      assert.strictEqual(envelope.ok, false);
+      assert.notStrictEqual(envelope.reason, 'config_invalid_key',
+        `audit.enabled ${value}: the key is valid — the VALUE must be what is refused`);
+    }
+    assert.strictEqual(fs.readFileSync(configPath, 'utf-8'), before, 'a rejected config-set must not write anything');
+  });
+});
+
 // ─── config-set/config-get context ─────────────────────────────────────────
 
 describe('config-set/config-get context', () => {
@@ -1495,7 +1420,7 @@ describe('config-set/config-get context', () => {
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
 
   afterEach(() => {
@@ -1801,7 +1726,7 @@ describe('plan_review.source_grounding and plan_review.source_grounding_authorit
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
 
   afterEach(() => {
@@ -2115,7 +2040,7 @@ describe('#3086: git.create_tag config key', () => {
     const tmpDir = createTempProject('gsd-3086-default-');
     t.after(() => cleanup(tmpDir));
 
-    const result = runGsdTools(['config-get', 'git.create_tag'], tmpDir, { HOME: tmpDir });
+    const result = runGsdTools(['config-get', 'git.create_tag'], tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(result.success, `config-get git.create_tag failed:\n${result.error}`);
     assert.strictEqual(
       result.output.trim(),
@@ -2128,12 +2053,10 @@ describe('#3086: git.create_tag config key', () => {
     const tmpDir = createTempProject('gsd-3086-set-false-');
     t.after(() => cleanup(tmpDir));
 
-    const setResult = runGsdTools(['config-set', 'git.create_tag', 'false'], tmpDir, {
-      HOME: tmpDir,
-    });
+    const setResult = runGsdTools(['config-set', 'git.create_tag', 'false'], tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(setResult.success, `config-set git.create_tag false failed:\n${setResult.error}`);
 
-    const getResult = runGsdTools(['config-get', 'git.create_tag'], tmpDir, { HOME: tmpDir });
+    const getResult = runGsdTools(['config-get', 'git.create_tag'], tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(getResult.success, `config-get after set failed:\n${getResult.error}`);
     assert.strictEqual(
       getResult.output.trim(),
@@ -2146,9 +2069,7 @@ describe('#3086: git.create_tag config key', () => {
     const tmpDir = createTempProject('gsd-3086-invalid-');
     t.after(() => cleanup(tmpDir));
 
-    const result = runGsdTools(['config-set', 'git.create_tag', 'maybe'], tmpDir, {
-      HOME: tmpDir,
-    });
+    const result = runGsdTools(['config-set', 'git.create_tag', 'maybe'], tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(
       !result.success,
       `Expected config-set to fail for invalid value "maybe", but it succeeded`,
@@ -2197,10 +2118,10 @@ describe('#3086: git.create_tag config key', () => {
     const tmpDir = createTempProject('gsd-3086-detect-git-create-tag-');
     t.after(() => cleanup(tmpDir));
 
-    const setFalse = runGsdTools(['config-set', 'git.create_tag', 'false'], tmpDir, { HOME: tmpDir });
+    const setFalse = runGsdTools(['config-set', 'git.create_tag', 'false'], tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(setFalse.success, `config-set git.create_tag false failed:\n${setFalse.error}`);
 
-    const falseResult = runGsdTools(['init', 'complete-milestone'], tmpDir, { HOME: tmpDir });
+    const falseResult = runGsdTools(['init', 'complete-milestone'], tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(falseResult.success, `init complete-milestone failed:\n${falseResult.error}`);
     assert.strictEqual(
       JSON.parse(falseResult.output).git_create_tag,
@@ -2208,10 +2129,10 @@ describe('#3086: git.create_tag config key', () => {
       'init complete-milestone must report git_create_tag: false once git.create_tag is set false',
     );
 
-    const setTrue = runGsdTools(['config-set', 'git.create_tag', 'true'], tmpDir, { HOME: tmpDir });
+    const setTrue = runGsdTools(['config-set', 'git.create_tag', 'true'], tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(setTrue.success, `config-set git.create_tag true failed:\n${setTrue.error}`);
 
-    const trueResult = runGsdTools(['init', 'complete-milestone'], tmpDir, { HOME: tmpDir });
+    const trueResult = runGsdTools(['init', 'complete-milestone'], tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(trueResult.success, `init complete-milestone failed:\n${trueResult.error}`);
     assert.strictEqual(
       JSON.parse(trueResult.output).git_create_tag,
@@ -2279,7 +2200,7 @@ describe('ship.pr_body_sections config (#3167)', () => {
       },
     ]);
 
-    const result = runGsdTools(['config-set', 'ship.pr_body_sections', value, '--raw'], cwd, { HOME: cwd });
+    const result = runGsdTools(['config-set', 'ship.pr_body_sections', value, '--raw'], cwd, homeSandboxEnv(cwd));
 
     assert.equal(result.success, true, result.error);
     const config = JSON.parse(fs.readFileSync(path.join(cwd, '.planning', 'config.json'), 'utf8'));
@@ -2304,7 +2225,7 @@ describe('ship.pr_body_sections config (#3167)', () => {
     const notArray = runGsdTools(
       ['config-set', 'ship.pr_body_sections', JSON.stringify({ heading: 'Not an array' }), '--raw'],
       cwd,
-      { HOME: cwd }
+      homeSandboxEnv(cwd)
     );
     assert.equal(notArray.success, false);
     assert.match(notArray.error, /ship\.pr_body_sections.*JSON array/);
@@ -2312,7 +2233,7 @@ describe('ship.pr_body_sections config (#3167)', () => {
     const missingHeading = runGsdTools(
       ['config-set', 'ship.pr_body_sections', JSON.stringify([{ fallback: '- Missing heading' }]), '--raw'],
       cwd,
-      { HOME: cwd }
+      homeSandboxEnv(cwd)
     );
     assert.equal(missingHeading.success, false);
     assert.match(missingHeading.error, /heading/);
@@ -2320,7 +2241,7 @@ describe('ship.pr_body_sections config (#3167)', () => {
     const invalidEnabled = runGsdTools(
       ['config-set', 'ship.pr_body_sections', JSON.stringify([{ heading: 'Toggle', enabled: 'yes', fallback: '- item' }]), '--raw'],
       cwd,
-      { HOME: cwd }
+      homeSandboxEnv(cwd)
     );
     assert.equal(invalidEnabled.success, false);
     assert.match(invalidEnabled.error, /enabled/);
@@ -2341,7 +2262,7 @@ describe('ship.pr_body_sections config (#3167)', () => {
       },
     });
 
-    const result = runGsdTools(['config-new-project', choices], cwd, { HOME: cwd });
+    const result = runGsdTools(['config-new-project', choices], cwd, homeSandboxEnv(cwd));
 
     assert.equal(result.success, false);
     assert.match(result.error, /source must use selectors/);
@@ -2654,10 +2575,10 @@ describe('bug #3212 execute-phase stall detection and safe resume', () => {
     const workflow = read('gsd-core/workflows/execute-phase.md');
 
     assert.match(workflow, /<step name="safe_resume_gate"/, 'execute-phase must define a safe_resume_gate step');
-    // #4003: the gate greps an anchored, zero-pad-tolerant scope regex derived from the
-    // current plan id (a bare padded substring matched other milestones' plans).
-    assert.match(workflow, /PLAN_SCOPE_RE="\^\[a-z\]\+\\\(\(0\*\$\{PHASE_N\}\)-\(0\*\$\{PLAN_N\}\)\\\):"/, 'safe resume gate must derive an anchored plan-scope regex');
-    assert.match(workflow, /--grep="\$\{PLAN_SCOPE_RE\}"/, 'safe resume gate must check commits for the current plan id');
+    // #4003 -> #5164: the gate asks the evaluation-scope resolver, which matches an anchored,
+    // zero-pad-tolerant subject pattern for the current plan id (a bare padded substring matched
+    // other milestones' plans), bounded to the current milestone.
+    assert.match(workflow, /gsd_run check evaluation-scope --plan "\$\{PHASE_NUMBER\}-\{plan_padded\}" --commits-only --milestone-bound/, 'safe resume gate must check commits for the current plan id through the resolver');
     assert.match(workflow, /SUMMARY.md is missing/, 'safe resume gate must detect production commits with missing SUMMARY.md');
     assert.match(workflow, /close out manually/, 'safe resume gate must offer manual close-out recovery');
     assert.match(workflow, /re-execute from scratch/, 'safe resume gate must offer re-execute recovery');
@@ -2888,7 +2809,7 @@ describe('workflow.context_guard_mode default value', () => {
   afterEach(() => { cleanup(tmpDir); });
 
   test('defaults to warn in new project config', () => {
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir });
+    const result = runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(result.success, `config-ensure-section failed: ${result.error}`);
 
     const config = readConfig(tmpDir);
@@ -2906,7 +2827,7 @@ describe('workflow.context_guard_mode config round-trip', () => {
   let tmpDir;
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
   afterEach(() => { cleanup(tmpDir); });
 
@@ -3113,7 +3034,7 @@ describe('workflow.human_verify_mode default value', () => {
   afterEach(() => { cleanup(tmpDir); });
 
   test('defaults to end-of-phase in new project config', () => {
-    const result = runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir });
+    const result = runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(result.success, `config-ensure-section failed: ${result.error}`);
 
     const config = readConfig(tmpDir);
@@ -3131,7 +3052,7 @@ describe('workflow.human_verify_mode config round-trip', () => {
   let tmpDir;
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
   afterEach(() => { cleanup(tmpDir); });
 
@@ -3246,7 +3167,7 @@ describe('config-set hooks.context_warning_threshold / hooks.context_critical_th
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
 
   afterEach(() => {

@@ -61,7 +61,13 @@
 //   segment's operands — `[ -f .env ]` and `ls .env*` are existence checks
 //   GSD's own agents run — while `cp`/`mv`/`ln`/`git` are deliberately NOT
 //   exempt (`cp .env x && cat x` launders the name; `git show HEAD:.env`
-//   reads). A shell interpreter (bash/sh/zsh/dash/ksh/su) has its script scanned
+//   reads). Narrower carve-outs exempt single operand POSITIONS that are
+//   names, never contents, and keep checking the rest of the segment: the
+//   `--env-file` value under a container runtime (#4639), the pathspecs of
+//   `git check-ignore` / `git ls-files` / `git rm --cached`, and the
+//   destination of a one-source `cp`/`mv` (#4856). The #4856 carve-outs
+//   fail closed: an option they do not list withdraws them from the segment.
+//   A shell interpreter (bash/sh/zsh/dash/ksh/su) has its script scanned
 //   whether it arrives via `-c '…'`, a `<( )` file operand, a heredoc /
 //   here-string, or a pipe from a knowable `echo`/`printf` source
 //   (`echo cat .env | bash`); `eval` scans its joined operands; `source`/`.`
@@ -91,7 +97,11 @@
 //   container's own command can print the interpolated environment
 //   (`alpine printenv`, `docker compose config`) — the same exposure class
 //   as the pre-existing volume-mount gap (`-v .env:/s`); the flag's value
-//   itself is a name, never contents.)
+//   itself is a name, never contents. #4856 adds another: the `cp`/`mv`
+//   destination exemption can move a link prepared under a non-secret name
+//   onto a secret name (`ln -s .env.example l && mv l .env`), so a later
+//   edit of `.env` lands in the link target — a write redirection, the
+//   out-of-scope write class, not a read.)
 //
 // Triggers on: Read, Grep, Bash tool calls (Kimi: ReadFile, Grep, Shell)
 // Action: BLOCK (decision: 'block', exit 2) — codes secret-read |
@@ -140,6 +150,57 @@ const NON_READING_COMMANDS = new Set([
 // segment is still checked, so the carve-out cannot launder a read.
 const CONTAINER_RUNTIMES = new Set(['docker', 'docker-compose', 'podman', 'nerdctl']);
 const ENV_FILE_FLAG_RE = /^--env-file(=|$)/;
+
+// #4856: git subcommands that report or drop a path's ignore / tracking
+// status and never print the file, so their pathspec operands are names —
+// the category NON_READING_COMMANDS encodes. Each carries the closed set of
+// its NO-VALUE options (from `git <subcommand> -h`, git 2.49). Any other
+// option withdraws the exemption from the whole segment, so an option value
+// is never mistaken for a pathspec: `-X <file>` reads the file, and
+// `--pathspec-from-file=<file>` echoes its lines in the "did not match"
+// error. `requires` names the option without which the subcommand stays
+// checked (#4856 scopes `git rm` to `--cached`).
+const GIT_PATHSPEC_SUBCOMMANDS = new Map([
+  ['check-ignore', {
+    flags: new Set(['-q', '--quiet', '-v', '--verbose', '--stdin', '-z', '-n', '--non-matching', '--no-index', '--index']),
+  }],
+  ['ls-files', {
+    flags: new Set([
+      '-z', '-t', '-v', '-f', '-c', '--cached', '-d', '--deleted', '-m', '--modified', '-o', '--others',
+      '-i', '--ignored', '-s', '--stage', '-k', '--killed', '-u', '--unmerged', '--directory', '--eol',
+      '--no-empty-directory', '--resolve-undo', '--exclude-standard', '--full-name',
+      '--recurse-submodules', '--error-unmatch', '--abbrev', '--debug', '--deduplicate', '--sparse',
+    ]),
+  }],
+  ['rm', {
+    flags: new Set(['--cached', '-f', '--force', '-n', '--dry-run', '-q', '--quiet', '-r', '--ignore-unmatch', '--sparse']),
+    requires: '--cached',
+  }],
+]);
+
+// git's global options (its own usage line, git 2.49), needed to locate the
+// subcommand. A value option consumes the next word unless written
+// `--opt=value`; an option in neither set fails closed, so a value is never
+// read as the subcommand (`git -C ls-files show HEAD:.env` runs `show`).
+const GIT_GLOBAL_VALUE_OPTIONS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env']);
+const GIT_GLOBAL_FLAGS = new Set([
+  '-p', '--paginate', '-P', '--no-pager', '--no-replace-objects', '--no-lazy-fetch',
+  '--no-optional-locks', '--no-advice', '--bare',
+]);
+
+// #4856: `cp`/`mv` write their destination and never print it, so a secret
+// name that is ONLY the destination of a one-source copy or move is a name
+// (`cp .env.example .env`). The exemption holds for exactly two operands
+// behind options from this closed set; anything else keeps the whole segment
+// checked — `-t`/`--target-directory` (every operand becomes a source), a
+// backup (`-b`, `--backup`, `-S`: the old secret survives as `.env~`, a name
+// the predicate does not classify), a link (`-l`, `-s`) or `--exchange`
+// (the destination shares or swaps the secret). Options must precede the
+// operands: a trailing one is an option under GNU getopt's permutation but
+// an operand under POSIXLY_CORRECT (`cp a .env -f` then copies `.env` INTO
+// `-f/`), so which word is the destination would hang on an environment
+// the hook cannot see.
+const COPY_NAME_ONLY_FLAGS = new Set(['-f', '--force', '-i', '--interactive', '-n', '--no-clobber', '-v', '--verbose']);
 
 // Shell interpreters that run a script from `-c`, a file operand, or stdin
 // (heredoc / here-string / piped `echo`|`printf`). `su` is here for its `-c`
@@ -714,6 +775,86 @@ function resolveCommand(words) {
   return { base: lastSegment(words[idx].text).toLowerCase(), operands: words.slice(idx + 1) };
 }
 
+// Operand indices the segment's command consumes as a NAME, never as
+// CONTENTS (#4639, #4856). Only these positions skip the operand check;
+// every other operand is still checked, so a carve-out cannot launder a read
+// elsewhere in the segment.
+function nameOnlyOperandIndices(base, operands) {
+  if (CONTAINER_RUNTIMES.has(base)) return envFileValueIndices(operands);
+  if (base === 'git') return gitPathspecIndices(operands);
+  if (base === 'cp' || base === 'mv') return copyDestinationIndices(operands);
+  return new Set();
+}
+
+// #4639: the `--env-file` word, plus the next operand for the bare flag
+// (`--env-file=<value>` is a single word).
+function envFileValueIndices(operands) {
+  const exempt = new Set();
+  for (let k = 0; k < operands.length; k++) {
+    if (!ENV_FILE_FLAG_RE.test(operands[k].text)) continue;
+    exempt.add(k);
+    if (!operands[k].text.includes('=')) exempt.add(++k);
+  }
+  return exempt;
+}
+
+// True when `text` is a listed long option, or a short cluster (`-co`) whose
+// every letter is listed. `--opt=value`, an abbreviation, or a cluster
+// holding a value option (`-ciX`) is not.
+function isListedFlag(text, flags) {
+  if (text.startsWith('--')) return flags.has(text);
+  return /^-[A-Za-z]+$/.test(text) && [...text.slice(1)].every((ch) => flags.has(`-${ch}`));
+}
+
+// Index of git's subcommand past its global options, or -1 when an option
+// outside GIT_GLOBAL_VALUE_OPTIONS / GIT_GLOBAL_FLAGS precedes it.
+function gitSubcommandIndex(operands) {
+  for (let k = 0; k < operands.length; k++) {
+    const t = operands[k].text;
+    if (!t.startsWith('-')) return k;
+    if (GIT_GLOBAL_VALUE_OPTIONS.has(t)) { k++; continue; }
+    if (GIT_GLOBAL_FLAGS.has(t)) continue;
+    const eq = t.indexOf('=');
+    const isLongValueForm = t.startsWith('--') && eq !== -1 && GIT_GLOBAL_VALUE_OPTIONS.has(t.slice(0, eq));
+    if (!isLongValueForm) return -1;
+  }
+  return -1;
+}
+
+// #4856: the pathspec operands of a GIT_PATHSPEC_SUBCOMMANDS invocation. git
+// permutes options, so one may follow a pathspec; after `--` every word is a
+// pathspec. The subcommand is matched case-sensitively, as git looks it up.
+function gitPathspecIndices(operands) {
+  const sub = gitSubcommandIndex(operands);
+  const spec = sub === -1 ? undefined : GIT_PATHSPEC_SUBCOMMANDS.get(operands[sub].text);
+  if (!spec) return new Set();
+  const pathspecs = new Set();
+  let required = spec.requires === undefined;
+  let endOfOptions = false;
+  for (let k = sub + 1; k < operands.length; k++) {
+    const t = operands[k].text;
+    if (endOfOptions || !t.startsWith('-') || t === '-') pathspecs.add(k);
+    else if (t === '--') endOfOptions = true;
+    else if (!isListedFlag(t, spec.flags)) return new Set();
+    else if (t === spec.requires) required = true;
+  }
+  return required ? pathspecs : new Set();
+}
+
+// #4856: the destination of a one-source `cp`/`mv` (see COPY_NAME_ONLY_FLAGS).
+function copyDestinationIndices(operands) {
+  const positional = [];
+  let endOfOptions = false;
+  for (let k = 0; k < operands.length; k++) {
+    const t = operands[k].text;
+    if (endOfOptions || !t.startsWith('-') || t === '-') positional.push(k);
+    else if (positional.length) return new Set(); // an option or `--` after an operand
+    else if (t === '--') endOfOptions = true;
+    else if (!isListedFlag(t, COPY_NAME_ONLY_FLAGS)) return new Set();
+  }
+  return positional.length === 2 ? new Set([positional[1]]) : new Set();
+}
+
 // The statically-knowable stdin a segment writes: `echo`/`printf` operands
 // joined by a space (for `echo`, leading `-neE` flags dropped). Any other
 // source (`cat gen.sh | bash`, `curl … | sh`) is not knowable → null.
@@ -854,20 +995,10 @@ function findSecretRead(command, depth) {
 
     if (NON_READING_COMMANDS.has(base)) continue;
 
-    // #4639: exempt ONLY the value of `--env-file`, and only when the
-    // segment's command word is a container runtime. A bare `--env-file`
-    // consumes the next operand; `--env-file=<value>` is a single word.
-    const envFileExempt = CONTAINER_RUNTIMES.has(base);
-    let skipNext = false;
-    for (const w of operands) {
-      if (envFileExempt) {
-        if (skipNext) { skipNext = false; continue; }
-        if (ENV_FILE_FLAG_RE.test(w.text)) {
-          if (!w.text.includes('=')) skipNext = true; // bare flag consumes the next operand
-          continue;
-        }
-      }
-      if (namesSecret(normalizeOperand(w.text))) return w.text;
+    const nameOnly = nameOnlyOperandIndices(base, operands);
+    for (let k = 0; k < operands.length; k++) {
+      if (nameOnly.has(k)) continue;
+      if (namesSecret(normalizeOperand(operands[k].text))) return operands[k].text;
     }
   }
   return null;

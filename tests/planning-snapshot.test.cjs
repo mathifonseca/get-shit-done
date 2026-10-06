@@ -1144,6 +1144,59 @@ describe('roadmapDeclaredPhases field (Phase 11, #3309)', () => {
   });
 });
 
+// #5007 (Phase 6 / ADR-4910 §8): buildCurrentMilestoneRoadmapPhaseIdsField
+// (W026's own phase-id scan) had no direct test anywhere — the only existing
+// pin naming this site (tests/adr-612-bracket-heading-selection.test.cjs:124)
+// only pins `phaseHeadingPrefixSrcFor`'s own output for this site's baseline,
+// not this function's actual matching behavior. Added while auditing this
+// site against the Phase 6 design doc's suggested `buildPhaseHeadingScanRegex`
+// swap (see the function's own comment in src/planning-snapshot.cts): that
+// swap was NOT made, because the owner requires a heading title
+// (`OPTIONAL_PHASE_TAG_SOURCE\s*:\s*([^\n]+)`) while this site's own tail is a
+// bare `:` with no title requirement — the title-less case below is the
+// concrete proof of that divergence.
+describe('currentMilestoneRoadmapPhaseIds field (#5007 Phase 6 migration audit)', () => {
+  test('happy: plain-digit phase headings in the current milestone are collected', (t) => {
+    const cwd = createTempDir('gsd-5007-cmrpi1-');
+    t.after(() => cleanup(cwd));
+    writeState(cwd, { milestone: 'v1.0' });
+    writeRoadmap(cwd, ['## v1.0 Current 🚧', '', '### Phase 1: Foo', '', '### Phase 2: Bar'].join('\n'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.currentMilestoneRoadmapPhaseIds, { value: ['1', '2'], scope: SCOPE.COMPLETE });
+  });
+
+  test('regression pin: a phase heading with no title text after the colon is still counted (no title requirement at this site)', (t) => {
+    const cwd = createTempDir('gsd-5007-cmrpi2-');
+    t.after(() => cleanup(cwd));
+    writeState(cwd, { milestone: 'v9.0' });
+    writeRoadmap(cwd, [
+      '## 🚧 v9.0 Current',
+      '',
+      '### Phase 3:',
+      '',
+      '**Goal:** no title text after the colon',
+      '',
+      '### Phase 4: WithTitle',
+      '',
+      '**Goal:** has a title',
+      '',
+    ].join('\n'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.currentMilestoneRoadmapPhaseIds, { value: ['3', '4'], scope: SCOPE.COMPLETE });
+  });
+
+  test('absence: no ROADMAP.md is a non-answer', (t) => {
+    const cwd = createTempDir('gsd-5007-cmrpi3-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.currentMilestoneRoadmapPhaseIds, { value: [], scope: SCOPE.UNREADABLE });
+  });
+});
+
 describe('roadmapPhaseCheckboxes field (Phase 11, #3309)', () => {
   test('happy: [x]/[ ] checkbox state parsed per phase id', (t) => {
     const cwd = createTempDir('gsd-3309-rpc1-');

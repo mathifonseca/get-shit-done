@@ -728,11 +728,11 @@ describe('resolveLoopHooks plan:post — pure function against real registry', (
   });
 });
 
-// ─── #4652: containment boundaries — resolvePath (check-command-router.cts:92)
+// ─── #4652: containment boundaries — `resolveContainedPath` (src/gate-phase-context.cts)
 // and `check gap-analysis.plan-post <phase-dir>` ───────────────────────────────
 //
 // Boundary 3: `check decision-coverage-plan <phase-dir>` resolves the phase-dir
-// positional via `resolvePath()`, which just does
+// positional via `resolveContainedPath()`. Before #4652 the router's `resolvePath()` just did
 // `path.isAbsolute(p) ? p : path.join(projectDir, p)` — no containment check.
 // Boundary 4: `check gap-analysis.plan-post <phase-dir>` takes `args[2]`
 // unconfined and joins it directly in `runGapAnalysis` (gap-checker.cts).
@@ -741,7 +741,7 @@ function runDecisionCoveragePlan(extraFlags, phaseDir, contextPath, cwd) {
   return runGsdTools(['query', 'check.decision-coverage-plan', ...extraFlags, phaseDir, contextPath], cwd);
 }
 
-describe('resolvePath / check decision-coverage-plan — containment boundary (#4652)', () => {
+describe('resolveContainedPath / check decision-coverage-plan — containment boundary (#4652)', () => {
   let tmpDir;
   let phaseDir;
   let outsideDir;

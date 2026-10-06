@@ -212,6 +212,7 @@
   - [Per-Task External-Tracker Content-Resolution Seam](#3970-per-task-external-tracker-content-resolution-seam)
   - [Unreadable-Directory Scope Signal](#4014-unreadable-directory-scope-signal)
   - [Graphify CLI Preferred for Planner and Researcher Graph Queries](#4836-graphify-cli-preferred-for-planner-and-researcher-graph-queries)
+  - [Gate Evidence and Verdict-Driven Exit Status](#5170-gate-evidence-and-verdict-driven-exit-status)
 
 ---
 
@@ -990,6 +991,12 @@ only the subtrees the phase actually changed. Each produced document carries
 `last_mapped_commit` in its YAML frontmatter so drift can be measured
 against the mapping point, not HEAD.
 
+**Staleness is measured against all seven documents (#5134):** the drift gate
+treats a directory as mapped when its path appears in any of the seven
+documents, flags modified and deleted files inside mapped directories as well
+as new structure outside them, and withholds paths that are unsafe to pass to
+the mapper. See [Post-Execute Codebase Drift Detection](post-execute-codebase-drift-detection.md).
+
 ---
 
 ### 27b. Existing Codebase Onboarding
@@ -1026,18 +1033,46 @@ against the mapping point, not HEAD.
   warn-only or spawn `gsd-codebase-mapper` with `--paths` scoped to
   affected subtrees.
 
-**What counts as drift:**
-- New directory outside mapped paths
-- New barrel export at `(packages|apps)/*/src/index.*`
-- New migration file (supabase/prisma/drizzle/src/migrations/…)
-- New route module under `routes/` or `api/`
+**What counts as drift:** additions are drift outside mapped territory;
+modifications and deletions are drift inside it.
+- New directory outside mapped paths (`new_dir`)
+- New barrel export at `(packages|apps)/*/src/index.*` (`barrel`)
+- New migration file (supabase/prisma/drizzle/src/migrations/…) (`migration`)
+- New route module under `routes/` or `api/` (`route`)
+- Modified file inside a mapped directory (`modified`; a typechange counts here)
+- Deleted file inside a mapped directory (`deleted`; a rename's old path counts here, its new path as an addition)
+
+**Why the rule is inverted.** A new directory is by definition outside what
+the map describes, so an addition is drift where the map is silent. An edit or
+deletion can only matter where the map does speak: a map that names a
+directory describes its contents, and changing or removing them makes the
+description stale. Counting modifications outside mapped territory would flag
+every ordinary edit; counting only additions, as the gate did before #5134,
+never flagged a map that went stale through edits or deletions.
+
+**Mapped territory is the whole map.** The gate reads all seven
+`.planning/codebase/*.md` documents, not only `STRUCTURE.md`. A directory is
+mapped when its path appears, at a path-component boundary, in any of them.
+`STRUCTURE.md` remains required. A document that is not a regular file or is
+larger than 1 MiB is unreadable and is reported in `documents_unreadable`
+(for `STRUCTURE.md`, the gate skips with `cannot-read-structure-md`).
+
+**Unsafe paths are withheld, not printed.** `affected_paths`, the `--paths`
+argument and the paths listed in the message pass only through the path
+allowlist (ASCII letters, digits, `_ . -`, `/`-separated, no `..`, not
+absolute). A path that fails is never interpolated into the message or the
+mapper prompt; the message states how many were withheld and
+`withheld_paths` / `withheld_count` carry them for inspection. A directory with
+a non-ASCII or space-containing name is withheld and counted rather than
+dropped silently. If no safe path remains, `auto-remap` does not spawn the
+mapper. See [`verify codebase-drift`](../CLI-TOOLS.md#verify-codebase-drift-structural-drift-of-the-codebase-map-2003-5134).
 
 **Non-blocking guarantee:** any internal failure (missing STRUCTURE.md,
 git errors, mapper spawn failure) logs a single line and the phase
 continues. Drift detection cannot fail verification.
 
 **Requirements:**
-- REQ-DRIFT-01: System MUST detect the four drift categories from `git diff
+- REQ-DRIFT-01: System MUST detect the six drift categories from `git diff
   --name-status last_mapped_commit..HEAD`
 - REQ-DRIFT-02: Action fires only when element count ≥ `workflow.drift_threshold`
 - REQ-DRIFT-03: `warn` action MUST NOT spawn any agent
@@ -2929,6 +2964,37 @@ With `features.global_learnings: true`, phase completion runs the extraction for
 **Configuration:** `workflow.tdd_mode`
 **Reference files:** `tdd.md`, `checkpoints.md`
 
+#### RED evidence formats
+
+`check tdd-red-evidence` selects a parser by the captured report format. Node's
+built-in runner and Vitest (`tap` and `tap-flat`) share the TAP adapter; Maven
+Surefire and Failsafe share the JUnit XML adapter; `swift test` (swift-testing)
+and Python `unittest` text output have their own adapters. The command name does not
+select or bypass validation. Reports from other producers can use these same
+formats. Unsupported or malformed reports return `INVALID_RED` with
+`evidence.report_errors`; configure a supported reporter before proceeding.
+
+`src/report-parser.cts` owns the adapters and their common result contract:
+individual test identities, optional class groups, pass/fail/skip/TODO statuses,
+and report validity. A new format needs an adapter and regression evidence;
+the RED policy in `src/tdd-red-evidence.cts` stays independent of the format.
+No runner-specific TAP summary counters are required.
+
+The gate rejects incomplete plans/documents, bailouts, skipped/TODO/cancelled targets,
+and ambiguous names. Qualify repeated TAP names with their suite path, and
+repeated JUnit class names with their package, and repeated `unittest` methods
+with their `module.Class.method` id. A swift-testing target is its display name
+or its function name; repeated swift-testing names cannot be qualified and
+block GREEN. Evidence counts are individual
+tests, excluding suite-closing TAP points; a `unittest` method with failing
+subTests or a parameterized swift-testing test counts once. `evidence.matched_test` and the
+persisted `failing_test` identify the target failure rather than an unrelated
+first failure. Report freshness and whether the assertion tests the intended
+behavior still require executor inspection; the parser cannot establish them.
+
+The upstream parsers (`tap-parser` and `saxes`) ship as reproducible bundles,
+including license notices, so installed runtimes need no `node_modules`.
+
 
 ---
 
@@ -3911,7 +3977,7 @@ See [Resolve verify-command path findings](how-to/resolve-verify-command-path-fi
 
 **It costs up to three bounded git calls per boundary.** Deriving `next` from the smart-entry classifier means inheriting its git signals — `git status --porcelain`, and `git log @{u}..HEAD`. Each is timeout-bounded and swallows every error, so nothing can hang or fail because of it, but a command like `phase add` did not previously touch git at all. "Invisible to the parent command" is exact about exit code and output; it is not a claim about latency.
 
-**Known limits:** an empty `phases: []` cannot be told apart from "no `ROADMAP.md`" or "roadmap unreadable" — the `1.0` schema carries no diagnostic channel, and `planning inspect` is the surface that does. A roadmap phase marked `Deferred` is reported as `pending`, because the roadmap vocabulary has four values and this contract has three; inventing a fourth wire value would break every existing reader. `phases[]` is not milestone-scoped, so a long-running project lists every phase it has ever had.
+**Known limits:** an empty `phases: []` cannot be told apart from "no `ROADMAP.md`" or "roadmap unreadable" — the `1.0` schema carries no diagnostic channel, and `planning inspect` is the surface that does. `status` is read from the roadmap's Progress-table Status cell by its leading word (prose after it is ignored): `Complete` → `complete`, `In Progress` / `Planned` → `in_progress`, and `Not started`, `Deferred` or no recognized word → `pending`. A roadmap phase marked `Deferred` is reported as `pending`, because the roadmap vocabulary has five words and this contract has three values; inventing a fourth wire value would break every existing reader. `phases[]` is not milestone-scoped, so a long-running project lists every phase it has ever had.
 
 **Reference:** [Consume the state contract](how-to/consume-the-state-contract.md) · [Consume the planning snapshot](how-to/consume-the-planning-snapshot.md)
 
@@ -4588,6 +4654,32 @@ default location.
   different unit.
 - With `graphify` absent from `PATH` the fallback runs and the injected graph
   context is byte-identical to before.
+
+---
+
+### 5170. Gate Evidence and Verdict-Driven Exit Status
+
+**Purpose:** A gate that could not read its evidence used to behave exactly like a gate that read it and found nothing. A phase directory that failed to list, a plan that was a directory, an unreadable `COVERAGE.md` or a nested `plans/` that errored all collapsed to an empty string, an empty list or `false`, and the gate passed over content it never saw. Separately, the exit code was chosen verb by verb: `phase uat-passed` and `verify artifacts` printed a failing verdict and exited `0`, so a script that branched on `$?` shipped a failed phase (#4686). This is the third and fourth bullet of [ADR-5057](adr/5057-one-owner-per-workflow-verdict.md) §4 (epic #5056, #5170).
+
+**Behavior:**
+
+- **Unreadable is a distinct state from none.** A gate reads evidence as `found` (a value; an empty file is `found ''`), `none` (the thing authoritatively does not exist: `ENOENT`, or `ENOTDIR` because a parent is a file) or `unreadable` (it exists or may exist and could not be read: `EISDIR`, `EACCES`, `EIO`, an encoding failure, an unresolvable phase, a plan scan that did not see every plan). `none` is a legitimate answer and each gate keeps its documented policy for it; `unreadable` is never coerced to `''`, `false` or an empty list. The verdict builder for the `unreadable` arm returns a verdict typed `outcome: 'unreadable'`, so a passing verdict from that arm does not type-check. A drift guard (`lint-gate-evidence-drift`) rejects the remaining shapes the type cannot see: an empty `catch` in a gate, a tolerant reader that returns `''`, a verdict arm that passes from `unreadable`, and a gate verb that sets its own exit code.
+- **The exit code is a function of the verdict.** One total function maps the outcome to a registered code: positive verdicts `0`; a negative verdict `1` in status mode; a read-and-genuinely-empty scope `66` (`NO_INPUT`); `unreadable` `69` (`UNAVAILABLE`) in both modes. No verb picks a code. The gate's own `block` decision is untouched: policy did not change, only the outcome and the exit for the unreadable arms.
+- **Status mode and payload mode.** `phase uat-passed` and the `verify` verbs that shell callers branch on (`artifacts`, `plan-structure`, `phase-completeness`, `references`, `commits`, `key-links`) are status mode: exit `1` is a negative verdict and the JSON on stdout is still the verdict. The gates that are routed as `check <verb>`, and the three drift verbs, are payload mode.
+- **Why `check` verbs stay payload mode.** The gate dispatch (`execute-phase/steps/wave-post-gate-hooks.md` step 1, `references/loop-hook-dispatch.md`) reads `.block` from stdout and treats a non-zero exit as a command failure routed by the capability's `onError`. `capabilities/drift` declares schema-drift `blocking: true, onError: skip`; exit `1` for "blocked" would be dropped as a skippable failure. A blocking verdict is therefore a delivered answer and exits `0`; only "could not look" exits `69`, which the dispatch routes as a step-1 command failure.
+- **Callers are migrated.** The workflow and agent shell blocks that consume these verbs capture the status (`… && X_EXIT=0 || X_EXIT=$?`, safe under `set -e`), read the JSON for `0`, `1` and `66`, and treat `69` or anything else as "could not run". Fail-closed consumers (the safe-resume and TDD gates) halt with a message that is not "missing RED commit".
+
+**Declared behavior changes:**
+
+- `verify schema-drift` reads `files_modified` through the Frontmatter Module: a YAML block sequence and CRLF files now yield their files (#4562); before, only the inline array was seen and such a plan reported no drift.
+- `verify plan-structure` flags a `! grep -q 'LIT' f` negative gate whose literal also appears in the same task `<action>` (#4541).
+- A plan that exists but is empty is read: `verify artifacts` / `verify key-links` exit `66` instead of `File not found`; `verify plan-structure` reports it invalid (`1`).
+- `verify commits` outside a git work tree answers `{"error":"Not a git repository"}` with `69` instead of listing every hash as invalid.
+- `scripts/run-tests.cjs` fails a chunk whose registered tests exceed its reported results, or whose accounting inputs are missing; it no longer drops executed tests under `--test-force-exit` (#4031).
+
+**Known limits:** `checkUiPresence` is a vocabulary check over prose and reads nothing; it stays outside the evidence type. Gates whose accepted-evidence model is narrower than GSD's producers (#4692, #4867, #4957) are out of scope.
+
+**Reference:** [Gate verb exit statuses](CLI-TOOLS.md#gate-verb-exit-statuses-5170) · [Exit code reference](reference/exit-codes.md) · [Handle gate verb exit statuses](how-to/handle-gate-verb-exit-statuses.md)
 
 ---
 

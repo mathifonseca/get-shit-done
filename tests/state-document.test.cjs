@@ -403,6 +403,107 @@ describe('stateReplaceField — anchored bold form leaves prose lookalikes untou
   });
 });
 
+// #5007 (Phase 6 / ADR-4910 amendment): the bold branch above was migrated
+// off its hand-rolled `\*\*${escaped}:\*\*` regex onto `parsePlanningDoc` for
+// LOCATING the field, the same migration shape as src/phase.cts's "Depends
+// on" field (#5007). These rows pin the behaviours the migration must
+// preserve OR deliberately widen — see the inline comment on
+// stateReplaceField itself for the full rationale of each deviation from a
+// bare findField() call, and for why the write is a LOCAL full-rest-of-line
+// splice against `content` rather than a call through `setFieldValue`.
+describe('stateReplaceField — bold branch migrated onto the PlanningDoc seam (#5007)', () => {
+  // The exact bug class TRAILING_SEPARATOR_RE / setFieldValue's round-trip
+  // check guards against (#4917 finding 2): a value containing the
+  // grammar's own ` — ` separator token. Migrating this branch naively onto
+  // a bare findField()/setFieldValue() call would have made such a write
+  // silently no-op (findField finds the field, setFieldValue refuses,
+  // stateReplaceField falls through and returns null) — this pins that the
+  // local full-rest-of-line splice still writes it, untruncated. See
+  // tests/planning-document.test.cjs row 32 for why this write path is
+  // local to this module rather than a shared `setFieldValue` option.
+  test('a value containing the trailing " — " separator is written, not silently dropped', () => {
+    const input = '**Core value:** Something else';
+    const result = stateReplaceField(input, 'Core value', 'Ship the seam — narrow, not delete the guard');
+    assert.equal(result, '**Core value:** Ship the seam — narrow, not delete the guard');
+  });
+
+  // ROUND-TRIP REGRESSION (the corruption a code review flagged in the
+  // original allowSeparator-based migration, confirmed by direct
+  // reproduction before this fix): the value written above must also read
+  // back CORRECTLY through the REAL production read path for this field —
+  // `stateExtractField`'s own regex, `(.+)` to end of line, which does NOT
+  // split on ` — ` the way `parseBoldFieldLine` does. Before this fix, the
+  // write was byte-correct but nothing verified the read side; this closes
+  // that gap for the actual call path STATE.md fields are read through.
+  test('a separator-containing value round-trips losslessly through the real read path (stateExtractField)', () => {
+    const input = '**Current Phase:** 1';
+    const written = stateReplaceField(input, 'Current Phase', '1 — COMPLETE');
+    assert.equal(written, '**Current Phase:** 1 — COMPLETE');
+    assert.equal(stateExtractField(written, 'Current Phase'), '1 — COMPLETE');
+  });
+
+  // Case-insensitive label lookup is preserved (not findField's exact
+  // match) — mirrors the removed regex's `i` flag, which state.cts /
+  // state-transition.cts's explicit case-variant fallback-call pairs
+  // ('Last Activity' / 'Last activity') depend on SOME lookup succeeding
+  // regardless of which spelling is actually present in the document.
+  test('label lookup stays case-insensitive: a lower-cased fieldName still matches an upper-cased label', () => {
+    const input = '**Status:** Ready to execute';
+    const result = stateReplaceField(input, 'status', 'Executing Phase 5');
+    assert.equal(result, '**Status:** Executing Phase 5');
+  });
+
+  // Intentional, precedented widening (same as the "Depends on" migration,
+  // src/phase.cts, #5007): BOLD_FIELD_RE recognizes BOTH bold-placement
+  // spellings, so `**Label**: value` (colon outside) now also matches,
+  // where the removed regex recognized only `**Label:**` (colon inside)
+  // and this form matched NEITHER the bold nor the plain pattern before
+  // (the plain pattern requires the line to start with the bare label
+  // text, not `**`) — so it was previously a silent no-op.
+  test('the colon-outside bold placement (**Label**: value) now also matches (widening, was previously a no-op)', () => {
+    const input = '**Status**: Ready to execute';
+    const result = stateReplaceField(input, 'Status', 'Executing Phase 5');
+    assert.equal(result, '**Status**: Executing Phase 5');
+  });
+
+  // Parity with the removed regex's unconditional-clobber contract: the
+  // OLD `joinFieldReplacement` call always discarded the entire captured
+  // tail (both what the seam calls valueSpan AND trailingSpan) and replaced
+  // it wholesale — there was never a "preserve a hand-written trailing
+  // annotation" behaviour on this branch to preserve. `allowSeparator`'s
+  // full-rest-of-line write reproduces that: any pre-existing trailing
+  // annotation on the field's line is replaced, not kept.
+  test('a pre-existing trailing annotation on the field line is replaced, matching the prior clobber-whole-tail contract', () => {
+    const input = '**Plans:** short — a hand-written annotation';
+    const result = stateReplaceField(input, 'Plans', 'brand new value');
+    assert.equal(result, '**Plans:** brand new value');
+  });
+
+  // The seam's own missing-separator normalization (joinFieldReplacement's
+  // documented behaviour, preserved via the migrated branch's own
+  // `needsSeparator` check) still applies: a zero-gap bold field gains
+  // exactly one inserted space.
+  test('a zero-gap bold field (**Status:**value, no space) still gains exactly one inserted separator space', () => {
+    const input = '**Status:**value';
+    const result = stateReplaceField(input, 'Status', 'new value');
+    assert.equal(result, '**Status:** new value');
+  });
+
+  // The seam excludes fenced code blocks and frontmatter from boldField
+  // scanning (parseBoldFieldLine never fires inside either) — the removed
+  // regex had no such awareness and would have matched and destructively
+  // rewritten a `**Status:**` occurrence anywhere, including inside a
+  // fenced block. This is a narrowing in the SAME direction as #4243's
+  // prose-lookalike fix above (never match content that only LOOKS like a
+  // field), not a regression: no STATE.md writer emits real fields inside
+  // a fenced block.
+  test('a bold-field lookalike inside a fenced code block is not a write target (seam fence-awareness, narrower than the removed regex)', () => {
+    const input = ['```', '**Status:** example markdown, not a real field', '```', ''].join('\n');
+    const result = stateReplaceField(input, 'Status', 'Executing Phase 5');
+    assert.equal(result, null, 'no real field exists outside the fence, so this must be an honest no-op');
+  });
+});
+
 describe('stateExtractField (#2880)', () => {
   test('extracts from a two-cell row', () => {
     const input = '| Current Phase | 3 |';

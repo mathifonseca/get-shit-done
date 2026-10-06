@@ -18,6 +18,9 @@ const fs = require('fs');
 const path = require('path');
 
 const VERIFY_WORK = path.join(__dirname, '..', 'gsd-core', 'workflows', 'verify-work.md');
+const SHARED_STEP = path.join(__dirname, '..', 'gsd-core', 'workflows', 'execute-phase', 'steps', 'verify-phase-goal.md');
+// The verify-work regeneration arm (#5118): the sentence that opens it.
+const STALE_ARM_ANCHOR = "Run the owner's route — the ONE verification action — here when `VERIFICATION_ROUTE` is";
 
 describe('verify-work.md — auto-transition after UAT passes with 0 issues', () => {
   test('workflow reads transition.md when issues == 0 and security gate cleared', () => {
@@ -108,9 +111,10 @@ describe('verify-work.md — auto-transition after UAT passes with 0 issues', ()
     assert.ok(setPassedIdx < predicateIdx, 'verification must be canonicalized before the required predicate runs');
   });
 
+  // #5118: the stale arm is keyed on the owner's route, not the status word.
   test('stale verification blocks before phase transition', () => {
     const content = fs.readFileSync(VERIFY_WORK, 'utf-8');
-    const staleIdx = content.indexOf('If `PHASE_VERIFICATION_STATUS` is `stale`');
+    const staleIdx = content.indexOf(STALE_ARM_ANCHOR);
     const predicateIdx = content.indexOf('PHASE_COMPLETE=$(gsd_run phase uat-passed "{phase}" --require-verification)');
     const transitionIdx = content.indexOf('transition.md');
 
@@ -140,7 +144,8 @@ describe('verify-work.md — canonicalize flip is gated by the UAT predicate (#4
   test('canonicalize flips to passed only when the uat-passed predicate reports passed (#4663)', () => {
     const content = fs.readFileSync(VERIFY_WORK, 'utf-8');
     const humanNeededIdx = content.indexOf('if [ "$VERIFICATION_STATUS_VALUE" = "human_needed" ]; then');
-    const precheckIdx = content.indexOf('UAT_PRECHECK=$(gsd_run phase uat-passed "{phase}" --uat-only 2>/dev/null)');
+    // #5118: stderr is kept (no 2>/dev/null) — a hard error must surface.
+    const precheckIdx = content.indexOf('UAT_PRECHECK=$(gsd_run phase uat-passed "{phase}" --uat-only)');
     const flipGuardIdx = content.indexOf('if [ "$UAT_PRECHECK_PASSED" = "true" ]; then');
     const setPassedIdx = content.indexOf('gsd_run query frontmatter.set "$VERIFICATION_FILE" --field status --value passed');
 
@@ -153,7 +158,7 @@ describe('verify-work.md — canonicalize flip is gated by the UAT predicate (#4
 
   test('the canonicalize pre-check runs uat-passed without --require-verification (#4663)', () => {
     const content = fs.readFileSync(VERIFY_WORK, 'utf-8');
-    const precheckIdx = content.indexOf('UAT_PRECHECK=$(gsd_run phase uat-passed "{phase}" --uat-only 2>/dev/null)');
+    const precheckIdx = content.indexOf('UAT_PRECHECK=$(gsd_run phase uat-passed "{phase}" --uat-only)');
     const flaggedIdx = content.indexOf('PHASE_COMPLETE=$(gsd_run phase uat-passed "{phase}" --require-verification)');
 
     assert.ok(precheckIdx !== -1, 'the --uat-only pre-check must exist');
@@ -271,17 +276,17 @@ describe('bug #3381: verify-work forwards workstream context', () => {
     // After #3797 architectural fix, callsites use gsd_run
     assert.match(
       workflow,
-      /gsd_run query init\.verify-work "\$\{PHASE_ARG\}" \$\{GSD_WS\}/,
+      /gsd_run query init\.verify-work "\$\{PHASE_ARG\}" \$\{GSD_WS:\+--ws=\$\{GSD_WS##\* \}\}/,
       'init.verify-work must receive GSD_WS so phase_dir resolves in workstreams',
     );
     assert.match(
       workflow,
-      /gsd_run query phase\.mvp-mode "\$\{phase_number\}" \$\{GSD_WS\} --pick active/,
+      /gsd_run query phase\.mvp-mode "\$\{phase_number\}" \$\{GSD_WS:\+--ws=\$\{GSD_WS##\* \}\} --pick active/,
       'phase.mvp-mode must receive GSD_WS so roadmap mode is workstream-scoped',
     );
     assert.match(
       workflow,
-      /gsd_run query roadmap\.get-phase "\$\{phase_number\}" \$\{GSD_WS\} --pick goal/,
+      /gsd_run query roadmap\.get-phase "\$\{phase_number\}" \$\{GSD_WS:\+--ws=\$\{GSD_WS##\* \}\} --pick goal/,
       'roadmap.get-phase must receive GSD_WS so goals are workstream-scoped',
     );
   });
@@ -294,13 +299,18 @@ describe('bug #3381: verify-work forwards workstream context', () => {
 // the only remedy is re-running the verifier. /gsd-verify-work never rewrites
 // VERIFICATION.md, so advising it from its own stale block is an advice loop.
 describe('verify-work.md — stale stop routes to the verifier (#4682)', () => {
+  // #5118: the stale arm runs the ONE regeneration step execute-phase runs
+  // (execute-phase/steps/verify-phase-goal.md, which dispatches gsd-verifier)
+  // instead of an inline second copy of the verifier spawn.
   test('the stale stop instructs re-running the verifier, not verify-work (#4682)', () => {
     const content = fs.readFileSync(VERIFY_WORK, 'utf-8');
-    const staleIdx = content.indexOf('If `PHASE_VERIFICATION_STATUS` is `stale`');
+    const staleIdx = content.indexOf(STALE_ARM_ANCHOR);
     assert.ok(staleIdx !== -1, 'the stale stop must exist');
-    const block = content.slice(staleIdx, staleIdx + 1600);
+    const block = content.slice(staleIdx, content.indexOf('PHASE_COMPLETE=$(gsd_run phase uat-passed'));
 
-    assert.match(block, /gsd-verifier/, 'the stale stop must route to the gsd-verifier agent');
+    assert.match(block, /execute-phase\/steps\/verify-phase-goal\.md/, 'the stale stop must run the shared regeneration step');
+    const step = fs.readFileSync(path.join(__dirname, '..', 'gsd-core', 'workflows', 'execute-phase', 'steps', 'verify-phase-goal.md'), 'utf-8');
+    assert.match(step, /subagent_type="gsd-verifier"/, 'the shared step dispatches the gsd-verifier agent');
     assert.match(block, /verification\.status/, 'it must re-check verification.status afterwards');
     assert.doesNotMatch(
       block, /`\/gsd:verify-work \{phase\}` — re-run verification/,
@@ -308,3 +318,181 @@ describe('verify-work.md — stale stop routes to the verifier (#4682)', () => {
     );
   });
 });
+
+// ── #5118 review F1 — a `missing` report must not dispatch the regeneration
+// on an unexecuted phase; the shared step loads the ROADMAP goal explicitly ──
+describe('verify-work.md — the regeneration arm is guarded on a phase that can be verified (#5118)', () => {
+  const content = fs.readFileSync(VERIFY_WORK, 'utf-8');
+  const armIdx = content.indexOf(STALE_ARM_ANCHOR);
+  const arm = content.slice(armIdx, content.indexOf('PHASE_COMPLETE=$(gsd_run phase uat-passed'));
+
+  test('IMPLEMENTATION_COMPLETE is read from the verify-work init bundle before the arm', () => {
+    const readIdx = content.indexOf("IMPLEMENTATION_COMPLETE=$(printf '%s' \"$INIT\" | jq -r '.phase_completion.implementation_complete // false')");
+    assert.ok(readIdx !== -1, 'the phase_completion.implementation_complete field must be read from $INIT');
+    assert.ok(readIdx < armIdx, 'it must be read before the arm that uses it');
+  });
+
+  test('the arm fires for stale, or for missing only once every plan has a SUMMARY', () => {
+    const head = arm.slice(0, arm.indexOf('```bash'));
+    assert.match(head, /`PHASE_VERIFICATION_STATUS` is `stale`/, 'stale regenerates');
+    assert.match(head, /it is `missing` and `IMPLEMENTATION_COMPLETE` is `true`/, 'missing regenerates only on an executed phase');
+    assert.match(head, /A `missing` report on a phase that is NOT fully executed does NOT\s+dispatch the step/, 'an unexecuted phase does not dispatch the step');
+    assert.match(head, /falls? through to the completion predicate|fall through to the completion predicate/, 'the unexecuted case falls through to the predicate');
+  });
+});
+
+describe('verify-phase-goal.md — the ROADMAP goal is loaded explicitly (#5118)', () => {
+  const step = fs.readFileSync(SHARED_STEP, 'utf-8');
+
+  test('PHASE_GOAL is resolved by roadmap.get-phase --pick goal', () => {
+    assert.match(step, /PHASE_GOAL=\$\(gsd_run query roadmap\.get-phase "\$\{PHASE_NUMBER\}"[^\n]*--pick goal\)/);
+  });
+
+  test('the verifier prompt names {PHASE_GOAL}, not a goal the model must resolve', () => {
+    assert.match(step, /Phase goal: \{PHASE_GOAL\}/);
+    assert.doesNotMatch(step, /\{goal from ROADMAP\.md\}/);
+  });
+});
+
+// ── #5118 review F1 — CLI-level route table: `missing` on an unexecuted phase
+// vs an executed one vs `stale`, and the init field the arm reads ──────────
+describe('verification route table and the init field the regeneration arm keys on (#5118)', () => {
+  const { runGsdTools, createTempGitProject, cleanup } = require('./helpers.cjs');
+  const { GIT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+  const { execFileSync } = require('child_process');
+
+  function initBundle(projectDir) {
+    const res = runGsdTools(['init', 'verify-work', '1'], projectDir);
+    assert.ok(res.success, `init verify-work must run: ${res.error}`);
+    let out = res.output;
+    if (out.startsWith('@file:')) out = fs.readFileSync(out.slice('@file:'.length).trim(), 'utf-8');
+    return JSON.parse(out);
+  }
+
+  function statusJson(projectDir, phaseDir) {
+    const res = runGsdTools(['verification', 'status', phaseDir], projectDir);
+    assert.ok(res.success, `verification status must run: ${res.error}`);
+    return JSON.parse(res.output);
+  }
+
+  function phaseFixture(t, { summarized }) {
+    const projectDir = createTempGitProject();
+    t.after(() => cleanup(projectDir));
+    const phaseDir = path.join(projectDir, '.planning', 'phases', '01-foo');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, '01-01-PLAN.md'), '# Plan\n');
+    if (summarized) fs.writeFileSync(path.join(phaseDir, '01-01-SUMMARY.md'), '# Summary\n');
+    return { projectDir, phaseDir };
+  }
+
+  test('missing report, phase NOT executed: route execute-phase but implementation_complete is false (no dispatch)', (t) => {
+    const { projectDir, phaseDir } = phaseFixture(t, { summarized: false });
+    const status = statusJson(projectDir, phaseDir);
+    assert.strictEqual(status.status, 'missing');
+    assert.strictEqual(status.route, 'execute-phase');
+    assert.strictEqual(initBundle(projectDir).phase_completion.implementation_complete, false);
+  });
+
+  test('missing report, phase executed: route execute-phase and implementation_complete is true (dispatch)', (t) => {
+    const { projectDir, phaseDir } = phaseFixture(t, { summarized: true });
+    const status = statusJson(projectDir, phaseDir);
+    assert.strictEqual(status.status, 'missing');
+    assert.strictEqual(status.route, 'execute-phase');
+    assert.strictEqual(initBundle(projectDir).phase_completion.implementation_complete, true);
+  });
+
+  test('stale report: route execute-phase and implementation_complete is true (dispatch)', (t) => {
+    const { projectDir, phaseDir } = phaseFixture(t, { summarized: true });
+    const declared = ['.planning/phases/01-foo/01-01-PLAN.md', '.planning/phases/01-foo/01-01-SUMMARY.md'];
+    const fp = runGsdTools(['verification', 'fingerprint', phaseDir, ...declared], projectDir);
+    assert.ok(fp.success, `fingerprint must succeed: ${fp.error}`);
+    const parsed = JSON.parse(fp.output);
+    fs.writeFileSync(
+      path.join(phaseDir, '01-VERIFICATION.md'),
+      `---\nstatus: passed\ncovered_files:\n${parsed.covered_files.map((f) => `  - ${f}`).join('\n')}\ncovered_digest: "${parsed.covered_digest}"\n---\n`,
+    );
+    execFileSync('git', ['add', '-A'], { cwd: projectDir, timeout: GIT_TIMEOUT_MS });
+    execFileSync('git', ['commit', '-q', '-m', 'seed'], { cwd: projectDir, timeout: GIT_TIMEOUT_MS });
+    assert.strictEqual(statusJson(projectDir, phaseDir).status, 'passed', 'sanity: fresh');
+    fs.writeFileSync(path.join(phaseDir, '01-01-SUMMARY.md'), '# Summary changed\n');
+    const status = statusJson(projectDir, phaseDir);
+    assert.strictEqual(status.status, 'stale');
+    assert.strictEqual(status.route, 'execute-phase');
+    assert.strictEqual(initBundle(projectDir).phase_completion.implementation_complete, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #5170 (Phase 8 of epic #5056): exit-status-aware capture of `phase uat-passed`.
+//
+// `phase uat-passed` now exits 1 when its verdict is "not passed" (JSON on stdout
+// unchanged), so the workflow's capture must treat exit 0 and exit 1-with-JSON as
+// VERDICTS and everything else as "could not run". The capture is written to
+// survive an agent shell running under `set -e`: a verdict of exit 1 must not
+// abort the script. Each documented capture is extracted from verify-work.md and
+// run under bash with `set -e`, a stub `gsd_run`, and the statuses the CLI can
+// produce: 0 (passed), 1 (not passed), 1 with nothing on stdout (an error()), 69
+// (UNAVAILABLE, could not look) and 2.
+// ---------------------------------------------------------------------------
+{
+  const { skipUnless } = require('./helpers/bash-probe.cjs');
+  const { span: docSpan, runBash } = require('./helpers/doc-bash-span.cjs');
+
+  const SKIP = skipUnless('bash', 'jq');
+
+  /** The lines of verify-work.md from the one starting with `from` through the one starting with `through`. */
+  const span = (from, through) => docSpan('gsd-core/workflows/verify-work.md', from, through);
+
+  const CAPTURES = [
+    {
+      name: 'the human_needed UAT precheck',
+      lines: () => span('UAT_PRECHECK=$(gsd_run phase uat-passed', 'UAT_PRECHECK_PASSED='),
+      passedVar: 'UAT_PRECHECK_PASSED',
+    },
+    {
+      name: 'the phase-completion predicate',
+      lines: () => span('PHASE_COMPLETE=$(gsd_run phase uat-passed', 'PHASE_COMPLETE_PASSED='),
+      passedVar: 'PHASE_COMPLETE_PASSED',
+    },
+  ];
+
+  const run = (capture, { stdout, rc }) => runBash(capture.lines(), { stdout, rc }, {
+    probe: `printf 'PASSED=%s\\n' "$${capture.passedVar}"`,
+  });
+
+  for (const capture of CAPTURES) {
+    describe(`${capture.name} (bash, set -e, stub gsd_run)`, { skip: SKIP }, () => {
+      test('exit 0 with passed:true is a verdict and is read', () => {
+        const r = run(capture, { stdout: '{"passed":true,"blockers":[]}', rc: 0 });
+        assert.equal(r.status, 0, r.stderr);
+        assert.match(r.stdout, /^PASSED=true$/m);
+      });
+
+      test('exit 1 with passed:false JSON is a verdict: it is read and the script continues', () => {
+        const r = run(capture, { stdout: '{"passed":false,"blockers":["UAT incomplete"]}', rc: 1 });
+        assert.equal(r.status, 0, `a negative verdict must not abort under set -e: ${r.stderr}`);
+        assert.match(r.stdout, /^PASSED=false$/m);
+      });
+
+      test('exit 1 with nothing on stdout is an error(): the workflow aborts and says it could not run', () => {
+        const r = run(capture, { stdout: '', rc: 1 });
+        assert.equal(r.status, 1);
+        assert.match(r.stderr, /phase uat-passed could not run \(exit 1\)/);
+        assert.ok(!/^PASSED=/m.test(r.stdout), 'nothing may be read after the abort');
+      });
+
+      test('exit 69 (could not look) aborts even though JSON was printed', () => {
+        const r = run(capture, { stdout: '{"passed":true}', rc: 69 });
+        assert.equal(r.status, 1);
+        assert.match(r.stderr, /phase uat-passed could not run \(exit 69\)/);
+        assert.ok(!/^PASSED=/m.test(r.stdout), 'a "passed" in the JSON of an unavailable run must not be read');
+      });
+
+      test('any other non-zero status is a command failure (limit+1 of the verdict range)', () => {
+        const r = run(capture, { stdout: '{"passed":false}', rc: 2 });
+        assert.equal(r.status, 1);
+        assert.match(r.stderr, /could not run \(exit 2\)/);
+      });
+    });
+  }
+}

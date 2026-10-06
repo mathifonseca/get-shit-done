@@ -32,6 +32,8 @@ import {
   toWorkstreamSlug,
   assertValidActiveWorkstreamName,
   isValidActiveWorkstreamName,
+  isReservedWorkstreamName,
+  reservedWorkstreamNameMessage,
   INVALID_ACTIVE_WORKSTREAM_NAME_MESSAGE,
 } from './workstream-name-policy.cjs';
 import { formatGsdSlash, resolveRuntime } from './runtime-slash.cjs';
@@ -69,6 +71,9 @@ function migrateToWorkstreams(cwd: string, workstreamName: string): MigrateResul
     assertValidActiveWorkstreamName(workstreamName, 'Invalid workstream name for migration');
   } catch {
     throw new Error('Invalid workstream name for migration');
+  }
+  if (isReservedWorkstreamName(workstreamName)) {
+    throw new Error(reservedWorkstreamNameMessage(workstreamName));
   }
 
   const baseDir = planningRoot(cwd);
@@ -119,6 +124,9 @@ function cmdWorkstreamCreate(cwd: string, name: string | null | undefined, optio
   const slug = toWorkstreamSlug(name);
   if (!slug) {
     error('Invalid workstream name — must contain at least one alphanumeric character');
+  }
+  if (isReservedWorkstreamName(slug)) {
+    error(reservedWorkstreamNameMessage(slug));
   }
 
   const baseDir = planningRoot(cwd);
@@ -359,8 +367,11 @@ function cmdWorkstreamSet(cwd: string, name: string | null | undefined, raw: boo
     return;
   }
 
-  if (!isValidActiveWorkstreamName(name)) {
-    output({ active: null, error: 'invalid_name', message: 'Workstream name must be alphanumeric, hyphens, underscores, or dots' }, raw, undefined);
+  if (!isValidActiveWorkstreamName(name) || isReservedWorkstreamName(name)) {
+    const message = isReservedWorkstreamName(name)
+      ? reservedWorkstreamNameMessage(name)
+      : 'Workstream name must be alphanumeric, hyphens, underscores, or dots';
+    output({ active: null, error: 'invalid_name', message }, raw, undefined);
     return;
   }
 

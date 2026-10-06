@@ -786,7 +786,7 @@ export function iterateBullets(sectionText: string): BulletItem[] {
  */
 export function updateBullet(
   content: string,
-  match: (bulletText: string, rawLine: string) => boolean,
+  match: (bulletText: string, rawLine: string, lineIndex: number) => boolean,
   transform: (rawLine: string) => string,
 ): string {
   if (typeof content !== 'string' || content.length === 0) return content;
@@ -868,13 +868,52 @@ export function updateBullet(
       }
     }
 
-    if (bulletText !== null && match(bulletText, rawLine)) {
+    if (bulletText !== null && match(bulletText, rawLine, i)) {
       const newLine = transform(rawLine);
       if (typeof newLine !== 'string') return content;
       return content.slice(0, offset) + newLine + content.slice(offset + rawLine.length);
     }
 
     offset += rawLine.length + 1;
+  }
+
+  return content;
+}
+
+// ─── updateHeading ────────────────────────────────────────────────────────────
+
+/**
+ * Rewrite the physical line of the FIRST ATX heading (outside fenced code)
+ * accepted by `match` — the heading analogue of `updateBullet` (ADR-5057 §6,
+ * Phase 13, #5217). Heading discovery is `tokenizeHeadings`' (the one fence
+ * state machine for headings); this function adds only the splice.
+ *
+ * `rawLine` (second argument to `match`, the only argument to `transform`) is
+ * the UNMODIFIED physical line between `\n` separators, so on a CRLF document
+ * its trailing `\r` is included and every untouched byte — including every
+ * other line's own terminator — is copied from `content` verbatim. `lineIndex`
+ * is the 0-based physical line index, the same indexing as
+ * `content.split('\n')`, so a caller holding a pre-computed line-indexed plan
+ * can disambiguate two headings with identical text.
+ *
+ * Bounded no-op: no accepted heading, or `transform` returning a non-string,
+ * returns `content` unchanged.
+ */
+export function updateHeading(
+  content: string,
+  match: (heading: HeadingToken, rawLine: string, lineIndex: number) => boolean,
+  transform: (rawLine: string) => string,
+): string {
+  if (typeof content !== 'string' || content.length === 0) return content;
+
+  for (const heading of tokenizeHeadings(content)) {
+    const newlineAt = content.indexOf('\n', heading.offset);
+    const lineEnd = newlineAt === -1 ? content.length : newlineAt;
+    const rawLine = content.slice(heading.offset, lineEnd);
+    if (!match(heading, rawLine, heading.line - 1)) continue;
+    const newLine = transform(rawLine);
+    if (typeof newLine !== 'string') return content;
+    return content.slice(0, heading.offset) + newLine + content.slice(lineEnd);
   }
 
   return content;
@@ -1125,6 +1164,49 @@ export function deleteSection(
   const collapsedBefore = before.replace(/(?:\r\n|\n){3,}$/, (m) => (m.includes('\r\n') ? '\r\n\r\n' : '\n\n'));
 
   return collapsedBefore + after;
+}
+
+// ─── extractXmlTagBodies ──────────────────────────────────────────────────────
+
+// #2372: scanned-tag set must match the planner-canonical surfaces where a D-NN citation
+// is meaningful. `<objective>`/`<tasks>`/`<task>`/`<action>` are the historical core. The
+// planner is also explicitly told (plan-phase.md) to cite decisions in `<read_first>`,
+// `<behavior>`, `<verify>`, `<acceptance_criteria>`, and `<done>` — those are scanned too,
+// so the decision-coverage gate does not report a false gap when a decision is cited in any of them.
+//
+// Implementation: per-tag matching, NOT a single wide alternation. A single alternation
+// like `<(?:a|b|c)>...<\/(?:a|b|c)>` halts the outer tag's body capture at any inner tag
+// in the set, dropping any citation in the outer tag's prefix prose — e.g.
+// `<action>per D-05 <verify>npm test</verify></action>` would lose D-05 because `<verify>`
+// halts the `<action>` body before the citation. Per-tag matching avoids this: each tag's
+// body terminates only at its OWN closing tag, so `<verify>` inside `<action>` is absorbed
+// into `<action>`'s body (D-05 caught) AND `<verify>` is matched separately on its own pass.
+// Each per-tag regex keeps the ReDoS-safe negative-lookahead tempering (#2128).
+export const XML_DECISION_TAG_NAMES = ['objective', 'tasks', 'task', 'action', 'read_first', 'behavior', 'verify', 'acceptance_criteria', 'done'] as const;
+
+function buildXmlDecisionTagRegex(tagName: string): RegExp {
+  // Per-tag: body tempering stops only at the SAME tag's reopening or closing — other
+  // scanned tags pass through as text into this body. Non-greedy `*?` to first close.
+  return new RegExp(
+    `<${tagName}(?:\\s[^>]{0,1000})?>((?:(?!<${tagName}[\\s>])[\\s\\S])*?)<\\/${tagName}>`,
+    'gi',
+  );
+}
+
+/**
+ * The bodies of every planner-canonical XML tag (`XML_DECISION_TAG_NAMES`) in `text`,
+ * joined by `\n`. Each tag's body ends only at its OWN closing tag, so an inner scanned tag
+ * is absorbed into the outer body AND matched on its own pass.
+ */
+export function extractXmlTagBodies(text: string): string {
+  const parts: string[] = [];
+  for (const tagName of XML_DECISION_TAG_NAMES) {
+    const re = buildXmlDecisionTagRegex(tagName);
+    for (const match of text.matchAll(re)) {
+      if (match[1]) parts.push(match[1]);
+    }
+  }
+  return parts.join('\n');
 }
 
 // Consumers: require('../gsd-core/bin/lib/markdown-sectionizer.cjs')

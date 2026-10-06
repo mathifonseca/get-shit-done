@@ -32,6 +32,7 @@ Language versions: [English](README.md) · [Português (pt-BR)](pt-BR/README.md)
 - [Resolve a contract-drift finding](how-to/resolve-contract-drift-findings.md) — bring an agent's completion contract, read-tag gate, or deleted-file test reference back into agreement with the registry
 - [Resolve unreachable-guard findings](how-to/resolve-unreachable-guard-findings.md) — fix shell guards whose fallback arm cannot run, and tell "nothing to report" apart from "could not look"
 - [Declare a hook's crash policy](how-to/declare-a-hook-crash-policy.md) — terminate a GSD hook with `allow`/`deny`/`crash`, declare its `ON_CRASH` policy, and tell a hook's own crash apart from a check that could not run at all
+- [Handle gate verb exit statuses](how-to/handle-gate-verb-exit-statuses.md) — capture a gate verb's status safely under `set -e` and tell a failing verdict from a gate that could not look
 - [Resolve a skipped capability probe](how-to/resolve-a-skipped-capability-probe.md) — act on a coverage gate that held your phase for an unestablished scope, or a planning checkpoint that reported `skipped` instead of a verdict
 - [Diagnose which gsd-tools is running](how-to/diagnose-a-foreign-gsd-tools.md) — tell this package's tool apart from the predecessor's colliding binary and from a gsd-core too old to identify itself
 - [Resolve an ESLint glob-coverage finding](how-to/resolve-eslint-coverage-findings.md) — bring a source file that matches no lint rule under coverage, or record a reasoned exemption
@@ -40,6 +41,8 @@ Language versions: [English](README.md) · [Português (pt-BR)](pt-BR/README.md)
 - [Read the statusline freshness marker](how-to/read-the-statusline-freshness-marker.md) — turn on `state ~N commits back`, and tell "STATE.md is fresh" apart from "freshness could not be established"
 - [Consume the planning snapshot](how-to/consume-the-planning-snapshot.md) — read `planning inspect` from a dashboard or harness, and tell "nothing to report" apart from "could not look"
 - [Read CI timeout budget signals](how-to/read-ci-timeout-signals.md) — find the near-cap warning on a run, read the accumulated `tests/ci-timeout-budget-history.jsonl` trend, and know which lever (cap, shard balance, shard-1 contents) a repeatedly-near-cap lane calls for
+- [Regenerate the win32 timing table](how-to/regenerate-the-win32-timing-table.md) — rebuild `tests/test-timings.win32.json` from the Windows conformance shards' duration artifacts so the win32 shards stay balanced
+- [Split platform-sensitive tests out of a heavy test file](how-to/split-platform-sensitive-tests.md) — move the few tests that need a real OS into a `.platform.test.cjs` sibling so the rest of the file stops running on Windows, and fix the generator's split errors
 - [Consume the state contract](how-to/consume-the-state-contract.md) — read `.planning/state.json` from a workbench or editor extension, gate on the contract version, and tell "nothing to show" apart from "could not look"
 - [Keep planning docs out of a shared repo](how-to/keep-planning-docs-private.md) — make `.planning/` local-only, including untracking files git already tracks (the step `.gitignore` alone cannot do)
 - [Publish PRs without planning artifacts](how-to/publish-prs-without-planning-artifacts.md) — keep `.planning/` committed locally, so worktrees and `/gsd-undo` keep working, while `planning.pr_strict` keeps every planning path out of the branch you push
@@ -60,6 +63,7 @@ Language versions: [English](README.md) · [Português (pt-BR)](pt-BR/README.md)
 - [Work in parallel with workstreams](how-to/work-in-parallel-with-workstreams.md) — run independent lines of work simultaneously using workstreams
 - [Isolate work with workspaces](how-to/isolate-work-with-workspaces.md) — use workspaces to sandbox experimental or risky changes
 - [Debug a failed execution](how-to/debug-a-failed-execution.md) — diagnose and recover from broken or incomplete phase execution
+- [Recover from an invalid verification status](how-to/recover-from-an-invalid-verification-status.md) — get a phase passing again after `verification_status_invalid`, a `W030` health warning, or `phase_dir_not_found`
 - [Interpret scope-conformance warnings](how-to/interpret-scope-conformance-warnings.md) — read the advisory the worktree-wave merge emits when a plan branch commits outside its declared scope
 - [Interpret install-shadow warnings](how-to/interpret-install-shadow-warnings.md) — read the advisory GSD Core emits when a `/gsd-*` trigger is installed at both scopes and one silently wins, and tell "nothing to report" apart from "could not look"
 - [Interpret `state validate` results](how-to/interpret-state-validate-results.md) — read the `scope` reason codes and tell "nothing to report" apart from "could not look"

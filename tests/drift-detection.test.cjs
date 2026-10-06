@@ -6,7 +6,8 @@
  * GSD Tools Tests — Codebase Drift Detection (#2003)
  *
  * Unit tests for bin/lib/drift.cjs plus CLI surface via verify codebase-drift.
- * Exercises the four drift categories (new dir, barrel, migration, route),
+ * Exercises the six drift categories (new dir, barrel, migration, route,
+ * modified, deleted),
  * threshold gating, warn vs. auto-remap, last_mapped_commit round-trip,
  * config validation, mapper --paths passthrough, and graceful failure paths.
  */
@@ -122,7 +123,7 @@ describe('detectDrift — categories', () => {
       addedFiles: ['newpkg/src/thing.ts'],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: baseStructure,
+      documents: { 'STRUCTURE.md': baseStructure },
     });
     const newDirs = result.elements.filter((e) => e.category === 'new_dir');
     assert.ok(newDirs.length >= 1, 'should find at least one new directory');
@@ -137,7 +138,7 @@ describe('detectDrift — categories', () => {
       addedFiles: ['src/lib/newhelper.ts'],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: baseStructure,
+      documents: { 'STRUCTURE.md': baseStructure },
     });
     const newDirs = result.elements.filter((e) => e.category === 'new_dir');
     assert.strictEqual(
@@ -152,7 +153,7 @@ describe('detectDrift — categories', () => {
       addedFiles: ['packages/widgets/src/index.ts'],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: baseStructure,
+      documents: { 'STRUCTURE.md': baseStructure },
     });
     assert.ok(result.elements.some((e) => e.category === 'barrel'));
   });
@@ -162,7 +163,7 @@ describe('detectDrift — categories', () => {
       addedFiles: ['supabase/migrations/20240501_add_accounts.sql'],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: baseStructure,
+      documents: { 'STRUCTURE.md': baseStructure },
     });
     assert.ok(result.elements.some((e) => e.category === 'migration'));
   });
@@ -172,7 +173,7 @@ describe('detectDrift — categories', () => {
       addedFiles: ['apps/accounting/src/routes/journal.ts'],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: baseStructure,
+      documents: { 'STRUCTURE.md': baseStructure },
     });
     assert.ok(result.elements.some((e) => e.category === 'route'));
   });
@@ -182,7 +183,7 @@ describe('detectDrift — categories', () => {
       addedFiles: ['supabase/migrations/20240101_init.sql'],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: baseStructure,
+      documents: { 'STRUCTURE.md': baseStructure },
     });
     const perFile = result.elements.filter(
       (e) => e.path === 'supabase/migrations/20240101_init.sql',
@@ -203,7 +204,7 @@ describe('detectDrift — threshold gating', () => {
       ],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: '# only src/ mapped',
+      documents: { 'STRUCTURE.md': '# only src/ mapped' },
       threshold: 3,
     });
     assert.strictEqual(result.elements.length >= 2, true);
@@ -219,7 +220,7 @@ describe('detectDrift — threshold gating', () => {
       ],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: '# only src/ mapped',
+      documents: { 'STRUCTURE.md': '# only src/ mapped' },
       threshold: 3,
     });
     assert.strictEqual(result.actionRequired, true);
@@ -235,7 +236,7 @@ describe('detectDrift — threshold gating', () => {
       ],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: '# only src/ mapped',
+      documents: { 'STRUCTURE.md': '# only src/ mapped' },
       threshold: 3,
     });
     assert.strictEqual(result.actionRequired, true);
@@ -246,7 +247,7 @@ describe('detectDrift — threshold gating', () => {
       addedFiles: ['packages/a/src/index.ts', 'packages/b/src/index.ts'],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: '# only src/ mapped',
+      documents: { 'STRUCTURE.md': '# only src/ mapped' },
       threshold: 2,
     });
     assert.strictEqual(result.actionRequired, true);
@@ -264,7 +265,7 @@ describe('detectDrift — action routing', () => {
     ],
     modifiedFiles: [],
     deletedFiles: [],
-    structureMd: '# only src/ mapped',
+    documents: { 'STRUCTURE.md': '# only src/ mapped' },
     threshold: 3,
   };
 
@@ -292,7 +293,7 @@ describe('detectDrift — action routing', () => {
       addedFiles: ['packages/a/src/index.ts'],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: '# only src/ mapped',
+      documents: { 'STRUCTURE.md': '# only src/ mapped' },
       threshold: 3,
       action: 'auto-remap',
     });
@@ -398,6 +399,27 @@ describe('last_mapped_commit frontmatter', () => {
     );
   });
 
+  // Found while implementing #5105: the frontmatter is the block the one fence owner finds. The
+  // old regex missed a BOM block, so a write stacked a second block above it; it also closed on
+  // a `--- x` line, leaving the rest of the block in the body.
+  for (const [label, before] of [
+    ['a BOM before the block', '\uFEFF---\nlast_mapped_commit: aaaa\nother: keep-me\n---\n# body\n'],
+    ['a `--- x` line inside the block', '---\nlast_mapped_commit: aaaa\n--- x\nother: keep-me\n---\n# body\n'],
+  ]) {
+    test(`writeMappedCommit on ${label} rewrites that one block`, () => {
+      const file = path.join(tmp, '.planning', 'codebase', 'STRUCTURE.md');
+      fs.writeFileSync(file, before);
+      assert.strictEqual(readMappedCommit(file), 'aaaa', 'the existing value is read');
+      writeMappedCommit(file, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-04-22');
+      const content = fs.readFileSync(file, 'utf8');
+      assert.ok(content.startsWith('---\n'), `opens with the fence: ${JSON.stringify(content)}`);
+      assert.strictEqual((content.match(/^last_mapped_commit:/gm) || []).length, 1, 'exactly one block');
+      assert.strictEqual(readMappedCommit(file), 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+      assert.ok(content.includes('other: keep-me'), 'preserves other keys');
+      assert.ok(content.endsWith('# body\n'), 'the body is kept');
+    });
+  }
+
   test('readMappedCommit returns null when file missing', () => {
     assert.strictEqual(readMappedCommit('/nonexistent/path.md'), null);
   });
@@ -425,12 +447,12 @@ describe('last_mapped_commit frontmatter', () => {
 // ─── Unit: negative / defensive ──────────────────────────────────────────────
 
 describe('detectDrift — defensive paths', () => {
-  test('missing structureMd → skipped result, no throw', () => {
+  test('missing STRUCTURE.md document → skipped result, no throw', () => {
     const result = detectDrift({
       addedFiles: ['foo/bar.ts'],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: null,
+      documents: {},
     });
     assert.strictEqual(result.skipped, true);
     assert.strictEqual(result.actionRequired, false);
@@ -442,7 +464,7 @@ describe('detectDrift — defensive paths', () => {
       addedFiles: [],
       modifiedFiles: [],
       deletedFiles: [],
-      structureMd: '# structure',
+      documents: { 'STRUCTURE.md': '# structure' },
     });
     assert.strictEqual(result.elements.length, 0);
     assert.strictEqual(result.actionRequired, false);
@@ -452,7 +474,7 @@ describe('detectDrift — defensive paths', () => {
     assert.ok(Array.isArray(DRIFT_CATEGORIES));
     assert.deepStrictEqual(
       [...DRIFT_CATEGORIES].sort(),
-      ['barrel', 'migration', 'new_dir', 'route'],
+      ['barrel', 'deleted', 'migration', 'modified', 'new_dir', 'route'],
     );
   });
 });
@@ -463,7 +485,7 @@ describe('detectDrift — non-blocking guarantee', () => {
   test('never throws on malformed input', () => {
     assert.doesNotThrow(() => detectDrift({}));
     assert.doesNotThrow(() => detectDrift({ addedFiles: null }));
-    assert.doesNotThrow(() => detectDrift({ addedFiles: ['x'], structureMd: undefined }));
+    assert.doesNotThrow(() => detectDrift({ addedFiles: ['x'], documents: undefined }));
   });
 
   test('malformed input returns a skipped result (never crashes the phase)', () => {
@@ -977,8 +999,8 @@ describe('bug #619 — codebase-drift-gate resolves gsd-tools via the runtime sh
     const content = readGate();
     assert.match(
       content,
-      /DRIFT=\$\(gsd_run verify codebase-drift 2>\/dev\/null \|\| echo '\{"skipped":true,"reason":"sdk-failed"\}'\)/,
-      'drift check must call `gsd_run verify codebase-drift` with the non-blocking skip fallback',
+      /DRIFT=\$\(gsd_run verify codebase-drift 2>\/dev\/null\) && DRIFT_EXIT=0 \|\| DRIFT_EXIT=\$\?/,
+      'drift check must call `gsd_run verify codebase-drift` and capture its status (exit 69 keeps its payload; #5170)',
     );
     assert.doesNotMatch(
       content,
@@ -991,8 +1013,8 @@ describe('bug #619 — codebase-drift-gate resolves gsd-tools via the runtime sh
     const content = readGate();
     assert.match(
       content,
-      /\|\| echo '\{"skipped":true,"reason":"sdk-failed"\}'/,
-      'an internal drift-command failure must still fall through to the skip JSON',
+      /if \[ -z "\$DRIFT" \]; then DRIFT='\{"skipped":true,"reason":"sdk-failed"\}'; fi/,
+      'an internal drift-command failure that printed nothing must still fall through to the skip JSON (once, never concatenated with a payload)',
     );
   });
 
@@ -1352,7 +1374,7 @@ describe('verify codebase-drift: an absent baseline is not total drift (#3418)',
     writeMappedCommit(structure, 'deadbeef'.repeat(5), '2026-04-22');
 
     const r = runGsdTools(['verify', 'codebase-drift'], tmp);
-    assert.strictEqual(r.success, true, r.error);
+    assert.strictEqual(r.exitCode, 69, `a baseline git cannot resolve is could-not-look: UNAVAILABLE (#5170): ${r.error}`);
     const data = JSON.parse(r.output);
 
     assert.strictEqual(data.reason, 'unresolvable-mapped-commit');
@@ -1370,7 +1392,7 @@ describe('verify codebase-drift: an absent baseline is not total drift (#3418)',
     writeMappedCommit(structure, tree, '2026-04-22');
 
     const r = runGsdTools(['verify', 'codebase-drift'], tmp);
-    assert.strictEqual(r.success, true, r.error);
+    assert.strictEqual(r.exitCode, 69, `a baseline git cannot resolve is could-not-look: UNAVAILABLE (#5170): ${r.error}`);
     const data = JSON.parse(r.output);
 
     assert.strictEqual(data.reason, 'unresolvable-mapped-commit');

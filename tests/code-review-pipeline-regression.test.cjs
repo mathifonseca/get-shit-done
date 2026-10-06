@@ -29,20 +29,10 @@ const path = require('node:path');
 const fc = require('fast-check');
 const { runHook, runNode, OUTCOME } = require('./helpers/process-seam.cjs');
 const { toLegacyResult, gitOrThrow } = require('./helpers/git-fixture.cjs');
-const { PROBE_TIMEOUT_MS, GIT_TIMEOUT_MS, HOOK_FANOUT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+const { PROBE_TIMEOUT_MS, HOOK_FANOUT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const { createTempDir, createTempGitProject, cleanup, readFileNormalized } = require('./helpers.cjs');
-const {
-  foldShellContinuations,
-  findShellFencedMatches,
-} = require('./helpers/shell-doc-scan.cjs');
+const { findShellFencedMatches } = require('./helpers/shell-doc-scan.cjs');
 const os = require('node:os');
-
-/**
- * A single invocation of the external `fallow` binary's `audit`
- * subcommand against the REAL current repo tree (CI-only) -- a heavier
- * third-party tool operation distinct from any existing shared constant.
- */
-const FALLOW_AUDIT_TIMEOUT_MS = 120000;
 
 const ROOT = path.resolve(__dirname, '..');
 // HOISTED. `const` is in the temporal dead zone until its declaration executes, and a
@@ -87,7 +77,8 @@ const WORKFLOW_PATH = path.join(ROOT, 'gsd-core', 'workflows', 'code-review.md')
 const PRE_PASS_STEP_PATH = path.join(ROOT, 'gsd-core', 'workflows', 'code-review', 'steps', 'structural-pre-pass.md');
 const FIXER_PATH = path.join(ROOT, 'agents', 'gsd-code-fixer.md');
 const REVIEWER_PATH = path.join(ROOT, 'agents', 'gsd-code-reviewer.md');
-const EXECUTE_PHASE_PATH = path.join(ROOT, 'gsd-core', 'workflows', 'execute-phase.md');
+// #5118: code_review_gate lives in the shared verification step execute-phase includes.
+const SHARED_VERIFY_STEP_PATH = path.join(ROOT, 'gsd-core', 'workflows', 'execute-phase', 'steps', 'verify-phase-goal.md');
 const DISPOSITION_STEP_PATH = path.join(ROOT, 'gsd-core', 'workflows', 'execute-phase', 'steps', 'code-review-disposition.md');
 
 // ---------------------------------------------------------------------------
@@ -499,21 +490,8 @@ describe('Bug 1 — compute_file_scope SUMMARY parser', () => {
     );
   });
 
-  // #2666 docs-parity: the Tier-3 git-diff fallback must intersect with the
-  // SUMMARY scope and warn on dropped files (not only fire on zero Tier-2 hits).
-  test('#2666 docs-parity: Tier-3 intersects/warns against git diff --name-only', () => {
-    const src = fs.readFileSync(WORKFLOW_PATH, 'utf8');
-    // The shipped workflow must compute git diff --name-only AND emit a warning
-    // when the diff contains files the SUMMARY extractor did not surface.
-    assert.ok(
-      src.includes('git diff --name-only'),
-      'code-review.md must run `git diff --name-only` to cross-check the SUMMARY scope (#2666)'
-    );
-    assert.ok(
-      /warn|missing|not surfaced|did not|not in/i.test(src),
-      'code-review.md must warn when git diff contains files the SUMMARY extractor dropped (#2666)'
-    );
-  });
+  // (The #2666 cross-check docs-parity row now lives with the other diff-base rows below:
+  // the cross-check reads the evaluation-scope resolver, not a `git diff --name-only` range.)
 
   // #2666 docs-parity: the membership test must be EXACT whole-line matching
   // (grep -Fxq), not an unanchored `case` substring match — otherwise a short
@@ -870,10 +848,20 @@ describe('Bug 4 (#2352) — compute_file_scope tilde-path expansion', () => {
         /REVIEW_FILES_COUNT=1/,
         `expected only the tilde path to survive; got: ${JSON.stringify(result.stdout)}`
       );
+      // The filter NAMES each dropped path ("  - <path>" under the "Filtered N deleted files" header,
+      // #5164); only the surviving REVIEW_FILES lines may not carry it.
+      const survivors = result.stdout
+        .split('\n')
+        .filter((line) => !/^Filtered \d+ deleted files/.test(line) && !/^ {2}- /.test(line));
       assert.doesNotMatch(
-        result.stdout,
+        survivors.join('\n'),
         /this\/relative\/path\/does-not-exist\.md/,
         'the missing ordinary relative path must not survive into REVIEW_FILES'
+      );
+      assert.match(
+        result.stdout,
+        /^ {2}- this\/relative\/path\/does-not-exist\.md$/m,
+        'the dropped path is named, not silently discarded'
       );
     }
   );
@@ -884,19 +872,24 @@ describe('Bug 4 (#2352) — compute_file_scope tilde-path expansion', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Shared diff-base extraction/execution helpers (Bug 5 #3191, Bug 6 #3503).
+// Diff-base / scope derivation (Bug 5 #3191, Bug 6 #3503/#3995 -> #5164, epic
+// #5056 Phase 7).
 //
-// The workflow computes "the phase's base commit" in three independent bash
-// invocations (each <step> is its own shell): the Tier-3 file-scope fallback
-// (compute_file_scope), the agent-context DIFF_BASE (spawn_reviewer), and the
-// fallow pre-pass's --changed-since base (structural-pre-pass.md).
-//
-// Behavioral style follows Bug 4: extract the SHIPPED bash from the workflow
-// .md files by content anchor and execute it via a real bash subprocess
-// against a git fixture — so the assertion binds the deployed text, not a
-// JS reimplementation. Running the real `git log` (not a regex shim) is what
-// makes platform-level regex holes (the #3191 macOS `\b` no-op) visible.
+// The workflow used to compute "the phase's base commit" in three independent
+// bash invocations (each <step> is its own shell): the Tier-3 file-scope
+// fallback (compute_file_scope), the agent-context DIFF_BASE (spawn_reviewer),
+// and the fallow pre-pass's --changed-since base (structural-pre-pass.md) —
+// first with a commit-subject grep that was re-fixed five times (#2989, #3191,
+// #3503, #3995), then with a hand-rolled `git log --diff-filter=A` anchor
+// repeated in each site. #5164 moves the derivation into ONE owner,
+// `gsd_run check evaluation-scope` (`rangeBase`, and the file scope itself as
+// the union of the phase's own commits' file sets), so these tests bind the
+// SHIPPED fences to that owner instead of to three copies of an anchor:
+// they extract the bash from the workflow .md files by content anchor and
+// execute it via a real bash subprocess against a git fixture.
 // ---------------------------------------------------------------------------
+
+const TOOLS_PATH = path.join(ROOT, 'gsd-core', 'bin', 'gsd-tools.cjs');
 
 // The ```bash fence containing `marker`, located after `fromIdx`.
 function fenceContaining(src, marker, fromIdx = 0) {
@@ -910,37 +903,34 @@ function fenceContaining(src, marker, fromIdx = 0) {
   return src.slice(bodyStart, fenceEnd);
 }
 
+const TIER3_RESOLVER_MARKER = 'gsd_run check evaluation-scope --phase "${PADDED_PHASE}"';
+
 // The Tier-3 derivation prefix: fence start up to the REVIEW_FILES branch.
 function extractTier3Derivation() {
   const src = readFileNormalized(WORKFLOW_PATH);
-  const fence = fenceContaining(src, '# Compute diff base from phase commits');
+  const fence = fenceContaining(src, TIER3_RESOLVER_MARKER);
   const cut = fence.indexOf('if [ ${#REVIEW_FILES[@]} -eq 0 ]');
   assert.ok(cut !== -1, 'Tier-3 fence must contain the REVIEW_FILES empty-scope branch');
   return fence.slice(0, cut);
 }
 
-// spawn_reviewer no longer derives its own DIFF_BASE (#4209 B3 fix: a second,
-// divergent recomputation there made the external reviewer lane and the
-// internal reviewer diff against different base SHAs on any re-review). It
-// now reuses the value compute_file_scope's Tier-3 derivation already
-// computed, so this is the SAME snippet as extractTier3Derivation() — kept
-// as a distinct name so T2/T5 below still read as testing spawn_reviewer's
-// contract, not just Tier 3's.
-function extractSpawnReviewerDerivation() {
-  return extractTier3Derivation();
+// The WHOLE Tier-3 fence: derivation plus the REVIEW_FILES branches that consume it.
+function extractTier3Fence() {
+  return fenceContaining(readFileNormalized(WORKFLOW_PATH), TIER3_RESOLVER_MARKER);
 }
 
 // The fallow phase-scope derivation, from the step fragment. The fragment
-// carries markdown-escaped quotes (\") in this fence — an authoring
-// artifact that survived #2994 fragmentization verbatim; the runtime agent
-// normalizes them when transcribing, so the test does the same before
-// executing. Sliced from FALLOW_SCOPE_ARGS=() (skipping the gsd-tools
-// runtime resolver line above it, which exits 1 on machines without an
-// installed gsd-tools and is orthogonal to the base-derivation under test)
-// to just before the gsd_run invocation (which needs the real binary).
+// carries markdown-escaped quotes (\") in this fence — an authoring artifact
+// that survived #2994 fragmentization verbatim; the runtime agent normalizes
+// them when transcribing, so the test does the same before executing. Sliced
+// from FALLOW_SCOPE_ARGS=() (skipping the gsd-tools runtime resolver line above
+// it, which exits 1 on machines without an installed gsd-tools and is
+// orthogonal to the base-derivation under test) to just before the gsd_run
+// invocation (which needs the real binary).
 function extractFallowDerivation() {
   const src = readFileNormalized(PRE_PASS_STEP_PATH);
-  const fence = fenceContaining(src, 'FALLOW_PHASE_START=$(git log');
+  // #5170: the resolver's status is captured into FALLOW_SCOPE_RC before its JSON is read.
+  const fence = fenceContaining(src, 'FALLOW_SCOPE_JSON=$(gsd_run check evaluation-scope');
   const scopeStart = fence.indexOf('FALLOW_SCOPE_ARGS=()');
   assert.ok(scopeStart !== -1, 'fallow fence must define FALLOW_SCOPE_ARGS=()');
   const cut = fence.indexOf('gsd_run run-with-timeout');
@@ -950,38 +940,36 @@ function extractFallowDerivation() {
 }
 
 // Execute a derivation snippet with PADDED_PHASE (and the fallow scope gate)
-// set, echoing the values it computes between sentinels so multi-line
-// PHASE_COMMITS parse cleanly.
+// set, echoing the values it computes between sentinels so multi-line values
+// parse cleanly. `gsd_run` is the workflow launcher's function, pointed at
+// this checkout's CLI.
 function runDerivation(repo, snippet, phase) {
   const script = [
+    `gsd_run() { node "${TOOLS_PATH}" "$@"; }`,
     `PADDED_PHASE=${phase}`,
-    // #3995: the derivations anchor on the phase's own directory, not a
-    // commit-subject grep — the fixture commits each phase's directory at
-    // its first scope commit.
     `PHASE_DIR=${repo}/.planning/phases/${phase}-ctx`,
+    'LAST_REVIEW_COMMIT=""',
+    'REVIEW_FILES=()',
+    'FILES_OVERRIDE=""',
     'FALLOW_SCOPE=phase',
     snippet,
-    'echo "===PHASE_START==="',
-    'printf \'%s\\n\' "$PHASE_START"',
     'echo "===DIFF_BASE==="',
-    'printf \'%s\\n\' "$DIFF_BASE"',
+    'printf \'%s\\n\' "${DIFF_BASE:-}"',
     'echo "===FALLOW_BASE==="',
-    'printf \'%s\\n\' "$FALLOW_BASE"',
+    'printf \'%s\\n\' "${FALLOW_BASE:-}"',
+    'echo "===REVIEW_FILES==="',
+    'printf \'%s\\n\' "${REVIEW_FILES[@]:-}"',
     'echo "===END==="',
   ].join('\n');
-  // Bash FAN-OUT: the extracted snippet runs `git log` plus an `echo | tail`
-  // pipe — the wrong class for `PROBE_TIMEOUT_MS` (a single short CLI
-  // probe). Same class as the observed CI failures in
-  // tests/quick-branching.test.cjs (PR #3787 run 32668773524) and
-  // tests/worktree-safety.test.cjs (`next` run 32608945654). See
-  // HOOK_FANOUT_TIMEOUT_MS in ./helpers/timeouts.cjs for the class
-  // rationale.
+  // Bash FAN-OUT: the extracted snippet runs the resolver CLI plus pipes — the
+  // wrong class for `PROBE_TIMEOUT_MS` (a single short CLI probe). See
+  // HOOK_FANOUT_TIMEOUT_MS in ./helpers/timeouts.cjs for the class rationale.
   return toLegacyResult(
     runHook('-c', [script, 'bash'], {
       interpreter: 'bash',
       cwd: repo,
       timeoutMs: HOOK_FANOUT_TIMEOUT_MS,
-    })
+    }),
   );
 }
 
@@ -991,553 +979,80 @@ function parseSentinel(stdout, name) {
   return m[1].split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
 }
 
-// ---------------------------------------------------------------------------
-// Bug 5 (#3191) — EVERY diff-base derivation must use the same anchored,
-// portable derivation.
-//
-// The workflow computes "the phase's base commit" in three independent bash
-// invocations (each <step> is its own shell): the Tier-3 file-scope fallback
-// (compute_file_scope), the agent-context DIFF_BASE (spawn_reviewer), and the
-// fallow pre-pass's --changed-since base (structural-pre-pass.md). #2989
-// anchored only the Tier-3 copy — and did so with `\b`, which is not a POSIX
-// ERE token, so on macOS (regex(3)) that grep matches NOTHING and Tier 3
-// always fails closed. The other two sites kept the original unanchored
-// `--grep="${PADDED_PHASE}"`, whose oldest substring match is routinely a
-// version-string/date commit from months before the phase existed.
-// (#3503 later replaced the anchor itself — a subject-line conventional-
-// commit scope match instead of the "[Pp]hase N" prose phrase, which GSD's
-// own commits never contain; see Bug 6. The lockstep + portability +
-// fail-closed contract THIS block verifies is unchanged.)
-//
-// Behavioral style follows Bug 4: extract the SHIPPED bash from the workflow
-// .md files by content anchor and execute it via a real bash subprocess
-// against a git fixture — so the assertion binds the deployed text, not a
-// JS reimplementation. Running the real `git log` (not a regex shim) is what
-// keeps platform-level regex holes (the #3191 macOS `\b` no-op) visible.
-// ---------------------------------------------------------------------------
-// Shared: the fixture phase directory every derivation anchors on (#3995).
-const PHASE06_PLAN_REL = path.join('.planning', 'phases', '06-ctx', '06-PLAN.md');
-
-// Shared history builder (was local to the #3503 describe; the #3995 rows
-// reuse it). Each entry is [relPath, subject, body?]; parent dirs are created.
-function buildHistory(prefix, commits) {
-  const repo = createTempGitProject(prefix);
-  const hashes = {};
-  for (const [file, message, body] of commits) {
-    fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
-    fs.writeFileSync(path.join(repo, file), `${message}\n`);
-    gitOrThrow(['add', file], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-    gitOrThrow(['commit', '-m', message, ...(body ? ['-m', body] : [])], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-    hashes[file] = gitOrThrow(['rev-parse', 'HEAD'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS }).trim();
+// One fixture for the whole block: phase 03's directory is first committed with
+// its first scope commit, preceded by earlier unrelated history and a SAME-NUMBERED
+// phase of a previous milestone under a different slug.
+function buildPhaseFixture(t, { withSummary }) {
+  const repo = createTempGitProject('gsd-5164-pipeline-');
+  t.after(() => cleanup(repo));
+  const write = (rel, content, message) => {
+    const abs = path.join(repo, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content);
+    gitOrThrow(['add', '-A'], { cwd: repo });
+    gitOrThrow(['commit', '-q', '-m', message], { cwd: repo });
+    return gitOrThrow(['rev-parse', 'HEAD'], { cwd: repo }).trim();
+  };
+  write('old/earlier.js', 'earlier\n', 'feat(02-01): earlier unrelated work');
+  const base = gitOrThrow(['rev-parse', 'HEAD'], { cwd: repo }).trim();
+  write('.planning/phases/03-ctx/03-CONTEXT.md', 'ctx\n', 'docs(03): phase context');
+  const first = write('src/one.js', 'one\n', 'feat(03-01): first phase work');
+  write('other/interleaved.js', 'x\n', 'fix(quick): somebody else, mid-phase');
+  const second = write('src/two.js', 'two\n', 'feat(03-01): second phase work');
+  if (withSummary) {
+    write(
+      '.planning/phases/03-ctx/03-01-SUMMARY.md',
+      `# Summary\n\n## Task Commits\n\n1. **Task 1: one** - \`${first}\`\n2. **Task 2: two** - \`${second}\`\n\n## Next\n`,
+      'docs(03-01): summary',
+    );
   }
-  return { repo, hashes };
+  write('src/later-phase.js', 'later\n', 'feat(04-01): a later phase');
+  return { repo, base };
 }
 
-describe('Bug 5 (#3191) — same anchored, portable phase-scope grep at all three diff-base sites', () => {
-  const SKIP_WIN32 = { skip: process.platform === 'win32' };
-
-  // Fixture: five commits whose messages exercise every false-match class
-  // from the issue — version string + date, another phase's plan whose scope
-  // number is a digit-superset, a prose "Phase N" mention in another phase's
-  // subject — plus the phase's real first scope commit and an unrelated HEAD.
-  function buildFixture(prefix, phaseCommitMessage, opts = {}) {
-    // opts.skipPhaseDir: the fail-closed row (T5) commits NO phase directory,
-    // so the directory anchor must resolve nothing.
-    const commitPhaseDir = opts.skipPhaseDir !== true;
-    const repo = createTempGitProject(prefix);
-    const phaseDir = path.join(repo, '.planning', 'phases', '06-ctx');
-    fs.mkdirSync(phaseDir, { recursive: true });
-    const commits = [
-      ['c1.txt', 'chore: bump to v2.06.0 on 2026-01-05'],
-      ['c2.txt', 'docs(60-01): unrelated phase-plan work'],
-      [commitPhaseDir ? PHASE06_PLAN_REL : 'c3.txt', phaseCommitMessage],
-      ['c4.txt', 'chore: Phase 60 cleanup'],
-      ['c5.txt', 'docs: touch README'],
-    ];
-    const hashes = {};
-    for (const [file, message] of commits) {
-      fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
-      fs.writeFileSync(path.join(repo, file), `${message}\n`);
-      gitOrThrow(['add', file], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-      gitOrThrow(['commit', '-m', message], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-      hashes[file] = gitOrThrow(['rev-parse', 'HEAD'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS }).trim();
-    }
-    return { repo, hashes };
-  }
-
-  test(
-    'T1 + T4: Tier-3 derivation matches ONLY the phase\'s real scope commit — never a digit-substring or superset hit',
-    SKIP_WIN32,
-    () => {
-      const { repo, hashes } = buildFixture('gsd-3191-tier3-', 'docs(06): capture phase context');
-      try {
-        const result = runDerivation(repo, extractTier3Derivation(), '06');
-        assert.equal(result.status, 0, `snippet exited ${result.status}; stderr=${result.stderr}`);
-        const phaseStart = parseSentinel(result.stdout, 'PHASE_START');
-        const diffBase = parseSentinel(result.stdout, 'DIFF_BASE');
-        // AC: the phase's real commits are a small minority of digit-containing
-        // commits; the derivation must resolve to an ancestor near the phase's
-        // actual first commit (c3^) — never the older v2.06.0/docs(06-01) hits.
-        assert.deepStrictEqual(
-          phaseStart,
-          [hashes[PHASE06_PLAN_REL]],
-          `Tier-3 anchor must resolve to the phase dir's first commit; got: ${JSON.stringify(phaseStart)}`
-        );
-        assert.deepStrictEqual(
-          diffBase,
-          [`${hashes[PHASE06_PLAN_REL]}^`],
-          'Tier-3 DIFF_BASE must be the phase first-commit parent'
-        );
-      } finally {
-        cleanup(repo);
-      }
-    }
-  );
-
-  test(
-    'T2: spawn_reviewer DIFF_BASE derivation uses the same anchored grep (not the bare digit)',
-    SKIP_WIN32,
-    () => {
-      const { repo, hashes } = buildFixture('gsd-3191-spawn-', 'docs(06): capture phase context');
-      try {
-        const result = runDerivation(repo, extractSpawnReviewerDerivation(), '06');
-        assert.equal(result.status, 0, `snippet exited ${result.status}; stderr=${result.stderr}`);
-        const phaseStart = parseSentinel(result.stdout, 'PHASE_START');
-        const diffBase = parseSentinel(result.stdout, 'DIFF_BASE');
-        // Pre-fix this matches c1 and c2 as well and tail -1 picks c1 — the
-        // oldest unrelated match — feeding a bogus diff_base to the reviewer
-        // agent exactly when files: is empty (the fail-closed scenario).
-        assert.deepStrictEqual(
-          phaseStart,
-          [hashes[PHASE06_PLAN_REL]],
-          `spawn_reviewer anchor must resolve to the phase dir's first commit; got: ${JSON.stringify(phaseStart)}`
-        );
-        assert.deepStrictEqual(
-          diffBase,
-          [`${hashes[PHASE06_PLAN_REL]}^`],
-          'spawn_reviewer DIFF_BASE must be the phase first-commit parent'
-        );
-      } finally {
-        cleanup(repo);
-      }
-    }
-  );
-
-  test(
-    'T3: fallow phase scope derives --changed-since from the anchored grep, never an old substring match',
-    SKIP_WIN32,
-    () => {
-      const { repo, hashes } = buildFixture('gsd-3191-fallow-', 'docs(06): capture phase context');
-      try {
-        const result = runDerivation(repo, extractFallowDerivation(), '06');
-        assert.equal(result.status, 0, `snippet exited ${result.status}; stderr=${result.stderr}`);
-        const fallowBase = parseSentinel(result.stdout, 'FALLOW_BASE');
-        // Pre-fix the unanchored grep's oldest match is the v2.06.0 commit, so
-        // FALLOW_SCOPE_ARGS resolves to --changed-since <old-unrelated-commit>
-        // and widens the structural pre-pass far beyond the phase.
-        assert.deepStrictEqual(
-          fallowBase,
-          [`${hashes[PHASE06_PLAN_REL]}^`],
-          `FALLOW_BASE must be the phase first-commit parent, got: ${JSON.stringify(fallowBase)}`
-        );
-      } finally {
-        cleanup(repo);
-      }
-    }
-  );
-
-  test(
-    'root commit: fallow phase scope uses a resolvable root SHA',
-    SKIP_WIN32,
-    () => {
-      const repo = createTempDir('gsd-4183-fallow-root-');
-      try {
-        gitOrThrow(['init', '-b', 'main'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-        gitOrThrow(['config', 'user.email', 'test@test.com'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-        gitOrThrow(['config', 'user.name', 'Test'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-        gitOrThrow(['config', 'commit.gpgsign', 'false'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-
-        const phaseFile = path.join(repo, '.planning', 'phases', '06-ctx', 'PLAN.md');
-        fs.mkdirSync(path.dirname(phaseFile), { recursive: true });
-        fs.writeFileSync(phaseFile, '# phase context\n');
-        gitOrThrow(['add', '.planning'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-        gitOrThrow(['commit', '-m', 'docs(06): initial phase context'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-        const rootSha = gitOrThrow(['rev-parse', 'HEAD'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS }).trim();
-
-        fs.writeFileSync(path.join(repo, 'index.js'), 'module.exports = 1;\n');
-        gitOrThrow(['add', 'index.js'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-        gitOrThrow(['commit', '-m', 'feat: add source'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
-
-        const result = runDerivation(repo, extractFallowDerivation(), '06');
-        assert.equal(result.status, 0, `snippet exited ${result.status}; stderr=${result.stderr}`);
-        const fallowBase = parseSentinel(result.stdout, 'FALLOW_BASE');
-        assert.deepStrictEqual(
-          fallowBase,
-          [rootSha],
-          `root-parent FALLOW_BASE regression: expected ${rootSha}, got ${JSON.stringify(fallowBase)}`,
-        );
-        assert.equal(
-          gitOrThrow(['rev-parse', '--verify', `${fallowBase[0]}^{commit}`], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS }).trim(),
-          rootSha,
-          'FALLOW_BASE must resolve to the root commit',
-        );
-
-        if (process.env.CI) {
-          const { requireFallowBinary } = require('../gsd-core/bin/lib/fallow-runner.cjs');
-          const { execTool } = require('../gsd-core/bin/lib/shell-command-projection.cjs');
-          const audit = execTool(
-            requireFallowBinary({ cwd: ROOT, envPath: '' }),
-            ['audit', '--changed-since', fallowBase[0], '--format', 'json'],
-            { cwd: repo, timeout: FALLOW_AUDIT_TIMEOUT_MS },
-          );
-          assert.ok([0, 1].includes(audit.exitCode), `fallow root audit exit=${audit.exitCode}; stderr=${audit.stderr}`);
-          console.log(`fallow-root-audit normal-exit=${audit.exitCode}`);
-        }
-      } finally {
-        cleanup(repo);
-      }
-    },
-  );
-
-  test(
-    'T5: with no genuine phase scope commit, every derivation yields NO base (fail-closed preserved)',
-    SKIP_WIN32,
-    () => {
-      const { repo } = buildFixture('gsd-3191-closed-', 'feat: scanner core', { skipPhaseDir: true }); // no committed phase dir anywhere
-      try {
-        for (const [label, snippet] of [
-          ['tier3', extractTier3Derivation()],
-          ['spawn_reviewer', extractSpawnReviewerDerivation()],
-          ['fallow', extractFallowDerivation()],
-        ]) {
-          const result = runDerivation(repo, snippet, '06');
-          assert.equal(result.status, 0, `${label} exited ${result.status}; stderr=${result.stderr}`);
-          const phaseStart = parseSentinel(result.stdout, 'PHASE_START');
-          const diffBase = parseSentinel(result.stdout, 'DIFF_BASE');
-          const fallowBase = parseSentinel(result.stdout, 'FALLOW_BASE');
-          assert.deepStrictEqual(phaseStart, [], `${label}: no phase dir committed — anchor must stay empty`);
-          assert.deepStrictEqual(diffBase, [], `${label}: DIFF_BASE must stay empty (no bogus base)`);
-          assert.deepStrictEqual(fallowBase, [], `${label}: FALLOW_BASE must stay unset`);
-        }
-      } finally {
-        cleanup(repo);
-      }
-    }
-  );
-
-  // T6 docs-parity anti-revert (#3191/#3995): every diff-base derivation in
-  // both files must use the SAME phase-directory anchor — and no message-grep
-  // derivation may return (a subject carries no milestone bound; that class
-  // failed five times: #2989/#3191/#3503/#3995).
-  // #4259: the T6 scan drives itself off the live workflow files, which are
-  // clean — so its matching branch is exercised only by whatever those files
-  // happen to contain, and the hole it had was invisible for exactly that
-  // reason. These fixtures drive findGrepSites directly, in both directions.
-  test('#4259 T6 site scan sees a backslash-continued derivation, and still ignores what it should', () => {
-    const sameLine = [
-      '```bash',
-      'PHASE_START=$(git log --extended-regexp --grep="^(feat|fix)\\(phase-${PHASE_SCOPE_NUM}" --format="%H")',
-      '```',
-    ].join('\n');
-
-    // Semantically identical to the row above. The only difference is two
-    // continued physical lines, and that used to be enough to vanish.
-    const continued = [
-      '```bash',
-      'PHASE_START=$(git log \\',
-      '  --extended-regexp \\',
-      '  --grep="^(feat|fix)\\(phase-${PHASE_SCOPE_NUM}" --format="%H")',
-      '```',
-    ].join('\n');
-
-    assert.equal(findGrepSites(sameLine).length, 1, 'the same-line form must stay caught');
-    assert.equal(findGrepSites(continued).length, 1, 'the continued form must now be caught (#4259)');
-
-    // The filter T6 actually asserts on has to see the marker too. Before the
-    // fold this failed twice over: the scan returned nothing, AND
-    // PHASE_SCOPE_NUM sat on a different physical line from the one the scan
-    // would have captured, so even a matching scan would have filtered it out.
-    for (const src of [sameLine, continued]) {
-      assert.equal(
-        findGrepSites(src).filter((l) => l.includes('PHASE_SCOPE_NUM')).length,
-        1,
-        'the captured site must carry the marker T6 filters on',
-      );
-    }
-
-    // Negative control that DOES exercise the fold: a continued, non-phase
-    // grep site remains a site, but must not become a phase-scope finding.
-    const benign = [
-      '```bash',
-      'RELEASE_NOTES=$(git log \\',
-      '  --grep="^chore" --format="%s")',
-      '```',
-    ].join('\n');
-    assert.equal(
-      findGrepSites(benign).filter((l) => l.includes('PHASE_SCOPE_NUM') || /phase-\)?\(/.test(l)).length,
-      0,
-      'a non-phase-scope --grep must stay clean',
-    );
-
-    // A wrapped git-log assignment that merely sits near a --grep string must
-    // not be glued into one logical line with it. This exercises the fold and
-    // still contains every keyword the site regex looks for.
-    const unrelated = [
-      '```bash',
-      'SOME_VAR=$(git log \\',
-      '  --format="%H")',
-      'echo "--grep=$SOME_VAR"',
-      '```',
-    ].join('\n');
-    assert.deepStrictEqual(findGrepSites(unrelated), [], 'a wrapped unrelated assignment must not glue into a hit');
-
-    // A continuation must not reach across a blank line — the reason this
-    // folds [ \t]* rather than \s* after the newline.
-    const acrossBlank = [
-      '```bash',
-      'SOME_VAR=$(git log \\',
-      '',
-      'FOO=--grep=x',
-      '```',
-    ].join('\n');
-    assert.deepStrictEqual(findGrepSites(acrossBlank), [], 'the fold must stop at a blank line');
-
-    // Two trailing backslashes represent one literal backslash followed by a
-    // real newline. Folding this would invent a site the shell does not have.
-    const evenBackslashes = [
-      '```bash',
-      'PHASE_START=$(git log \\\\',
-      '  --grep="phase-${PHASE_SCOPE_NUM}")',
-      '```',
-    ].join('\n');
-    assert.deepStrictEqual(
-      findGrepSites(evenBackslashes),
-      [],
-      'an even trailing-backslash run is not a shell continuation',
-    );
-
-    // Three trailing backslashes retain one literal pair while the final
-    // backslash continues the command. This pins the non-trivial odd boundary.
-    const oddBackslashes = [
-      '```bash',
-      `PHASE_START=$(git log ${'\\'.repeat(3)}`,
-      '  --grep="phase-${PHASE_SCOPE_NUM}")',
-      '```',
-    ].join('\n');
-    assert.deepStrictEqual(
-      findGrepSites(oddBackslashes),
-      [`PHASE_START=$(git log ${'\\'.repeat(2)} --grep="phase-\${PHASE_SCOPE_NUM}")`],
-      'an odd trailing-backslash run keeps its literal pairs and continues the line',
-    );
-  });
-
-  test('#4259 continuation folding preserves every odd/even backslash-run boundary', () => {
-    fc.assert(fc.property(
-      fc.integer({ min: 0, max: 31 }),
-      fc.array(fc.constantFrom(' ', '\t'), { maxLength: 8 }).map((chars) => chars.join('')),
-      (runLength, indentation) => {
-        const slashes = '\\'.repeat(runLength);
-        const source = `cmd ${slashes}\n${indentation}tail`;
-        const expected = runLength % 2 === 1
-          ? `cmd ${'\\'.repeat(runLength - 1)} tail`
-          : source;
-        assert.strictEqual(foldShellContinuations(source), expected);
-      },
-    ), { numRuns: 200 });
-  });
-
-  test('#4259 T6 site scan reports nothing on the live workflow files', () => {
-    // The adoption check: only shell code fences are scanned, so markdown hard
-    // breaks and examples in other languages cannot be folded into fake shell
-    // sites. Distinct from T6 itself, this asserts the live scan is quiet.
-    for (const src of [
-      readFileNormalized(WORKFLOW_PATH),
-      readFileNormalized(PRE_PASS_STEP_PATH).replace(/\\"/g, '"'),
-    ]) {
-      assert.deepStrictEqual(findGrepSites(src), []);
+describe('Bug 5/6 → #5164 — every diff-base site asks the one evaluation-scope owner', () => {
+  test('no workflow fence hand-rolls a phase-start anchor, a commit-subject grep or a range', () => {
+    for (const [label, p] of [['code-review.md', WORKFLOW_PATH], ['structural-pre-pass.md', PRE_PASS_STEP_PATH]]) {
+      const src = readFileNormalized(p);
+      assert.ok(src.includes('gsd_run check evaluation-scope'), `${label} must ask the evaluation-scope resolver`);
+      assert.ok(!src.includes('--diff-filter=A'), `${label} must not derive its own phase-start anchor`);
+      assert.deepEqual(findGrepSites(src), [], `${label} must not carry a commit-subject grep site (T6, #3191/#3503)`);
+      assert.ok(!/git diff --name-only[^\n]*(?:DIFF_BASE|HEAD)/.test(src), `${label} must not diff a base..HEAD range`);
     }
   });
 
-  test('T6 docs-parity: all diff-base derivations use the identical phase-directory anchor; no --grep site remains', () => {
-    const sources = [
-      readFileNormalized(WORKFLOW_PATH),
-      readFileNormalized(PRE_PASS_STEP_PATH).replace(/\\"/g, '"'),
-    ];
-    for (const src of sources) {
-      assert.ok(
-        src.includes('PHASE_START=$(git log --format="%H" --diff-filter=A -- "${PHASE_DIR}"'),
-        'each file must derive the base from the phase directory\'s first commit (#3995)'
-      );
-    }
-    const grepSites = [];
-    for (const src of sources) {
-      // #4259: findGrepSites folds backslash continuations first, so a wrapped
-      // assignment presents as one logical line and cannot slip the scan.
-      grepSites.push(...findGrepSites(src));
-    }
-    assert.deepStrictEqual(
-      grepSites.filter((l) => l.includes('PHASE_SCOPE_NUM') || /phase-\)?\(/.test(l)),
-      [],
-      'no phase-scope message-grep derivation may remain — subjects carry no milestone bound (#3995)'
-    );
+  test('#2666 docs-parity: Tier-3 cross-checks the SUMMARY scope against the resolver and warns about what it missed', () => {
+    const src = readFileNormalized(WORKFLOW_PATH);
+    assert.ok(src.includes('SUMMARY scope was missing'), 'code-review.md must warn when the SUMMARY scope missed in-scope files (#2666)');
+    assert.ok(src.includes('gsd_run check evaluation-scope'), 'the cross-check must read the resolver, not a git range');
   });
-});
 
-describe('Bug 6 (#3503/#3995) — diff base keys on the phase directory, not commit subjects', () => {
-  const SKIP_WIN32 = { skip: process.platform === 'win32' };
+  test('T1: the Tier-3 DIFF_BASE and the fallow base are the SAME anchor — the parent of the phase directory\'s first commit', { skip: !HAS_BASH }, (t) => {
+    const { repo, base } = buildPhaseFixture(t, { withSummary: false });
+    const tier3 = parseSentinel(runDerivation(repo, extractTier3Derivation(), '03').stdout, 'DIFF_BASE');
+    const fallow = parseSentinel(runDerivation(repo, extractFallowDerivation(), '03').stdout, 'FALLOW_BASE');
+    const phaseDirFirst = gitOrThrow(['log', '--format=%H', '--diff-filter=A', '--', '.planning/phases/03-ctx'], { cwd: repo }).trim().split('\n').pop();
+    const expected = gitOrThrow(['rev-parse', `${phaseDirFirst}^`], { cwd: repo }).trim();
+    assert.equal(expected, base, 'fixture sanity: the phase directory is first committed right after the earlier history');
+    assert.deepEqual(tier3, [expected], 'Tier-3 DIFF_BASE must be the phase first-commit parent');
+    assert.deepEqual(fallow, [expected], 'fallow --changed-since base must be the same anchor (lockstep, #3191/#3995)');
+  });
 
-  const REPRO_HISTORY = [
-    ['c1.txt', 'chore: bump to v2.06.0 on 2026-01-05'],
-    ['c2.txt', 'feat(60-01): probe wiring', 'The EF path still uses it, fenced to Phase 06 per D-09.'],
-    ['c3.txt', 'docs: commit message format', 'Phase headers use the form:\n\n### Phase 06 (Cluster B): Title\n\nin ROADMAP detail sections.'],
-    [PHASE06_PLAN_REL, 'docs(06): capture phase context'],
-    ['c5.txt', 'feat(06-01): implement scanner core'],
-    ['c6.txt', 'docs(phase-6): update tracking after wave 1'],
-    ['c7.txt', 'docs: touch README'],
-  ];
+  test('T2: with the phase\'s task commits recorded, the Tier-3 scope is their union — interleaved and later work stay out', { skip: !HAS_BASH }, (t) => {
+    const { repo } = buildPhaseFixture(t, { withSummary: true });
+    const files = parseSentinel(runDerivation(repo, extractTier3Fence(), '03').stdout, 'REVIEW_FILES');
+    assert.deepEqual(files, ['src/one.js', 'src/two.js']);
+  });
 
-  test(
-    'T1: prose forward-references and doc-format examples never capture the base — it resolves to the phase dir first commit at all three sites',
-    SKIP_WIN32,
-    () => {
-      const { repo, hashes } = buildHistory('gsd-3503-scope-', REPRO_HISTORY);
-      try {
-        const sites = [
-          ['tier3', extractTier3Derivation()],
-          ['spawn_reviewer', extractSpawnReviewerDerivation()],
-          ['fallow', extractFallowDerivation()],
-        ];
-        for (const [label, snippet] of sites) {
-          const result = runDerivation(repo, snippet, '06');
-          assert.equal(result.status, 0, `${label} exited ${result.status}; stderr=${result.stderr}`);
-          const phaseStart = parseSentinel(result.stdout, 'PHASE_START');
-          const diffBase = parseSentinel(result.stdout, 'DIFF_BASE');
-          const fallowBase = parseSentinel(result.stdout, 'FALLOW_BASE');
-          const dirFirst = hashes[PHASE06_PLAN_REL];
-          if (label !== 'fallow') {
-            assert.deepStrictEqual(
-              phaseStart,
-              [dirFirst],
-              `${label}: anchor must resolve to the phase dir's first commit; got: ${JSON.stringify(phaseStart)}`
-            );
-          }
-          const expected = [`${dirFirst}^`];
-          if (label === 'fallow') {
-            assert.deepStrictEqual(fallowBase, expected, `${label}: base must be the phase dir first commit's parent`);
-          } else {
-            assert.deepStrictEqual(diffBase, expected, `${label}: base must be the phase dir first commit's parent`);
-          }
-        }
-      } finally {
-        cleanup(repo);
-      }
-    }
-  );
-
-  test(
-    'T2: subject spellings are irrelevant to the directory anchor — unpadded and padded histories resolve identically',
-    SKIP_WIN32,
-    () => {
-      const { repo, hashes } = buildHistory('gsd-3503-unpadded-', [
-        ['c1.txt', 'feat(60-01): probe wiring', 'Deferred to Phase 06 per D-09.'],
-        [PHASE06_PLAN_REL, 'docs(phase-6): capture phase context'],
-        ['c3.txt', 'feat(6-01): implement scanner core'],
-        ['c4.txt', 'test(6): persist human verification items as UAT'],
-        ['c5.txt', 'docs: touch README'],
-      ]);
-      try {
-        for (const [label, snippet] of [
-          ['tier3', extractTier3Derivation()],
-          ['spawn_reviewer', extractSpawnReviewerDerivation()],
-          ['fallow', extractFallowDerivation()],
-        ]) {
-          const result = runDerivation(repo, snippet, '06');
-          assert.equal(result.status, 0, `${label} exited ${result.status}; stderr=${result.stderr}`);
-          const diffBase = parseSentinel(result.stdout, 'DIFF_BASE');
-          const fallowBase = parseSentinel(result.stdout, 'FALLOW_BASE');
-          const expected = [`${hashes[PHASE06_PLAN_REL]}^`];
-          if (label === 'fallow') {
-            assert.deepStrictEqual(fallowBase, expected, `${label}: base must be the phase dir first commit's parent`);
-          } else {
-            assert.deepStrictEqual(diffBase, expected, `${label}: base must be the phase dir first commit's parent`);
-          }
-        }
-      } finally {
-        cleanup(repo);
-      }
-    }
-  );
-
-  test(
-    'T3: no committed phase dir fails closed (no silent arbitrary base)',
-    SKIP_WIN32,
-    () => {
-      const { repo } = buildHistory('gsd-3503-closed-', [
-        ['c1.txt', 'chore: bump to v2.06.0'],
-        ['c2.txt', 'feat(60-01): probe wiring', 'Deferred to Phase 06 per D-09.'],
-        ['c3.txt', 'docs(06): capture phase context'],
-        ['c4.txt', 'docs: touch README'],
-      ]);
-      try {
-        for (const [label, snippet] of [
-          ['tier3', extractTier3Derivation()],
-          ['spawn_reviewer', extractSpawnReviewerDerivation()],
-          ['fallow', extractFallowDerivation()],
-        ]) {
-          const result = runDerivation(repo, snippet, '06');
-          assert.equal(result.status, 0, `${label} exited ${result.status}; stderr=${result.stderr}`);
-          const diffBase = parseSentinel(result.stdout, 'DIFF_BASE');
-          const fallowBase = parseSentinel(result.stdout, 'FALLOW_BASE');
-          assert.deepStrictEqual(diffBase, [], `${label}: DIFF_BASE must stay empty without a committed phase dir`);
-          assert.deepStrictEqual(fallowBase, [], `${label}: FALLOW_BASE must stay unset`);
-        }
-      } finally {
-        cleanup(repo);
-      }
-    }
-  );
-
-  // #3995: the milestone-blind repro. A PREVIOUS milestone's phase-02 commit
-  // exists in history with a perfectly anchored subject; the current
-  // milestone's phase 02 has its own directory. The old derivation's
-  // unbounded grep + tail -1 selected the archived milestone's commit and
-  // took a 7-file phase to a 3388-file scope; the directory anchor cannot.
-  test(
-    "T4 (#3995): a previous milestone's same-numbered phase commit never captures the base",
-    SKIP_WIN32,
-    () => {
-      const oldMilestonePhase = path.join('.planning', 'milestones', 'v1.1-phases', '02-old', '02-PLAN.md');
-      const currentPhase = path.join('.planning', 'phases', '02-ctx', '02-PLAN.md');
-      const { repo, hashes } = buildHistory('gsd-3995-milestone-', [
-        [oldMilestonePhase, 'feat(02-01): research-project command, workflow, and template'],
-        ['mid.txt', 'chore: close milestone v1.1'],
-        [currentPhase, 'feat(02-01): current milestone phase 02 plan 01'],
-        ['c4.txt', 'docs: touch README'],
-      ]);
-      try {
-        for (const [label, snippet] of [
-          ['tier3', extractTier3Derivation()],
-          ['spawn_reviewer', extractSpawnReviewerDerivation()],
-          ['fallow', extractFallowDerivation()],
-        ]) {
-          const result = runDerivation(repo, snippet, '02');
-          assert.equal(result.status, 0, `${label} exited ${result.status}; stderr=${result.stderr}`);
-          const diffBase = parseSentinel(result.stdout, 'DIFF_BASE');
-          const fallowBase = parseSentinel(result.stdout, 'FALLOW_BASE');
-          const expected = [`${hashes[currentPhase]}^`];
-          if (label === 'fallow') {
-            assert.deepStrictEqual(fallowBase, expected,
-              `${label}: base must be the CURRENT phase dir's first commit, never the archived milestone's (#3995)`);
-          } else {
-            assert.deepStrictEqual(diffBase, expected,
-              `${label}: base must be the CURRENT phase dir's first commit, never the archived milestone's (#3995)`);
-          }
-        }
-      } finally {
-        cleanup(repo);
-      }
-    }
-  );
+  test('T3: without a committed phase directory the base stays EMPTY (no bogus base) and the scope is empty, not guessed', { skip: !HAS_BASH }, (t) => {
+    const repo = createTempGitProject('gsd-5164-nodir-');
+    t.after(() => cleanup(repo));
+    fs.mkdirSync(path.join(repo, '.planning', 'phases', '03-ctx'), { recursive: true });
+    fs.writeFileSync(path.join(repo, '.planning', 'phases', '03-ctx', '03-CONTEXT.md'), 'uncommitted\n');
+    const out = runDerivation(repo, extractTier3Fence(), '03').stdout;
+    assert.deepEqual(parseSentinel(out, 'DIFF_BASE'), [], 'DIFF_BASE must stay empty without a committed phase dir');
+    assert.deepEqual(parseSentinel(out, 'REVIEW_FILES'), [], 'the scope must be empty, not guessed');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2013,7 +1528,9 @@ describe('#3829 — code_review_gate per-finding disposition record', () => {
   test('docs-parity: code_review_gate actually reaches the extracted step', () => {
     // The step is only reachable because the parent says to read and execute it. Without this,
     // every other docs-parity assertion here could pass against a file nothing loads.
-    const parent = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf8');
+    // #5118: code_review_gate lives in the shared verification step execute-phase
+    // includes (execute-phase/steps/verify-phase-goal.md) — that step is the parent now.
+    const parent = fs.readFileSync(SHARED_VERIFY_STEP_PATH, 'utf8');
     assert.ok(
       /Read and execute\s+`gsd-core\/workflows\/execute-phase\/steps\/code-review-disposition\.md`/.test(parent),
       'code_review_gate must read and execute the disposition step'

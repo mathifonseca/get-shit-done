@@ -3,6 +3,14 @@
 // Claude Code Statusline - GSD Edition
 // Shows: model | current task (or GSD state) | directory | context usage
 
+// #5183: Node's on-disk compile cache, so later runs reuse V8's compiled code
+// for unchanged modules. Only as the entry (a test require() is unaffected),
+// skipped under V8 coverage, optional (Bun stubs it), and never fatal.
+// NODE_DISABLE_COMPILE_CACHE (any value) turns it off.
+if (require.main === module && !process.env.NODE_V8_COVERAGE) {
+  try { require('node:module').enableCompileCache?.(); } catch { /* optimization only */ }
+}
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -42,6 +50,7 @@ if (require.main === module) {
 const { isSemverNewer } = require('../gsd-core/bin/lib/semver-compare.cjs');
 const { PACKAGE_NAME, updateCacheFileName } = require('../gsd-core/bin/lib/package-identity.cjs');
 const { normalizeStateStatus } = require('../gsd-core/bin/lib/state-document.cjs');
+const { locateFrontmatterFence } = require('../gsd-core/bin/lib/frontmatter-fence.cjs');
 const {
   renderBracketPhaseDisplay,
   renderBracketMilestoneDisplay,
@@ -250,13 +259,12 @@ function readGsdState(dir, opts = {}) {
 function parseStateMd(content) {
   const state = {};
 
-  // YAML frontmatter between --- markers (anchored at file start).
-  // #2754: \r?\n (not literal \n) so a CRLF STATE.md (Windows-authored) parses
-  // identically to LF — pre-fix the literal-\n fence dropped the ENTIRE block.
-  // Mirrors the CRLF-safe extractFrontmatter in src/frontmatter.cts.
-  const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (fmMatch) {
-    const fm = fmMatch[1];
+  // YAML frontmatter: the block the one fence owner finds (`locateFrontmatterFence`), so a
+  // CRLF STATE.md (#2754), a BOM, and a `---` inside a value read exactly as every other
+  // STATE.md reader reads them (found while implementing #5105).
+  const fence = locateFrontmatterFence(content);
+  if (fence && fence.closed) {
+    const fm = content.slice(fence.openEnd, fence.bodyEnd);
     // Top-level scalar key: value
     for (const line of fm.split(/\r?\n/)) {
       const m = line.match(/^(\w+):\s*(.+)/);

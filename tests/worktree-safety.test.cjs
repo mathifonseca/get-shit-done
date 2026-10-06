@@ -5055,7 +5055,7 @@ describe('worktree-safety: pruneOrphanedWorktrees behaviour', () => {
 {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-3707-locked-worktree-cleanup (consolidation epic #1969 B3 #1972)", () => {
-// allow-test-rule: source-text-is-the-product (see #3707)
+// source-text-is-the-product (see #3707)
 // Real-filesystem tests for the two failure modes pinned in #3707:
 //   1. executeWorktreeWaveCleanupPlan must unlock-then-retry when a worktree is locked.
 //   2. reapOrphanWorktrees must reap dead-pid+merged entries and skip live / unmerged / fresh-mtime entries.
@@ -5850,7 +5850,7 @@ describe('bug-3707: reapOrphanWorktrees — adversarial edge cases', () => {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-3129-validate-commit-git-bypass (consolidation epic #1969 B5 #1974)", () => {
 'use strict';
-// allow-test-rule: structural-regression-guard (see #3129)
+// structural-regression-guard (see #3129)
 // Reads the gsd-validate-commit.sh hook source to verify it delegates to
 // git-cmd.js isGitSubcommand() rather than the old regex — a specific code
 // pattern that must (and must not) exist; behavioral tests of tokenize()/
@@ -6382,7 +6382,7 @@ describe('git-cmd.js extractBranchArgument', () => {
 {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-3384-secondary-defects (consolidation epic #1969 B8 #1977)", () => {
-// allow-test-rule: source-text-is-the-product (see #3384)
+// source-text-is-the-product (see #3384)
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -6497,12 +6497,9 @@ const path = require('node:path');
 const { cleanup } = require('./helpers.cjs');
 const { runHook: seamRunHook } = require('./helpers/process-seam.cjs');
 const { gitOrThrow } = require('./helpers/git-fixture.cjs');
-const { QUICK_SPAWN_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+const { STAGED_HOOK_SCRIPT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const HOOK_PATH = path.join(__dirname, '..', 'hooks', 'gsd-worktree-path-guard.js');
-const INSTALL_SRC = path.join(__dirname, '..', 'bin', 'install.js');
-// ADR-857 phase 5f-1b: settings-json hook registration moved to runtime-hooks-surface.cts.
-const HOOKS_SURFACE_SRC = path.join(__dirname, '..', 'src', 'runtime-hooks-surface.cts');
 
 /**
  * Resolve symlinks in a path so that we compare the same canonical form
@@ -6554,17 +6551,17 @@ function makeWorktree(mainRepo, branchName) {
  * Run the hook with a given payload, returning the spawnSync result.
  */
 function runHook(cwd, payload) {
-  // QUICK_SPAWN_TIMEOUT_MS (10000ms): previously UNBOUNDED (no `timeout`
-  // option passed to spawnSync). gsd-worktree-path-guard.js is a
-  // synchronous, in-process path-guard hook (fs/path checks against a JSON
-  // stdin payload) — no subprocess or network work of its own. 10s leaves
-  // generous headroom over its sub-second worst case even on a heavily
-  // contended CI runner. See tests/helpers/timeouts.cjs for the shared
-  // norm this value was promoted to (#4514).
+  // STAGED_HOOK_SCRIPT_TIMEOUT_MS (20000ms): the hook spawns up to 3 sequential
+  // `git rev-parse` probes (BLOCKING_GUARD_PROBE_TIMEOUT_MS = 5000ms each,
+  // hooks/lib/git-probe.js), so its worst case is ~15.5s. A probe that times
+  // out FAILS OPEN (exit 0), so this bound must sit above N probes x the
+  // per-probe budget or a starved runner turns a deny case into a silent allow
+  // (#3911, #5180). tests/blocking-guard-budget-parity.test.cjs pins the
+  // arithmetic. See tests/helpers/timeouts.cjs for the class (#4514).
   const r = seamRunHook(HOOK_PATH, [], {
     cwd,
     input: JSON.stringify(payload),
-    timeoutMs: QUICK_SPAWN_TIMEOUT_MS,
+    timeoutMs: STAGED_HOOK_SCRIPT_TIMEOUT_MS,
   });
   return { status: r.exitCode, stdout: r.stdout, stderr: r.stderr };
 }
@@ -6722,7 +6719,7 @@ describe('bug #260: gsd-worktree-path-guard.js', () => {
         tool_input: { file_path: path.join(mainRepo, 'out.txt') },
       };
       const result = runHook(worktreeDir, payload);
-      assert.strictEqual(result.status, 2);
+      assert.strictEqual(result.status, 2, `Expected exit 2 (block), got ${result.status}. stderr: ${result.stderr}`);
       const parsed = JSON.parse(result.stdout);
       assert.strictEqual(parsed.decision, 'block');
     });
@@ -6735,7 +6732,7 @@ describe('bug #260: gsd-worktree-path-guard.js', () => {
         tool_input: { file_path: offendingPath },
       };
       const result = runHook(worktreeDir, payload);
-      assert.strictEqual(result.status, 2);
+      assert.strictEqual(result.status, 2, `Expected exit 2 (block), got ${result.status}. stderr: ${result.stderr}`);
       const parsed = JSON.parse(result.stdout);
       assert.ok(
         parsed.reason && parsed.reason.includes(offendingPath),
@@ -7371,58 +7368,55 @@ describe('#1342 — GSD-activity gate + fail-open for no-repo targets', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Static analysis: install.js guard
+// Behavioral: the settings-json registration table (#5207)
 // ---------------------------------------------------------------------------
 
 describe('install.js guard for gsd-worktree-path-guard.js', () => {
-  let src;
+  const { createTempDir: makeTarget, captureConsole } = require('./helpers.cjs');
+  const { applySettingsJsonHooks } = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
+  const GUARD = 'gsd-worktree-path-guard.js';
 
-  before(() => {
-    // ADR-857 phase 5f-1b: hook registration moved to runtime-hooks-surface.cts.
-    // Concatenate both sources so structural assertions find patterns in either file.
-    // allow-test-rule: structural-implementation-guard (#3545) — structural install.js
-    // guard; install.js has side effects on require and no exported symbol for hook-registration wiring;
-    // every src.includes()/indexOf() and block.includes() call below traces
-    // back to this read
-    const installSrc = fs.readFileSync(INSTALL_SRC, 'utf-8');
-    let hooksSurfaceSrc = '';
-    try { hooksSurfaceSrc = fs.readFileSync(HOOKS_SURFACE_SRC, 'utf-8'); } catch { /* ok */ }
-    src = installSrc + '\n' + hooksSurfaceSrc;
+  function register(t, { present }) {
+    const targetDir = makeTarget('worktree-guard-reg-');
+    t.after(() => cleanup(targetDir));
+    fs.mkdirSync(path.join(targetDir, 'hooks'), { recursive: true });
+    if (present) fs.writeFileSync(path.join(targetDir, 'hooks', GUARD), '// stub\n');
+    const settings = {};
+    const localCmd = (f) => `node ${path.join(targetDir, 'hooks', f)}`;
+    const { stdout, stderr } = captureConsole(() => applySettingsJsonHooks(settings, {
+      runtime: 'claude',
+      isGlobal: false,
+      targetDir,
+      postToolEvent: 'PostToolUse',
+      hookEvents: 'claude',
+      extendedHookEvents: [],
+      hooksSurface: 'settings-json',
+      updateCheckCommand: null,
+      contextMonitorCommand: null,
+      promptGuardCommand: null,
+      readGuardCommand: null,
+      readInjectionScannerCommand: null,
+      configReloadCommand: null,
+      hookOpts: { portableHooks: false, runtime: 'claude' },
+      localCmd,
+      localShellCmd: localCmd,
+    }));
+    const entries = (settings.hooks.PreToolUse || []).filter(e => e.hooks.some(h => h.command.includes('gsd-worktree-path-guard')));
+    return { entries, stdout, stderr };
+  }
+
+  test('registers the guard for Write|Edit|MultiEdit when its file was installed', (t) => {
+    const { entries, stdout } = register(t, { present: true });
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].matcher, 'Write|Edit|MultiEdit');
+    assert.ok(stdout.includes('Configured worktree path guard hook'));
   });
 
-  test('install.js has hasWorktreePathGuardHook variable', () => {
-    assert.ok(
-      src.includes('hasWorktreePathGuardHook'),
-      'hasWorktreePathGuardHook variable not found in install.js'
-    );
-  });
-
-  test('install.js checks fs.existsSync before registering gsd-worktree-path-guard.js', () => {
-    const anchorIdx = src.indexOf('hasWorktreePathGuardHook');
-    assert.ok(anchorIdx !== -1, 'hasWorktreePathGuardHook not found in install.js');
-
-    const blockStart = anchorIdx;
-    const blockEnd = Math.min(src.length, anchorIdx + 1200);
-    const block = src.slice(blockStart, blockEnd);
-
-    assert.ok(
-      block.includes('fs.existsSync') || block.includes('existsSync'),
-      'install.js must call fs.existsSync on the target path before registering ' +
-      'gsd-worktree-path-guard.js in settings.json. Without this guard, the hook ' +
-      'is registered even when the .js file was never copied (root cause of #1754).'
-    );
-  });
-
-  test('install.js emits a skip warning when gsd-worktree-path-guard.js is missing', () => {
-    const anchorIdx = src.indexOf('hasWorktreePathGuardHook');
-    assert.ok(anchorIdx !== -1, 'hasWorktreePathGuardHook not found in install.js');
-
-    const block = src.slice(anchorIdx, Math.min(src.length, anchorIdx + 1200));
-
-    assert.ok(
-      block.includes('Skipped') && block.includes('gsd-worktree-path-guard'),
-      'install.js must emit a skip warning mentioning gsd-worktree-path-guard when the file is not found'
-    );
+  test('registers nothing and warns when the guard file was never copied (root cause of #1754)', (t) => {
+    const { entries, stderr } = register(t, { present: false });
+    assert.equal(entries.length, 0);
+    assert.ok(stderr.includes('Skipped worktree path guard hook'));
+    assert.ok(stderr.includes('gsd-worktree-path-guard.js'));
   });
 });
   });
@@ -7608,7 +7602,7 @@ describe('bug #261: workflow guard blocks forced git add on worktree-agent branc
 {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-2772-gitmodules-path-intersection (consolidation epic #1969 B6 #1975)", () => {
-// allow-test-rule: source-text-is-the-product (see #2772)
+// source-text-is-the-product (see #2772)
 // Workflow .md / agent .md / command .md / reference .md files — their text
 // IS what the runtime loads. Testing text content tests the deployed contract.
 // Per CONTRIBUTING.md exception matrix.
@@ -8236,7 +8230,7 @@ describe('quick.md executor pre-commit submodule guard (#2772)', () => {
 {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-3542-executor-git-stash-prohibition (consolidation epic #1969 B6 #1975)", () => {
-// allow-test-rule: source-text-is-the-product (see #3542)
+// source-text-is-the-product (see #3542)
 // Bug #3542 — Worktree stash storage is shared across agent worktrees;
 // `git stash pop` from an executor agent contaminates its isolation.
 //

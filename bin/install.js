@@ -49,7 +49,7 @@ const { isTestHomeGuardRefusal } = require('../gsd-core/bin/lib/real-home-guard.
 // (getConfigDirFromHome and the runtime-content-rewrite loops below) — #2876
 // retired the re-export; tests now import getDirName directly from
 // gsd-core/bin/lib/runtime-name-policy.cjs.
-const { getDirName, getRuntimeLabel, getGlobalConfigHomeFragment, runtimeFlags, getRuntimeNewProjectCommand } = require('../gsd-core/bin/lib/runtime-name-policy.cjs');
+const { getDirName, getRuntimeLabel, getGlobalConfigHomeFragment, runtimeFlags, hostBehaviorsFor } = require('../gsd-core/bin/lib/runtime-name-policy.cjs');
 const {
   applyWorktreeBaseRef,
   readBaseRefFromSettings,
@@ -104,7 +104,7 @@ const hooksSurface = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
  */
 function shouldNormalizeHyphenNamespaceInAgentBody(runtime) {
   if (typeof runtime !== 'string' || runtime === '') return false;
-  return _hostBehaviors(runtime).hyphenNameAgentBody === true;
+  return hostBehaviorsFor(runtime).hyphenNameAgentBody === true;
 }
 
 /**
@@ -436,7 +436,7 @@ const GSD_CHANGESET_FILES = [
   'github-release-notes.cjs', 'lint.cjs', 'new.cjs',
   'README.md', // documentation only — not user-authored
 ];
-const GSD_SCRIPTS_LIB_FILES = ['cli-exit.cjs', 'allowlist-ratchet.cjs', 'drift-scan.cjs', 'alias-drift-families.cjs', 'exit-code-registry.cjs', 'ndjson-reporter.cjs', 'ci-job-timing.cjs', 'shellcheck-fetch.cjs', 'npm-version-check-diagnosis.cjs', 'platform-conformance-tier.generated.cjs', 'suite-detection.cjs', 'macos-conformance-tier.generated.cjs'];
+const GSD_SCRIPTS_LIB_FILES = ['cli-exit.cjs', 'allowlist-ratchet.cjs', 'drift-scan.cjs', 'alias-drift-families.cjs', 'exit-code-registry.cjs', 'ndjson-reporter.cjs', 'ci-job-timing.cjs', 'shellcheck-fetch.cjs', 'npm-version-check-diagnosis.cjs', 'platform-conformance-tier.generated.cjs', 'suite-detection.cjs', 'macos-conformance-tier.generated.cjs', 'vendor-bundle.cjs', 'registration-ledger-preload.cjs'];
 
 // #4544 — the Codex hook payload the install stages into <targetDir>/hooks/.
 // Hoisted to module scope (the #3184 precedent above) so the rollback's
@@ -473,7 +473,7 @@ const CODEX_HOOKS_TO_COPY = [
  * @returns {string}
  */
 function resolveSharedHooksDirName(runtime) {
-  const raw = _hostBehaviors(runtime).sharedHooksDirName;
+  const raw = hostBehaviorsFor(runtime).sharedHooksDirName;
   if (typeof raw !== 'string') return SHARED_HOOKS_DIR_DEFAULT;
   const name = raw.trim();
   if (name === '') return SHARED_HOOKS_DIR_DEFAULT;
@@ -628,68 +628,6 @@ try {
   _installedCapabilityRegistry = _capabilityRegistry;
 }
 
-// Fail-safe floor for the reference host's #338-privacy-critical behaviors, used
-// ONLY when the first-party capability registry cannot be loaded (a broken bundle).
-// Without it, a registry-load failure would make `_hostBehaviors('claude')` return
-// {} and silently route a claude LOCAL install to the repo-shared, committed
-// `settings.json` instead of the gitignored `settings.local.json` (#338) — leaking
-// engineer-specific absolute paths. Keyed by runtime id (a DATA lookup, not a
-// hardcoded string-equality branch) so behavior degrades CLOSED (safe), never open.
-// The live descriptor (capabilities/claude/capability.json) remains the source of
-// truth; this mirrors only the privacy-load-bearing subset. (ADR-1239 / #2086)
-//
-// #2870: NOT routed through the Install Scope Module (resolveScope,
-// src/install-scope.cts) despite that module owning per-scope settings-file
-// resolution elsewhere in this file. resolveScope's own descriptor lookup
-// goes through the SAME capability registry require this floor exists to
-// survive the failure of (see getRegistry() in install-scope.cts) — so on
-// exactly the "registry failed to load" path this constant is for,
-// resolveScope would throw too. Routing through it here would trade a
-// graceful, documented degrade for a crash in the one case this floor was
-// added to prevent. This hardcoded literal is the correct, honest answer,
-// not an un-migrated leftover.
-const FALLBACK_HOST_BEHAVIORS = Object.freeze({
-  claude: Object.freeze({
-    settingsFileByScope: Object.freeze({ local: 'settings.local.json', global: 'settings.json' }),
-    permissionsSchema: 'claude',
-    sourceMarkerFile: '.gsd-source',
-    hyphenNameAgentBody: true,
-    legacyCommandsGsdInstallMigration: true,
-    legacyCommandsGsdUninstall: 'global',
-  }),
-  // antigravity's global config dir is resolved dynamically (env-overridable,
-  // multi-segment) via resolveAntigravityGlobalDir in getConfigDirFromHome. If the
-  // registry fails to load, this floor keeps that routing intact instead of
-  // silently falling through to the generic getGlobalConfigHomeFragment default
-  // (which would return the wrong '.claude' fragment). (ADR-1239 / #2096)
-  antigravity: Object.freeze({ globalDirResolver: 'antigravity' }),
-});
-
-/**
- * Resolve a runtime's host behaviors from a capability registry, with the
- * #338-privacy fail-safe floor when the registry (or the runtime's descriptor)
- * is unavailable. Registry is passed in so this is unit-testable under a
- * simulated registry-load failure. (ADR-1239 / #2086)
- */
-function _resolveHostBehaviors(runtime, registry) {
-  const cap = registry && registry.runtimes && registry.runtimes[runtime];
-  const declared = cap && cap.runtime && cap.runtime.hostBehaviors;
-  if (declared) return declared;
-  return FALLBACK_HOST_BEHAVIORS[runtime] || {};
-}
-
-/**
- * Host-specific install behaviors, declared on the runtime descriptor
- * (capabilities/<runtime>/capability.json -> runtime.hostBehaviors) instead of
- * scattered `runtime === '<id>'` string checks (ADR-1239 / #2086). Returns {}
- * for runtimes that declare none, so every behavior branch degrades to the
- * generic path by default — EXCEPT the reference host's #338-critical keys, which
- * fall back to FALLBACK_HOST_BEHAVIORS if the registry failed to load.
- */
-function _hostBehaviors(runtime) {
-  return _resolveHostBehaviors(runtime, _capabilityRegistry);
-}
-
 /**
  * Read a runtime's documentation-sourced `hostIntegration.dispatch` axes
  * (ADR-1239 Phase A — `capabilities/<runtime>/capability.json`
@@ -697,7 +635,7 @@ function _hostBehaviors(runtime) {
  * background, backgroundDispatch, subagentToolkit}`. These are validated,
  * closed-vocabulary FACTS about what the runtime's real dispatch primitive
  * supports (never inferred) — see `docs/reference/host-integration-capability-
- * matrix.md` for citations. Unlike `_hostBehaviors` (install *policy*), this is
+ * matrix.md` for citations. Unlike `hostBehaviorsFor` (install *policy*), this is
  * the negotiated *capability* surface; #2284 is its first content-projection
  * consumer (previously read only by `shouldFlattenDispatch`). Returns `{}` if
  * the registry or the runtime's descriptor is unavailable, so callers must
@@ -833,6 +771,7 @@ const {
 } = require(path.join(_gsdLibDir, 'installer-migration-report.cjs'));
 const {
   resolveRuntimeArtifactLayout,
+  resolveAdvertisedNewProject,
 } = require(path.join(_gsdLibDir, 'runtime-artifact-layout.cjs'));
 const {
   readSurface,
@@ -1178,13 +1117,13 @@ function getConfigDirFromHome(runtime, isGlobal) {
   // !isGlobal returns at the top of this function.)
   // Descriptor-driven (ADR-1239 / #2096): folded from a hardcoded
   // `runtime === 'antigravity'` literal into a read of the runtime's
-  // `hostBehaviors.globalDirResolver` descriptor field (via _hostBehaviors, which
-  // also degrades to FALLBACK_HOST_BEHAVIORS on registry-load failure). This is
+  // `hostBehaviors.globalDirResolver` descriptor field (via hostBehaviorsFor, which
+  // also degrades to its #338 floor on registry-load failure). This is
   // antigravity-unique: unlike `configHome.kind === 'dot-home-nested'` (which
   // windsurf also declares — see capabilities/windsurf/capability.json — and
   // would wrongly route windsurf's global dir through
   // resolveAntigravityGlobalDir), `globalDirResolver` is only set by antigravity.
-  if (_hostBehaviors(runtime).globalDirResolver === 'antigravity') {
+  if (hostBehaviorsFor(runtime).globalDirResolver === 'antigravity') {
     const antigravityDir = resolveAntigravityGlobalDir();
     const rel = path.relative(os.homedir(), antigravityDir);
     const segments = rel.split(path.sep).filter(Boolean);
@@ -1594,12 +1533,12 @@ function getCommitAttribution(runtime) {
 
   let result;
 
-  const _attrResolverKey = _hostBehaviors(runtime).attributionConfigResolver;
+  const _attrResolverKey = hostBehaviorsFor(runtime).attributionConfigResolver;
   if (_attrResolverKey && ATTRIBUTION_CONFIG_RESOLVERS[_attrResolverKey]) {
     const resolveConfigPath = ATTRIBUTION_CONFIG_RESOLVERS[_attrResolverKey];
     const config = readSettings(resolveConfigPath(getGlobalConfigDir(runtime, null)));
     result = (config && config.disable_ai_attribution === true) ? null : undefined;
-  } else if (_hostBehaviors(runtime).attributionSource === 'settings-json-commit') {
+  } else if (hostBehaviorsFor(runtime).attributionSource === 'settings-json-commit') {
     // Claude Code
     const settings = readSettings(path.join(getGlobalConfigDir(runtime, explicitConfigDir), 'settings.json'));
     if (!settings || !settings.attribution || settings.attribution.commit === undefined) {
@@ -2084,13 +2023,13 @@ function convertClaudeCommandToClaudeSkill(content, skillName, runtime = null, c
   // Hermes' SKILL.md spec lists `version` as a required frontmatter field.
   // Track GSD's package version so Hermes' skill_view() reports a stable
   // identifier per install.
-  if (_hostBehaviors(runtime).skillFrontmatterVersion) fm += `version: ${yamlQuote(pkg.version)}\n`;
+  if (hostBehaviorsFor(runtime).skillFrontmatterVersion) fm += `version: ${yamlQuote(pkg.version)}\n`;
   // #778 (b) — numeric priority for /skills ordering, declared on the runtime
   // descriptor (runtime.hostBehaviors.skillPriorityFrontmatter). Scoped to
   // runtimes that declare the flag so Claude/Hermes skill frontmatter is
   // unchanged (they ignore the field, but we keep their output byte-stable).
   // skillName is the `gsd-<stem>` dir name. (ADR-1239 / #2086)
-  if (_hostBehaviors(runtime).skillPriorityFrontmatter) {
+  if (hostBehaviorsFor(runtime).skillPriorityFrontmatter) {
     const stem = typeof skillName === 'string' && skillName.startsWith('gsd-')
       ? skillName.slice(4)
       : skillName;
@@ -2555,20 +2494,11 @@ function yamlIdentifier(value) {
   return yamlQuote(text);
 }
 
+// The frontmatter block is the one the one fence owner (`locateFrontmatterFence`) finds, read
+// through the conversion module's reader — never a local `indexOf('---', 3)` scan, which ended
+// the block at the first `---` anywhere, even inside a value (found while implementing #5105).
 function extractFrontmatterAndBody(content) {
-  if (!content.startsWith('---')) {
-    return { frontmatter: null, body: content };
-  }
-
-  const endIndex = content.indexOf('---', 3);
-  if (endIndex === -1) {
-    return { frontmatter: null, body: content };
-  }
-
-  return {
-    frontmatter: content.substring(3, endIndex).trim(),
-    body: content.substring(endIndex + 3),
-  };
+  return runtimeArtifactConversion.extractFrontmatterAndBody(content);
 }
 
 function extractFrontmatterField(frontmatter, fieldName) {
@@ -2813,7 +2743,7 @@ function convertClaudeCommandToTraeSkill(content, skillName) {
   // is not formally documented (thin SPA docs) — descriptor-driven, single
   // fixed GSD-side value (runtime.hostBehaviors.soloStageMetadata), inferred/
   // best-effort.
-  const soloStage = _hostBehaviors('trae').soloStageMetadata;
+  const soloStage = hostBehaviorsFor('trae').soloStageMetadata;
   if (soloStage) fm += `stage: ${soloStage}\n`;
   fm += '---';
   return `${fm}\n${body}`;
@@ -3806,7 +3736,7 @@ const HERMES_DISPATCH_TOOL_CONFIG = Object.freeze({
  */
 function convertClaudeToHermesMarkdown(content, ctx) {
   const runtime = (ctx && ctx.runtime) || 'hermes';
-  const b = _hostBehaviors(runtime).brandingRewrites;
+  const b = hostBehaviorsFor(runtime).brandingRewrites;
   let converted = content;
   if (b) {
     converted = converted.replace(/CLAUDE\.md/g, b['CLAUDE.md']);
@@ -7040,7 +6970,7 @@ function writeCopilotHookConfig(targetDir) {
  * model aliases). Preserves an explicit `true` opt-in and existing values.
  */
 function writeNonClaudeDefaults(runtime) {
-  if (_hostBehaviors(runtime).nativeModelAliases || process.env.GSD_TEST_MODE) return;
+  if (hostBehaviorsFor(runtime).nativeModelAliases || process.env.GSD_TEST_MODE) return;
   const gsdDir = path.join(os.homedir(), '.gsd');
   const defaultsPath = path.join(gsdDir, 'defaults.json');
   let releaseLock = null;
@@ -7271,19 +7201,11 @@ function convertClaudeToOpencodeFrontmatter(content, { isAgent = false, modelOve
   // Runtime-neutral agent name replacement (#766)
   convertedContent = neutralizeAgentReferences(convertedContent, 'AGENTS.md');
 
-  // Check if content has frontmatter
-  if (!convertedContent.startsWith('---')) {
+  // The frontmatter block, as the one fence owner finds it (none → nothing to convert).
+  const { frontmatter, body } = extractFrontmatterAndBody(convertedContent);
+  if (frontmatter === null) {
     return convertedContent;
   }
-
-  // Find the end of frontmatter
-  const endIndex = convertedContent.indexOf('---', 3);
-  if (endIndex === -1) {
-    return convertedContent;
-  }
-
-  const frontmatter = convertedContent.substring(3, endIndex).trim();
-  const body = convertedContent.substring(endIndex + 3);
 
   // Parse frontmatter line by line (simple YAML parsing)
   const lines = frontmatter.split('\n');
@@ -7438,19 +7360,11 @@ function convertClaudeToKiloFrontmatter(content, { isAgent = false, modelOverrid
   // Runtime-neutral agent name replacement (#766)
   convertedContent = neutralizeAgentReferences(convertedContent, 'AGENTS.md');
 
-  // Check if content has frontmatter
-  if (!convertedContent.startsWith('---')) {
+  // The frontmatter block, as the one fence owner finds it (none → nothing to convert).
+  const { frontmatter, body } = extractFrontmatterAndBody(convertedContent);
+  if (frontmatter === null) {
     return convertedContent;
   }
-
-  // Find the end of frontmatter
-  const endIndex = convertedContent.indexOf('---', 3);
-  if (endIndex === -1) {
-    return convertedContent;
-  }
-
-  const frontmatter = convertedContent.substring(3, endIndex).trim();
-  const body = convertedContent.substring(endIndex + 3);
 
   // Parse frontmatter line by line (simple YAML parsing)
   const lines = frontmatter.split('\n');
@@ -7825,7 +7739,7 @@ const RUNTIME_CONTENT_DISPATCH = {
     },
   },
   // qwen/hermes: brand VALUES are descriptor-driven (ADR-1239 / #2092) via
-  // _hostBehaviors(ctx.runtime).brandingRewrites — EXACT regexes/ordering
+  // hostBehaviorsFor(ctx.runtime).brandingRewrites — EXACT regexes/ordering
   // preserved from the prior hardcoded-literal versions (including the
   // qwen-specific `.claude/skills/` -> `.qwen/skills/` pre-rewrite, whose
   // target is derived as `${b['.claude/']}skills/`).
@@ -7833,7 +7747,7 @@ const RUNTIME_CONTENT_DISPATCH = {
     md: (content, ctx) => {
       // Guarded (post-review #2092): degrade closed to a no-op if the
       // registry fails to load, instead of throwing on `b['CLAUDE.md']`.
-      const b = _hostBehaviors(ctx.runtime).brandingRewrites;
+      const b = hostBehaviorsFor(ctx.runtime).brandingRewrites;
       if (b) {
         content = content.replace(/CLAUDE\.md/g, b['CLAUDE.md']);
         // #2284(b): skips <runtime_compatibility> comparison-table content (protected region).
@@ -7843,7 +7757,7 @@ const RUNTIME_CONTENT_DISPATCH = {
       return content;
     },
     js: (content, ctx) => {
-      const b = _hostBehaviors(ctx.runtime).brandingRewrites;
+      const b = hostBehaviorsFor(ctx.runtime).brandingRewrites;
       if (b) {
         content = content.replace(/\.claude\/skills\//g, `${b['.claude/']}skills/`);
         content = content.replace(/\.claude\//g, b['.claude/']);
@@ -7862,7 +7776,7 @@ const RUNTIME_CONTENT_DISPATCH = {
     // hostIntegration.dispatch facts.
     md: (content, ctx) => convertClaudeToHermesMarkdown(content, ctx),
     js: (content, ctx) => {
-      const b = _hostBehaviors(ctx.runtime).brandingRewrites;
+      const b = hostBehaviorsFor(ctx.runtime).brandingRewrites;
       if (b) {
         content = content.replace(/\.claude\/skills\//g, `${b['.claude/']}skills/`);
         content = content.replace(/\.claude\//g, b['.claude/']);
@@ -8025,7 +7939,7 @@ function copyWithPathReplacement(srcDir, destDir, pathPrefix, runtime, isCommand
           // emit path, which never had it: every @~/.claude/gsd-core/… include
           // in a global install's workflows/references tree silently resolved
           // to nothing (54 includes across 22 files on a live install).
-          if (runtime === 'claude') {
+          if (hostBehaviorsFor(runtime).restoreAtRefTildeInSpecTree) {
             content = runtimeArtifactConversion._restoreClaudeGlobalAtRefTilde(content, pathPrefix);
           }
           return content;
@@ -8041,7 +7955,7 @@ function copyWithPathReplacement(srcDir, destDir, pathPrefix, runtime, isCommand
       // copyWithPathReplacement is the emit path for gsd-core/workflows/*.md;
       // _applyRuntimeRewrites is NOT invoked here, so this is what makes the fix
       // live in real installs (it is a no-op for files without those lines).
-      if (!_hostBehaviors(runtime).authorsCanonicalWorkflow) {
+      if (!hostBehaviorsFor(runtime).authorsCanonicalWorkflow) {
         content = _stampNonClaudeRuntimeDefaults(content, runtime);
       }
 
@@ -8391,7 +8305,7 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
   // `runtime === 'cline'` branch into hostBehaviors.localTargetIsProjectRoot.
   const targetDir = isGlobal
     ? getGlobalConfigDir(runtime, explicitConfigDir)
-    : _hostBehaviors(runtime).localTargetIsProjectRoot
+    : hostBehaviorsFor(runtime).localTargetIsProjectRoot
       ? process.cwd()
       : path.join(process.cwd(), dirName);
 
@@ -8499,7 +8413,7 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
   }
 
   // 1a. Non-layout Codex side-effects: agent .toml files, config.toml sections, hooks.json
-  if (_hostBehaviors(runtime).tomlConfigInstall) {
+  if (hostBehaviorsFor(runtime).tomlConfigInstall) {
     const codexAgentsDir = path.join(targetDir, 'agents');
     if (fs.existsSync(codexAgentsDir)) {
       const tomlFiles = fs.readdirSync(codexAgentsDir);
@@ -8613,7 +8527,7 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
   // global cross-tool ~/.agents/AGENTS.md target.
   // Descriptor-driven (ADR-1239 / #2090): folded from `runtime === 'cline'`
   // into hostBehaviors.clineRulesSurface.
-  if (_hostBehaviors(runtime).clineRulesSurface) {
+  if (hostBehaviorsFor(runtime).clineRulesSurface) {
     const clinerulesDir = path.join(targetDir, '.clinerules');
     for (const rel of ['gsd.md', path.join('hooks', 'PreToolUse')]) {
       const p = path.join(clinerulesDir, rel);
@@ -8663,7 +8577,7 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
   // GSD-managed hook entries from hooks.json and clean up the managed hook
   // scripts. Gated by the hostBehaviors.hooksJsonSurface descriptor axis, not a
   // hardcoded `isCursor` branch.
-  if (_hostBehaviors(runtime).hooksJsonSurface) {
+  if (hostBehaviorsFor(runtime).hooksJsonSurface) {
     const hooksJsonCleanup = removeCursorHooksJson(targetDir);
     if (hooksJsonCleanup.changed) {
       removedCount++;
@@ -8723,7 +8637,7 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
 
   // 1c. Claude local: remove flat gsd-*.md commands from commands/ (current layout,
   //     #1367 fix). Also remove legacy commands/gsd/ subdirectory from prior installs.
-  if (!isGlobal && _hostBehaviors(runtime).localInstallStyle === 'legacy-flat') {
+  if (!isGlobal && hostBehaviorsFor(runtime).localInstallStyle === 'legacy-flat') {
     const commandsDir = path.join(targetDir, 'commands');
     // Remove flat gsd-*.md files (current layout after #1367 fix)
     if (fs.existsSync(commandsDir)) {
@@ -8789,7 +8703,7 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
   //     removes the directory; we must preserve/restore user artifacts before that path.
   //     This block runs AFTER uninstallRuntimeArtifacts, so we check if the directory
   //     was already removed and skip if so (idempotent).
-  if (_hostBehaviors(runtime).legacyCommandsGsdCleanup === true) {
+  if (hostBehaviorsFor(runtime).legacyCommandsGsdCleanup === true) {
     // dev-preferences may have survived in skills/ as SKILL.md — nothing to do for
     // that case. If a stale commands/gsd/ still exists (e.g. legacy was not removed),
     // attempt migration. In practice _runLegacyUninstallCleanup removes it first,
@@ -9004,7 +8918,7 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
   // that declares the block (OpenCode, Kilo, ...), not just OpenCode. Only
   // GSD's own plugin file is removed; the plugins/ dir is pruned only if it
   // becomes empty, preserving any user-authored plugins for that host.
-  const _np = _hostBehaviors(runtime).nativePlugin;
+  const _np = hostBehaviorsFor(runtime).nativePlugin;
   if (_np) {
     const pluginsDir = path.join(targetDir, _np.dir);
     const pluginPath = path.join(pluginsDir, _np.file);
@@ -9169,7 +9083,7 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
     // to preserve any user-added allow/deny entries.
     // Uses a local flag to avoid the shared `settingsModified` producing a false
     // "Removed GSD permissions" message when only hooks/statusline changed.
-    if (_hostBehaviors(runtime).permissionsSchema === 'claude' && settings.permissions) {
+    if (hostBehaviorsFor(runtime).permissionsSchema === 'claude' && settings.permissions) {
       let permissionsModified = false;
       if (Array.isArray(settings.permissions.allow)) {
         const before = settings.permissions.allow.length;
@@ -9240,7 +9154,7 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
     // runtimes that host MCP there (Augment), symmetric to the mcp_config.json
     // removal for Antigravity below. Only the GSD-owned mcpServers.gsd key is
     // removed — any other user-configured MCP servers are preserved.
-    if (_hostBehaviors(runtime).mcpCompanion === 'settings-json' &&
+    if (hostBehaviorsFor(runtime).mcpCompanion === 'settings-json' &&
       settings.mcpServers && typeof settings.mcpServers === 'object' &&
       settings.mcpServers.gsd !== undefined) {
       delete settings.mcpServers.gsd;
@@ -9929,7 +9843,7 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
   // #1367: Claude local now writes flat gsd-*.md files at commands/ (not commands/gsd/).
   // Claude local uses flatCommandsDir instead for manifest recording.
   const flatCommandsDir = path.join(configDir, 'commands');
-  const opencodeCommandDir = path.join(configDir, _hostBehaviors(runtime).flatCommandDir || 'command');
+  const opencodeCommandDir = path.join(configDir, hostBehaviorsFor(runtime).flatCommandDir || 'command');
   // Hermes nests GSD skills under skills/gsd/ as a single category (#2841) —
   // already encoded in its layout descriptor's destSubpath ('skills/gsd').
   // All other runtimes that use the Codex-style skills layout use a flat skills/ root.
@@ -9944,7 +9858,7 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
   // `options.scope` could drift; one cannot.
   const resolvedScope = options.scope === 'local' ? 'local' : 'global';
   const codexSkillsDir = _resolveSkillsRootDir(runtime, configDir, resolvedScope);
-  const codexSkillsManifestPrefix = _hostBehaviors(runtime).skillsManifestPrefix || 'skills/';
+  const codexSkillsManifestPrefix = hostBehaviorsFor(runtime).skillsManifestPrefix || 'skills/';
   // #3738: resolve the ACTUAL agents-install dir honoring an agents-kind `home`
   // override (antigravity global → $HOME/.gemini/config/agents), mirroring
   // _resolveSkillsRootDir for skills. Hardcoding configDir/agents left the
@@ -9996,26 +9910,26 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
   // Claude local (#1367): flat gsd-*.md files at commands/ level.
   // Only claude local writes gsd-*.md here; global installs don't emit commands,
   // so this branch is a no-op for global (no matching files to find).
-  if (_hostBehaviors(runtime).localInstallStyle === 'legacy-flat' && fs.existsSync(flatCommandsDir)) {
+  if (hostBehaviorsFor(runtime).localInstallStyle === 'legacy-flat' && fs.existsSync(flatCommandsDir)) {
     for (const file of fs.readdirSync(flatCommandsDir)) {
       if (file.startsWith('gsd-') && file.endsWith('.md')) {
         manifest.files['commands/' + file] = fileHash(path.join(flatCommandsDir, file));
       }
     }
   }
-  if (_hostBehaviors(runtime).flatCommandDir && fs.existsSync(opencodeCommandDir)) {
+  if (hostBehaviorsFor(runtime).flatCommandDir && fs.existsSync(opencodeCommandDir)) {
     // #2329: derive the manifest key prefix from the SAME descriptor value used
     // to compute opencodeCommandDir above, instead of a separately-hardcoded
     // literal — a divergence here would silently break the manifest even after
     // the destSubpath descriptor is corrected (Generative Fix Divergence guard).
-    const flatCommandDirPrefix = _hostBehaviors(runtime).flatCommandDir || 'command';
+    const flatCommandDirPrefix = hostBehaviorsFor(runtime).flatCommandDir || 'command';
     for (const file of fs.readdirSync(opencodeCommandDir)) {
       if (file.startsWith('gsd-') && file.endsWith('.md')) {
         manifest.files[flatCommandDirPrefix + '/' + file] = fileHash(path.join(opencodeCommandDir, file));
       }
     }
   }
-  if (!_hostBehaviors(runtime).skipCodexSkillsManifest && fs.existsSync(codexSkillsDir)) {
+  if (!hostBehaviorsFor(runtime).skipCodexSkillsManifest && fs.existsSync(codexSkillsDir)) {
     // All runtimes (including Hermes post-#947) use the canonical 'gsd-' prefix.
     const skillListPrefix = 'gsd-';
     for (const skillName of listCodexSkillNames(codexSkillsDir, skillListPrefix)) {
@@ -10026,14 +9940,14 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
       }
     }
     // Descriptor-driven (#2090): hash the category DESCRIPTION.md so reinstall detects drift.
-    if (_hostBehaviors(runtime).trackCategoryDescription) {
+    if (hostBehaviorsFor(runtime).trackCategoryDescription) {
       const descPath = path.join(codexSkillsDir, 'DESCRIPTION.md');
       if (fs.existsSync(descPath)) {
         manifest.files['skills/gsd/DESCRIPTION.md'] = fileHash(descPath);
       }
     }
   }
-  if (_hostBehaviors(runtime).agentManifestStyle === 'kimi-nested' && fs.existsSync(agentsDir)) {
+  if (hostBehaviorsFor(runtime).agentManifestStyle === 'kimi-nested' && fs.existsSync(agentsDir)) {
     const agentHashes = generateManifest(agentsDir);
     for (const [rel, hash] of Object.entries(agentHashes)) {
       const isRootAgent = rel === 'gsd.yaml' || rel === 'gsd.md';
@@ -10054,7 +9968,7 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
   // marker block, not the per-configDir manifest, since it lives outside it.)
   // Descriptor-driven (ADR-1239 / #2090): folded from `isCline` into
   // hostBehaviors.clineRulesSurface.
-  if (_hostBehaviors(runtime).clineRulesSurface) {
+  if (hostBehaviorsFor(runtime).clineRulesSurface) {
     for (const rel of ['.clinerules/gsd.md', '.clinerules/hooks/PreToolUse']) {
       const dest = path.join(configDir, rel);
       if (fs.existsSync(dest)) {
@@ -10075,7 +9989,7 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
   // skipSharedHooksInstall:true) — the redundant `&& !isCopilot` was removed.
   // #2100: Windsurf's exclusion is likewise descriptor-driven (windsurf declares
   // skipSharedHooksInstall:true) — the redundant `&& !isWindsurf` was removed.
-  if (!isCodex && _hostBehaviors(runtime).skipSharedHooksInstall !== true) {
+  if (!isCodex && hostBehaviorsFor(runtime).skipSharedHooksInstall !== true) {
     // #3023: manifest keys must track the bundle wherever the descriptor put it,
     // or uninstall/saveLocalPatches silently orphan the tree.
     const sharedHooksDirName = resolveSharedHooksDirName(runtime);
@@ -10142,7 +10056,7 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
 
   // Track the OpenCode native plugin adapter (#1914) so update/drift detection
   // and uninstall can account for it.
-  const _npM = _hostBehaviors(runtime).nativePlugin;
+  const _npM = hostBehaviorsFor(runtime).nativePlugin;
   if (_npM) {
     const pluginInstallPath = path.join(configDir, _npM.dir, _npM.file);
     if (fs.existsSync(pluginInstallPath)) {
@@ -10373,7 +10287,7 @@ function saveLocalPatches(configDir, pristineCtx) {
       skillsRoot !== resolvedConfig &&
       !skillsRoot.startsWith(resolvedConfig + path.sep)
     ) {
-      const prefix = _hostBehaviors(patchRuntime).skillsManifestPrefix || 'skills/';
+      const prefix = hostBehaviorsFor(patchRuntime).skillsManifestPrefix || 'skills/';
       skillsRedirect = { root: skillsRoot, prefix };
     }
   }
@@ -10596,7 +10510,7 @@ function reportLocalPatches(configDir, runtime = DEFAULT_RUNTIME) {
   try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch { return []; }
 
   if (meta.files && meta.files.length > 0) {
-    const reapplyCommand = _hostBehaviors(runtime).reapplyCommand || '/gsd-update --reapply';
+    const reapplyCommand = hostBehaviorsFor(runtime).reapplyCommand || '/gsd-update --reapply';
     console.log('');
     console.log('  ' + yellow + 'Local patches detected' + reset + ' (from v' + meta.from_version + '):');
     for (const f of meta.files) {
@@ -10624,12 +10538,12 @@ function reportInstallerMigrationResult(result) {
 
 function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // #2093: isKilo dropped — Kilo's agent/model-override handling below reads
-  // _hostBehaviors(runtime).frontmatterDialect === 'kilo' instead of this flag.
+  // hostBehaviorsFor(runtime).frontmatterDialect === 'kilo' instead of this flag.
   // #2095: isKimi dropped — kimi is now a hooks/ consumer like every other
   // settings-json-adjacent runtime; the two `&& !isKimi` hooks-copy guards
   // below were removed, leaving isKimi unused in this function (the kimi
   // local-install-deferred branch above already reads
-  // _hostBehaviors(runtime).localInstallDeferred instead of this flag).
+  // hostBehaviorsFor(runtime).localInstallDeferred instead of this flag).
   // #2096: isAntigravity dropped — antigravity's agents were already
   // descriptor-driven (installRuntimeArtifacts), so its two legacy-agent-loop
   // branches (the path-rewrite skip and the converter dispatch) were
@@ -10669,7 +10583,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // re-running install()) can warn again if the same condition recurs.
   _codexResolverModelOmittedWarned = false;
 
-  if (_hostBehaviors(runtime).localInstallDeferred && !isGlobal) {
+  if (hostBehaviorsFor(runtime).localInstallDeferred && !isGlobal) {
     console.log(`  ${yellow}⚠${reset} Kimi local install is deferred for Phase 2.`);
     console.log(`      No .kimi-code/skills or .agents/skills project artifacts were written.`);
     console.log(`      Project-level Kimi install semantics remain deferred.`);
@@ -10740,7 +10654,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // auto-removed on reinstall (dual-read fallback per issue #791 spec).
   const targetDir = isGlobal
     ? getGlobalConfigDir(runtime, explicitConfigDir)
-    : _hostBehaviors(runtime).localTargetIsProjectRoot
+    : hostBehaviorsFor(runtime).localTargetIsProjectRoot
       ? process.cwd()
       : path.join(process.cwd(), dirName);
 
@@ -10855,7 +10769,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   const isWindowsHost = process.platform === 'win32';
   const pathPrefix = computePathPrefix({
     isGlobal,
-    isOpencode: _hostBehaviors(runtime).skipHomePrefixSubstitution === true,
+    isOpencode: hostBehaviorsFor(runtime).skipHomePrefixSubstitution === true,
     isWindowsHost,
     resolvedTarget,
     homeDir,
@@ -10863,7 +10777,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     // copyWithPathReplacement, i.e. the one actually written into every
     // emitted command/skill/workflow body — the rewrite-engine seams below
     // handle re-applied surfaces, not the first install.
-    localDirName: _hostBehaviors(runtime).localTargetIsProjectRoot === true ? undefined : getDirName(runtime),
+    localDirName: hostBehaviorsFor(runtime).localTargetIsProjectRoot === true ? undefined : getDirName(runtime),
   });
 
   // runtimeLabel is now the single-source getRuntimeLabel lookup (ADR-1239
@@ -10967,7 +10881,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // a core/--minimal install too (#2695), and its pass-2 sweeps remove every
   // gsd-* skill dir / agent file the snapshot does not claim — so an empty
   // minimal-mode snapshot deleted the whole surface with nothing to restore.
-  if (_hostBehaviors(runtime).tomlConfigInstall) {
+  if (hostBehaviorsFor(runtime).tomlConfigInstall) {
     codexManagedSnapshotCaptured = true;
     const _preSkillsDir = _resolveSkillsRootDir(runtime, targetDir, _installScopeId);
     if (fs.existsSync(_preSkillsDir)) {
@@ -11216,7 +11130,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // The full restoreCodexSnapshot() (defined inside the config block) additionally
   // handles config.toml and the staged hooks/ tree, which are not yet touched
   // at this point in the pipeline.
-  const _codexPreConfigRollback = !_hostBehaviors(runtime).tomlConfigInstall || isMinimalMode(_effectiveInstallMode) ? null : () => {
+  const _codexPreConfigRollback = !hostBehaviorsFor(runtime).tomlConfigInstall || isMinimalMode(_effectiveInstallMode) ? null : () => {
     rollbackInstallerMigrations();
     // skills/gsd-* — pass 1: restore snapshot entries (may be absent if deleted mid-install).
     const _earlySkillsDir = _resolveSkillsRootDir(runtime, targetDir, _installScopeId);
@@ -11406,7 +11320,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // used to describe. Claude-local remains the one special-cased path
   // (copyWithPathReplacement + stale-skills cleanup).
   const _isSkillsRuntime = (() => {
-    if (_hostBehaviors(runtime).localInstallStyle === 'legacy-flat' && !isGlobal) return false;  // legacy flat local path (descriptor-driven; #2086)
+    if (hostBehaviorsFor(runtime).localInstallStyle === 'legacy-flat' && !isGlobal) return false;  // legacy flat local path (descriptor-driven; #2086)
     // #2875 Part 2 defect fix: a runtime whose LOCAL commands are embedded in a
     // rules file rather than materialized as files (hostBehaviors.localCommandsViaRules
     // — cline is the only declarant, capabilities/cline/capability.json) must not
@@ -11417,7 +11331,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     // spuriously fail; the `localCommandsViaRules` branch below (unchanged
     // messaging) and the unconditional agents-materialization block further down
     // (installAgentsKindStandalone) already cover this runtime/scope correctly.
-    if (!isGlobal && _hostBehaviors(runtime).localCommandsViaRules) return false;
+    if (!isGlobal && hostBehaviorsFor(runtime).localCommandsViaRules) return false;
     const cap = _capabilityRegistry && _capabilityRegistry.runtimes && _capabilityRegistry.runtimes[runtime];
     const layout = cap && cap.runtime && cap.runtime.artifactLayout;
     if (!layout) return false;
@@ -11456,13 +11370,13 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // marker. Write failure is non-fatal (install proceeds; warn so /gsd-surface breakage is
   // diagnosable) — the same contract the late write had.
   function _writeGsdSourceMarker(runtime, targetDir, src, isGlobal) {
-    if (_hostBehaviors(runtime).sourceMarkerFile && isGlobal) {
+    if (hostBehaviorsFor(runtime).sourceMarkerFile && isGlobal) {
       const gsdSourceCommands = path.join(src, 'commands', 'gsd');
       if (fs.existsSync(gsdSourceCommands)) {
         try {
           // ADR-1239 Phase B write-confinement: the descriptor-sourced marker filename
           // must resolve under targetDir (parity with the other descriptor-driven writes).
-          const _markerPath = assertDestWithinConfigHome(targetDir, _hostBehaviors(runtime).sourceMarkerFile);
+          const _markerPath = assertDestWithinConfigHome(targetDir, hostBehaviorsFor(runtime).sourceMarkerFile);
           if (hasExistingSymlinkBetween(path.resolve(targetDir), _markerPath, { allowOptInFollow: isSymlinkedDestOptIn() })) {
             throw new Error(`compatibility marker "${_markerPath}" contains an untrusted symlink`);
           }
@@ -11537,7 +11451,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     // index BOTH SKILL.md and the sidecar, causing each GSD skill to appear twice
     // in autocomplete. Cleaning them up fixes the duplication; SKILL.md alone is
     // sufficient for Codex discovery. User-owned dirs are never touched.
-    if (_hostBehaviors(runtime).cleanupSkillSidecars) {
+    if (hostBehaviorsFor(runtime).cleanupSkillSidecars) {
       cleanupCodexSkillMetadataSidecars(_skillsRootDir);
     }
 
@@ -11563,7 +11477,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     // Descriptor-driven (ADR-1239 / #2100): folded from `isWindsurf` into
     // hostBehaviors.legacyDevinSkillsCleanup (windsurf is the only runtime that
     // declares it, so this is byte-parity).
-    if (_hostBehaviors(runtime).legacyDevinSkillsCleanup && !isGlobal) {
+    if (hostBehaviorsFor(runtime).legacyDevinSkillsCleanup && !isGlobal) {
       const removedCount = cleanupWindsurfLegacyDevinSkills(process.cwd());
       if (removedCount > 0) {
         console.log(`  ${green}✓${reset} Removed ${removedCount} legacy .devin/skills/gsd-* dir(s) (pre-#1615 Windsurf layout)`);
@@ -11571,12 +11485,12 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     }
 
     // Descriptor-driven (#2090): write DESCRIPTION.md for the gsd/ category after layout install
-    if (_hostBehaviors(runtime).writeCategoryDescription) {
+    if (hostBehaviorsFor(runtime).writeCategoryDescription) {
       writeHermesCategoryDescription(path.join(targetDir, 'skills', 'gsd'));
     }
 
     // Verify installed artifacts and report
-    if (_hostBehaviors(runtime).reportSkillsCount) {
+    if (hostBehaviorsFor(runtime).reportSkillsCount) {
       const hermesSkillsDir = path.join(targetDir, 'skills', 'gsd');
       if (fs.existsSync(hermesSkillsDir)) {
         // Hermes layout uses prefix: 'gsd-' (#947) — skill dirs have gsd-<stem> names
@@ -11590,7 +11504,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       } else {
         failures.push('skills/gsd/*');
       }
-    } else if (_hostBehaviors(runtime).verificationStyle === 'kimi') {
+    } else if (hostBehaviorsFor(runtime).verificationStyle === 'kimi') {
       const skillsDir = path.join(targetDir, 'skills');
       const rootAgentPath = path.join(targetDir, 'agents', 'gsd.yaml');
       if (fs.existsSync(skillsDir)) {
@@ -11614,7 +11528,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     // hostBehaviors.verificationStyle === 'windsurf-workflows' (extends the
     // same mechanism the 'kimi' verificationStyle branch above uses; windsurf
     // is the only runtime that declares this value, so this is byte-parity).
-    } else if (_hostBehaviors(runtime).verificationStyle === 'windsurf-workflows') {
+    } else if (hostBehaviorsFor(runtime).verificationStyle === 'windsurf-workflows') {
       if (isGlobal) {
         console.log(`  ${green}✓${reset} Windsurf global install skipped workflow artifacts (workspace-only)`);
       } else {
@@ -11663,7 +11577,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       // Descriptor-driven commands/ output report (currently CodeBuddy).
       // Cursor retired this parallel surface in #2644 because its skills are
       // already slash-menu entries as well as model-invocable context.
-      if (_hostBehaviors(runtime).reportCommandsDir) {
+      if (hostBehaviorsFor(runtime).reportCommandsDir) {
         const commandsDir = path.join(targetDir, 'commands');
         if (fs.existsSync(commandsDir)) {
           const cmdCount = fs.readdirSync(commandsDir)
@@ -11678,14 +11592,14 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
         }
       }
     }
-  } else if (_hostBehaviors(runtime).localCommandsViaRules) {
+  } else if (hostBehaviorsFor(runtime).localCommandsViaRules) {
     // Cline local install: rules-based only — commands are embedded in .clinerules (generated below).
     // No skills/commands directory needed for local installs.
     // Global installs are handled above by _isSkillsRuntime (#782).
     // Descriptor-driven (ADR-1239 / #2090): folded from `isCline` into
     // hostBehaviors.localCommandsViaRules.
     console.log(`  ${green}✓${reset} Cline: commands will be available via .clinerules`);
-  } else if (_hostBehaviors(runtime).pluginOnlyInstall) {
+  } else if (hostBehaviorsFor(runtime).pluginOnlyInstall) {
     // pi (ADR-1239 / #2102 Stage 1): plugin-only install — pi's /gsd command is
     // registered programmatically by the native extension (pi/gsd.cjs →
     // extensions/gsd.js, staged separately below; the dest suffix must be
@@ -11793,8 +11707,8 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // double-stages their plugin file. A runtime like pi, whose artifactLayout is
   // intentionally empty for both scopes (`_isSkillsRuntime` is false), still
   // needs its declared hostBehaviors.nativePlugin file copied into targetDir.
-  if (!_isSkillsRuntime && _hostBehaviors(runtime).nativePlugin) {
-    _installNativePluginIfDeclared(runtime, targetDir, _hostBehaviors(runtime), src);
+  if (!_isSkillsRuntime && hostBehaviorsFor(runtime).nativePlugin) {
+    _installNativePluginIfDeclared(runtime, targetDir, hostBehaviorsFor(runtime), src);
   }
 
   // #2624: the .gsd-source marker is now written by _writeGsdSourceMarker()
@@ -11815,7 +11729,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // hostBehaviors.installsCommandBodiesForWorkflowDelegation (windsurf is the
   // only runtime that declares it, so this is byte-parity — the #1629 fix
   // itself is unchanged).
-  if (_hostBehaviors(runtime).installsCommandBodiesForWorkflowDelegation && !isGlobal) {
+  if (hostBehaviorsFor(runtime).installsCommandBodiesForWorkflowDelegation && !isGlobal) {
     const commandsSrc = path.join(src, 'commands', 'gsd');
     const commandsDest = path.join(skillDest, 'commands', 'gsd');
     if (fs.existsSync(commandsSrc)) {
@@ -11879,7 +11793,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // scopes (programmatic dispatch, no named-dispatch subagent toolkit, no
   // host-read markdown surface), so the resolved layout has no `agents` kind
   // to stage and the function returns `null` without writing anything.
-  if (_hostBehaviors(runtime).pluginOnlyInstall) {
+  if (hostBehaviorsFor(runtime).pluginOnlyInstall) {
     console.log(`  ${green}✓${reset} pi: no subagent files (programmatic dispatch, no named-dispatch toolkit)`);
   } else if (_isSkillsRuntime) {
     console.log(`  ${dim}↳${reset} Agents installed via descriptor-driven layout (${runtime})`);
@@ -11914,7 +11828,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // advertising the old full agent surface even though the descriptor-driven
   // write above already skipped writing the .md files for a minimal-tier
   // resolvedProfile. Reuse the same helper that powers `--uninstall`.
-  if (isMinimalMode(_effectiveInstallMode) && _hostBehaviors(runtime).tomlConfigInstall) {
+  if (isMinimalMode(_effectiveInstallMode) && hostBehaviorsFor(runtime).tomlConfigInstall) {
     const codexConfigPath = path.join(targetDir, 'config.toml');
     if (fs.existsSync(codexConfigPath)) {
       const existing = fs.readFileSync(codexConfigPath, 'utf8');
@@ -12033,7 +11947,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
             // runtime.hostBehaviors.brandingRewrites. This site only
             // rewrites the two brand-name keys (no `.claude/` here — the
             // config-dir replace above already handled path fragments).
-            const _b2 = _hostBehaviors(runtime).brandingRewrites;
+            const _b2 = hostBehaviorsFor(runtime).brandingRewrites;
             if (_b2) {
               content = content.replace(/CLAUDE\.md/g, _b2['CLAUDE.md']);
               content = content.replace(/\bClaude Code\b/g, _b2['Claude Code']);
@@ -12192,7 +12106,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // skipSharedHooksInstall:true) — the redundant `&& !isCopilot` was removed.
   // #2100: Windsurf's exclusion is likewise descriptor-driven (windsurf declares
   // skipSharedHooksInstall:true) — the redundant `&& !isWindsurf` was removed.
-  if (!isCodex && _hostBehaviors(runtime).skipSharedHooksInstall !== true) {
+  if (!isCodex && hostBehaviorsFor(runtime).skipSharedHooksInstall !== true) {
     if (!installSharedHooksBundle(targetDir)) {
       failures.push('hooks');
     }
@@ -12359,7 +12273,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   }
 
   // Verify no leaked .claude paths in non-Claude runtimes (manifest-scoped)
-  if (!_hostBehaviors(runtime).ownsClaudePaths) {
+  if (!hostBehaviorsFor(runtime).ownsClaudePaths) {
     const leakedPaths = [];
     // Only scan files that were written by this install (manifest-tracked).
     // Scanning the entire targetDir can match user-authored content that
@@ -12392,7 +12306,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       // verification backstop. The `_GSD_RUNTIME_ROOT`/`$PREFERRED_CONFIG_DIR`
       // fallback chains and prose `.claude` mentions carry no `@~/` prefix and
       // are deliberately untouched, as is CHANGELOG.md.
-      if (runtime === 'codex') {
+      if (hostBehaviorsFor(runtime).rewriteClaudeAtIncludes) {
         for (const relPath of manifestFiles) {
           const fileName = path.basename(relPath);
           if (!(fileName.endsWith('.md') || fileName.endsWith('.toml'))) continue;
@@ -13041,7 +12955,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     // stop, subagentStart, subagentStop) via runtime-hooks-surface.cts, which reads
     // the event list from the descriptor-driven adapter module.
     const cursorHookResult = writeCursorHooksJson(targetDir, src, {
-      managedHookEvents: _hostBehaviors(runtime).managedHookEvents,
+      managedHookEvents: hostBehaviorsFor(runtime).managedHookEvents,
     });
     if (cursorHookResult.changed) {
       console.log(`  ${green}✓${reset} Configured Cursor lifecycle hooks (sessionStart, postToolUse, preToolUse, stop, subagentStart, subagentStop)`);
@@ -13134,9 +13048,9 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       // reports success and the user is left with the very breakage the opt-in
       // exists to prevent. Verified reproducible before this guard existed.
       const kimiInstalledThisRun = selectedRuntimes.includes('kimi');
-      if (hasReclaimKimiLegacy && runtime === 'kimi-code' && kimiInstalledThisRun) {
+      if (hasReclaimKimiLegacy && hostBehaviorsFor(runtime).reclaimsKimiLegacyHooksRoot && kimiInstalledThisRun) {
         console.log(`  ${dim}•${reset} Skipped --reclaim-kimi-legacy: this run also installs --kimi, so ${resolveKimiHooksTomlDir({ runtime: 'kimi' })} is a live Kimi CLI install`);
-      } else if (hasReclaimKimiLegacy && runtime === 'kimi-code') {
+      } else if (hasReclaimKimiLegacy && hostBehaviorsFor(runtime).reclaimsKimiLegacyHooksRoot) {
         const legacyKimiRoot = resolveKimiHooksTomlDir({ runtime: 'kimi' });
         // Both roots honor their own env override (KIMI_SHARE_DIR /
         // KIMI_CODE_HOME). A user who points both at ONE directory collapses
@@ -13212,15 +13126,15 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // #2870: the CURRENT scope's settings filename is sourced from the Install
   // Scope Module (_installScope.settingsFile, resolveScope's per-scope field)
   // instead of indexing _scopedSettings by hand. _scopedSettings itself is
-  // retained unchanged as the #338-privacy fail-safe path: _hostBehaviors
-  // already degrades to FALLBACK_HOST_BEHAVIORS (see that constant's comment
-  // above) when the registry fails to load, whereas resolveScope's registry
+  // retained unchanged as the #338-privacy fail-safe path: hostBehaviorsFor
+  // already degrades to its #338 floor (see runtime-name-policy.cts)
+  // when the registry fails to load, whereas resolveScope's registry
   // lookup throws in that same scenario (_installScope is null when it did).
   // Falling back to _scopedSettings[_installScopeId] there — and keeping the
   // non-local-claude branch's expression untouched — means this is
   // byte-identical to the pre-migration computation in every case, including
   // the broken-registry fail-safe floor.
-  const _scopedSettings = _hostBehaviors(runtime).settingsFileByScope || null;
+  const _scopedSettings = hostBehaviorsFor(runtime).settingsFileByScope || null;
   const _currentScopeSettingsFile = _installScope
     ? _installScope.settingsFile
     : (_scopedSettings ? (_scopedSettings[_installScopeId] ?? null) : null);
@@ -13346,7 +13260,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // Descriptor-driven (ADR-1239 / #2096): hookPathStyle comes from the
   // runtime's hostBehaviors instead of a hardcoded `runtime === 'antigravity'`
   // check inside projectLocalHookPrefix.
-  const localPrefix = projectLocalHookPrefix({ runtime, dirName, hookPathStyle: _hostBehaviors(runtime).hookPathStyle });
+  const localPrefix = projectLocalHookPrefix({ runtime, dirName, hookPathStyle: hostBehaviorsFor(runtime).hookPathStyle });
   const settingsEntrypoints = [];
   const hookOpts = {
     portableHooks: hasPortableHooks,
@@ -13449,7 +13363,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // installAllRuntimes can register it at finalize time when the user opts
   // in (#2795). Computed here (not in finishInstall) so the same buildHookCommand
   // / localCmd resolution logic is shared with the other JS hooks.
-  const updateBannerCommand = _hostBehaviors(runtime).skipUpdateBannerCommand
+  const updateBannerCommand = hostBehaviorsFor(runtime).skipUpdateBannerCommand
     ? null
     : (isGlobal
       ? buildHookCommand(targetDir, 'gsd-update-banner.js', hookOpts)
@@ -13612,7 +13526,7 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
   // on plan.finishPermissionWriter === 'kilo' (descriptor-driven), not this flag.
   // #2094: isTrae dropped — unused in this function.
   // #2095: isKimi dropped — the Kimi "Done!" banner below reads
-  // _hostBehaviors(runtime).doneBannerStyle === 'kimi-agent-file' (descriptor-driven), not this flag.
+  // hostBehaviorsFor(runtime).doneBannerStyle === 'kimi-agent-file' (descriptor-driven), not this flag.
   // #2096: isAntigravity dropped — unused in this function.
   // #2098: isCodebuddy dropped — unused in this function.
   // #2099: isCopilot dropped — unused in this function.
@@ -13633,7 +13547,7 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
   // runtime — kept for a caller that invokes finishInstall directly.
   assertConfiguredEntrypoints(bannerOpts.configuredEntrypoints);
 
-  if (shouldInstallStatusline && plan.writesSharedSettings && !_hostBehaviors(runtime).skipSettingsUi) {
+  if (shouldInstallStatusline && plan.writesSharedSettings && !hostBehaviorsFor(runtime).skipSettingsUi) {
     if (!isGlobal && !forceStatusline) {
       // Local installs skip statusLine by default: repo settings.json takes precedence over
       // profile-level settings.json in Claude Code, so writing here would silently clobber
@@ -13659,7 +13573,7 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
   // settings.json hooks block — opencode/kilo/codex/cursor/windsurf/trae/
   // cline either lack the surface or use a different config schema.
   const { shouldInstallBanner, bannerCommand } = bannerOpts;
-  if (shouldInstallBanner && settings && plan.writesSharedSettings && !_hostBehaviors(runtime).skipSettingsUi) {
+  if (shouldInstallBanner && settings && plan.writesSharedSettings && !hostBehaviorsFor(runtime).skipSettingsUi) {
     if (!bannerCommand) {
       console.warn(`  ${yellow}⚠${reset}  Skipped update banner registration — Node executable path unavailable. See #2979 / #3002.`);
     } else {
@@ -13688,13 +13602,13 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
   // Merges GSD-owned entries non-destructively (preserves existing user permissions).
   // Scoped to Claude only: antigravity/qwen/hermes/codebuddy also write
   // settings.json but use different runtimes and do not use these permission strings.
-  if (_hostBehaviors(runtime).permissionsSchema === 'claude') {
+  if (hostBehaviorsFor(runtime).permissionsSchema === 'claude') {
     mergeClaudePermissions(settings);
   }
 
   // #2097 UPGRADE 3 (transport:mcp): companion MCP server for runtimes that host
   // MCP in settings.json (Augment). settings.json is golden-excluded, so no golden change.
-  if (_hostBehaviors(runtime).mcpCompanion === 'settings-json' && settings && plan.writesSharedSettings) {
+  if (hostBehaviorsFor(runtime).mcpCompanion === 'settings-json' && settings && plan.writesSharedSettings) {
     mergeGsdMcpServerIntoSettings(settings);
   }
 
@@ -13734,18 +13648,29 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
   // generation reads it). This call is idempotent (preserves existing values).
   writeNonClaudeDefaults(runtime);
 
-  // program + command are now single-source lookups (ADR-1239 Phase B / #1679):
-  // program is the runtime display label; command is the per-host /gsd-new-project
-  // invocation syntax.
+  // program is the runtime display label (ADR-1239 Phase B / #1679). The command
+  // is generated from the surface this runtime registered in this install scope
+  // (#5215, ADR-5057 §5 Phase 12) — a runtime that registers no new-project
+  // trigger is told so instead of being sent to a command that does not exist (#4567).
   const program = getRuntimeLabel(runtime);
-  const command = getRuntimeNewProjectCommand(runtime);
+  const advertised = resolveAdvertisedNewProject(runtime, isGlobal ? 'global' : 'local');
+  const command = advertised.kind === 'command' ? advertised.command : null;
+  // Host-specific launch/restart steps below stay; only the new-project clause
+  // changes when the runtime registered no such command.
+  const noNewProject = advertised.kind === 'unregistered'
+    ? `${program} registers no new-project command in this scope${advertised.nativeCommand ? ` (its native extension registers ${cyan}${advertised.nativeCommand}${reset})` : ''}.`
+    : '';
 
   // Claude Code global installs use the skills/ format (CC 2.1.88+).
   // Restart is required for CC to pick up newly-installed skills, and the
   // slash-menu surface depends on CC version — so the instruction needs to
   // cover both invocation paths to avoid #2957-style "no commands appear".
-  if (_hostBehaviors(runtime).skillsGlobalOnboarding && isGlobal) {
-    console.log(`
+  if (hostBehaviorsFor(runtime).skillsGlobalOnboarding && isGlobal) {
+    console.log(command === null ? `
+  ${green}Done!${reset} Restart ${program}. ${noNewProject}
+
+  ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
+` : `
   ${green}Done!${reset} Restart ${program}, then in any directory either type ${cyan}${command}${reset} or ask Claude to run the ${cyan}gsd-new-project${reset} skill.
 
   ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
@@ -13753,9 +13678,13 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
     return;
   }
 
-  if (_hostBehaviors(runtime).doneBannerStyle === 'kimi-agent-file') {
+  if (hostBehaviorsFor(runtime).doneBannerStyle === 'kimi-agent-file') {
     const agentPath = configDir ? path.join(configDir, 'agents', 'gsd.yaml') : 'agents/gsd.yaml';
-    console.log(`
+    console.log(command === null ? `
+  ${green}Done!${reset} Start ${program} with ${cyan}kimi --agent-file ${agentPath}${reset}. ${noNewProject}
+
+  ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
+` : `
   ${green}Done!${reset} Start ${program} with ${cyan}kimi --agent-file ${agentPath}${reset}, then run ${cyan}${command}${reset}.
 
   ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
@@ -13763,7 +13692,11 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
     return;
   }
 
-  console.log(`
+  console.log(command === null ? `
+  ${green}Done!${reset} GSD is installed for ${program}, which registers no new-project command in this scope${advertised.nativeCommand ? ` (its native extension registers ${cyan}${advertised.nativeCommand}${reset})` : ''}.
+
+  ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
+` : `
   ${green}Done!${reset} Open a blank directory in ${program} and run ${cyan}${command}${reset}.
 
   ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
@@ -14713,9 +14646,6 @@ module.exports = {
     install,
     installAllRuntimes,
     uninstall,
-    // #2086 — host-behavior resolution + the #338 privacy fail-safe floor (exported for tests)
-    _resolveHostBehaviors,
-    FALLBACK_HOST_BEHAVIORS,
     // #3023 — shared hook bundle directory name, descriptor-driven
     SHARED_HOOKS_DIR_DEFAULT,
     resolveSharedHooksDirName,

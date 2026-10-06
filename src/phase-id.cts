@@ -1454,7 +1454,7 @@ const unpad = (digits: string): string => digits.replace(/^0+(?=\d)/, '');
  *   candidates (#2237).
  *
  *   TAKE `matches[0]` — `cmdPhasesList`, `cmdInitManager`, `cmdRoadmapAnalyze`,
- *   `cmdVerifySchemaDrift`, `detectVerifyFailed`. Each read a directory to
+ *   the schema-drift gate (`resolvePhaseDirByToken`), `detectVerifyFailed`. Each read a directory to
  *   DECORATE a row they are already emitting; each used `.find()` before this
  *   PR, so first-match is their prior behavior preserved verbatim, and each is
  *   order-stable because the directory list is sorted and this function filters

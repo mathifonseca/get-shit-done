@@ -168,56 +168,73 @@ function planningRoot(cwd: string): string {
   return path.join(cwd, '.planning');
 }
 
+type ScopedConfigValue = { present: boolean; value: unknown };
+
+const CONFIG_VALUE_ABSENT: ScopedConfigValue = Object.freeze({ present: false, value: undefined });
+
+/**
+ * The value one config file sets at `keyPath`, if it sets one at all. Every
+ * segment must be an OWN property of a plain (non-null, non-array) object, so
+ * an absent, unreadable, or unparseable file — or a non-object anywhere on the
+ * path — does not set the key.
+ */
+function ownConfigValue(configPath: string, keyPath: readonly string[]): ScopedConfigValue {
+  let node: unknown;
+  try {
+    node = JSON.parse(String(fs.readFileSync(configPath, 'utf8')));
+  } catch {
+    return CONFIG_VALUE_ABSENT;
+  }
+  for (const key of keyPath) {
+    if (node === null || typeof node !== 'object' || Array.isArray(node)) return CONFIG_VALUE_ABSENT;
+    if (!Object.prototype.hasOwnProperty.call(node, key)) return CONFIG_VALUE_ABSENT;
+    node = (node as Record<string, unknown>)[key];
+  }
+  return { present: true, value: node };
+}
+
+/**
+ * #3972/#4975: the ONE scope-aware config read for surfaces that must answer
+ * with the value `config-get <keyPath>` reports but may not call loadConfig
+ * (it normalizes and rewrites config.json, spawns git, and prints warnings).
+ * Ladder: the scoped config's OWN key wins (planningDir is project- and
+ * workstream-aware); otherwise the flat root's key, but only under the
+ * GSD_WORKSTREAM env gate — config-get deliberately does NOT inherit root
+ * under GSD_PROJECT alone, and no reader of this ladder may diverge (#3963).
+ * An unreadable or unparseable file sets nothing, so the ladder moves on:
+ * under GSD_WORKSTREAM a broken workstream config inherits the root's key.
+ * That is the one place this read and config-get part ways — for a scoped
+ * config.json that exists but cannot be read or parsed, config-get fails
+ * with CONFIG_PARSE_FAILED instead of reporting a value.
+ * The value is returned uncoerced; each caller applies its own strict
+ * comparison. Never throws: planningDir/planningRoot reject a
+ * GSD_PROJECT/GSD_WORKSTREAM value containing path separators or `..`, and
+ * that shape resolves to "not present".
+ */
+function readScopedConfigValue(cwd: string, keyPath: readonly [string, ...string[]]): ScopedConfigValue {
+  try {
+    const scoped = ownConfigValue(path.join(planningDir(cwd), 'config.json'), keyPath);
+    if (scoped.present) return scoped;
+    if (resolveEnvWorkstream() !== null) {
+      return ownConfigValue(path.join(planningRoot(cwd), 'config.json'), keyPath);
+    }
+  } catch {
+    // Degrade to "not present" — see the contract above.
+  }
+  return CONFIG_VALUE_ABSENT;
+}
+
 /**
  * #3972: the ONE owner of "is this planning scope opted out of worktrees?" —
  * the effective `workflow.use_worktrees === false` read every
  * isolation-deciding surface must share (config-get's merged view is the
- * contract). Ladder: the scoped config's OWN key wins (planningDir is
- * project- and workstream-aware); otherwise the flat root's key, but only
- * under the GSD_WORKSTREAM env gate — config-get deliberately does NOT
- * inherit root under GSD_PROJECT alone, and this read must not diverge
- * (#3963). Strict `=== false` (never coerced); any read failure degrades to
- * "not opted out" (worktrees on — the fail-safe direction: the guard keeps
- * enforcing). Direct file reads only — never loadConfig, which normalizes
- * and rewrites config on paths that back sentinel writes.
+ * contract), resolved on the readScopedConfigValue ladder. Strict `=== false`
+ * (never coerced); a config that cannot be read never opts out by itself
+ * (worktrees on — the fail-safe direction: the guard keeps enforcing).
  */
 function worktreesOptedOut(cwd: string): boolean {
-  // #3972 review: the WHOLE body is guarded — planningDir/planningRoot
-  // themselves throw on a GSD_PROJECT/GSD_WORKSTREAM value containing path
-  // separators or `..`, and this contract ("any failure degrades to not
-  // opted out — worktrees on, keep enforcing") must hold for that shape too.
-  try {
-    return worktreesOptedOutUnguarded(cwd);
-  } catch {
-    return false;
-  }
-}
-
-function worktreesOptedOutUnguarded(cwd: string): boolean {
-  type MaybeConfig = { workflow?: unknown } | null;
-  const readCfg = (p: string): MaybeConfig => {
-    try {
-      return JSON.parse(String(fs.readFileSync(p, 'utf8'))) as MaybeConfig;
-    } catch {
-      return null;
-    }
-  };
-  const ownKey = (cfg: MaybeConfig): { present: boolean; value: unknown } => {
-    if (cfg === null || typeof cfg !== 'object') return { present: false, value: undefined };
-    const wf = cfg.workflow;
-    if (wf === null || typeof wf !== 'object' || Array.isArray(wf)) return { present: false, value: undefined };
-    const wfRec = wf as Record<string, unknown>;
-    return Object.prototype.hasOwnProperty.call(wfRec, 'use_worktrees')
-      ? { present: true, value: wfRec['use_worktrees'] }
-      : { present: false, value: undefined };
-  };
-  const scoped = ownKey(readCfg(path.join(planningDir(cwd), 'config.json')));
-  if (scoped.present) return scoped.value === false;
-  if (resolveEnvWorkstream() !== null) {
-    const root = ownKey(readCfg(path.join(planningRoot(cwd), 'config.json')));
-    if (root.present) return root.value === false;
-  }
-  return false;
+  const { present, value } = readScopedConfigValue(cwd, ['workflow', 'use_worktrees']);
+  return present && value === false;
 }
 
 /**
@@ -337,8 +354,8 @@ function quickDirFrom(planningBase: string): string {
   return path.join(planningBase, 'quick');
 }
 
-// #4256: the todos directory — deliberately ROOT-SCOPED, unlike every other
-// planningPaths key. Todos are shared project state by construction: the
+// #4256: the todos directory — deliberately ROOT-SCOPED, like debug (#5042).
+// Todos are shared project state by construction: the
 // migrateToWorkstreams contract keeps them among the shared files that "stay
 // in place" at .planning/todos/ (workstream.cts), and every workflow writer
 // writes that literal cwd-relative root path. The six todos readers
@@ -364,6 +381,16 @@ function todosDir(cwd: string): string {
   return todosDirFrom(planningRoot(cwd));
 }
 
+// Debug sessions are shared project state: the workflow and debugger agent
+// write them under the root .planning/debug directory in every workstream.
+function debugDirFrom(planningBase: string): string {
+  return path.join(planningBase, 'debug');
+}
+
+function debugDir(cwd: string): string {
+  return debugDirFrom(planningRoot(cwd));
+}
+
 function planningPaths(cwd: string, ws?: string | null): PlanningPaths {
   const base = planningDir(cwd, ws);
   return {
@@ -374,14 +401,13 @@ function planningPaths(cwd: string, ws?: string | null): PlanningPaths {
     config: path.join(base, 'config.json'),
     phases: path.join(base, 'phases'),
     requirements: path.join(base, 'REQUIREMENTS.md'),
-    // #3149: the debug-session directory. Single source for both `state.load`'s
-    // `debug_dir` field and `init.debug`'s — previously each composed its own
-    // `path.join(planning, 'debug')` (DEFECT.GENERATIVE-FIX).
-    debug: path.join(base, 'debug'),
+    // #3149/#5042: the debug-session directory shared by state.load,
+    // init.debug, and the root-scoped writers.
+    debug: debugDir(cwd),
     // #2142: quick-task directory, composed via the shared quickDirFrom helper.
     quick: quickDirFrom(base),
-    // #4256: todos directory — deliberately ROOT-scoped while the rest of
-    // this record follows the active workstream/project (todos are shared
+    // #4256: todos directory — deliberately ROOT-scoped like debug, while
+    // most other keys follow the active workstream/project (todos are shared
     // project state per the migrateToWorkstreams contract), composed via the
     // shared todosDir helper so this key and every direct caller agree.
     todos: todosDir(cwd),
@@ -681,6 +707,7 @@ function findContextMdIn(
 
 export = {
   worktreesOptedOut,
+  readScopedConfigValue,
   createPlanningWorkspace,
   createSharedPointerAdapter,
   createSessionScopedPointerAdapter,
@@ -692,6 +719,8 @@ export = {
   listAvailableWorkstreams,
   planningPaths,
   quickDirFrom,
+  debugDirFrom,
+  debugDir,
   todosDirFrom,
   todosDir,
   withPlanningLock,

@@ -4,6 +4,7 @@
 - **Date:** 2026-07-10
 - **Issue:** [#2143](https://github.com/open-gsd/gsd-core/issues/2143) — epic (tech-debt / root-cause consolidation, `type: chore` + `approved-enhancement`)
 - **Supersedes:** nothing
+- **Subsumed by:** [ADR-4910](4910-planning-document-seam.md) (PlanningDoc parse → mutate → serialize seam) — frames this seam as a layer, not a rewrite target; `src/markdown-table.cts` remains live and unchanged (`parseMarkdownTable`, `matchTableSchema`, `updateTableCell`, `insertTableRow`, `deleteTableRow`, the bounded mutation / fail-loud `Result<T>` primitives)
 - **Relationship to prior work:** the second half of [#1372](https://github.com/open-gsd/gsd-core/issues/1372) (which built the `markdown-sectionizer` **read** seam and the `local/no-adhoc-markdown-parsing` rule, then closed). Sibling of [#2121](https://github.com/open-gsd/gsd-core/issues/2121) (`phase-id.cts`, the phase-identifier slice). The fail-loud decision (§5) is the document-mutation analog of **ADR-1411** (Resolution Provenance — "report provenance rather than fall open silently to defaults").
 
 ## Context

@@ -223,6 +223,8 @@
  * Loop Extension Point Queries (ADR-857 phase 3c):
  *   loop render-hooks <point>            Resolve + render active Capability hooks at a loop point
  *                                        [--config-dir <path>] [--runtime <r>] [--active-cap <capId>]
+ *                                        [--after-fingerprint <phaseDir>] (#5105: skip verify:post
+ *                                        steps whose declared artifact already exists in phaseDir)
  *                                        Returns JSON envelope { point, activeHooks, rendered }
  *                                        Valid points: discuss:pre/post, plan:pre/post,
  *                                        execute:pre/wave:pre/wave:post/post, verify:pre/post, ship:pre/post
@@ -244,6 +246,14 @@
  *   from-gsd2 [--path <dir>] [--force] [--dry-run]
  *             Import a GSD-2 (.gsd/) project back to GSD v1 (.planning/) format
  */
+
+// #5183: Node's on-disk compile cache, so later runs reuse V8's compiled code
+// for unchanged modules. Only as the entry (a test require() is unaffected),
+// skipped under V8 coverage, optional (Bun stubs it), and never fatal.
+// NODE_DISABLE_COMPILE_CACHE (any value) turns it off.
+if (require.main === module && !process.env.NODE_V8_COVERAGE) {
+  try { require('node:module').enableCompileCache?.(); } catch { /* optimization only */ }
+}
 
 const fs = require('fs');
 const path = require('path');
@@ -276,7 +286,7 @@ try {
 
 const { ExitError, runMain, resolveContractVersion } = require('./lib/cli-exit.cjs');
 const io = require('./lib/io.cjs');
-const { error, ERROR_REASON, setJsonErrorMode, output, formatDiagnosticToken } = io;
+const { error, ERROR_REASON, setJsonErrorMode, output, formatDiagnosticToken, captureStdoutSyncWrites, resolveAtFileOutput } = io;
 const projectRoot = require('./lib/project-root.cjs');
 // Resolve findProjectRoot lazily at call time rather than binding it at module
 // load. It is sourced from project-root.cjs; a call-time lookup is robust
@@ -491,6 +501,7 @@ function dispatchCapabilityCommand({ command, args, cwd, raw, error, registry, r
     _result = fn({ args, cwd, raw, error });
   } catch (e) {
     if (e instanceof ExitError) throw e; // intentional structured error from the router (honors --json-errors) — propagate untouched
+    if (isVerificationStatusError(e)) throw e; // #5118: translated once, centrally, by main()
     error(
       'capability command "' + command + '" router "' + entry.router + '" in module "' + entry.module + '" threw: ' + (e && e.message ? e.message : String(e)),
       ERROR_REASON.SDK_FAIL_FAST,
@@ -606,6 +617,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     _result = fn({ args, cwd, raw, error });
   } catch (e) {
     if (e instanceof ExitError) throw e;
+    if (isVerificationStatusError(e)) throw e; // #5118: translated once, centrally, by main()
     error(
       'capability command "' + command + '" router "' + entry.router + '" in module "' + entry.module + '" threw: ' + (e && e.message ? e.message : String(e)),
       ERROR_REASON.SDK_FAIL_FAST,
@@ -1512,7 +1524,10 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             error(`quick-tasks-append: STATE.md not found at ${statePath}`, ERROR_REASON.USAGE);
           }
 
-          const date = new Date().toISOString().slice(0, 10);
+          // #4905: an operator-facing date, so the local calendar day (#2136)
+          // through the clock seam, which honors the GSD_NOW_MS pin (#474).
+          const { realClock } = require('./lib/clock.cjs');
+          const date = realClock.localToday();
           const { execGit } = require('./lib/shell-command-projection.cjs');
           const hashResult = execGit(['rev-parse', '--short', 'HEAD'], { cwd });
           const commit = hashResult.exitCode === 0 && hashResult.stdout ? hashResult.stdout : '—';
@@ -2766,6 +2781,63 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     };
     try {
       nodeFs.mkdirSync(sentinelDir, { recursive: true });
+      // Never write through a project-supplied .gsd symlink. Resolve the
+      // directory as well so an ancestor redirect cannot escape this project.
+      if (nodeFs.lstatSync(sentinelDir).isSymbolicLink() ||
+          nodePath.relative(nodeFs.realpathSync(cwd), nodeFs.realpathSync(sentinelDir)) !== '.gsd') {
+        throw new Error('sentinel directory is a symlink or resolves outside the project');
+      }
+      // User projects do not inherit gsd-core's root .gitignore. Ignore this
+      // tool-owned directory locally before writing the first sentinel. An
+      // ordinary ignore-file IO failure must not prevent recording isolation.
+      const ignorePath = nodePath.join(sentinelDir, '.gitignore');
+      try {
+        nodeFs.writeFileSync(ignorePath, '*\n', { flag: 'wx' });
+      } catch (ignoreError) {
+        if (ignoreError.code === 'EEXIST') {
+          // Keep a pre-existing ignore file. A bare '*' already ignores the
+          // whole directory, including this file and the sentinel temp file.
+          // Read through an fd opened without following links where supported;
+          // replace by rename rather than append through the path, so a link
+          // swapped in after the check cannot redirect a write elsewhere.
+          let fd;
+          let ignoreTmpPath;
+          try {
+            if (nodeFs.lstatSync(ignorePath).isSymbolicLink()) {
+              throw new Error('sentinel ignore file is a symlink');
+            }
+            fd = nodeFs.openSync(ignorePath, nodeFs.constants.O_RDONLY | (nodeFs.constants.O_NOFOLLOW || 0));
+            if (!nodeFs.fstatSync(fd).isFile()) throw new Error('sentinel ignore file is not a regular file');
+            const current = nodeFs.readFileSync(fd, 'utf8');
+            nodeFs.closeSync(fd);
+            fd = undefined;
+            if (!current.includes('# gsd-core dispatch sentinel') && !/^\*\r?$/m.test(current)) {
+              const additionalRules = `${current.endsWith('\n') ? '' : '\n'}# gsd-core dispatch sentinel\n` +
+                '/dispatch-isolation-sentinel.json\n' +
+                '/dispatch-isolation-sentinel.json.tmp-*\n' +
+                '/.gitignore\n';
+              ignoreTmpPath = `${ignorePath}.tmp-${process.pid}-${require('crypto').randomBytes(6).toString('hex')}`;
+              nodeFs.writeFileSync(ignoreTmpPath, current + additionalRules, { flag: 'wx' });
+              if (nodeFs.lstatSync(ignorePath).isSymbolicLink()) {
+                throw new Error('sentinel ignore file is a symlink');
+              }
+              nodeFs.renameSync(ignoreTmpPath, ignorePath);
+              ignoreTmpPath = null;
+            }
+          } catch (existingIgnoreError) {
+            if (existingIgnoreError.code === 'ELOOP' || existingIgnoreError.message === 'sentinel ignore file is a symlink') {
+              throw new Error('sentinel ignore file is a symlink');
+            }
+            // Ignore seeding is best-effort; the sentinel is still useful if
+            // this path cannot be read or updated.
+          } finally {
+            if (fd !== undefined) nodeFs.closeSync(fd);
+            if (ignoreTmpPath) {
+              try { nodeFs.unlinkSync(ignoreTmpPath); } catch (_) { /* best-effort cleanup */ }
+            }
+          }
+        }
+      }
       // Atomic write: unique temp file + rename, so a concurrent reader (a
       // guard hook firing mid-write) never observes a partially-written
       // sentinel. Unique per-process+time so concurrent orchestrator-worktree
@@ -3076,8 +3148,13 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             const coverage = require('./lib/coverage.cjs');
             const options = parseNamedArgsOrExit(args, { valueFlags: ['summary', 'file'], positionals: 2 }, error);
             coverage.cmdClassify(cwd, options, raw);
+          } else if (subcommand === 'complete-session') {
+            const uat = require('./lib/uat.cjs');
+            const uatPath = args[2];
+            const options = parseNamedArgsOrExit(args, { valueFlags: ['message'], positionals: 3 }, error);
+            return uat.cmdUatCompleteSession(cwd, uatPath, { message: options.message }, raw);
           } else {
-            error('Unknown uat subcommand. Available: render-checkpoint, classify-coverage', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+            error('Unknown uat subcommand. Available: render-checkpoint, classify-coverage, complete-session', ERROR_REASON.SDK_UNKNOWN_COMMAND);
           }
   }
 
@@ -3175,10 +3252,27 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
               }
               loopRuntime = value;
             }
+            // --after-fingerprint <phaseDir> (#5105 R2): gate out verify:post
+            // steps whose declared artifact already exists in phaseDir.
+            let loopAfterFingerprint = undefined;
+            const afterFpEqArg = args.find(arg => arg.startsWith('--after-fingerprint='));
+            const afterFpIdx = args.indexOf('--after-fingerprint');
+            if (afterFpEqArg) {
+              const value = afterFpEqArg.slice('--after-fingerprint='.length).trim();
+              if (!value) error('Missing value for --after-fingerprint', ERROR_REASON ? ERROR_REASON.USAGE : undefined);
+              loopAfterFingerprint = value;
+            } else if (afterFpIdx !== -1) {
+              const value = args[afterFpIdx + 1];
+              if (!value || value.startsWith('--')) {
+                error('Missing value for --after-fingerprint', ERROR_REASON ? ERROR_REASON.USAGE : undefined);
+              }
+              loopAfterFingerprint = value;
+            }
             loopResolver.cmdLoopRenderHooks(cwd, args[2], raw, {
               configDir: loopConfigDir ? path.resolve(loopConfigDir) : undefined,
               activeCap: loopActiveCap,
               runtime: loopRuntime,
+              afterFingerprint: loopAfterFingerprint,
             });
           } else {
             error(
@@ -3720,13 +3814,14 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       || relPath.startsWith('agents/')
       || relPath.startsWith('commands/');
     if (isFrontmatterSurface) {
-      const block = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+      // The block is the one the one fence owner finds (found while implementing #5105).
+      const found = frontmatter.frontmatterRegion(content);
       const missingFields = [];
-      if (!block) {
+      if (!found || !found.terminated) {
         missingFields.push('name', 'description');
       } else {
-        if (!/^name:\s*\S/m.test(block[1])) missingFields.push('name');
-        if (!/^description:\s*\S/m.test(block[1])) missingFields.push('description');
+        if (!/^name:\s*\S/m.test(found.region)) missingFields.push('name');
+        if (!/^description:\s*\S/m.test(found.region)) missingFields.push('description');
       }
       if (missingFields.length > 0) {
         warnings.push({
@@ -4510,7 +4605,19 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             }
 
             const roadmapStatus = matchedRow.Status;
-            const result = comparePhaseStatus({ stateStatus, roadmapStatus });
+            // #5060: normalize the raw Status cell through the Phase Status
+            // Module's `matchRoadmapStatusCell` owner before comparing ranks —
+            // this recognizes a cell with trailing operator prose after its
+            // leading token (e.g. "Complete — shipped") the same way the
+            // ROADMAP writers/readers already do, rather than requiring the
+            // WHOLE cell to equal a bare token. The raw `roadmapStatus` in the
+            // output stays untouched — only the comparison input changes.
+            const { matchRoadmapStatusCell } = require('./lib/phase-status.cjs');
+            const matched = matchRoadmapStatusCell(roadmapStatus);
+            const result = comparePhaseStatus({
+              stateStatus,
+              roadmapStatus: matched ? matched.token.toLowerCase() : roadmapStatus,
+            });
             output({
               verdict: result.verdict,
               phase,
@@ -5092,6 +5199,28 @@ function resolveMainWorktreeCwd(cwd, deps = {}) {
   return worktreeRoot;
 }
 
+// ─── #5118: an out-of-set verification status thrown past a command ─────────
+// ADR-5057 Phase 4 closed the verification-status vocabulary: a
+// *-VERIFICATION.md whose frontmatter `status` is outside `passed |
+// gaps_found | human_needed` is a hard error (verification.cjs's
+// VerificationStatusError). A command that reads one report directly
+// (`verification status`, `phase uat-passed`, `phase complete`) lets it throw;
+// aggregates carry it in their own results and fail themselves. Either way
+// the CLI fails through the owner's `failOnVerificationStatusError` — the
+// error's own message and its own `.reason`; nothing here restates either.
+function isVerificationStatusError(err) {
+  return err instanceof verification.VerificationStatusError;
+}
+
+async function captureTranslatingVerificationStatus(run) {
+  try {
+    return await captureStdoutSyncWrites(run);
+  } catch (err) {
+    if (isVerificationStatusError(err)) verification.failOnVerificationStatusError(err);
+    throw err;
+  }
+}
+
 async function main() {
   let args = process.argv.slice(2);
 
@@ -5357,7 +5486,7 @@ async function main() {
   // themselves JSON text, so resolving late would make every large result a
   // false "output was not JSON" (negative space N8).
   if (pickField) {
-    const captured = await captureStdoutSyncWrites(async () => {
+    const captured = await captureTranslatingVerificationStatus(async () => {
       await runCommand(command, args, cwd, raw, defaultValue, originalCommand, workstreamContext, preWorktreeRemapCwd);
     });
     const resolved = resolveAtFileOutput(captured);
@@ -5389,58 +5518,15 @@ async function main() {
   // already resolves this, but the normal path wrote @file: to stdout, forcing
   // every workflow to have a bash-specific `if [[ "$INIT" == @file:* ]]` check
   // that breaks on PowerShell and other non-bash shells.
-  const captured = await captureStdoutSyncWrites(async () => {
+  const captured = await captureTranslatingVerificationStatus(async () => {
     await runCommand(command, args, cwd, raw, defaultValue, originalCommand, workstreamContext, preWorktreeRemapCwd);
   });
   fs.writeSync(1, resolveAtFileOutput(captured));
 }
 
-function captureStdoutSyncWrites(run) {
-  const originalWriteSync = fs.writeSync;
-  let captured = '';
-
-  fs.writeSync = function patchedWriteSync(fd, data, ...rest) {
-    if (fd === 1) {
-      if (Buffer.isBuffer(data)) {
-        captured += data.toString('utf-8');
-        return data.length;
-      }
-      const text = String(data);
-      captured += text;
-      let encoding = 'utf-8';
-      if (typeof rest[1] === 'string') encoding = rest[1];
-      return Buffer.byteLength(text, encoding);
-    }
-    return originalWriteSync.call(fs, fd, data, ...rest);
-  };
-
-  const restore = () => {
-    fs.writeSync = originalWriteSync;
-  };
-
-  return Promise.resolve()
-    .then(() => run())
-    .then(() => {
-      restore();
-      return captured;
-    }, (err) => {
-      restore();
-      // The wrapped command may have written to stdout BEFORE it threw — e.g. a --raw
-      // command that emits a JSON result/error envelope and THEN throws ExitError to set a
-      // non-zero exit code (capability set/disable on an unknown id). Without this flush that
-      // captured output is silently discarded (the success-path flush at the call site never
-      // runs on a throw). Emit it now; the error still propagates so the exit code is preserved.
-      if (captured) {
-        try { originalWriteSync.call(fs, 1, resolveAtFileOutput(captured)); } catch { /* best-effort flush */ }
-      }
-      throw err;
-    });
-}
-
-function resolveAtFileOutput(captured) {
-  if (!captured.startsWith('@file:')) return captured;
-  return fs.readFileSync(captured.slice(6), 'utf-8');
-}
+// captureStdoutSyncWrites and resolveAtFileOutput moved to src/io.cts
+// (gsd-core/bin/lib/io.cjs) — the ONE shared pair (#5105 S9, review finding
+// 7), also used by uat.cts's cmdUatCompleteSession.
 
 // A plain object root/intermediate value — everything else (null, an array,
 // a number, a string, a boolean) is treated as non-object for NAMED-key

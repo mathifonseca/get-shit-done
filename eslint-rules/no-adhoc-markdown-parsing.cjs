@@ -70,6 +70,25 @@
  *                          this — nor does `.replace()` on a receiver whose name
  *                          doesn't match the roadmap/state fingerprint.
  *
+ *   5. FIELD-SHAPED-REPLACE-MUTATION — the same `.replace(` call/receiver gate
+ *                          as pattern 4, but for a THIRD fingerprint: a
+ *                          bold-label markdown field matcher (ADR-4910 §6, the
+ *                          "unrepresentable by construction" deliverable — the
+ *                          now-deleted #4852 paradigm). A regex source
+ *                          qualifies when it contains an escaped bold marker
+ *                          (`\*\*`) immediately followed (within the same
+ *                          single-line field span) by a label and a colon,
+ *                          with NO `[\s\S]`/`[\S\s]` cross-line flag (that
+ *                          would make it SECTION-COLLECT-shaped instead) and no
+ *                          qualifying negated-pipe cell class (that would make
+ *                          it TABLE-shaped instead) — e.g. a `.replace()` call
+ *                          whose pattern is /\*\*Plans:\*\*[^\n]*(space)/ .
+ *                          Table- and section-collect-shaped patterns are
+ *                          checked FIRST and always win (reported via
+ *                          `adhocReplaceMutation`, unchanged) — this fingerprint
+ *                          only applies when neither of those already matched,
+ *                          so no `.replace()` call is ever double-reported.
+ *
  * Per-finding exemption: add  // allow-adhoc-markdown: <reason>  as a
  * trailing comment on the same source line, OR as a standalone comment on the
  * line immediately preceding the flagged node.  (Mirrors no-source-grep's
@@ -99,6 +118,12 @@ const rule = {
         'Ad-hoc table-row/cell regex detected (escaped pipe + negated-pipe cell-capture class). Use parseMarkdownTable() / findTableWithColumns() / TABLE_SCHEMAS from ./markdown-table instead. Suppress with: // allow-adhoc-markdown: <reason>',
       adhocReplaceMutation:
         'Ad-hoc .replace() mutation of a roadmap/state document using a hand-rolled table or section regex. Use updateTableCell() (./markdown-table) or withSection()/withPhaseSection() (./markdown-sectionizer) instead. Suppress with: // allow-adhoc-markdown: <reason>',
+      adhocSplitJoinMutation:
+        'Ad-hoc split(x).join(y) substitution over a planning document. Use replaceProse() (./planning-document) or the artifact\'s own write seam instead. Suppress with: // allow-adhoc-markdown: <reason>',
+      adhocLineIndexedMutation:
+        'Ad-hoc line-indexed rewrite (lines[i] = … / lines.splice(…)) of a planning document split on newlines. Use updateBullet()/updateHeading()/withSection() (./markdown-sectionizer) instead. Suppress with: // allow-adhoc-markdown: <reason>',
+      fieldShapedReplaceMutation:
+        'Ad-hoc .replace() mutation of a roadmap/state document using a hand-rolled bold-label field regex (field-shaped: \\*\\*Label:\\*\\*...). Use findField() + setFieldValue() (./planning-document) instead. Suppress with: // allow-adhoc-markdown: <reason>',
     },
   },
 
@@ -280,6 +305,85 @@ const rule = {
       return isTableRegexSource(node.regex.pattern || '');
     }
 
+    // ── Field-shaped regex detection (ADR-4910 §6) ──────────────────────────
+    // A bold-label markdown field matcher: an escaped bold marker `\*\*`
+    // immediately followed, within the same single-line field span, by a
+    // label and a colon — e.g. `\*\*Plans:\*\*[^\n]*`. Deliberately excludes
+    // anything that already qualifies as SECTION-COLLECT-shaped (a `[\s\S]`/
+    // `[\S\s]` cross-line body) or TABLE-shaped (a qualifying negated-pipe
+    // cell class) — those are each other detectors' fingerprints and always
+    // win when present, so a single `.replace()` call is never reported
+    // twice for the same pattern.
+    function isFieldShapedRegex(src) {
+      const hasMultilineBody = src.includes('[\\s\\S]') || src.includes('[\\S\\s]');
+      if (hasMultilineBody) return false;
+      if (isTableRegexSource(src)) return false;
+      return hasBoldLabelColon(src);
+    }
+
+    // A `:` at `colonIndex` is regex GROUP-OPENER syntax — not literal
+    // matched text — when it is the colon of a `(?:` non-capturing-group
+    // opener (i.e. the two preceding characters are `(` and `?`). This is
+    // the only JS regex construct that produces a bare `:` as syntax: the
+    // other `(?`-prefixed forms (lookahead `(?=`, negative lookahead `(?!`,
+    // named group `(?<name>`, lookbehind `(?<=`/`(?<!`) use `=`, `!`, or `>`
+    // instead of `:`. This matters because `getNewRegExpSource` joins a
+    // TemplateLiteral's static quasis with an empty string wherever a
+    // `${...}` expression was dropped: when the dropped expression sits
+    // between two adjacent optional non-capturing groups (e.g. an
+    // interpolated id wrapped `(?:\*\*)?<expr>(?:\*\*)?`, as in
+    // roadmap.cts's plan-checkbox toggle pattern), the join collapses them
+    // into `...(?:\*\*)?(?:\*\*)?...` — and the `:` opening the second group
+    // then sits immediately after the first group's `\*\*` (or immediately
+    // before the next `\*\*`), coincidentally shaped like a markdown
+    // bold-label colon even though it is pure regex metasyntax with no
+    // matched text at all.
+    function isNonCapturingGroupOpenerColon(src, colonIndex) {
+      return src[colonIndex - 1] === '?' && src[colonIndex - 2] === '(';
+    }
+
+    // Single-pass scan (same cheap-scan discipline as
+    // hasQualifyingNegatedPipeClass above): from each `\*\*` occurrence, walk
+    // forward only as far as the next `\*\*` (the end of this field's own
+    // span) or the next escaped line-terminator (`\n`/`\r`), looking for a
+    // `:`. A bounded backtracking-free regex would be just as safe here (no
+    // nested unbounded quantifiers, so no quadratic-on-failure risk like the
+    // negated-pipe-class case above), but this keeps the same "walk forward,
+    // never re-enter consumed bytes" style as the rest of the file rather
+    // than introducing a second idiom. Every character between one `\*\*`
+    // occurrence and the next is visited at most once across the whole
+    // outer loop, so the total walk stays O(n) in `src.length`. A `:` that
+    // is `(?:` group-opener syntax (see isNonCapturingGroupOpenerColon
+    // above) never counts as a field-label colon, in either direction: the
+    // forward walk skips over it and keeps scanning, and the O(1) backward
+    // peek below (which independently catches the reverse `Label:\*\*`
+    // ordering, colon immediately before the bold run) applies the same
+    // exclusion.
+    function hasBoldLabelColon(src) {
+      const BOLD = '\\*\\*';
+      let i = src.indexOf(BOLD);
+      while (i !== -1) {
+        if (src[i - 1] === ':' && !isNonCapturingGroupOpenerColon(src, i - 1)) {
+          return true;
+        }
+        let j = i + BOLD.length;
+        let sawColon = false;
+        while (j < src.length) {
+          if (src.startsWith(BOLD, j)) break;
+          const ch = src[j];
+          if (ch === ':' && !isNonCapturingGroupOpenerColon(src, j)) {
+            sawColon = true;
+            break;
+          }
+          if (ch === '\\' && (src[j + 1] === 'n' || src[j + 1] === 'r')) break;
+          j += 1;
+        }
+        if (sawColon) return true;
+        i = src.indexOf(BOLD, i + BOLD.length);
+      }
+      return false;
+    }
+
     // ── new RegExp(<Literal-string | TemplateLiteral>) source extraction ─────
     // Builds the EFFECTIVE regex source text for a `new RegExp(...)` call so
     // the same fingerprint checks above can run against it. Only a string
@@ -402,21 +506,160 @@ const rule = {
       return null;
     }
 
-    function isAdhocReplaceMutation(node, scope) {
+    /**
+     * Resolves an ad-hoc `.replace()` mutation of a roadmap/state-ish
+     * receiver to the messageId it should report, or `null` if none of the
+     * three fingerprints (table, section-collect, field-shaped) matches.
+     * Table/section-collect are checked first and always win when present —
+     * field-shaped is a third, mutually-exclusive alternative, never a
+     * second report for the same call.
+     */
+    function resolveAdhocReplaceMutationMessageId(node, scope) {
+      if (node.type !== 'CallExpression') return null;
+      const callee = node.callee;
+      if (!callee || callee.type !== 'MemberExpression' || callee.computed) return null;
+      if (!callee.property || callee.property.name !== 'replace') return null;
+      const receiver = callee.object;
+      if (!receiver || receiver.type !== 'Identifier' || !REPLACE_RECEIVER_RE.test(receiver.name)) return null;
+      const patternArg = node.arguments && node.arguments[0];
+      if (!patternArg) return null;
+      const src = resolveReplacePatternSource(patternArg, scope);
+      if (src === null) return null;
+      if (isTableRegexSource(src) || isSectionCollectRegexSource(src)) return 'adhocReplaceMutation';
+      if (isFieldShapedRegex(src)) return 'fieldShapedReplaceMutation';
+      return null;
+    }
+
+    // ── SPLIT-JOIN / LINE-INDEXED MUTATION detection (ADR-5057 §6, Phase 13) ──
+    // The two mutation shapes ADR-4910's census could not see because neither
+    // carries a regex: `<doc>.split(x).join(y)` (a literal substitution) and an
+    // index-addressed rewrite of `<doc>.split('\n')` (`lines[i] = …`,
+    // `lines.splice(…)`). Receiver gate is the same roadmap/state/content name
+    // fingerprint patterns 4/5 use. A split/join whose separator AND joiner are
+    // both line breaks is a line-ending normalisation, not a substitution of
+    // planning text, and is not flagged.
+    //
+    // Receiver gate for THESE two detectors is narrower than patterns 4/5's
+    // (a bare `content` is every markdown-ish string in the tree — agent
+    // files, skill bodies, fixtures). A receiver is planning content when
+    //   (a) its own name is planning-specific (`roadmapContent`, `stateMd`…), or
+    //   (b) it is a same-scope binding initialised by a file READ whose path
+    //       argument — followed through same-scope bindings, a few hops —
+    //       names a planning location or artifact (`ROADMAP.md`, `statePath`,
+    //       `planningDir(cwd)`, `.planning`…).
+    // A function parameter or any other unresolvable receiver is NOT planning
+    // content: the rule is a fingerprint of the two shapes ADR-4910's census
+    // missed, not a dataflow proof, and refuses to guess.
+    const PLANNING_RECEIVER_RE = /roadmap|state|project|requirement|reqContent/i;
+    const PLANNING_PATH_EVIDENCE_RE = /(?:ROADMAP|STATE|PROJECT|REQUIREMENTS)\.md|\.planning\b|planningDir|planningPath|roadmapPath|statePath|projectPath|requirementsPath/i;
+    const READ_CALLEE_RE = /^(?:readFileSync|readFile|platformReadSync|readTextEvidence|readText)$/;
+    const EVIDENCE_HOPS = 4;
+
+    function calleeName(callNode) {
+      const c = callNode.callee;
+      if (!c) return '';
+      if (c.type === 'Identifier') return c.name;
+      if (c.type === 'MemberExpression' && !c.computed && c.property) return c.property.name || '';
+      return '';
+    }
+
+    /** Concatenate the identifier names, string literals and callee names under `node`, following same-scope bindings. */
+    function pathEvidenceText(node, scope, hops) {
+      if (!node || hops < 0) return '';
+      switch (node.type) {
+        case 'Literal':
+          return typeof node.value === 'string' ? `${node.value} ` : '';
+        case 'TemplateLiteral':
+          return `${node.quasis.map((q) => (q.value && q.value.cooked) || '').join(' ')} ${node.expressions.map((e) => pathEvidenceText(e, scope, hops - 1)).join(' ')}`;
+        case 'Identifier': {
+          const init = resolveVariableInit(node.name, scope);
+          return `${node.name} ${init ? pathEvidenceText(init, scope, hops - 1) : ''}`;
+        }
+        case 'CallExpression':
+          return `${calleeName(node)} ${node.arguments.map((a) => pathEvidenceText(a, scope, hops - 1)).join(' ')}`;
+        case 'MemberExpression':
+          return `${pathEvidenceText(node.object, scope, hops - 1)} ${node.computed ? '' : (node.property && node.property.name) || ''}`;
+        case 'BinaryExpression':
+          return `${pathEvidenceText(node.left, scope, hops - 1)} ${pathEvidenceText(node.right, scope, hops - 1)}`;
+        default:
+          return '';
+      }
+    }
+
+    // A name that says it holds a path, directory or identifier (`projectPath`,
+    // `stateDir`, `roadmapSlug`) is not planning CONTENT, whatever noun it
+    // starts with — `projectPath.split(path.sep).join('/')` is the repo's own
+    // separator-normalisation idiom.
+    const NON_CONTENT_NAME_RE = /(?:path|paths|dir|root|file|filename|name|slug|id|label)$/i;
+
+    function isPlanningReceiver(identifier, scope) {
+      if (NON_CONTENT_NAME_RE.test(identifier.name)) return false;
+      if (PLANNING_RECEIVER_RE.test(identifier.name)) return true;
+      const init = resolveVariableInit(identifier.name, scope);
+      if (!init || init.type !== 'CallExpression' || !READ_CALLEE_RE.test(calleeName(init))) return false;
+      return PLANNING_PATH_EVIDENCE_RE.test(pathEvidenceText(init.arguments[0], scope, EVIDENCE_HOPS));
+    }
+
+    const LINE_BREAK_LITERALS = new Set(['\n', '\r\n', '\r']);
+
+    function isLineBreakLiteral(arg) {
+      if (!arg || arg.type !== 'Literal') return false;
+      if (arg.regex) return /^(?:\\r\?\\n|\\r\\n\|\\n|\\n|\\r\?\\n\|\\r)$/.test(arg.regex.pattern || '');
+      return typeof arg.value === 'string' && LINE_BREAK_LITERALS.has(arg.value);
+    }
+
+    /** `<receiver>.split(…)` where receiver is a planning-content identifier. */
+    function isPlanningSplit(node, scope) {
+      if (!node || node.type !== 'CallExpression') return false;
+      const callee = node.callee;
+      if (!callee || callee.type !== 'MemberExpression' || callee.computed) return false;
+      if (!callee.property || callee.property.name !== 'split') return false;
+      const receiver = callee.object;
+      return !!receiver && receiver.type === 'Identifier' && isPlanningReceiver(receiver, scope);
+    }
+
+    function isSplitJoinSubstitution(node, scope) {
       if (node.type !== 'CallExpression') return false;
       const callee = node.callee;
       if (!callee || callee.type !== 'MemberExpression' || callee.computed) return false;
-      if (!callee.property || callee.property.name !== 'replace') return false;
-      const receiver = callee.object;
-      if (!receiver || receiver.type !== 'Identifier' || !REPLACE_RECEIVER_RE.test(receiver.name)) return false;
-      const patternArg = node.arguments && node.arguments[0];
-      if (!patternArg) return false;
-      const src = resolveReplacePatternSource(patternArg, scope);
-      if (src === null) return false;
-      return isTableRegexSource(src) || isSectionCollectRegexSource(src);
+      if (!callee.property || callee.property.name !== 'join') return false;
+      const inner = callee.object;
+      if (!isPlanningSplit(inner, scope)) return false;
+      // A split on a line break is a line-ending conversion / line operation,
+      // never a substitution of planning text (that shape is the line-indexed
+      // detector's); only a non-line-break separator is a literal substitution.
+      return !isLineBreakLiteral(inner.arguments[0]);
+    }
+
+    /** Identifier whose declared initializer is `<planning content>.split(…)`. */
+    function isPlanningLinesIdentifier(node, scope) {
+      if (!node || node.type !== 'Identifier') return false;
+      return isPlanningSplit(resolveVariableInit(node.name, scope), scope);
+    }
+
+    function isLineIndexedMutation(node, scope) {
+      if (node.type === 'AssignmentExpression') {
+        const left = node.left;
+        return !!left && left.type === 'MemberExpression' && left.computed
+          && isPlanningLinesIdentifier(left.object, scope);
+      }
+      if (node.type === 'CallExpression') {
+        const callee = node.callee;
+        return !!callee && callee.type === 'MemberExpression' && !callee.computed
+          && !!callee.property && callee.property.name === 'splice'
+          && isPlanningLinesIdentifier(callee.object, scope);
+      }
+      return false;
     }
 
     return {
+      AssignmentExpression(node) {
+        const scope = context.getScope ? context.getScope() : sourceCode.getScope(node);
+        if (isLineIndexedMutation(node, scope) && !isAllowed(node)) {
+          context.report({ node, messageId: 'adhocLineIndexedMutation' });
+        }
+      },
+
       Literal(node) {
         // 1. Fence-block-strip regex
         if (isFenceBlockStripRegex(node)) {
@@ -453,13 +696,21 @@ const rule = {
         }
       },
 
-      // 4. Ad-hoc .replace() mutation of a roadmap/state document
+      // 4/5. Ad-hoc .replace() mutation of a roadmap/state document — table,
+      // section-collect, or field-shaped fingerprint.
       CallExpression(node) {
         const scope = context.getScope ? context.getScope() : sourceCode.getScope(node);
-        if (isAdhocReplaceMutation(node, scope)) {
+        const messageId = resolveAdhocReplaceMutationMessageId(node, scope);
+        if (messageId) {
           if (!isAllowed(node)) {
-            context.report({ node, messageId: 'adhocReplaceMutation' });
+            context.report({ node, messageId });
           }
+        }
+        // 6/7. split/join substitution; line-indexed splice.
+        if (isSplitJoinSubstitution(node, scope) && !isAllowed(node)) {
+          context.report({ node, messageId: 'adhocSplitJoinMutation' });
+        } else if (isLineIndexedMutation(node, scope) && !isAllowed(node)) {
+          context.report({ node, messageId: 'adhocLineIndexedMutation' });
         }
       },
     };

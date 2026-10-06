@@ -110,21 +110,15 @@ GSD stores project settings in `.planning/config.json`. Created during `/gsd-new
     "quick_branch_template": null
   },
   "gates": {
-    "confirm_project": true,
-    "confirm_phases": true,
-    "confirm_roadmap": true,
-    "confirm_breakdown": true,
-    "confirm_plan": true,
     "execute_next_plan": true,
-    "issues_review": true,
-    "confirm_transition": true
-  },
-  "safety": {
-    "always_confirm_destructive": true,
-    "always_confirm_external_services": true
+    "confirm_transition": true,
+    "confirm_milestone_scope": true
   },
   "security": {
     "injection_blocking": false
+  },
+  "audit": {
+    "enabled": false
   },
   "project_code": null,
   "agent_skills": {},
@@ -164,7 +158,7 @@ replaced your entire configuration with built-in defaults, and nothing said so (
 
 The warning is printed once per file per run, so a repeated command will not spam it.
 
-The same applies to the global `~/.gsd/defaults.json`. If the project config is also unusable, the
+The same applies to the global `$GSD_HOME/.gsd/defaults.json`. If the project config is also unusable, the
 project one is reported, since that is the file you are most likely able to fix.
 
 **If you see this warning:** your config was not applied. Validate the file, for example with
@@ -255,16 +249,18 @@ derived from the shipped agent declaration.
 | `claude_md_assembly.mode` | enum | `embed`, `link` | `embed` | Controls how managed sections are written into CLAUDE.md. `embed` (default) inlines content between GSD markers. `link` writes `@.planning/<source-path>` instead — Claude Code expands the reference at runtime, reducing CLAUDE.md size by ~65% on typical projects. `link` only applies to sections that have a real source file; `workflow` and fallback sections always embed. Per-block overrides: `claude_md_assembly.blocks.<section>` (e.g. `claude_md_assembly.blocks.architecture: link`). Added in v1.38 |
 | `context` | string | any text | (none) | Custom context string injected into every agent prompt for the project. Use to provide persistent project-specific guidance (e.g., coding conventions, team practices) that every agent should be aware of |
 | `phase_naming` | string | any string | (none) | Custom prefix for phase directory names. When set, overrides the auto-generated phase slug (e.g., `"feature"` produces `feature-01-setup/` instead of the roadmap-derived slug) |
-| `brave_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Brave Search API availability. When unset, GSD checks for `BRAVE_API_KEY` env var or `~/.gsd/brave_api_key` file |
-| `firecrawl` | boolean | `true`/`false` | auto-detected | Override auto-detection of Firecrawl API availability. When unset, GSD checks for `FIRECRAWL_API_KEY` env var or `~/.gsd/firecrawl_api_key` file |
-| `exa_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Exa Search API availability. When unset, GSD checks for `EXA_API_KEY` env var or `~/.gsd/exa_api_key` file |
-| `tavily_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Tavily Search API availability. When unset, GSD checks for `TAVILY_API_KEY` env var or `~/.gsd/tavily_api_key` file |
-| `ref_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Ref search API availability. When unset, GSD checks for `REF_API_KEY` env var or `~/.gsd/ref_api_key` file |
-| `perplexity` | boolean | `true`/`false` | auto-detected | Override auto-detection of Perplexity API availability. When unset, GSD checks for `PERPLEXITY_API_KEY` env var or `~/.gsd/perplexity_api_key` file |
-| `jina` | boolean | `true`/`false` | `true` | Override auto-detection of Jina API availability. Jina is a terminal fallback in the docs waterfall and defaults to available (`true`); GSD checks for `JINA_API_KEY` env var or `~/.gsd/jina_api_key` file when an explicit override is needed |
+| `brave_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Brave Search API availability. When unset, GSD checks for `BRAVE_API_KEY` env var or `$GSD_HOME/.gsd/brave_api_key` file |
+| `firecrawl` | boolean | `true`/`false` | auto-detected | Override auto-detection of Firecrawl API availability. When unset, GSD checks for `FIRECRAWL_API_KEY` env var or `$GSD_HOME/.gsd/firecrawl_api_key` file |
+| `exa_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Exa Search API availability. When unset, GSD checks for `EXA_API_KEY` env var or `$GSD_HOME/.gsd/exa_api_key` file |
+| `tavily_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Tavily Search API availability. When unset, GSD checks for `TAVILY_API_KEY` env var or `$GSD_HOME/.gsd/tavily_api_key` file |
+| `ref_search` | boolean | `true`/`false` | auto-detected | Override auto-detection of Ref search API availability. When unset, GSD checks for `REF_API_KEY` env var or `$GSD_HOME/.gsd/ref_api_key` file |
+| `perplexity` | boolean | `true`/`false` | auto-detected | Override auto-detection of Perplexity API availability. When unset, GSD checks for `PERPLEXITY_API_KEY` env var or `$GSD_HOME/.gsd/perplexity_api_key` file |
+| `jina` | boolean | `true`/`false` | `true` | Override auto-detection of Jina API availability. Jina is a terminal fallback in the docs waterfall and defaults to available (`true`); GSD checks for `JINA_API_KEY` env var or `$GSD_HOME/.gsd/jina_api_key` file when an explicit override is needed |
 | `search_gitignored` | boolean | `true`/`false` | `false` | Legacy top-level alias for `planning.search_gitignored`. Prefer the namespaced form; this alias is accepted for backward compatibility |
 
 > **Note:** `granularity` was renamed from `depth` in v1.22.3. Existing configs are auto-migrated.
+
+> **Note:** `GSD_HOME` defaults to your home directory (`~`) when unset, so the key files above live in `~/.gsd/` unless you point `GSD_HOME` elsewhere.
 
 ---
 
@@ -274,7 +270,7 @@ Configured interactively via [`/gsd-config --integrations`](COMMANDS.md#gsd-conf
 
 ### Search API keys
 
-API key fields accept a string value (the key itself). They can also be set to the sentinels `true`/`false`/`null` to override auto-detection from env vars / `~/.gsd/*_api_key` files (legacy behavior, see rows above).
+API key fields accept a string value (the key itself). They can also be set to the sentinels `true`/`false`/`null` to override auto-detection from env vars / `$GSD_HOME/.gsd/*_api_key` files (legacy behavior, see rows above; `GSD_HOME` defaults to your home directory).
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -572,7 +568,7 @@ Most workflow toggles follow the **absent = enabled** pattern: if a key is missi
 | `planner.stall_detect_interval_minutes` | number | `5` | Minutes between planner/plan-checker stall checks while a planner or plan-checker agent is active. The plan-phase orchestrator uses this cadence to inspect on-disk `*-PLAN.md` activity and avoid waiting forever on a silent agent (#2650). |
 | `planner.stall_threshold_minutes` | number | `10` | Minutes without a completion marker or fresh on-disk plan activity before plan-phase automatically surfaces the accept-plans/retry/stop recovery choice for a possible stalled planner or plan-checker (#2650). |
 | `workflow.inline_plan_threshold` | number | `3` | Maximum number of tasks in a phase before the planner generates a separate PLAN.md file instead of inlining tasks in the prompt |
-| `workflow.drift_threshold` | number | `3` | Minimum number of new structural elements (new directories, barrel exports, migrations, route modules) before the codebase-drift gate takes action. The gate runs at two points: `plan:pre` (before `/gsd-plan-phase` plans — **non-blocking, warn-only**, so plans are authored against a fresh STRUCTURE.md) and `execute:wave:post` (after `/gsd-execute-phase` — honors `workflow.drift_action`). See [#2003](https://github.com/open-gsd/gsd-core/issues/2003). Added in v1.39 |
+| `workflow.drift_threshold` | number | `3` | Minimum number of drift elements before the codebase-drift gate takes action: new structural elements (new directories, barrel exports, migrations, route modules) plus modified and deleted files inside directories the codebase map already describes. The gate runs at two points: `plan:pre` (before `/gsd-plan-phase` plans — **non-blocking, warn-only**, so plans are authored against a fresh STRUCTURE.md) and `execute:wave:post` (after `/gsd-execute-phase` — honors `workflow.drift_action`). See [#2003](https://github.com/open-gsd/gsd-core/issues/2003). Added in v1.39 |
 | `workflow.drift_action` | string | `warn` | What to do when `workflow.drift_threshold` is exceeded **at `execute:wave:post`** (after `/gsd-execute-phase`). `warn` prints a message suggesting `/gsd-map-codebase --paths …`; `auto-remap` spawns `gsd-codebase-mapper` scoped to the affected paths. The `plan:pre` pre-check is always warn-only regardless of this setting — it never auto-spawns the mapper at plan entry. Added in v1.39 |
 | `workflow.plan_drift_precheck` | boolean | `true` | Enable the non-blocking codebase-drift pre-check at `plan:pre`, before `/gsd-plan-phase` spawns the planner. Surfaces a stale STRUCTURE.md (drift over `workflow.drift_threshold`) as a warn-only advisory pointing to `/gsd-map-codebase`; never blocks planning, never spawns the mapper. Separate from the `execute:wave:post` gates so autonomous/CI runs can silence the plan-time advisory while keeping execute-time drift detection on. Added in v1.6.0. See [#1592](https://github.com/open-gsd/gsd-core/issues/1592). |
 | `workflow.context_drift_precheck` | boolean | `true` | Enable the non-blocking context-drift pre-check at `plan:pre`, before `/gsd-plan-phase` reuses an existing RESEARCH.md/PATTERNS.md/VALIDATION.md/SPEC.md. Compares each artifact's effective last-changed time (git commit time, falling back to mtime for uncommitted edits) against CONTEXT.md's own; an artifact that predates CONTEXT.md's newest decision was derived from a premise that has since changed. Warn-only by default (see `workflow.context_drift_action`); never blocks planning on its own. See [#3348](https://github.com/open-gsd/gsd-core/issues/3348). |
@@ -1391,27 +1387,16 @@ Example quick-task branching:
 
 ## Gate Settings
 
-Control confirmation prompts during workflows.
+Control confirmation prompts during workflows. Each gate only applies under
+`mode: "interactive"` — `"yolo"` always auto-approves regardless of these
+settings (there is no third `"custom"` mode). Set a gate to `false` to skip
+that one confirmation while staying in interactive mode for everything else.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `gates.confirm_project` | boolean | `true` | Confirm project details before finalizing |
-| `gates.confirm_phases` | boolean | `true` | Confirm phase breakdown |
-| `gates.confirm_roadmap` | boolean | `true` | Confirm roadmap before proceeding |
-| `gates.confirm_breakdown` | boolean | `true` | Confirm task breakdown |
-| `gates.confirm_plan` | boolean | `true` | Confirm each plan before execution |
-| `gates.execute_next_plan` | boolean | `true` | Confirm before executing next plan |
-| `gates.issues_review` | boolean | `true` | Review issues before creating fix plans |
-| `gates.confirm_transition` | boolean | `true` | Confirm phase transition |
-
----
-
-## Safety Settings
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `safety.always_confirm_destructive` | boolean | `true` | Confirm destructive operations (deletes, overwrites) |
-| `safety.always_confirm_external_services` | boolean | `true` | Confirm external service interactions |
+| `gates.execute_next_plan` | boolean | `true` | Confirm before executing next plan (`execute-plan.md`) |
+| `gates.confirm_transition` | boolean | `true` | Confirm phase transition (`transition.md`) |
+| `gates.confirm_milestone_scope` | boolean | `true` | Confirm milestone scope before shipping (`complete-milestone.md`) |
 
 ---
 
@@ -1445,7 +1430,7 @@ plans and shipped code (issue #2492).
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `workflow.context_coverage_gate` | boolean | `true` | Toggle for both decision-coverage gates. When `false`, both the plan-phase translation gate and the verify-phase validation gate skip silently. |
+| `workflow.context_coverage_gate` | boolean | `true` | Toggle for both decision-coverage gates. When `false`, both the plan-phase translation gate and the verify-phase validation gate skip silently. Only the nested key under `workflow` is read, exactly as `config-get workflow.context_coverage_gate` answers; a top-level `context_coverage_gate` is ignored (the config loader warns about it) and the gates stay enabled. The gates read the active workstream's `config.json` when `GSD_WORKSTREAM` is set. |
 
 ### What the gates do
 
@@ -1636,7 +1621,9 @@ Valid override values: `opus`, `sonnet`, `haiku`, `fable`, `inherit`, or any ful
 On the Claude runtime, fully-qualified Claude model IDs are honored as explicit generation pins (#4192): an ID that names the current tier default (e.g. `"claude-sonnet-5"`) collapses to its tier alias — the same model in the form Claude Code's Agent tool always accepts — while any other ID (e.g. `"claude-opus-4-7"`) is resolved verbatim, so the pinned generation is what `resolve-model` reports. GSD emits a warn-once stderr breadcrumb for verbatim pins, because Claude Code setups whose Agent tool accepts only tier aliases will not honor a full ID. `fable` is a Claude Code Agent-tool alias, not a GSD profile tier: it is valid in `model_overrides` but has no column in the profile table.
 
 `model_overrides` can be set in either `.planning/config.json` (per-project)
-or `~/.gsd/defaults.json` (global). Per-project entries win on conflict and
+or `$GSD_HOME/.gsd/defaults.json` (global). The install-time embedding for
+Codex and OpenCode described below still reads `~/.gsd/defaults.json`
+([#5017](https://github.com/open-gsd/gsd-core/issues/5017)). Per-project entries win on conflict and
 non-conflicting global entries are preserved, so you can tune a single
 agent's model in one repo without re-setting global defaults. This applies
 uniformly across Claude Code, Codex, OpenCode, Kilo, and the other
@@ -2306,6 +2293,7 @@ Use `provider: "generic"` (or `"custom"`) for OpenRouter, LiteLLM, local gateway
 | `GSD_SKIP_SCHEMA_CHECK` | Skip schema drift detection during execute-phase (v1.31) |
 | `GSD_EXIT_CONTRACT` | Select the exit-code projection: `v1` (default) or `v2`. See [Exit-code contract](#exit-code-contract-gsd_exit_contract) below. |
 | `GSD_ALLOW_SYMLINKED_DEST` | Set to `1` (or `true`) to permit install/update when `CLAUDE_CONFIG_DIR` (or any artifact-kind child like `skills/`, `hooks/`) is an **intentional, user-owned symlink** pointing outside the install root. v1.7.x write-confinement (ADR-1239 Phase B) refuses such layouts by default to prevent untrusted `destSubpath` traversal. Opt in only if you manage configHome via symlinked external dirs, multi-account config layouts (`~/.claude-personal`, `~/.claude-team`), or dotfiles-managed configHome (nix-darwin, etc.). Two refusals remain load-bearing even with opt-in: path-traversal in `destSubpath` (`../../etc`-style), and a symlink whose resolved target equals the install root itself (would let the prune pass wipe it). |
+| `NODE_DISABLE_COMPILE_CACHE` | Set (to any value) to turn off Node's compile cache, which `gsd-tools` and the hooks that load `gsd-core/bin/lib` enable to start faster. The cache lives in `node-compile-cache` under the OS temp directory, or in `NODE_COMPILE_CACHE` if you set it. Node reads both variables itself. |
 | `WSL_DISTRO_NAME` | Detected by installer for WSL path handling |
 
 ### Exit-code contract (`GSD_EXIT_CONTRACT`)
@@ -2352,7 +2340,7 @@ and the full band allocation are in
 
 Save settings as global defaults for future projects:
 
-**Location:** `~/.gsd/defaults.json`
+**Location:** `$GSD_HOME/.gsd/defaults.json` (`GSD_HOME` defaults to your home directory, so `~/.gsd/defaults.json` when unset)
 
 When `/gsd-new-project` creates a new `config.json`, it reads global defaults and merges them as the starting configuration. Per-project settings always override globals.
 
@@ -2360,7 +2348,7 @@ When `/gsd-new-project` creates a new `config.json`, it reads global defaults an
 
 Two different rules apply, and the difference is deliberate ([#3532](https://github.com/open-gsd/gsd-core/issues/3532)):
 
-- **In a directory with no `.planning/` at all**, `~/.gsd/defaults.json` is the active
+- **In a directory with no `.planning/` at all**, `$GSD_HOME/.gsd/defaults.json` is the active
   configuration — model resolution reads it directly.
 - **In a real project (`.planning/config.json` present, even if empty)**, the global file is
   **not read for model resolution** — every model-side key it sets (`model_profile`,
@@ -2376,7 +2364,7 @@ Two different rules apply, and the difference is deliberate ([#3532](https://git
   `git.allow_default_branch_commits`, not
   `git.branching_strategy` or the branch templates. Branch policy is a property of the
   repository, not of the machine, so it is read only from that project's
-  `.planning/config.json`. A `git` block in `~/.gsd/defaults.json` still seeds new projects
+  `.planning/config.json`. A `git` block in `$GSD_HOME/.gsd/defaults.json` still seeds new projects
   (`/gsd-new-project` copies globals into the new `config.json`), but it never takes effect
   at runtime on its own. It is outside the shadowed-key warning above, which covers the
   model-resolution set only.
@@ -2395,7 +2383,7 @@ When a dispatch fails, one JSON line is emitted to stderr:
 { "kind": "HandlerFailure", "traceId": "...", "command": "plan", "timestamp": "...", "message": "..." }
 ```
 
-The `kind` field matches one of the Hub's error variants: `UnknownCommand`, `InvalidArgs`, `HandlerRefusal`, or `HandlerFailure`. Args are omitted by default (privacy); see `GSD_AUDIT_ARGS` below.
+The `kind` field matches one of the Hub's error variants: `UnknownCommand`, `InvalidArgs`, `HandlerRefusal`, `HandlerFailure`, or `VerificationStatusInvalid` (a verification report whose `status` is outside the closed set). Args are omitted by default (privacy); see `GSD_AUDIT_ARGS` below.
 
 ### Audit trail (opt-in)
 
@@ -2414,6 +2402,14 @@ GSD_AUDIT=1 gsd plan
   }
 }
 ```
+
+Or set it with `gsd config-set audit.enabled true` — the value must be a boolean. The key is read from the project config (a workstream's own setting wins over the root config's). A malformed workstream config sets no value, so the audit reader inherits the root config's value; `config-get audit.enabled` instead fails with `CONFIG_PARSE_FAILED` for that file. Either source turns the trail on and neither turns the other off: `GSD_AUDIT=0` does not override `audit.enabled: true`.
+
+#### Settings
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `audit.enabled` | boolean | `false` | Opt in to the dispatch audit trail. Strict boolean: only `true` enables it; any other value (including the string `"true"`) leaves it off. Resolved like `config-get audit.enabled` — the scoped config wins, the root key is inherited under `GSD_WORKSTREAM`. `GSD_AUDIT=1` enables the trail independently. |
 
 **Audit file location:** `.planning/.gsd-trace.jsonl` (gitignored)
 

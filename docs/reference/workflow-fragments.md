@@ -93,7 +93,7 @@ into the `--discuss`/`--research`/`--validate` facts before evaluation) and
 | `state:reviewer-instances-configured` | Applicable when `.planning/config.json`'s `review.reviewer_instances` is present AND non-empty. |
 | `state:ui-phase-active` | Applicable when the phase's active `plan:pre` loop hooks include the `ui-phase` step, OR the phase directory already contains a `*-UI-SPEC.md` file — see [Compound conditions are resolved in the fact, never the grammar](#compound-conditions-are-resolved-in-the-fact-never-the-grammar) below. |
 | `state:workstream-active` | Applicable when a workstream is active — `GSD_WORKSTREAM` env, falling back to the stored active-workstream pointer. |
-| `state:worktrees-enabled` | Applicable when `.planning/config.json`'s `workflow.use_worktrees` is enabled. |
+| `state:worktrees-enabled` | Applicable unless the effective `workflow.use_worktrees` is the boolean `false` (fail-OPEN default `true`: unset, malformed, and non-boolean values such as the string `"false"` stay on; the scoped config wins, the root key is inherited under `GSD_WORKSTREAM` only — the #3972 `worktreesOptedOut` ladder). |
 
 This list is **closed by design** (Greenspun's Tenth Rule): left open-ended,
 `when=` would acquire boolean operators, negation, precedence, and

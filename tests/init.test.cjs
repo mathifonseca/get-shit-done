@@ -6,8 +6,8 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('node:child_process');
-const { runGsdTools, cleanup, absPlanningPath, TOOLS_PATH, parseFrontmatter, captureFdSync } = require('./helpers.cjs');
+const processSeam = require('./helpers/process-seam.cjs');
+const { runGsdTools, cleanup, absPlanningPath, TOOLS_PATH, parseFrontmatter, captureFdSync, homeSandboxEnv, TEST_ENV_BASE } = require('./helpers.cjs');
 const { createFixture, seedPhase } = require('./fixtures/index.cjs');
 const { createTempProject, createTempDir } = require('./helpers.cjs');
 const { executionContextRefs } = require('../scripts/command-contract-helpers.cjs');
@@ -35,9 +35,9 @@ describe('init commands', () => {
   beforeEach(() => {
     // #2376 macOS fix: realpath the fixture root so absolute path-field
     // assertions (absPlanningPath comparisons below) match the code's
-    // process.cwd()-anchored output — macOS's tmpdir is a symlink
+    // process.cwd()-anchored output — macOS's tmpdir resolves through a link
     // (/var/... -> /private/var/...) that a spawned child resolves via
-    // realpath but `createFixture()` does not. No-op on Linux (no symlink).
+    // realpath but `createFixture()` does not. No-op on Linux (no such link).
     tmpDir = fs.realpathSync(createFixture());
   });
 
@@ -1346,6 +1346,67 @@ describe('init plan-phase zero-padded phase number (bug #2391)', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// init plan-phase — Phase Status Module consumers (#5060)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('init plan-phase — Phase Status Module consumers (#5060)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = fs.realpathSync(createFixture());
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('a stale-passed phase 1 reports phase_status Executed, not Complete', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n### Phase 1: Foo\n**Goal**: do the thing\n'
+    );
+    seedPhase(tmpDir, '01-foo', {
+      '01-01-PLAN.md': '# Plan',
+      '01-01-SUMMARY.md': '# Summary',
+      // Written last: covered_digest never matches, so the report is stale
+      // despite `status: passed`.
+      '01-VERIFICATION.md': [
+        '---',
+        'status: passed',
+        'covered_files:',
+        '  - 01-01-PLAN.md',
+        'covered_digest: sha256-v2:0000000000000000',
+        '---',
+        '# Verification',
+        '',
+      ].join('\n'),
+    });
+
+    const result = runGsdTools('init plan-phase 1', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phase_status, 'Executed', 'a stale-passed verification must not report Complete');
+  });
+
+  test('a zero-plan phase with a fresh passed report reports phase_status Complete', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n### Phase 1: Foo\n**Goal**: do the thing\n'
+    );
+    seedPhase(tmpDir, '01-foo', {
+      '01-VERIFICATION.md': '---\nstatus: passed\n---\n# Verification',
+    });
+
+    const result = runGsdTools('init plan-phase 1', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phase_status, 'Complete', 'a zero-plan phase with a fresh passed report is disk-strict Complete');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // cmdInitTodos (INIT-01)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1543,6 +1604,10 @@ describe('cmdInitMilestoneOp', () => {
     fs.mkdirSync(phase2, { recursive: true });
     fs.writeFileSync(path.join(phase1, '01-01-PLAN.md'), '# Plan');
     fs.writeFileSync(path.join(phase1, '01-01-SUMMARY.md'), '# Summary');
+    // #5060: a completed phase is now the ladder's own PHASE_STATUS.COMPLETE
+    // (isPhaseComplete's disk-strict verdict), not "has any *-SUMMARY.md" — a
+    // passing verification is required for phase1 to still count here.
+    fs.writeFileSync(path.join(phase1, '01-VERIFICATION.md'), '---\nstatus: passed\n---\n# Verification\n');
     fs.writeFileSync(path.join(phase2, '02-01-PLAN.md'), '# Plan');
 
     const result = runGsdTools('init milestone-op', tmpDir);
@@ -1559,6 +1624,9 @@ describe('cmdInitMilestoneOp', () => {
     fs.mkdirSync(phase1, { recursive: true });
     fs.writeFileSync(path.join(phase1, '01-01-PLAN.md'), '# Plan');
     fs.writeFileSync(path.join(phase1, '01-01-SUMMARY.md'), '# Summary');
+    // #5060: see "mix of complete and incomplete phases" above — a passing
+    // verification is required for the ladder to report COMPLETE.
+    fs.writeFileSync(path.join(phase1, '01-VERIFICATION.md'), '---\nstatus: passed\n---\n# Verification\n');
 
     const result = runGsdTools('init milestone-op', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
@@ -1569,10 +1637,33 @@ describe('cmdInitMilestoneOp', () => {
     assert.strictEqual(output.all_phases_complete, true);
   });
 
+  // #5060 review finding: cmdInitMilestoneOp used to count a phase as
+  // completed when its directory had ANY `*-SUMMARY.md` — a counts-only
+  // verdict that bypasses isPhaseComplete. A phase with 2 plans and only 1
+  // matched summary (and no verification at all) must not count as complete.
+  test('#5060: a phase with unsummarized plans and no verification does not count as completed', () => {
+    const phase1 = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phase1, { recursive: true });
+    fs.writeFileSync(path.join(phase1, '01-01-PLAN.md'), '# Plan 1');
+    fs.writeFileSync(path.join(phase1, '01-02-PLAN.md'), '# Plan 2');
+    fs.writeFileSync(path.join(phase1, '01-01-SUMMARY.md'), '# Summary 1');
+
+    const result = runGsdTools('init milestone-op', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phase_count, 1);
+    assert.strictEqual(output.completed_phases, 0);
+    assert.strictEqual(output.all_phases_complete, false);
+  });
+
   test('project_code-prefixed phase directories count as completed milestone phases (#1836)', () => {
+    // #5060: a passing verification is required for the ladder to report
+    // COMPLETE (see "mix of complete and incomplete phases" above).
     seedPhase(tmpDir, 'PROJ-01-setup', {
       'PROJ-01-01-PLAN.md': '# Plan',
       'PROJ-01-01-SUMMARY.md': '# Summary',
+      '01-VERIFICATION.md': '---\nstatus: passed\n---\n# Verification\n',
     });
     fs.writeFileSync(
       path.join(tmpDir, '.planning', 'config.json'),
@@ -1616,6 +1707,9 @@ describe('cmdInitMilestoneOp', () => {
     fs.mkdirSync(phase1, { recursive: true });
     fs.writeFileSync(path.join(phase1, '01-01-PLAN.md'), '# Plan');
     fs.writeFileSync(path.join(phase1, '01-01-SUMMARY.md'), '# Summary');
+    // #5060: a passing verification is required for the ladder to report
+    // COMPLETE (see "mix of complete and incomplete phases" above).
+    fs.writeFileSync(path.join(phase1, '01-VERIFICATION.md'), '---\nstatus: passed\n---\n# Verification\n');
     fs.writeFileSync(
       path.join(tmpDir, '.planning', 'STATE.md'),
       [
@@ -2014,7 +2108,7 @@ describe('cmdInitQuick', () => {
   test('init quick resolves the default researcher_model without overrides', () => {
     // #3936: the quick research step dispatches gsd-phase-researcher, so init
     // quick must resolve that agent's balanced-profile model without an override.
-    const result = runGsdTools('init quick "Fix login bug" --raw', tmpDir, { HOME: tmpDir, USERPROFILE: tmpDir });
+    const result = runGsdTools('init quick "Fix login bug" --raw', tmpDir, homeSandboxEnv(tmpDir));
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
@@ -3227,15 +3321,19 @@ describe('#2376 — init.* path fields resolve when process cwd differs from --c
   });
 
   // allow-test-rule: source-text-is-the-product (see #2376)
-  test('gsd-core/workflows/execute-phase.md verify_phase_goal step references {requirements_path}, not a bare .planning literal', () => {
-    const wfPath = path.join(__dirname, '..', 'gsd-core', 'workflows', 'execute-phase.md');
+  // #5118: the verifier dispatch prompt moved out of execute-phase.md's
+  // verify_phase_goal step into the shared step it includes
+  // (execute-phase/steps/verify-phase-goal.md, also included by verify-work).
+  // The #2376 contract is about the prompt, wherever it lives.
+  test('the verifier dispatch prompt (execute-phase/steps/verify-phase-goal.md) references {requirements_path}, not a bare .planning literal', () => {
+    const wfPath = path.join(__dirname, '..', 'gsd-core', 'workflows', 'execute-phase', 'steps', 'verify-phase-goal.md');
     const content = fs.readFileSync(wfPath, 'utf8');
     // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own workflow .md content, fixed-size author-controlled content
-    const stepMatch = content.match(/<step name="verify_phase_goal">[\s\S]*?<\/step>/);
-    assert.ok(stepMatch, 'verify_phase_goal step should exist in execute-phase.md');
+    const stepMatch = content.match(/<step name="verifier_dispatch">[\s\S]*?<\/step>/);
+    assert.ok(stepMatch, 'verifier_dispatch step should exist in the shared verification step');
     const step = stepMatch[0];
-    assert.ok(step.includes('{requirements_path}'), 'verify_phase_goal must reference {requirements_path} from init JSON, not a bare literal');
-    assert.ok(!step.includes('.planning/REQUIREMENTS.md'), 'verify_phase_goal must not hardcode .planning/REQUIREMENTS.md (#2376)');
+    assert.ok(step.includes('{requirements_path}'), 'the verifier prompt must reference {requirements_path} from init JSON, not a bare literal');
+    assert.ok(!step.includes('.planning/REQUIREMENTS.md'), 'the verifier prompt must not hardcode .planning/REQUIREMENTS.md (#2376)');
   });
 
   // allow-test-rule: source-text-is-the-product (see #2376)
@@ -3424,7 +3522,7 @@ describe('#3057 B3: cmdInitVerifyWork — verification staleness-check indetermi
 // reach — so these drive the exported functions directly, in-process,
 // mirroring the cmdInitVerifyWork capture pattern immediately above.
 // Injected via `t.mock.method(fs, 'readdirSync', ...)` (auto-restored) —
-// NEVER chmod 0o000, which root bypasses with zero coverage.
+// never a zero-permission mode bit, which root bypasses with zero coverage.
 describe('#3885 (ADR-3473 §8.5): init callers distinguish unreadable from absent phase directories', () => {
   const initMod = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'init.cjs'));
   let projectDir;
@@ -3730,7 +3828,7 @@ test('bug-3491: new-project.md gates `git init` on in_nested_subdir, not just ha
 // init CLI negative matrix for `section_manifest`. Covers
 // `.gsd/phase/chore-2932-init-section-manifest/50-test-matrix.md` section E
 // (rows 42-59) plus row 62. Drives the REAL CLI through the dispatch seam
-// (`spawnSync(process.execPath, [...])` with argv ARRAYS — never shell strings) so
+// (argv-array spawn via the process seam — never a shell string) so
 // hostile inputs (rows 55/56) prove no shell interpolation and no path escape.
 //
 // Each test asserts: exit status, structured JSON result, absence of project-tree
@@ -3746,24 +3844,32 @@ describe('init section manifest', () => {
   /**
    * Invokes the real CLI dispatch seam with an argv ARRAY (never a shell string),
    * so shell metacharacters in an argument (rows 55/56) can never be interpreted
-   * by a shell — spawnSync with an array bypasses the shell entirely. Always runs
+   * by a shell — the process seam bypasses the shell entirely. Always runs
    * with GSD_JSON_ERRORS=1 so an error path yields a typed `{ ok, reason, message }`
    * envelope instead of prose, per CONTRIBUTING.md "Prohibited: Raw Text Matching".
+   * TEST_ENV_BASE goes under the caller's env, exactly as runGsdTools layers it:
+   * it blanks every GSD location var, so an ambient GSD_PROJECT / GSD_WORKSTREAM
+   * exported by the developer's shell can never redirect planningDir and change
+   * a scope-dependent fact; a case's own scope is applied after it.
    */
   function runSectionManifestCli(args, cwd, env = {}) {
-    const result = spawnSync(process.execPath, [TOOLS_PATH, 'query', ...args], {
+    const seamResult = processSeam.runNode([TOOLS_PATH, 'query', ...args], {
       cwd,
-      encoding: 'utf8',
-      env: { ...process.env, GSD_JSON_ERRORS: '1', ...env },
-      timeout: GSD_TOOLS_CLI_MODERATE_TIMEOUT_MS,
+      env: { ...process.env, ...TEST_ENV_BASE, GSD_JSON_ERRORS: '1', ...env },
+      timeoutMs: GSD_TOOLS_CLI_MODERATE_TIMEOUT_MS,
     });
-    let stdout = result.stdout || '';
+    let stdout = seamResult.stdout || '';
     // output() spills payloads over 50KB to a tmpfile and prints "@file:<path>"
     // (src/io.cts) — dereference it exactly as the workflow itself does.
     if (stdout.startsWith('@file:')) {
       stdout = fs.readFileSync(stdout.slice('@file:'.length).trim(), 'utf8');
     }
-    return { status: result.status, stdout, stderr: result.stderr || '' };
+    // Adapter over the seam's typed { outcome, exitCode, ... } result — preserves
+    // this helper's pre-existing { status, stdout, stderr } contract for callers
+    // that read `.status` (parseOkJson/parseErrorJson above use `equal`/`notEqual`
+    // against a numeric status, matching spawnSync's `result.status` shape, which
+    // is `null` on a kill/timeout exactly like `seamResult.exitCode` is).
+    return { status: seamResult.exitCode, stdout, stderr: seamResult.stderr || '' };
   }
 
   function runExecutePhase(phaseArgs, cwd, env = {}) {
@@ -4278,12 +4384,21 @@ describe('init section manifest', () => {
 
   // ── D9/D10/D11 (#2992, prod-shape): state:* detector degradation ─────────
   // Drives the REAL cmdInitExecutePhase -> buildSectionManifestField ->
-  // readConfigJsonBoolean/detectPhaseMvpMode seam through the real CLI with a
-  // fixture manifest naming the two config-backed atoms, never a hand-built
-  // InvocationFacts (matrix note: "(prod-shape)" rows must drive the options
-  // path). `seedSinglePhaseProject` writes no `.planning/config.json` and no
-  // `.planning/ROADMAP.md` at all, so D9 (absent config) and D11 (absent
-  // ROADMAP) are the fixture's natural, un-monkeypatched state.
+  // worktreesOptedOut/readConfigJsonBoolean/detectPhaseMvpMode seam through the
+  // real CLI with a fixture manifest naming the config- and ROADMAP-backed
+  // atoms, never a hand-built InvocationFacts (matrix note: "(prod-shape)" rows
+  // must drive the options path). `seedSinglePhaseProject` writes no
+  // `.planning/config.json` and no `.planning/ROADMAP.md` at all, so D9 (absent
+  // config) and D11 (absent ROADMAP) are the fixture's natural,
+  // un-monkeypatched state.
+  //
+  // #4977: `state:worktrees-enabled` is the one DEFAULT-ON atom here — its fact
+  // is the negation of the #3972 `worktreesOptedOut` owner, so an absent config
+  // resolves it ON (the documented `workflow.use_worktrees` default). The
+  // default-off atoms (`state:chunked-mode` via `workflow.plan_chunked`,
+  // `state:phase-mvp-mode` via ROADMAP) must still degrade to false: the
+  // `chunked-section` row is the negative proof that the fix did not flip
+  // `readConfigJsonBoolean`'s absent ⇒ false polarity for every key.
 
   describe('init execute-phase: state:* detector degradation (#2992 rows D9-D11)', () => {
     function writeDetectorManifest(dir) {
@@ -4293,40 +4408,187 @@ describe('init section manifest', () => {
           'execute-phase': [
             { id: 'worktrees-section', when: 'state:worktrees-enabled', read: 'x.md' },
             { id: 'mvp-section', when: 'state:phase-mvp-mode', read: 'y.md' },
+            { id: 'chunked-section', when: 'state:chunked-mode', read: 'z.md' },
           ],
         },
       }));
       return manifestPath;
     }
 
-    test('absentConfigAndAbsentRoadmapDegradeBothStateAtomsToFalse (rows D9/D11)', (t) => {
+    test('absentConfigResolvesWorktreesOnWhileDefaultOffAtomsDegradeToFalse (rows D9/D11, #4977)', (t) => {
       const dir = seedSinglePhaseProject(t, 'gsd-d9-');
       assert.equal(fs.existsSync(path.join(dir, '.planning', 'config.json')), false, 'sanity: no config.json');
       assert.equal(fs.existsSync(path.join(dir, '.planning', 'ROADMAP.md')), false, 'sanity: no ROADMAP.md');
       const manifestPath = writeDetectorManifest(dir);
       const body = parseOkJson(runExecutePhase(['1'], dir, { GSD_SECTION_MANIFEST: manifestPath }), 'd9-d11');
-      assert.deepStrictEqual(body.section_manifest.excluded, ['worktrees-section', 'mvp-section']);
-      assert.deepStrictEqual(body.section_manifest.included, []);
+      assert.deepStrictEqual(body.section_manifest.included, ['worktrees-section'],
+        'an unset workflow.use_worktrees is the documented default (worktrees on), never off');
+      assert.deepStrictEqual(body.section_manifest.excluded, ['mvp-section', 'chunked-section'],
+        'default-off atoms keep absent ⇒ false (negative proof: the polarity change is scoped to worktrees)');
     });
 
-    test('nonBooleanConfigValueDegradesToFalse (row D10 — strict boolean, string "true" is not true)', (t) => {
+    test('nonBooleanConfigValuesNeverCoerce (row D10 — strict: string "true" is not true, string "false" is not an opt-out)', (t) => {
       const dir = seedSinglePhaseProject(t, 'gsd-d10-');
-      fs.writeFileSync(path.join(dir, '.planning', 'config.json'), JSON.stringify({ workflow: { use_worktrees: 'true' } }));
+      fs.writeFileSync(
+        path.join(dir, '.planning', 'config.json'),
+        JSON.stringify({ workflow: { use_worktrees: 'false', plan_chunked: 'true' } }),
+      );
       const manifestPath = writeDetectorManifest(dir);
       const body = parseOkJson(runExecutePhase(['1'], dir, { GSD_SECTION_MANIFEST: manifestPath }), 'd10');
-      assert.ok(
-        body.section_manifest.excluded.includes('worktrees-section'),
-        'a string "true" config value must never coerce to boolean true',
-      );
+      assert.deepStrictEqual(body.section_manifest.included, ['worktrees-section'],
+        'a string "false" is not the boolean opt-out — worktrees stay on (#3972 strict === false)');
+      assert.deepStrictEqual(body.section_manifest.excluded, ['mvp-section', 'chunked-section'],
+        'a string "true" must never coerce a default-off fact to true');
     });
 
-    test('realBooleanTrueConfigValueIncludesTheSection (independence: the strict check still accepts a real boolean)', (t) => {
+    test('realBooleanConfigValuesAreHonored (independence: the strict checks still accept a real boolean)', (t) => {
       const dir = seedSinglePhaseProject(t, 'gsd-d10b-');
-      fs.writeFileSync(path.join(dir, '.planning', 'config.json'), JSON.stringify({ workflow: { use_worktrees: true } }));
+      const configPath = path.join(dir, '.planning', 'config.json');
       const manifestPath = writeDetectorManifest(dir);
-      const body = parseOkJson(runExecutePhase(['1'], dir, { GSD_SECTION_MANIFEST: manifestPath }), 'd10b');
-      assert.ok(body.section_manifest.included.includes('worktrees-section'));
+
+      fs.writeFileSync(configPath, JSON.stringify({ workflow: { use_worktrees: true, plan_chunked: true } }));
+      const on = parseOkJson(runExecutePhase(['1'], dir, { GSD_SECTION_MANIFEST: manifestPath }), 'd10b-true');
+      assert.deepStrictEqual(on.section_manifest.included, ['worktrees-section', 'chunked-section']);
+
+      fs.writeFileSync(configPath, JSON.stringify({ workflow: { use_worktrees: false, plan_chunked: false } }));
+      const off = parseOkJson(runExecutePhase(['1'], dir, { GSD_SECTION_MANIFEST: manifestPath }), 'd10b-false');
+      assert.deepStrictEqual(off.section_manifest.included, [],
+        'the boolean false is the only opt-out — it must still exclude the worktrees section');
     });
+  });
+
+  // ── #4977: state:worktrees-enabled follows the #3972 opt-out ladder ─────
+  //
+  // With `workflow.use_worktrees` unset, `query dispatch-isolation` (which
+  // consumes the #3972 `worktreesOptedOut` owner: absent ⇒ not opted out)
+  // dispatched the quick executor isolated, while `init.quick`'s
+  // `section_manifest` read the same key through `readConfigJsonBoolean`
+  // (absent ⇒ false) and excluded `worktree-pre-dispatch-commit` — the step
+  // that commits PLAN.md so the isolated executor can read it at its worktree
+  // HEAD. Every case drives the REAL `init.quick` against the SHIPPED manifest
+  // and pins both the expected verdict and its parity with the
+  // `query dispatch-isolation` resolver verdict on the same fixture: the
+  // pre-dispatch commit is included exactly when that resolver reports
+  // `harness-worktree`. This is parity with the resolver, not with the
+  // workflow's final dispatch: the Step 2 shell gate
+  // (references/dispatch-isolation-gate.md) additionally forces `none`
+  // whenever `USE_WORKTREES` reads back as `false`, which a string "false"
+  // also does through `config-get --raw`, while the resolver alone still
+  // reports `harness-worktree` for it (the string-"false" row below).
+
+  describe('init quick: state:worktrees-enabled follows the worktreesOptedOut ladder (#4977)', () => {
+    const PRE_DISPATCH = 'worktree-pre-dispatch-commit';
+    const SCOPES = Object.freeze({
+      workstream: { env: { GSD_WORKSTREAM: 'alpha' }, dir: ['workstreams', 'alpha'] },
+      project: { env: { GSD_PROJECT: 'second-product' }, dir: ['second-product'] },
+    });
+
+    /** `undefined` writes no file; a string is written verbatim (malformed shapes); anything else as JSON. */
+    function writeConfigShape(configPath, shape) {
+      if (shape === undefined) return;
+      fs.writeFileSync(configPath, typeof shape === 'string' ? shape : JSON.stringify(shape));
+    }
+
+    /**
+     * runSectionManifestCli already layers TEST_ENV_BASE (no ambient scope);
+     * this adds a pinned runtime and a sandboxed home, then the case's own
+     * `extra` scope.
+     */
+    function hermeticEnv(dir, extra = {}) {
+      return { GSD_RUNTIME: 'claude', ...homeSandboxEnv(dir), ...extra };
+    }
+
+    /** Which partition of the quick manifest holds the pre-dispatch step — exactly one of them must. */
+    function preDispatchVerdict(dir, env, label) {
+      const body = parseOkJson(runSectionManifestCli(['init.quick', 'x'], dir, env), label);
+      const { included, excluded } = body.section_manifest;
+      const inIncluded = included.includes(PRE_DISPATCH);
+      assert.notEqual(inIncluded, excluded.includes(PRE_DISPATCH), `${label}: ${PRE_DISPATCH} must sit in exactly one partition`);
+      return { verdict: inIncluded ? 'included' : 'excluded', sectionManifest: body.section_manifest };
+    }
+
+    function dispatchIsolation(dir, env, label) {
+      return parseOkJson(runSectionManifestCli(['dispatch-isolation', '--json'], dir, env), label).isolation;
+    }
+
+    test('regression fixture from the issue: unset use_worktrees selects the same sections as explicit true', (t) => {
+      const dir = createFixture({ prefix: 'gsd-4977-issue-', planning: true, git: true });
+      t.after(() => cleanup(dir));
+      writePlanningDocs(dir, { requirements: false });
+      const configPath = path.join(dir, '.planning', 'config.json');
+      const env = hermeticEnv(dir);
+
+      writeConfigShape(configPath, { runtime: 'claude', workflow: { plan_check: true } });
+      const unset = preDispatchVerdict(dir, env, 'unset');
+      assert.equal(dispatchIsolation(dir, env, 'unset-isolation'), 'harness-worktree',
+        'fixture self-check: the unset key dispatches the executor isolated');
+      assert.equal(unset.verdict, 'included', 'an isolated dispatch must be preceded by the pre-dispatch plan commit');
+
+      writeConfigShape(configPath, { runtime: 'claude', workflow: { plan_check: true, use_worktrees: true } });
+      const explicitTrue = preDispatchVerdict(dir, env, 'explicit-true');
+      assert.deepStrictEqual(unset.sectionManifest, explicitTrue.sectionManifest,
+        'unset must resolve identically to the documented default (explicit true)');
+
+      writeConfigShape(configPath, { runtime: 'claude', workflow: { plan_check: true, use_worktrees: false } });
+      assert.equal(preDispatchVerdict(dir, env, 'explicit-false').verdict, 'excluded', 'explicit false is still the opt-out');
+      assert.equal(dispatchIsolation(dir, env, 'explicit-false-isolation'), 'none');
+    });
+
+    const LADDER_CASES = [
+      // Flat project (no workstream/project scope): the root config IS the scoped config.
+      { name: 'missing config.json', root: undefined, expected: 'included' },
+      { name: 'empty config.json', root: '', expected: 'included' },
+      { name: 'whitespace-only config.json', root: '  \n\t\n', expected: 'included' },
+      { name: 'malformed config.json', root: '{ not valid json', expected: 'included' },
+      { name: 'scalar workflow where an object is expected', root: { workflow: 'false' }, expected: 'included' },
+      { name: 'string "false" is not the boolean opt-out', root: { workflow: { use_worktrees: 'false' } }, expected: 'included' },
+      { name: 'numeric 0 is not the boolean opt-out', root: { workflow: { use_worktrees: 0 } }, expected: 'included' },
+      { name: 'null is not the boolean opt-out', root: { workflow: { use_worktrees: null } }, expected: 'included' },
+      {
+        name: 'an inherited __proto__ key never counts as an own opt-out',
+        root: '{"workflow":{"__proto__":{"use_worktrees":false}}}',
+        expected: 'included',
+      },
+      {
+        name: 'duplicate keys resolve last-wins, same as every JSON.parse reader',
+        root: '{"workflow":{"use_worktrees":true,"use_worktrees":false}}',
+        expected: 'excluded',
+      },
+      { name: 'CRLF-formatted explicit false', root: '{\r\n  "workflow": {\r\n    "use_worktrees": false\r\n  }\r\n}\r\n', expected: 'excluded' },
+      // Workstream scope: the scoped key wins; otherwise the root key is inherited under GSD_WORKSTREAM.
+      { name: 'workstream: root false, workstream key absent → inherits the opt-out', scope: 'workstream', root: { workflow: { use_worktrees: false } }, scoped: { model_profile: 'balanced' }, expected: 'excluded' },
+      { name: 'workstream: root false, no workstream config file → inherits the opt-out', scope: 'workstream', root: { workflow: { use_worktrees: false } }, scoped: undefined, expected: 'excluded' },
+      { name: 'workstream: root key absent, workstream false → own opt-out', scope: 'workstream', root: { runtime: 'claude' }, scoped: { workflow: { use_worktrees: false } }, expected: 'excluded' },
+      { name: 'workstream: root false, workstream true → the scoped key wins', scope: 'workstream', root: { workflow: { use_worktrees: false } }, scoped: { workflow: { use_worktrees: true } }, expected: 'included' },
+      { name: 'workstream: root true, workstream key absent → inherits true', scope: 'workstream', root: { workflow: { use_worktrees: true } }, scoped: { model_profile: 'balanced' }, expected: 'included' },
+      { name: 'workstream: key absent at both levels → default on', scope: 'workstream', root: { runtime: 'claude' }, scoped: { runtime: 'claude' }, expected: 'included' },
+      { name: 'workstream: root false, malformed workstream config → falls back to the root view', scope: 'workstream', root: { workflow: { use_worktrees: false } }, scoped: '{ not valid json', expected: 'excluded' },
+      // Project scope: config-get does NOT inherit the root under GSD_PROJECT alone (#3963), and neither may this fact.
+      { name: 'project: root false, project key absent → no root inheritance', scope: 'project', root: { workflow: { use_worktrees: false } }, scoped: { runtime: 'claude' }, expected: 'included' },
+    ];
+
+    for (const c of LADDER_CASES) {
+      test(`${c.name}: ${PRE_DISPATCH} ${c.expected}, in parity with dispatch-isolation`, (t) => {
+        const dir = createTempProject('gsd-4977-ladder-');
+        t.after(() => cleanup(dir));
+        writeConfigShape(path.join(dir, '.planning', 'config.json'), c.root);
+        let scopeEnv = {};
+        if (c.scope) {
+          const scopedDir = path.join(dir, '.planning', ...SCOPES[c.scope].dir);
+          fs.mkdirSync(scopedDir, { recursive: true });
+          writeConfigShape(path.join(scopedDir, 'config.json'), c.scoped);
+          scopeEnv = SCOPES[c.scope].env;
+        }
+        const env = hermeticEnv(dir, scopeEnv);
+
+        assert.equal(preDispatchVerdict(dir, env, c.name).verdict, c.expected);
+        assert.equal(
+          dispatchIsolation(dir, env, `${c.name} (isolation)`),
+          c.expected === 'included' ? 'harness-worktree' : 'none',
+          'the pre-dispatch commit must be selected in parity with the query dispatch-isolation resolver verdict',
+        );
+      });
+    }
   });
 
   // ── #2992 review finding: state:needs-codebase-map wiring (real CLI) ─────
@@ -5034,6 +5296,130 @@ describe('#3581: init.progress next_phase prefers the roadmap frontier', () => {
     assert.ok(result.success, `init progress failed: ${result.error}`);
     const out = JSON.parse(result.output);
     assert.equal(out.next_phase, null, 'all-complete milestone: no frontier (completion flow owns the answer)');
+  });
+});
+
+// ─── #4982: cmdInitProgress's `cbPattern` checkbox->phase scan must be
+// line-anchored (no greedy `.*` binding to the LAST "Phase N" mentioned in a
+// checklist line's prose) and must resolve each phase from its own FIRST
+// anchored line, not the last one seen by the global scan (last-match-wins).
+describe('#4982: init.progress ROADMAP checkbox projection anchoring', () => {
+  test('#4982: a checklist line whose prose mentions a later phase does not bind its checkbox to that phase (greedy binding)', (t) => {
+    const tmpDir = createTempProject('gsd-4982-greedy-');
+    t.after(() => cleanup(tmpDir));
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), [
+      '# Roadmap',
+      '',
+      '## Milestone v1.1.0',
+      '',
+      '- [x] **Phase 1: Foundation** — extends the Phase 2 store',
+      '- [ ] **Phase 2: Hardening**',
+      '  - [x] 1-03-PLAN — scaffolding for Phase 2 hardening',
+      '',
+      '### Phase 1: Foundation',
+      '**Goal:** foundation',
+      '',
+      '### Phase 2: Hardening',
+      '**Goal:** hardening',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), [
+      '---', 'gsd_state_version: 1.0', 'milestone: v1.1.0', 'milestone_name: Active',
+      'status: executing', 'current_phase: 1', 'progress:', '  total_phases: 2',
+      '  completed_phases: 1', '  percent: 50', '---', '', '# Project State', '',
+      '## Current Position', '', 'Phase: 1', 'Status: Executing', '',
+    ].join('\n'));
+
+    const result = runGsdTools(['init', 'progress', '--raw'], tmpDir);
+    assert.ok(result.success, `init progress failed: ${result.error}`);
+    const out = JSON.parse(result.output);
+    const one = out.phases.find((p) => String(p.number).replace(/^0+/, '') === '1');
+    const two = out.phases.find((p) => String(p.number).replace(/^0+/, '') === '2');
+    assert.ok(one, 'Phase 1 present');
+    assert.ok(two, 'Phase 2 present');
+    assert.strictEqual(one.roadmap_complete, true,
+      "Phase 1's own [x] must be attributed to Phase 1, not the 'Phase 2' mentioned in its prose");
+    assert.strictEqual(two.roadmap_complete, false,
+      "Phase 2's own [ ] must not be overwritten by a later line's incidental 'Phase 2' mention");
+    assert.ok(out.next_phase, 'next_phase present');
+    assert.strictEqual(String(out.next_phase.number).replace(/^0+/, ''), '2',
+      'Phase 2 (the real incomplete phase) is the frontier, not Phase 1');
+  });
+
+  test('#4982: a self-titled nested sub-entry line must not overwrite its parent phase\'s own (first) checkbox — anchoring alone is not enough', (t) => {
+    const tmpDir = createTempProject('gsd-4982-lastwins-');
+    t.after(() => cleanup(tmpDir));
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), [
+      '# Roadmap',
+      '',
+      '## Milestone v1.1.0',
+      '',
+      '- [x] **Phase 3: Foo**',
+      '- [ ] **Phase 4: Bar**',
+      '  - [ ] Phase 3 regression sweep (extra verification pass)',
+      '',
+      '### Phase 3: Foo',
+      '**Goal:** foo',
+      '',
+      '### Phase 4: Bar',
+      '**Goal:** bar',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), [
+      '---', 'gsd_state_version: 1.0', 'milestone: v1.1.0', 'milestone_name: Active',
+      'status: executing', 'current_phase: 3', 'progress:', '  total_phases: 2',
+      '  completed_phases: 1', '  percent: 50', '---', '', '# Project State', '',
+      '## Current Position', '', 'Phase: 3', 'Status: Executing', '',
+    ].join('\n'));
+
+    const result = runGsdTools(['init', 'progress', '--raw'], tmpDir);
+    assert.ok(result.success, `init progress failed: ${result.error}`);
+    const out = JSON.parse(result.output);
+    const three = out.phases.find((p) => String(p.number).replace(/^0+/, '') === '3');
+    assert.ok(three, 'Phase 3 present');
+    assert.strictEqual(three.roadmap_complete, true,
+      "Phase 3's own anchored [x] line must win even though a later anchored line ('Phase 3 regression sweep') also mentions Phase 3 — first anchored match wins, not last");
+  });
+
+  // #4982 review finding: the anchor fix above must not regress a checklist
+  // line that combines a bracket tag with the literal "Phase N" wording (the
+  // old unanchored `.*` absorbed the bracket text and still matched); this
+  // site stays deliberately non-bracket-convention-aware otherwise (#4984).
+  test('#4982 (review fold-in): a bracket-tagged checklist line combined with literal "Phase N" wording still resolves its own checkbox', (t) => {
+    const tmpDir = createTempProject('gsd-4982-brackethybrid-');
+    t.after(() => cleanup(tmpDir));
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), [
+      '# Roadmap',
+      '',
+      '## Milestone v1.1.0',
+      '',
+      '- [x] **[GSD.02] Phase 3: Foo**',
+      '- [ ] **[GSD.02] Phase 4: Bar**',
+      '',
+      '### Phase 3: Foo',
+      '**Goal:** foo',
+      '',
+      '### Phase 4: Bar',
+      '**Goal:** bar',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), [
+      '---', 'gsd_state_version: 1.0', 'milestone: v1.1.0', 'milestone_name: Active',
+      'status: executing', 'current_phase: 3', 'progress:', '  total_phases: 2',
+      '  completed_phases: 1', '  percent: 50', '---', '', '# Project State', '',
+      '## Current Position', '', 'Phase: 3', 'Status: Executing', '',
+    ].join('\n'));
+
+    const result = runGsdTools(['init', 'progress', '--raw'], tmpDir);
+    assert.ok(result.success, `init progress failed: ${result.error}`);
+    const out = JSON.parse(result.output);
+    const three = out.phases.find((p) => String(p.number).replace(/^0+/, '') === '3');
+    const four = out.phases.find((p) => String(p.number).replace(/^0+/, '') === '4');
+    assert.ok(three, 'Phase 3 present');
+    assert.ok(four, 'Phase 4 present');
+    assert.strictEqual(three.roadmap_complete, true,
+      'a bracket tag before the literal "Phase N" wording must not prevent the anchor from matching');
+    assert.strictEqual(four.roadmap_complete, false);
   });
 });
 

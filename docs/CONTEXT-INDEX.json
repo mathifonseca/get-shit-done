@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "count": 287,
+  "count": 304,
   "classes": {
     "ARCH": 1,
     "CI": 2,
@@ -18,8 +18,8 @@
     "PROC": 14,
     "PROHIB": 10,
     "RELEASE-NOTES": 32,
-    "RULESET": 60,
-    "SEAM": 14,
+    "RULESET": 61,
+    "SEAM": 30,
     "SESSION": 9,
     "WAVE": 5,
     "WORKSTREAM": 5,
@@ -952,6 +952,11 @@
       "value": "command's allowed-tools must cover every tool the workflow calls (including Write for file creation); thin-wrapper pattern makes this easy to miss"
     },
     {
+      "id": "RULESET.ARGUMENTS-LABELED-BLOCK",
+      "klass": "RULESET",
+      "value": "every commands/gsd/*.md template that references $ARGUMENTS or declares argument-hint opens (right after frontmatter) with exactly one <arguments>$ARGUMENTS</arguments> block plus the data-not-instructions note; bodies reference \"the <arguments> block\" instead of splicing $ARGUMENTS into prose (quick-batch's shell --text \"$ARGUMENTS\" stays literal); skills/ inherit via gen:plugin-skills; enforced by tests/command-arguments-block.test.cjs (ADR-4780)"
+    },
+    {
       "id": "RULESET.ARGUMENTS-SANITIZE",
       "klass": "RULESET",
       "value": "any workflow step constructing .planning/.../{SLUG}.md path from user input ($ARGUMENTS, parsed remainder) must sanitize inline ([a-z0-9-] only, reject ..//\\\\, max-length) — \"(already sanitized)\" must trace back to explicit guard; RESUME/fallback modes need own guards"
@@ -1247,6 +1252,46 @@
       "value": "the config-key four-level precedence walk (loadConfig result → workstream config.json → root config.json → registry.configSchema default → absent), owned solely by src/capability-activation.cts"
     },
     {
+      "id": "SEAM.evaluation-scope.enforced-by",
+      "klass": "SEAM",
+      "value": "test:tests/evaluation-scope-drift-lint.test.cjs"
+    },
+    {
+      "id": "SEAM.evaluation-scope.owns",
+      "klass": "SEAM",
+      "value": "resolveEvaluationScope(projectDir, unit, options) (src/gate-evaluation-scope.cts) is the single owner of which commits and files a gate or workflow step evaluates (ADR-5057 §4, #5164)"
+    },
+    {
+      "id": "SEAM.gate-evidence.enforced-by",
+      "klass": "SEAM",
+      "value": "test:tests/gate-evidence.test.cjs"
+    },
+    {
+      "id": "SEAM.gate-evidence.owns",
+      "klass": "SEAM",
+      "value": "Evidence<T> / readTextEvidence / readDirEvidence / verdictFromEvidence (src/gate-evidence.cts) is the single owner of found-versus-none-versus-unreadable for a gate read (ADR-5057 §4, #5170)"
+    },
+    {
+      "id": "SEAM.gate-exit.enforced-by",
+      "klass": "SEAM",
+      "value": "test:tests/gate-exit.test.cjs"
+    },
+    {
+      "id": "SEAM.gate-exit.owns",
+      "klass": "SEAM",
+      "value": "gateExitOutcome / declareGateExit (src/gate-exit.cts) is the single owner of the exit status a gate verdict projects to; declareOutcome (src/cli-exit.cts) is the only writer of the pending-outcome cell besides output() (ADR-5057 §4, #5170)"
+    },
+    {
+      "id": "SEAM.gate-verdict.enforced-by",
+      "klass": "SEAM",
+      "value": "test:tests/gate-verdict.test.cjs"
+    },
+    {
+      "id": "SEAM.gate-verdict.owns",
+      "klass": "SEAM",
+      "value": "GateVerdict / GateResult (src/gate-verdict.cts) is the single value a check gate module returns; only the command router formats it (ADR-5057 §4, #5139)"
+    },
+    {
       "id": "SEAM.git-query-readonly-seam.enforced-by",
       "klass": "SEAM",
       "value": "test:tests/git-base-branch.test.cjs"
@@ -1277,6 +1322,26 @@
       "value": "listMilestonePhaseDirs(phasesDir, opts) is the single canonical owner of milestone-scoped phase-directory enumeration (ADR-3180 Decision 1, Phase 3, #3185)"
     },
     {
+      "id": "SEAM.phase-status-owner.enforced-by",
+      "klass": "SEAM",
+      "value": "test:tests/phase-status.test.cjs"
+    },
+    {
+      "id": "SEAM.phase-status-owner.owns",
+      "klass": "SEAM",
+      "value": "phaseStatus(phaseDir, deps?) / phaseStatusFromFacts(...) is the single canonical owner of \"what state is phase P in?\" (ADR-5057 §2, epic #5056)"
+    },
+    {
+      "id": "SEAM.runtime-descriptor-owner.enforced-by",
+      "klass": "SEAM",
+      "value": "test:tests/runtime-descriptor-owner.test.cjs"
+    },
+    {
+      "id": "SEAM.runtime-descriptor-owner.owns",
+      "klass": "SEAM",
+      "value": "hostBehaviorsFor / assertKnownRuntime (src/runtime-name-policy.cts) are the single owners of a runtime's host behaviors and of refusing an unknown runtime id; no install or hook code compares a runtime-name literal (ADR-5057 §5, #5169)"
+    },
+    {
       "id": "SEAM.shellcmdproj-win-binary-resolution.enforced-by",
       "klass": "SEAM",
       "value": "lint-rule:no-private-binary-resolution"
@@ -1287,6 +1352,16 @@
       "value": "Windows binary resolution (resolveExecutableBinary, projectSpawnInvocation) — which file a declared command name actually names, and cmd.exe mediation"
     },
     {
+      "id": "SEAM.test-report-adapter.enforced-by",
+      "klass": "SEAM",
+      "value": "test:tests/report-parser.property.test.cjs"
+    },
+    {
+      "id": "SEAM.test-report-adapter.owns",
+      "klass": "SEAM",
+      "value": "parseTestReport(output) (src/report-parser.cts) is the single owner of turning a test report into individual results; the RED-evidence policy consumes its contract and parses no report text (#4692)"
+    },
+    {
       "id": "SEAM.verification-isphasecomplete.enforced-by",
       "klass": "SEAM",
       "value": "test:tests/verification-status.test.cjs"
@@ -1295,6 +1370,16 @@
       "id": "SEAM.verification-isphasecomplete.owns",
       "klass": "SEAM",
       "value": "isPhaseComplete(phaseDir, deps?) is the single canonical owner of \"is phase P complete?\" (ADR-3180 §7.4, issue #3186)"
+    },
+    {
+      "id": "SEAM.verification-status.enforced-by",
+      "klass": "SEAM",
+      "value": "test:tests/eslint-no-verification-status-literal.test.cjs"
+    },
+    {
+      "id": "SEAM.verification-status.owns",
+      "klass": "SEAM",
+      "value": "VERIFICATION_STATUS (src/verification.cts) is the closed verification-status vocabulary and VERIFICATION_ROUTES its only routing table (ADR-5057 Phase 4, #5118)"
     },
     {
       "id": "SEAM.worktree-safety-policy.enforced-by",

@@ -39,6 +39,7 @@ const _warnedRawConfigPaths = new Set<string>();
 function _readRawConfigKey(
   filePath: string,
   dotKey: string,
+  quiet = false,
 ): { found: boolean; value: unknown } {
   try {
     const raw = fs.readFileSync(filePath, 'utf8');
@@ -46,7 +47,7 @@ function _readRawConfigKey(
     try {
       parsed = JSON.parse(raw) as Record<string, unknown>;
     } catch {
-      if (!_warnedRawConfigPaths.has(filePath)) {
+      if (!quiet && !_warnedRawConfigPaths.has(filePath)) {
         _warnedRawConfigPaths.add(filePath);
         try {
           process.stderr.write(
@@ -74,12 +75,17 @@ function _readRawConfigKey(
  *   3. Root config.json at planningRoot(cwd)/config.json (only if path differs).
  *   4. registry.configSchema[dotKey].default — schema default.
  *   5. Absent → { found: false, value: undefined }.
+ *
+ * `quiet: true` (default false) suppresses the one-time stderr warning for a config.json that is
+ * not valid JSON: a gate reads its switch quietly (a malformed config is simply "key absent"), it
+ * never writes to stderr (#5139).
  */
 function resolveConfigKey(
   dotKey: string,
-  opts: { config: Record<string, unknown>; cwd: string | undefined; registry: Record<string, unknown> },
+  opts: { config: Record<string, unknown>; cwd: string | undefined; registry: Record<string, unknown>; quiet?: boolean },
 ): { found: boolean; value: unknown } {
   const { config, cwd, registry } = opts;
+  const quiet = opts.quiet === true;
 
   // Level 1: loadConfig result
   const fromConfig = _getNestedConfigValue(config, dotKey);
@@ -90,11 +96,11 @@ function resolveConfigKey(
     const wsConfigPath = path.join(planningDir(cwd), 'config.json');
     const rootConfigPath = path.join(planningRoot(cwd), 'config.json');
 
-    const fromWs = _readRawConfigKey(wsConfigPath, dotKey);
+    const fromWs = _readRawConfigKey(wsConfigPath, dotKey, quiet);
     if (fromWs.found) return { found: true, value: fromWs.value };
 
     if (wsConfigPath !== rootConfigPath) {
-      const fromRoot = _readRawConfigKey(rootConfigPath, dotKey);
+      const fromRoot = _readRawConfigKey(rootConfigPath, dotKey, quiet);
       if (fromRoot.found) return { found: true, value: fromRoot.value };
     }
   }

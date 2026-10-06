@@ -35,8 +35,8 @@
 // See docs/TESTING-SUITES.md for full grouping policy.
 'use strict';
 
-const { readdirSync, readFileSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } = require('fs');
-const { join, basename } = require('path');
+const { appendFileSync, readdirSync, readFileSync, realpathSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } = require('fs');
+const { join, basename, resolve } = require('path');
 const { tmpdir } = require('os');
 const { pathToFileURL } = require('url');
 const { execFileSync, spawn } = require('child_process');
@@ -495,6 +495,16 @@ const DEFAULT_TIMINGS_PATH = join(__dirname, '..', 'tests', 'test-timings.json')
 // Must track SCHEMA_VERSION in scripts/gen-test-timings.cjs.
 const SUPPORTED_TIMINGS_SCHEMA = 1;
 
+// #5071: a per-platform table measured ON that platform (CI's Windows
+// conformance shards export per-file durations; `gen-test-timings.cjs
+// --platform win32` turns them into tests/test-timings.win32.json). Same
+// schema as the Linux table. Loaded only for the platform the runner is on,
+// and only alongside the DEFAULT Linux table — see loadedPlatformTimings in
+// main() for why an injected RUN_TESTS_TIMINGS_FILE does not pick it up.
+function platformTimingsPath(platform) {
+  return join(__dirname, '..', 'tests', `test-timings.${platform}.json`);
+}
+
 // Load the timing table and reduce it to what the packer needs.
 //
 // Weights are normalized by the table's MEAN duration, so an average-cost file
@@ -593,11 +603,53 @@ const WINDOWS_UNMEASURED_COST_MULTIPLIER = 2.2;
 // incident averaged 6659ms against a table mean of 7152ms — within 7%. That
 // equivalence does not hold on win32, where the table's own sources are
 // Linux-only (#4434).
-function makeFileWeigher(timings, platform = process.platform) {
+//
+// #5071: `platformTimings` (optional) is a table measured on `platform`
+// itself. A file it covers is weighed by THAT duration, because the Linux
+// table's relative ordering is exactly what mispredicts Windows cost (the
+// win32 conformance shards ran 25.2 / 29.0 / 31.6 min medians from one LPT
+// partition). Its milliseconds are CALIBRATED into this function's existing
+// unit — Linux-table weight — rather than normalized by their own mean:
+// MAX_FILES_PER_CHUNK, the isolation threshold and RUN_TESTS_SHARD_RESERVE
+// are all denominated in that unit, and the platform table covers a
+// different population (the conformance tier only) with a different mean, so
+// own-mean normalization would silently rescale all three. The scale factor
+// keeps the files BOTH tables measured at their combined Linux weight: the
+// pool's aggregate weight — and with it the chunk count — is unchanged, and
+// only its distribution moves to follow real platform cost. With no usable
+// overlap the scale falls back to 1 / the platform table's own mean. A file
+// the platform table does not cover keeps today's behavior exactly (its Linux
+// weight, else the unmeasured fallback), and a missing Linux table still
+// means uniform weight 1 — the Linux table is the unit anchor.
+function validMs(table, key) {
+  // Own-property lookup, for the reason given in makeFileWeigher below.
+  const ms = Object.hasOwn(table.timings, key) ? table.timings[key] : undefined;
+  return typeof ms === 'number' && Number.isFinite(ms) && ms >= 0 ? ms : undefined;
+}
+
+function platformScale(timings, platformTimings) {
+  let baseWeight = 0;
+  let platformMs = 0;
+  for (const key of Object.keys(platformTimings.timings)) {
+    const p = validMs(platformTimings, key);
+    const b = validMs(timings, key);
+    if (p === undefined || b === undefined) continue;
+    baseWeight += b / timings.mean;
+    platformMs += p;
+  }
+  return baseWeight > 0 && platformMs > 0 ? baseWeight / platformMs : 1 / platformTimings.mean;
+}
+
+function makeFileWeigher(timings, platform = process.platform, platformTimings = null) {
   if (!timings) return () => 1;
   const unmeasuredWeight = platform === 'win32' ? WINDOWS_UNMEASURED_COST_MULTIPLIER : 1;
+  const scale = platformTimings ? platformScale(timings, platformTimings) : 0;
   return (f) => {
     const key = basename(f);
+    if (platformTimings) {
+      const platformMs = validMs(platformTimings, key);
+      if (platformMs !== undefined) return platformMs * scale;
+    }
     // Own-property check before the lookup. This is defense-in-depth, NOT a
     // behavior change: the table is JSON-parsed, so a bare `timings[key]` would
     // walk the prototype chain, but the only keys that resolve there are
@@ -620,13 +672,66 @@ function makeFileWeigher(timings, platform = process.platform) {
 // balance). Isolation (partitionIsolatedFiles) needs the stronger fact: a
 // file must never be isolated on the strength of the unknown-file fallback
 // weight alone, only on a weight it actually earned.
-function makeMeasuredPredicate(timings) {
+//
+// #5071: a file measured only in the platform table has a real measurement
+// too, so it counts — but only when the Linux table loaded, matching
+// makeFileWeigher's "no Linux table means uniform weight" anchor.
+function makeMeasuredPredicate(timings, platformTimings = null) {
   if (!timings) return () => false;
   return (f) => {
     const key = basename(f);
-    const ms = Object.hasOwn(timings.timings, key) ? timings.timings[key] : undefined;
-    return typeof ms === 'number' && Number.isFinite(ms) && ms >= 0;
+    return validMs(timings, key) !== undefined
+      || (platformTimings ? validMs(platformTimings, key) !== undefined : false);
   };
+}
+
+// #5071: reduce one chunk's companion-reporter events file (see
+// scripts/lib/ndjson-reporter.cjs) to its per-file durations. Only a
+// `test:summary` carrying a string `file` is a per-file measurement — the
+// run-level summary has no file, and a nesting-0 `test:pass` repeats a file's
+// duration under a different event, so neither may be counted. Lines are
+// independent: a truncated line from a killed chunk, or anything that is not
+// a JSON object, is skipped without affecting the rest.
+function extractFileSummaries(text) {
+  const out = [];
+  for (const line of String(text).split('\n')) {
+    if (line.trim() === '') continue;
+    let evt;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!evt || typeof evt !== 'object' || evt.type !== 'test:summary') continue;
+    const { file, duration_ms: ms } = evt;
+    if (typeof file !== 'string' || typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) continue;
+    out.push({ file, duration_ms: ms });
+  }
+  return out;
+}
+
+// #5071: append one chunk's per-file durations to the run's export file, in
+// the node:test reporter-stream shape scripts/gen-test-timings.cjs already
+// folds (`{type:'test:summary', data:{file, duration_ms}}`). Advisory like the
+// table it feeds: a missing events file yields nothing, and a write failure is
+// RETURNED for the caller to report, never thrown into the chunk loop.
+function appendTimingExport(eventsPath, exportPath) {
+  let text;
+  try {
+    text = readFileSync(eventsPath, 'utf8');
+  } catch {
+    return { appended: 0, error: null };
+  }
+  const lines = extractFileSummaries(text).map(
+    (s) => `${JSON.stringify({ type: 'test:summary', data: { file: s.file, duration_ms: s.duration_ms } })}\n`,
+  );
+  if (lines.length === 0) return { appended: 0, error: null };
+  try {
+    appendFileSync(exportPath, lines.join(''));
+  } catch (err) {
+    return { appended: 0, error: err };
+  }
+  return { appended: lines.length, error: null };
 }
 
 // Pack `files` into chunks using LPT (longest-processing-time-first): sort by
@@ -817,12 +922,16 @@ function packChunks(files, { weightOf, maxWeight, maxChars, fixedOverhead, isMea
 // `isolationThresholdWeight` below converts that ms bar into the packer's
 // weight units by dividing by the LIVE timings table's own mean duration —
 // the same normalization `makeFileWeigher` already applies to every file, so
-// isolation and packing share one scale. This is platform-independent BY
-// CONSTRUCTION: the timings table is not sharded by OS, so every platform
-// computes the identical threshold weight and therefore the identical
-// isolated set (pinned by
-// "the isolated set is identical across win32, linux, darwin" in
-// tests/run-tests-harness.test.cjs). Isolating a file into its own chunk,
+// isolation and packing share one scale. With only the Linux table loaded
+// this is platform-independent BY CONSTRUCTION: every platform computes the
+// identical threshold weight and therefore the identical isolated set (pinned
+// by "the isolated set is identical across win32, linux, darwin" in
+// tests/run-tests-harness.test.cjs). #5071: where a platform-measured table
+// is committed (tests/test-timings.win32.json), makeFileWeigher calibrates
+// its files into the SAME weight unit, so the threshold is unchanged but a
+// file's weight on that platform follows its measured cost there — a file
+// that is heavy on Windows but not on Linux is isolated on Windows only,
+// which is the point. Isolating a file into its own chunk,
 // unconditionally, on every platform, removes the gamble at its source
 // rather than tuning a shared per-platform budget again around a moving
 // target: an isolated file never enters the shared pool `packChunks`
@@ -1142,18 +1251,203 @@ function analyzeChunkEvents(eventsPath) {
   };
 }
 
+// #4031: per-file test accounting for one chunk. `--test-force-exit` is forwarded
+// by node to every test-file child, which calls process.exit() the moment its root
+// test ends while results are still queued in its non-blocking stdout pipe
+// (nodejs/node#64833), so the parent's reporters (and this runner's own ndjson
+// events file) never see them and the run reports a smaller count with exit 0.
+// The loss is prevented at its source (registration-ledger-preload.cjs makes the
+// child's stdout blocking; measured 6000/6000 vs ~5070/6000 on Node 24.18, Linux) and
+// this accounting stays as the loud backstop for whatever else drops results.
+// The count of results the child REGISTERED with its reporter therefore comes
+// from the child, through a channel that does not share that pipe:
+// scripts/lib/registration-ledger-preload.cjs (loaded with `--require`) counts the
+// leaf `test:pass`/`test:fail` events the child hands to the serializer that
+// frames them onto the pipe, per `file` each event carries, and appends one
+// `{type:'registered', file, count}` line per file when the child exits. The
+// ndjson reporter records every leaf `test:pass`/`test:fail` the parent received,
+// under the same `file`. A file whose registered count exceeds its reported count
+// lost results.
+//
+// Both sides count the same events (leaf pass/fail, not suites) under the same `file` field, so a
+// skipped test, a skipped suite, a run-time subtest and a name/only filter (an excluded test emits no
+// event on either side) do not by themselves make registered exceed reported.
+//
+// What this does NOT catch (measured limits, not guarantees):
+//   - a child that emitted nothing (a crash before its first result, a file with no tests): count 0,
+//     nothing to compare;
+//   - a child killed by SIGKILL (a timeout): it writes its ledger line from an `exit` handler, which
+//     does not run, so the file has no line at all (a timed-out chunk is reported by its own path);
+//   - a file that was reported but never registered (a ledger line is missing for it): reported can
+//     exceed registered and is not flagged per file;
+//   - the count is taken at v8.DefaultSerializer.prototype.writeValue, which holds only while node:test's
+//     child reporter frames events through it. If a Node change moves that, every count is 0. The
+//     chunk-level guard below (ledger counted 0 while the reporter received results) fails that loudly,
+//     and tests/run-tests-accounting.test.cjs ('counts every leaf result') pins the hook directly.
+//
+// `available` is false when either file is missing/unreadable or the ledger
+// holds no `registered` line: the chunk could not be accounted. That is
+// UNREADABLE EVIDENCE (#5170, ADR-5057 §4), never "nothing was lost": the
+// caller FAILS a chunk that exited 0 without an accounting it can trust
+// (formatAccountingUnavailable), with `eventsRead` / `ledgerRead` /
+// `sawRegisteredLine` naming which input was missing. Truncated trailing
+// lines are skipped, as in analyzeChunkEvents. Paths are compared by their
+// real path (normalizeAccountedPath: realpath, case-folded on win32) on BOTH
+// sides — never by basename, which would attribute one file's results to
+// another of the same name in a different directory.
+function normalizeAccountedPath(p) {
+  let resolved = resolve(p);
+  try {
+    // The child's argv[1] and the runner's event `file` are the same file but
+    // not necessarily the same spelling (a symlinked temp root, 8.3 names).
+    resolved = realpathSync.native(resolved);
+  } catch {
+    // Not on disk (a synthetic path in a unit test): the resolved spelling stands.
+  }
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function analyzeChunkAccounting(eventsPath, ledgerPath) {
+  const reported = new Map(); // normalized file -> leaf pass+fail events received
+  const registered = new Map(); // normalized file -> registrations counted in the child
+  const display = new Map(); // normalized file -> path as first seen, for messages
+  let eventsRead = true;
+  let ledgerRead = true;
+  let sawRegisteredLine = false;
+  let eventsRaw = '';
+  let ledgerRaw = '';
+  try {
+    eventsRaw = readFileSync(eventsPath, 'utf8');
+  } catch {
+    eventsRead = false;
+  }
+  try {
+    ledgerRaw = readFileSync(ledgerPath, 'utf8');
+  } catch {
+    ledgerRead = false;
+  }
+  const parse = (raw, onEvent) => {
+    for (const line of raw.split('\n')) {
+      if (line.trim() === '') continue;
+      let evt;
+      try {
+        evt = JSON.parse(line);
+      } catch {
+        continue; // truncated trailing line
+      }
+      onEvent(evt);
+    }
+  };
+  parse(eventsRaw, (evt) => {
+    if ((evt.type !== 'test:pass' && evt.type !== 'test:fail') || typeof evt.file !== 'string') return;
+    if (evt.kind === 'suite') return;
+    const key = normalizeAccountedPath(evt.file);
+    display.set(key, display.get(key) || evt.file);
+    reported.set(key, (reported.get(key) || 0) + 1);
+  });
+  parse(ledgerRaw, (evt) => {
+    if (evt.type !== 'registered' || typeof evt.file !== 'string' || !Number.isInteger(evt.count)) return;
+    sawRegisteredLine = true;
+    const key = normalizeAccountedPath(evt.file);
+    display.set(key, display.get(key) || evt.file);
+    registered.set(key, (registered.get(key) || 0) + evt.count);
+  });
+  // A registered file is matched to its reported results by its real path ALONE.
+  // Both sides are normalized through realpath (normalizeAccountedPath), so a
+  // spelling the two sides disagree on (a symlinked temp root, 8.3 names, case on
+  // a case-insensitive filesystem) is the same key. There is no basename
+  // fallback: tests/a/x.test.cjs and tests/b/x.test.cjs share a basename, and
+  // crediting one file's results to the other would hide a loss. A registered
+  // file with no reported entry IS a shortfall.
+  const reportedFor = (key) => reported.get(key) || 0;
+  const shortfalls = [];
+  let registeredTotal = 0;
+  let reportedTotal = 0;
+  for (const [key, count] of registered) {
+    const got = reportedFor(key);
+    registeredTotal += count;
+    reportedTotal += Math.min(got, count);
+    if (count > got) shortfalls.push({ file: display.get(key), registered: count, reported: got });
+  }
+  // A dead count is positively established, not unavailability: the parent REPORTED results while the
+  // child ledger counted none at all, and a reported result was necessarily handed to the child's
+  // serializer first. The ledger lines exist (the preload ran) so the counting hook is what failed
+  // (the serializer no longer being the reporter's channel is the realistic cause). A chunk whose files
+  // legitimately report nothing has reportedAll === 0 and is not caught by this.
+  let reportedAll = 0;
+  for (const n of reported.values()) reportedAll += n;
+  const ledgerCountedNothing = sawRegisteredLine && registeredTotal === 0 && reportedAll > 0;
+  return {
+    available: eventsRead && ledgerRead && sawRegisteredLine,
+    eventsRead,
+    ledgerRead,
+    sawRegisteredLine,
+    shortfalls,
+    registeredTotal,
+    reportedTotal,
+    reportedAll,
+    ledgerCountedNothing,
+  };
+}
+
+// #5170: the loud failure for a chunk whose ledger counted no result while the reporter received some.
+function formatAccountingCountDead(chunkNumber, chunkCount, accounting) {
+  return (
+    `run-tests: chunk ${chunkNumber}/${chunkCount} FAILED test accounting — the registration ledger counted 0 ` +
+    `results but the reporter received ${accounting.reportedAll}. The preload's count (the serializer hook in ` +
+    `scripts/lib/registration-ledger-preload.cjs) is not seeing the child's results, so no loss in this chunk ` +
+    `could be detected; a Node change to how the child reports is the likely cause.`
+  );
+}
+
+// #4031: the loud failure for a chunk whose registered tests are not all
+// accounted for. Names the chunk and the counts, per file and in total.
+function formatAccountingFailure(chunkNumber, chunkCount, accounting) {
+  const lost = accounting.registeredTotal - accounting.reportedTotal;
+  const lines = accounting.shortfalls.map(
+    (s) => `  ${basename(s.file)}: ${s.registered} registered, ${s.reported} reported (${s.registered - s.reported} unaccounted)`,
+  );
+  return (
+    `run-tests: chunk ${chunkNumber}/${chunkCount} FAILED test accounting — ` +
+    `${accounting.registeredTotal} tests registered, ${accounting.reportedTotal} reported ` +
+    `(${lost} unaccounted). The runner exited 0, but results for tests that registered never ` +
+    `reached the report (--test-force-exit can end the runner before a test file's results ` +
+    `are read, nodejs/node#64833), so a green count here would be a lower bound.\n${lines.join('\n')}`
+  );
+}
+
+// #5170: the loud failure for a chunk that exited 0 whose accounting inputs are missing: the
+// registration ledger and/or the reporter events file could not be read, or the ledger holds no
+// registration at all. The chunk may have lost results and there is no way to know, so it is unreadable
+// evidence — the class this phase closes — and fails like any other failed chunk.
+function formatAccountingUnavailable(chunkNumber, chunkCount, accounting) {
+  const missing = [];
+  if (!accounting.ledgerRead) missing.push('the registration ledger could not be read');
+  else if (!accounting.sawRegisteredLine) missing.push('the registration ledger holds no registration (the preload never recorded a test file)');
+  if (!accounting.eventsRead) missing.push('the reporter events file could not be read');
+  return (
+    `run-tests: chunk ${chunkNumber}/${chunkCount} FAILED test accounting — it exited 0 but could ` +
+    `not be accounted (unreadable evidence): ${missing.join('; ')}. A dropped result would not be ` +
+    `detected for this chunk, so a green count here would be a lower bound.`
+  );
+}
+
 // #3889: ranks a killed chunk's files heaviest-first using the same weigher
 // the packer used to build the chunk, and flags any file the timings table
 // has no measurement for at all (as opposed to one that IS measured but
 // happens to be cheap) — an unmeasured file is an unknown quantity, not a
 // known-light one, and the table itself is advisory/stale (see the
 // loadTestTimings header), so this is presented as a hint, never a verdict.
-function rankChunkFilesByWeight(files, weightOf, timingsTable) {
+//
+// #5071: `platformTable` (optional) is the platform-measured table; a file it
+// covers is measured too, so it must not be labeled UNMEASURED.
+function rankChunkFilesByWeight(files, weightOf, timingsTable, platformTable = null) {
   return [...files]
     .map((f) => ({ base: basename(f), weight: weightOf(f) }))
     .sort((a, b) => b.weight - a.weight)
     .map(({ base, weight }, idx) => {
-      const measured = timingsTable ? Object.hasOwn(timingsTable.timings, base) : false;
+      const measured = (timingsTable ? Object.hasOwn(timingsTable.timings, base) : false)
+        || (platformTable ? Object.hasOwn(platformTable.timings, base) : false);
       return `  ${idx + 1}. ${base} (weight=${weight.toFixed(2)}${
         measured ? '' : ', UNMEASURED — absent from tests/test-timings.json (table is advisory'
           + ' and stale; treat this file as an unknown cost, not a cheap one)'
@@ -1399,17 +1693,35 @@ async function main() {
     }
     return timingsMemo;
   };
+  // #5071: the table measured on THIS platform, when one is committed
+  // (tests/test-timings.win32.json). RUN_TESTS_PLATFORM_TIMINGS_FILE
+  // overrides its path. Without that override the platform table is only
+  // consulted alongside the DEFAULT Linux table: a caller that injects its own
+  // RUN_TESTS_TIMINGS_FILE (every synthetic-table test in
+  // tests/run-tests-harness.test.cjs) gets exactly the cost profile it
+  // injected, not that profile silently blended with the real Windows one.
+  let platformTimingsMemo; // undefined = not loaded yet; null = loaded-but-absent
+  const loadedPlatformTimings = () => {
+    if (platformTimingsMemo === undefined) {
+      const override = process.env.RUN_TESTS_PLATFORM_TIMINGS_FILE;
+      let platformPath = null;
+      if (override) platformPath = override;
+      else if (!process.env.RUN_TESTS_TIMINGS_FILE) platformPath = platformTimingsPath(process.platform);
+      platformTimingsMemo = platformPath ? loadTestTimings(platformPath) : null;
+    }
+    return platformTimingsMemo;
+  };
   let weigherMemo = null;
   const fileWeightOf = () => {
     if (weigherMemo === null) {
-      weigherMemo = makeFileWeigher(loadedTimings(), process.platform);
+      weigherMemo = makeFileWeigher(loadedTimings(), process.platform, loadedPlatformTimings());
     }
     return weigherMemo;
   };
   let measuredMemo = null;
   const fileMeasuredOf = () => {
     if (measuredMemo === null) {
-      measuredMemo = makeMeasuredPredicate(loadedTimings());
+      measuredMemo = makeMeasuredPredicate(loadedTimings(), loadedPlatformTimings());
     }
     return measuredMemo;
   };
@@ -1586,6 +1898,15 @@ async function main() {
       + `weight=${myWeight.toFixed(2)} table=${table ? 'loaded' : 'absent'} `
       + `sig=${sig.toString(16)}`,
     );
+    // #5071: its own line, so the one above keeps its established format —
+    // how much of this shard the platform-measured table priced.
+    const platformTable = loadedPlatformTimings();
+    if (platformTable) {
+      const platformWeighed = mine.filter(n => Object.hasOwn(platformTable.timings, n)).length;
+      console.error(
+        `run-tests: platform-timings=${process.platform} weighed=${platformWeighed}/${mine.length}`,
+      );
+    }
   }
 
   // Default concurrency: 4 on Linux/macOS, 2 on Windows.
@@ -1769,6 +2090,17 @@ async function main() {
   // races with, or is polluted by, another chunk's events. Deleted on the
   // success path; kept only long enough to read back on a timeout.
   const eventsDir = mkdtempSync(join(tmpdir(), 'gsd-run-tests-events-'));
+
+  // #5071: when set, each chunk's per-file `test:summary` durations are
+  // appended here (CI uploads the file per Windows shard; gen-test-timings
+  // --platform turns it into the platform table). Removed from this process's
+  // environment BEFORE any chunk is spawned: chunks inherit process.env, and a
+  // test that itself spawns run-tests.cjs (the harness tests do, with
+  // synthetic fixtures) would otherwise append those fixtures' durations to
+  // the real export.
+  const timingExportPath = process.env.RUN_TESTS_TIMING_EVENTS_FILE || null;
+  delete process.env.RUN_TESTS_TIMING_EVENTS_FILE;
+  let timingExportWarned = false;
   // #3889: Node documents `--test-reporter`'s value as "a string similar to
   // those used in import() statements" (https://nodejs.org/api/test.html#--test-reporter),
   // NOT a bare filesystem path — a bare absolute path is not a portable
@@ -1813,7 +2145,15 @@ async function main() {
   ];
   const reporterOverhead = reporterArgs.reduce((sum, a) => sum + a.length + 1, 0);
 
-  const FIXED_OVERHEAD = process.execPath.length + '--test'.length + concurrency.length + (forceExit ? '--test-force-exit'.length + 1 : 0) + reporterOverhead + 8;
+  // #4031: the registration-ledger preload (see analyzeChunkAccounting). Its
+  // per-chunk output path travels via env (GSD_RUN_TESTS_LEDGER_FILE), like the
+  // events path, so only this fixed `--require <path>` counts toward argv.
+  const ledgerPreloadPath = join(__dirname, 'lib', 'registration-ledger-preload.cjs');
+  const ledgerArgs = ['--require', ledgerPreloadPath];
+  const ledgerOverhead = ledgerArgs.reduce((sum, a) => sum + a.length + 1, 0);
+  const ledgerPathFor = (i) => join(eventsDir, `chunk-${String(i).padStart(3, '0')}.ledger.ndjson`);
+
+  const FIXED_OVERHEAD = process.execPath.length + '--test'.length + concurrency.length + (forceExit ? '--test-force-exit'.length + 1 : 0) + reporterOverhead + ledgerOverhead + 8;
 
   // Convert the ms-denominated isolation bar into the packer's weight units
   // by dividing by the live table's own mean duration — see the comment
@@ -1896,6 +2236,7 @@ async function main() {
       console.error(`run-tests: chunk ${i + 1}/${chunks.length} — ${chunks[i].length} files`);
     }
     const chunkEventsPath = eventsPathFor(i);
+    const chunkLedgerPath = ledgerPathFor(i);
     const chunkStartedAt = process.hrtime.bigint();
     // #4936: the timeout diagnostic is printed from runChunk's own timer the
     // moment the bound is exceeded — not from the result, which only arrives
@@ -1956,7 +2297,7 @@ async function main() {
                 `completed. This diagnostic could not identify an in-flight file.`;
 
       const table = loadTestTimings(process.env.RUN_TESTS_TIMINGS_FILE || DEFAULT_TIMINGS_PATH);
-      const ranked = rankChunkFilesByWeight(chunks[i], fileWeightOf(), table).join('\n');
+      const ranked = rankChunkFilesByWeight(chunks[i], fileWeightOf(), table, loadedPlatformTimings()).join('\n');
 
       console.error(
         `run-tests: chunk ${i + 1}/${chunks.length} exceeded the per-chunk timeout ` +
@@ -1977,17 +2318,57 @@ async function main() {
         ...(forceExit ? ['--test-force-exit'] : []),
         concurrency,
         ...reporterArgs,
+        ...ledgerArgs,
         ...chunks[i],
       ],
       {
-        env: { ...process.env, GSD_RUN_TESTS_EVENTS_FILE: chunkEventsPath },
+        env: {
+          ...process.env,
+          GSD_RUN_TESTS_EVENTS_FILE: chunkEventsPath,
+          GSD_RUN_TESTS_LEDGER_FILE: chunkLedgerPath,
+        },
         timeoutMs: chunkTimeoutMs,
         graceMs: chunkKillGraceMs,
         onTimeout: reportChunkTimeout,
       },
     );
     const elapsedMs = Number(process.hrtime.bigint() - chunkStartedAt) / 1e6;
+    // #5071: on every outcome — a failed or killed chunk's COMPLETED files
+    // are still genuine measurements — and before the success path below
+    // deletes the events file.
+    if (timingExportPath) {
+      const { error: exportError } = appendTimingExport(chunkEventsPath, timingExportPath);
+      if (exportError && !timingExportWarned) {
+        timingExportWarned = true;
+        console.error(
+          'run-tests: WARNING: could not append per-file durations to RUN_TESTS_TIMING_EVENTS_FILE='
+            + `"${timingExportPath}" (${exportError.code || exportError.message}); the timing `
+            + 'export is advisory, so the run continues.',
+        );
+      }
+    }
+    // #4031: a chunk that exited 0 must also ACCOUNT for every test its files
+    // registered. Run before the success path below, which deletes the events
+    // file this reads; a shortfall turns the chunk into an ordinary failure
+    // (non-timeout, so the remaining chunks still run and every failure is
+    // visible in one pass).
+    let accountingFailed = false;
     if (!result.timedOut && result.code === 0 && !result.signal && !result.error) {
+      const accounting = analyzeChunkAccounting(chunkEventsPath, chunkLedgerPath);
+      if (accounting.ledgerCountedNothing) {
+        accountingFailed = true;
+        console.error(formatAccountingCountDead(i + 1, chunks.length, accounting));
+      } else if (accounting.shortfalls.length > 0) {
+        accountingFailed = true;
+        console.error(formatAccountingFailure(i + 1, chunks.length, accounting));
+      } else if (!accounting.available) {
+        // Unreadable evidence is a FAILURE, not a warning (#5170): accounting that cannot be read
+        // cannot show that nothing was lost.
+        accountingFailed = true;
+        console.error(formatAccountingUnavailable(i + 1, chunks.length, accounting));
+      }
+    }
+    if (!accountingFailed && !result.timedOut && result.code === 0 && !result.signal && !result.error) {
       console.error(
         `run-tests: chunk ${i + 1}/${chunks.length} completed in ${elapsedMs.toFixed(0)}ms`,
       );
@@ -2113,7 +2494,10 @@ module.exports = {
   defaultMaxFilesPerChunk,
   defaultMaxUnmeasuredPerChunk,
   loadTestTimings,
+  platformTimingsPath,
   makeFileWeigher,
+  extractFileSummaries,
+  appendTimingExport,
   WINDOWS_UNMEASURED_COST_MULTIPLIER,
   makeMeasuredPredicate,
   packChunks,
@@ -2126,6 +2510,12 @@ module.exports = {
   ISOLATION_BUDGET_FRACTION,
   partitionIsolatedFiles,
   analyzeChunkEvents,
+  // #4031: per-file registered-vs-reported accounting, exported so the
+  // shortfall and accounted arms are unit-testable on synthetic ledgers.
+  analyzeChunkAccounting,
+  formatAccountingFailure,
+  formatAccountingUnavailable,
+  formatAccountingCountDead,
   // #4936: the chunk watchdog, exported so its arms are unit-testable with
   // injected spawn/platform seams (a real wedged Windows child is not
   // reproducible on demand).

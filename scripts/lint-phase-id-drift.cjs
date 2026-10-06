@@ -283,6 +283,34 @@ function findPhaseHeadingScanLiteralDrift(text) {
   return out;
 }
 
+/**
+ * Scan the authored source tree (`src/**\/*.cts`, the same `SCAN_DIRS` root
+ * and `phase-id.cts` owner exemption that `scanRepo` applies to this
+ * detector — the heading-scan literal is a `src/**\/*.cts` defect, not a
+ * markdown one, unlike its sibling wrappers below) for unsanctioned
+ * hand-rolled heading-scan literals. Returns [{ file, line, found }] with
+ * repo-relative paths.
+ */
+function scanMarkdownPhaseHeadingScanLiteral(root) {
+  const violations = [];
+  for (const dir of SCAN_DIRS) {
+    for (const file of walk(path.join(root, dir), [])) {
+      const rel = path.relative(root, file);
+      if (EXEMPT.has(rel)) continue;
+      let text;
+      try {
+        text = fs.readFileSync(file, 'utf8');
+      } catch {
+        continue;
+      }
+      for (const d of findPhaseHeadingScanLiteralDrift(text)) {
+        violations.push({ file: rel, kind: 'phase-heading-scan-literal', ...d });
+      }
+    }
+  }
+  return violations;
+}
+
 // #4634: ban base-10-forced shell arithmetic (`$((10#...))`) on a variable
 // that still carries a possibly-decimal/multi-segment phase id — this
 // construct is exactly the pattern that breaks on a value like `08.5`. The
@@ -857,6 +885,7 @@ module.exports = {
   findNameValidityDrift,
   findBranchSlugFallbackDrift,
   findPhaseHeadingScanLiteralDrift,
+  scanMarkdownPhaseHeadingScanLiteral,
   findShellPhaseArithDrift,
   findSingleSegmentPhaseRegexDrift,
   findLetterlessPhaseMirrorDrift,

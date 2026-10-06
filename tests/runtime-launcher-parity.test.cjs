@@ -45,9 +45,7 @@ const SNIPPET_FILE = path.join(WORKFLOWS_DIR, '_runtime-launcher.snippet.sh');
  * reads (see tests/helpers.cjs, #2665), so a new runtime home cannot leave it
  * silently stale — the shape of #4205.
  *
- * Three keys the derived set cannot supply:
- *  - GEMINI_CONFIG_DIR: the gemini runtime is retired (#1928) so the registry
- *    no longer carries it, but the snippet still probes its arm.
+ * Two keys the derived set cannot supply:
  *  - CLAUDE_ENV_FILE: a WRITE sink, not a read path. Left ambient, every
  *    fixture that exits 0 appends `export PATH='<temp dir>'` to the
  *    developer's real env file, each line naming a /tmp dir the fixture has
@@ -56,7 +54,7 @@ const SNIPPET_FILE = path.join(WORKFLOWS_DIR, '_runtime-launcher.snippet.sh');
  *    after this scrub is applied — so one inherited var re-injects any of
  *    the others. Measured: a BASH_ENV exporting CODEX_HOME turns (H) red.
  */
-const SNIPPET_SCRUB = { GEMINI_CONFIG_DIR: '', CLAUDE_ENV_FILE: '', BASH_ENV: '' };
+const SNIPPET_SCRUB = { CLAUDE_ENV_FILE: '', BASH_ENV: '' };
 function snippetEnv(overrides = {}) {
   const env = { ...process.env, ...TEST_ENV_BASE, ...SNIPPET_SCRUB, ...overrides };
   // Windows env vars are case-insensitive; a spread of process.env is not. The
@@ -1632,22 +1630,31 @@ const SNIPPET_FILE = path.join(WORKFLOWS_DIR, '_runtime-launcher.snippet.sh');
 // Key: runtime name (for diagnostics). Value: the substring that must appear
 // in the snippet (the env-var-with-default expansion that probes that runtime's
 // gsd-core install location). Mirrors src/runtime-homes.cts getGlobalConfigDir().
+//
+// #5169: the list is RENDERED from the runtime descriptors (scripts/sync-runtime-launcher.cjs,
+// tests/launcher-homes-derivation.test.cjs proves it equals the registry rendering), as a loop
+// over the homes — each home is a quoted element and the `/gsd-core/bin/<shim>` suffix is
+// written once. The retired gemini runtime is not probed (#4347); zcode, pi, kimi and
+// kimi-code are.
 const EXPECTED_RUNTIME_PROBES = {
-  hermes:      '.hermes}/gsd-core/bin/',
-  cursor:      '.cursor}/gsd-core/bin/',
-  codex:       '.codex}/gsd-core/bin/',
-  gemini:      '.gemini}/gsd-core/bin/',
-  copilot:     '.copilot}/gsd-core/bin/',
-  windsurf:    '.codeium/windsurf}/gsd-core/bin/',
-  augment:     '.augment}/gsd-core/bin/',
-  trae:        '.trae}/gsd-core/bin/',
-  qwen:        '.qwen}/gsd-core/bin/',
-  codebuddy:   '.codebuddy}/gsd-core/bin/',
-  cline:       '.cline}/gsd-core/bin/',
-  grok:        '.agents}/gsd-core/bin/',
-  antigravity: '.gemini/antigravity}/gsd-core/bin/',
-  opencode:    'opencode}/gsd-core/bin/',
-  kilo:        'kilo}/gsd-core/bin/',
+  hermes:      '$HOME/.hermes}"',
+  cursor:      '$HOME/.cursor}"',
+  codex:       '$HOME/.codex}"',
+  copilot:     '$HOME/.copilot}}"',
+  windsurf:    '$HOME/.codeium/windsurf}"',
+  augment:     '$HOME/.augment}"',
+  trae:        '$HOME/.trae}"',
+  qwen:        '$HOME/.qwen}"',
+  codebuddy:   '$HOME/.codebuddy}"',
+  cline:       '$HOME/.cline}"',
+  grok:        'GROK_AGENTS_HOME:-$HOME/.agents}"',
+  antigravity: '$HOME/.gemini/antigravity}"',
+  opencode:    '/opencode}"',
+  kilo:        '/kilo}"',
+  zcode:       '$HOME/.zcode}"',
+  pi:          '$HOME/.pi/agent}"',
+  kimi:        '$HOME/.config/agents}"',
+  'kimi-code': '$HOME/.kimi-code}"',
 };
 
 
@@ -1977,15 +1984,15 @@ describe('bug-891: non-Claude runtime home fallback arms', () => {
     assert.ok(helperEnd !== -1, 'Snippet _gsd_homes helper must close');
     const homesBody = snippetContent.slice(helperStart, helperEnd);
 
-    // The helper's claude arm reads `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/...` —
-    // the closing brace sits between `.claude` and the slash, so probe for the
-    // arm text as it is actually spelled (same style as the hermes probe below).
-    const claudePos  = homesBody.indexOf('$HOME/.claude}/gsd-core/bin/');
-    const hermesPos  = homesBody.indexOf('.hermes}/gsd-core/bin/');
+    // The helper (#5169: rendered from the descriptors as a loop over quoted homes)
+    // lists the claude home as `"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"` — the closing
+    // brace and quote follow `.claude` — so probe for each element as it is spelled.
+    const claudePos  = homesBody.indexOf('$HOME/.claude}"');
+    const hermesPos  = homesBody.indexOf('$HOME/.hermes}"');
     const errorPos   = snippetContent.indexOf('exit 1');
 
     assert.ok(claudePos  !== -1, 'Snippet must contain the claude config-home arm');
-    assert.ok(hermesPos  !== -1, 'Snippet must contain .hermes}/gsd-core/bin/ arm');
+    assert.ok(hermesPos  !== -1, 'Snippet must contain the hermes config-home arm ($HOME/.hermes}")');
     assert.ok(errorPos   !== -1, 'Snippet must contain exit 1 hard-error');
 
     assert.ok(
@@ -2000,7 +2007,7 @@ describe('bug-891: non-Claude runtime home fallback arms', () => {
 
   // ── (E) Propagation: workflow .md files using gsd_run contain hermes probe ─
   test('(E) all workflow .md files using gsd_run contain the hermes runtime home probe', () => {
-    const HERMES_PROBE = '.hermes}/gsd-core/bin/';
+    const HERMES_PROBE = '$HOME/.hermes}"';
     const files = collectWorkflowFiles();
     assert.ok(files.length > 0, 'expected at least one workflow .md file');
 
@@ -2328,7 +2335,7 @@ describe('bug-444: resolver finds repo-local .claude install', () => {
     // #1865: the Claude arm must honor CLAUDE_CONFIG_DIR (the installer writes
     // there when it is set), with $HOME/.claude as the fallback.
     assert.ok(
-      content.includes('${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/'),
+      content.includes('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"'),
       `Snippet's Claude arm must honor CLAUDE_CONFIG_DIR via \${CLAUDE_CONFIG_DIR:-$HOME/.claude}.`,
     );
 

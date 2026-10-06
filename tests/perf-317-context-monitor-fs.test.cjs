@@ -613,6 +613,61 @@ describe('#1974 context exhaustion auto-record', () => {
   // by the runHook() helper throughout this test file — it calls the hook from an arbitrary
   // tmpDir and all tests pass, proving __dirname-relative resolution works.
 });
+
+describe('#4905: the CRITICAL breadcrumb stamps the local day through the clock seam', () => {
+  const { runNode } = require('./helpers/process-seam.cjs');
+
+  // The breadcrumb the hook would record, computed in a child whose clock and
+  // time zone are pinned. Each pin puts the local and UTC calendar days on
+  // different dates, so only the clock seam's local day passes.
+  function breadcrumbAt(nowMs, tz) {
+    const result = runNode(
+      ['-e', `process.stdout.write(require(${JSON.stringify(HOOK_PATH)}).criticalStoppedAt(80))`],
+      { env: { ...process.env, GSD_TEST_MODE: '1', GSD_NOW_MS: String(nowMs), TZ: tz } },
+    );
+    assert.strictEqual(result.exitCode, 0, result.stderr);
+    return result.stdout;
+  }
+
+  test('ahead of UTC (the #4905 repro): 2026-06-30T22:30Z is already 1 July in Copenhagen', () => {
+    assert.strictEqual(breadcrumbAt(1782858600000, 'Europe/Copenhagen'), 'context exhaustion at 80% (2026-07-01)');
+  });
+
+  test('behind UTC: 2020-06-15T02:00Z is still 14 June in Chicago', () => {
+    assert.strictEqual(breadcrumbAt(1592186400000, 'America/Chicago'), 'context exhaustion at 80% (2020-06-14)');
+  });
+
+  // These tests fail if a standalone hook falls back to UTC or the unpinned
+  // wall clock. Only Date is mocked; loading the absent runtime really fails.
+  for (const { label, nowMs, tz, expected } of [
+    { label: 'ahead of UTC', nowMs: 1782858600000, tz: 'Europe/Copenhagen', expected: 'context exhaustion at 80% (2026-07-01)' },
+    { label: 'behind UTC', nowMs: 1592186400000, tz: 'America/Chicago', expected: 'context exhaustion at 80% (2020-06-14)' },
+  ]) {
+    test(`without the runtime library, the fallback uses the host-local day ${label}`, (t) => {
+      const { createTempDir } = require('./helpers.cjs');
+      const fixture = createTempDir('gsd-context-clock-fallback-');
+      t.after(() => cleanup(fixture));
+      const hooksDir = path.join(fixture, 'hooks');
+      fs.mkdirSync(hooksDir);
+      const hookPath = path.join(hooksDir, 'gsd-context-monitor.js');
+      fs.copyFileSync(HOOK_PATH, hookPath);
+      fs.cpSync(path.join(path.dirname(HOOK_PATH), 'lib'), path.join(hooksDir, 'lib'), { recursive: true });
+      const missingRuntime = path.join(fixture, 'gsd-core', 'bin', 'ensure-runtime-build.cjs');
+      const script = [
+        "const assert = require('node:assert/strict');",
+        "const { mock } = require('node:test');",
+        `assert.throws(() => require(${JSON.stringify(missingRuntime)}), { code: 'MODULE_NOT_FOUND' });`,
+        `mock.timers.enable({ apis: ['Date'], now: ${nowMs} });`,
+        `process.stdout.write(require(${JSON.stringify(hookPath)}).criticalStoppedAt(80));`,
+      ].join('\n');
+      const result = runNode(['-e', script], {
+        env: { ...process.env, TZ: tz, GSD_TEST_MODE: '1', GSD_NOW_MS: '0' },
+      });
+      assert.strictEqual(result.exitCode, 0, result.stderr);
+      assert.strictEqual(result.stdout, expected);
+    });
+  }
+});
   });
 }
 

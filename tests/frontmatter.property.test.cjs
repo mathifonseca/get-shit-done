@@ -9,9 +9,8 @@
  * Properties tested:
  *   (a) extractFrontmatter never throws on ANY string input (including binary/unicode)
  *   (b) extractFrontmatter always returns a plain object (not null, not array)
- *   (c) round-trip: reconstructFrontmatter(extractFrontmatter(spliceFrontmatter(content, obj)))
- *       preserves key-value pairs for simple flat string values
- *   (d) spliceFrontmatter never throws on any string/object combination
+ *   (c)/(d) spliceFrontmatter's own properties live in tests/frontmatter-splice.property.test.cjs
+ *       since the writer moved to frontmatter-splice.cts (#5105)
  *   (e) extractFrontmatter returns {} for content without a leading ---...--- block
  *   (f) prohibitions bijection (#644): over a generated must_haves.prohibitions block,
  *       parseMustHavesBlock(spliceFrontmatter(doc, parseFrontmatter(doc)), 'prohibitions')
@@ -29,7 +28,88 @@ const {
   spliceFrontmatter,
   parseFrontmatter,
   parseMustHavesBlock,
+  frontmatterKeyHasValue,
+  frontmatterKeyBlockText,
+  frontmatterRegion,
 } = require('../gsd-core/bin/lib/frontmatter.cjs');
+const { escapeRegex } = require('../gsd-core/bin/lib/pattern.cjs');
+
+// ─── frontmatterKeyHasValue / frontmatterKeyBlockText — property (#5139) ──────────────────────────
+// Key and value are matched LITERALLY: no caller-supplied key or value can change the pattern.
+describe('frontmatterKeyHasValue / frontmatterKeyBlockText — property (fast-check)', () => {
+  // Metacharacters on purpose; no whitespace, no newline, no `-` (so a line can never read as a fence).
+  const ALPHABET = 'ab.*+?^${}()|[]\\'.split('');
+  const tokenArb = fc.array(fc.constantFrom(...ALPHABET), { minLength: 1, maxLength: 8 }).map((chars) => chars.join(''));
+  const wsArb = fc.constantFrom('', ' ', '  ', '\t');
+  const modeArb = fc.constantFrom('match', 'longer', 'shorter-key', 'wrong-key-prefix');
+
+  /** Reference: split the region into lines and compare — no regex anywhere. */
+  function reference(doc, key, value) {
+    const lines = doc.split('\n');
+    const close = lines.indexOf('---', 1);
+    return lines.slice(1, close).some((line) => line.startsWith(`${key}:`) && line.slice(key.length + 1).trim() === value);
+  }
+
+  function build(key, value, ws1, ws2, mode) {
+    let line;
+    if (mode === 'match') line = `${key}:${ws1}${value}${ws2}`;
+    else if (mode === 'longer') line = `${key}:${ws1}${value}zz${ws2}`;
+    else if (mode === 'shorter-key') line = `${key.slice(0, -1)}:${ws1}${value}${ws2}`;
+    else line = `q${key}:${ws1}${value}${ws2}`;
+    return `---\nzz: 1\n${line}\nzz: 2\n---\nbody\n`;
+  }
+
+  const property = (hasValue) => fc.property(tokenArb, tokenArb, wsArb, wsArb, modeArb, (key, value, ws1, ws2, mode) => {
+    const doc = build(key, value, ws1, ws2, mode);
+    return hasValue(doc, key, value) === reference(doc, key, value);
+  });
+
+  function assertPropertyFails(prop, what) {
+    let failed = false;
+    try {
+      fc.assert(prop);
+    } catch {
+      failed = true;
+    }
+    assert.ok(failed, `positive control: ${what} must be rejected by the property`);
+  }
+
+  test('P1: never throws, and agrees with a line-splitting reference for keys/values full of metacharacters', () => {
+    fc.assert(property(frontmatterKeyHasValue));
+  });
+
+  test('P1 control: a variant that interpolates key and value UNESCAPED is rejected (throws or disagrees)', () => {
+    const unescaped = (content, key, value) => {
+      const found = frontmatterRegion(content);
+      if (!found || !found.terminated) return false;
+      return new RegExp(`^${key}:\\s*${value}\\s*$`, 'm').test(found.region);
+    };
+    assertPropertyFails(property(unescaped), 'the unescaped variant');
+  });
+
+  test('P1 control: a variant that escapes only the value is rejected', () => {
+    const valueOnly = (content, key, value) => {
+      const found = frontmatterRegion(content);
+      if (!found || !found.terminated) return false;
+      return new RegExp(`^${key}:\\s*${escapeRegex(value)}\\s*$`, 'm').test(found.region);
+    };
+    assertPropertyFails(property(valueOnly), 'the value-only-escaped variant');
+  });
+
+  test('P2: frontmatterKeyBlockText finds a metacharacter key exactly when the literal line is present, and returns its value line', () => {
+    fc.assert(fc.property(tokenArb, tokenArb, wsArb, (key, value, ws) => {
+      const doc = `---\nzz: 1\n${key}:${ws}${value}\nzz: 2\n---\nbody\n`;
+      return frontmatterKeyBlockText(doc, key) === `${ws}${value}`;
+    }));
+  });
+
+  test('P2: a doc without the literal key line yields the empty string (never throws)', () => {
+    fc.assert(fc.property(tokenArb, tokenArb, (key, value) => {
+      const doc = `---\nzz: 1\nq${key}x: ${value}\n---\nbody\n`;
+      return frontmatterKeyBlockText(doc, key) === '';
+    }));
+  });
+});
 
 // ─── Arbitraries ─────────────────────────────────────────────────────────────
 
@@ -136,66 +216,6 @@ describe('frontmatter: reconstructFrontmatter properties', () => {
 
   test('property: reconstructFrontmatter on {} returns empty string', () => {
     assert.equal(reconstructFrontmatter({}), '');
-  });
-});
-
-describe('frontmatter: spliceFrontmatter properties', () => {
-  // (d) Never throws on any combination
-  test('property: spliceFrontmatter never throws on arbitrary content + object', () => {
-    fc.assert(
-      fc.property(
-        fc.string({ maxLength: 300 }),
-        fc.dictionary(yamlKey, yamlScalarValue, { maxKeys: 8 }),
-        (content, obj) => {
-          assert.doesNotThrow(
-            () => spliceFrontmatter(content, obj),
-            `spliceFrontmatter threw on content=${JSON.stringify(content.slice(0, 30))}`
-          );
-        }
-      )
-    );
-  });
-
-  test('property: spliceFrontmatter always returns a string', () => {
-    fc.assert(
-      fc.property(
-        fc.string({ maxLength: 200 }),
-        fc.dictionary(yamlKey, yamlScalarValue, { maxKeys: 5 }),
-        (content, obj) => {
-          const result = spliceFrontmatter(content, obj);
-          assert.ok(typeof result === 'string', `Expected string got ${typeof result}`);
-        }
-      )
-    );
-  });
-
-  // (c) Round-trip: splice then extract preserves flat string keys
-  test('property: splice then extract round-trip preserves flat string values', () => {
-    fc.assert(
-      fc.property(
-        fc.string({ maxLength: 100 }),  // existing document body
-        // Only keys + simple values without colons/hashes that would confuse the minimal parser
-        fc.dictionary(
-          fc.stringMatching(/^[a-z][a-z0-9]{0,14}$/),
-          fc.stringMatching(/^[a-zA-Z0-9]{1,30}$/),
-          { minKeys: 1, maxKeys: 5 }
-        ),
-        (body, obj) => {
-          const spliced = spliceFrontmatter(body, obj);
-          const extracted = extractFrontmatter(spliced);
-
-          for (const [key, value] of Object.entries(obj)) {
-            if (typeof value === 'string' && value.length > 0) {
-              assert.equal(
-                extracted[key],
-                value,
-                `Round-trip failed for key=${key}: expected ${value} got ${extracted[key]}`
-              );
-            }
-          }
-        }
-      )
-    );
   });
 });
 

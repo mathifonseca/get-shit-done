@@ -312,8 +312,9 @@ describe('autonomous verification deferral contract', () => {
     // #2589: the verification read uses the native --pick flag (no jq dependency).
     // String-based check (not a regex literal) so the assertion stays robust to
     // shell metacharacters in the snippet and parses cleanly under espree.
+    // #5118: stderr kept, and a failed read is a blocker — never `|| true`.
     assert.ok(
-      section.includes('VERIFY_STATUS=$(gsd_run query verification.status "${PHASE_DIR}" --pick status 2>/dev/null || true)'),
+      section.includes('VERIFY_STATUS=$(gsd_run query verification.status "${PHASE_DIR}" --pick status) || VERIFY_ERROR=1'),
       'autonomous must route human validation through canonical verification.status via the native --pick flag',
     );
     assert.doesNotMatch(
@@ -332,7 +333,7 @@ describe('autonomous verification deferral contract', () => {
     const discoverStep = workflow.slice(discoverStart, discoverEnd);
     const iterateStep = workflow.slice(iterateStart, iterateEnd);
 
-    assert.match(discoverStep, /INIT_MANAGER=\$\(gsd_run query init\.manager\)/);
+    assert.match(discoverStep, /INIT_MANAGER=\$\(gsd_run query init\.manager[^)]*\)/);
     assert.ok(
       discoverStep.includes('if [[ "$INIT_MANAGER" == @file:* ]]; then INIT_MANAGER=$(cat "${INIT_MANAGER#@file:}"); fi'),
       'autonomous discovery must dereference large init.manager payloads before parsing',
@@ -356,7 +357,7 @@ describe('autonomous verification deferral contract', () => {
     assert.doesNotMatch(discoverStep, /ROADMAP=\$\(gsd_run query roadmap\.analyze\)/);
     assert.doesNotMatch(discoverStep, /disk_status !== "complete"/);
 
-    assert.match(iterateStep, /INIT_MANAGER=\$\(gsd_run query init\.manager\)/);
+    assert.match(iterateStep, /INIT_MANAGER=\$\(gsd_run query init\.manager[^)]*\)/);
     assert.ok(
       iterateStep.includes('if [[ "$INIT_MANAGER" == @file:* ]]; then INIT_MANAGER=$(cat "${INIT_MANAGER#@file:}"); fi'),
       'autonomous iteration must dereference large init.manager payloads before parsing',

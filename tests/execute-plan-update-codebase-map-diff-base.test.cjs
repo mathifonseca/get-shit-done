@@ -5,25 +5,24 @@
 'use strict';
 
 /**
- * Regression coverage for #4459: execute-plan.md's `update_codebase_map`
- * step used a commit-subject `--grep` with no milestone bound to find the
- * diff base for the codebase-map update. A phase NUMBER is unique within a
- * MILESTONE, not a repository — on a project that reuses a phase number
- * across milestones, the old `--reverse | head -1` deliberately picked the
- * OLDEST matching commit subject, dragging the previous milestone's
- * same-numbered phase's files into the diff.
+ * Regression coverage for #4459 (carried through #5164, epic #5056 Phase 7):
+ * execute-plan.md's `update_codebase_map` step must scope the codebase-map
+ * update to THIS phase's files. A phase NUMBER is unique within a MILESTONE,
+ * not a repository — on a project that reuses a phase number across
+ * milestones, the old commit-subject grep dragged the previous milestone's
+ * same-numbered phase's files into the diff, and its successor, a
+ * `PHASE_START^..HEAD` range, still folded in every unrelated commit landed
+ * since.
  *
- * The fix (matching the already-established anchor in code-review.md's
- * structural-pre-pass step, #3995) anchors on the phase's own DIRECTORY
- * instead: the parent of the first commit that added anything under it.
+ * The step now asks the evaluation-scope resolver, keyed on the phase's own
+ * DIRECTORY (`--phase-dir`): the union of the phase's task commits when its
+ * SUMMARY records them, else the range from the parent of the first commit
+ * that added the directory — reported as `degraded`, never as an empty scope.
  *
  * This test extracts the step's real bash fence from the workflow file and
  * runs it against a constructed git fixture that reproduces the issue's
  * exact scenario — two milestones, phase number reused with a different
- * slug (the realistic case; same-number-same-slug reuse is a documented
- * residual limitation shared with code-review.md's own anchor) — so a
- * regression in the fix is caught by real git behavior, not just text
- * matching.
+ * slug — so a regression is caught by real git behavior, not text matching.
  */
 
 const { describe, test } = require('node:test');
@@ -32,10 +31,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { gitOrThrow } = require('./helpers/git-fixture.cjs');
-const { GIT_FIXTURE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+const { GIT_FIXTURE_TIMEOUT_MS, LOOP_HOOK_POINT_CLI_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const { createTempDir, cleanup } = require('./helpers.cjs');
 
 const WORKFLOW_PATH = path.join(__dirname, '..', 'gsd-core', 'workflows', 'execute-plan.md');
+const TOOLS_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 
 function extractNamedBlock(markdown, blockName) {
   const openStep = `<step name="${blockName}">`;
@@ -76,71 +76,95 @@ function writeAndCommit(dir, relPath, content, message) {
   fs.writeFileSync(abs, content);
   gitOrThrow(['add', '-A'], { cwd: dir, timeoutMs: GIT_FIXTURE_TIMEOUT_MS });
   gitOrThrow(['commit', '-q', '-m', message], { cwd: dir, timeoutMs: GIT_FIXTURE_TIMEOUT_MS });
+  return gitOrThrow(['rev-parse', 'HEAD'], { cwd: dir, timeoutMs: GIT_FIXTURE_TIMEOUT_MS }).trim();
 }
 
-describe('#4459: update_codebase_map diff base is anchored to the phase directory, not an unbounded commit-subject grep', () => {
+function seedTwoMilestones(tmpDir) {
+  seedFixtureRepo(tmpDir);
+  writeAndCommit(tmpDir, 'README.md', '# init\n', 'chore: init');
+
+  // Milestone 1, phase 03 (slug "alpha") — this occupant must NOT leak into milestone 2's scope.
+  writeAndCommit(tmpDir, '.planning/phases/03-alpha/03-01-PLAN.md', '# plan\n', 'feat(03-01): milestone-1 phase 3 first task');
+  writeAndCommit(tmpDir, 'm1/alpha.js', 'm1 alpha\n', 'feat(03-01): milestone-1 phase 3 work');
+  writeAndCommit(tmpDir, 'm1/beta.js', 'm1 beta\n', 'test(03-01): milestone-1 phase 3 tests');
+
+  // Unrelated intervening work (a later phase in milestone 1).
+  for (let i = 1; i <= 3; i++) {
+    writeAndCommit(tmpDir, `src/f${i}.js`, `f${i}\n`, `feat(07-0${i}): unrelated later work ${i}`);
+  }
+
+  // Milestone 2 reuses phase NUMBER 03 with a DIFFERENT slug ("beta").
+  writeAndCommit(tmpDir, '.planning/phases/03-beta/03-01-PLAN.md', '# plan\n', 'feat(03-01): milestone-2 phase 3 first task');
+}
+
+function runFence(bashFence, tmpDir) {
+  // The workflow's own launcher defines gsd_run; the fixture points it at this checkout's CLI.
+  const script = [`gsd_run() { node "${TOOLS_PATH}" "$@"; }`, bashFence.replace('.planning/phases/XX-name', '.planning/phases/03-beta')].join('\n');
+  const scriptPath = path.join(tmpDir, '.diff-base-script.sh');
+  fs.writeFileSync(scriptPath, script);
+  const output = execFileSync('bash', [scriptPath], {
+    cwd: tmpDir,
+    encoding: 'utf8',
+    timeout: LOOP_HOOK_POINT_CLI_TIMEOUT_MS,
+  });
+  return output.split('\n').map((l) => l.trim()).filter(Boolean).sort();
+}
+
+describe('#4459 / #5164: update_codebase_map scopes to the phase through the evaluation-scope resolver', () => {
   const workflowContent = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
   const stepBlock = extractNamedBlock(workflowContent, 'update_codebase_map');
   const bashFence = extractFirstBashBlock(stepBlock);
 
-  test('the old unbounded commit-subject grep is gone', () => {
+  test('the fence derives no commit range or phase-start anchor of its own', () => {
+    assert.ok(!/git (?:diff|log)/.test(bashFence), 'update_codebase_map must not run its own git diff / git log');
+    assert.ok(!bashFence.includes('--diff-filter=A'), 'update_codebase_map must not hand-roll the phase-start anchor');
+    assert.ok(!bashFence.includes('--grep='), 'update_codebase_map must not derive its scope from a commit-subject grep');
+  });
+
+  test('the fence asks the resolver, keyed on the phase directory', () => {
     assert.ok(
-      !bashFence.includes('--grep="feat({phase}-{plan}):"'),
-      'update_codebase_map must no longer derive its diff base from an unbounded --grep',
+      /gsd_run check evaluation-scope --phase-dir "\.planning\/phases\/XX-name"/.test(bashFence),
+      'update_codebase_map must call the evaluation-scope resolver with the phase directory',
     );
   });
 
-  test('the new fence anchors on the phase directory via --diff-filter=A, matching code-review.md\'s #3995 pattern', () => {
-    assert.ok(
-      bashFence.includes('--diff-filter=A') && bashFence.includes('.planning/phases/'),
-      'update_codebase_map must derive PHASE_START from the first commit that added the phase directory',
-    );
-  });
-
-  test('real execution: milestone-2 reusing phase 03 scopes the diff to milestone-2\'s own files, not milestone-1\'s (issue #4459 repro)', () => {
+  test('real execution: milestone-2 reusing phase 03 scopes to milestone-2\'s own files, not milestone-1\'s (issue #4459 repro; degraded to the phase-directory range)', () => {
     const tmpDir = fs.realpathSync(createTempDir('gsd-4459-'));
     try {
-      seedFixtureRepo(tmpDir);
-      writeAndCommit(tmpDir, 'README.md', '# init\n', 'chore: init');
-
-      // Milestone 1, phase 03 (slug "alpha") — this occupant must NOT leak
-      // into milestone 2's diff.
-      writeAndCommit(tmpDir, '.planning/phases/03-alpha/03-01-PLAN.md', '# plan\n', 'feat(03-01): milestone-1 phase 3 first task');
-      writeAndCommit(tmpDir, 'm1/alpha.js', 'm1 alpha\n', 'feat(03-01): milestone-1 phase 3 work');
-      writeAndCommit(tmpDir, 'm1/beta.js', 'm1 beta\n', 'test(03-01): milestone-1 phase 3 tests');
-
-      // Unrelated intervening work (a later phase in milestone 1).
-      for (let i = 1; i <= 3; i++) {
-        writeAndCommit(tmpDir, `src/f${i}.js`, `f${i}\n`, `feat(07-0${i}): unrelated later work ${i}`);
-      }
-
-      // Milestone 2 reuses phase NUMBER 03 with a DIFFERENT slug ("beta") —
-      // the realistic reuse case (same-number-same-slug is code-review.md's
-      // own documented residual, not this fix's regression target).
-      writeAndCommit(tmpDir, '.planning/phases/03-beta/03-01-PLAN.md', '# plan\n', 'feat(03-01): milestone-2 phase 3 first task');
+      seedTwoMilestones(tmpDir);
       writeAndCommit(tmpDir, 'm2/gamma.js', 'm2 gamma\n', 'feat(03-01): milestone-2 phase 3 work');
       writeAndCommit(tmpDir, 'm2/delta.js', 'm2 delta\n', 'test(03-01): milestone-2 phase 3 tests');
 
-      const substituted = bashFence.replace('.planning/phases/XX-name', '.planning/phases/03-beta');
-      const scriptPath = path.join(tmpDir, '.diff-base-script.sh');
-      fs.writeFileSync(scriptPath, substituted);
-
-      const output = execFileSync('bash', [scriptPath], {
-        cwd: tmpDir,
-        encoding: 'utf8',
-        timeout: GIT_FIXTURE_TIMEOUT_MS,
-      });
-      const files = output.split('\n').map((l) => l.trim()).filter(Boolean).sort();
+      const files = runFence(bashFence, tmpDir);
 
       assert.deepEqual(
         files,
-        ['.planning/phases/03-beta/03-01-PLAN.md', 'm2/delta.js', 'm2/gamma.js'].sort(),
-        `diff must be scoped to milestone-2's own phase 03-beta files only, got: ${JSON.stringify(files)}`,
+        ['m2/delta.js', 'm2/gamma.js'],
+        `scope must be milestone-2's own phase 03-beta files only, got: ${JSON.stringify(files)}`,
       );
-      // The defect this test guards against: milestone-1's files must NOT
-      // leak into the diff.
-      assert.ok(!files.includes('m1/alpha.js'), 'milestone-1 files must not appear in the diff');
-      assert.ok(!files.includes('.planning/phases/03-alpha/03-01-PLAN.md'), 'milestone-1 phase dir must not appear in the diff');
+      assert.ok(!files.includes('m1/alpha.js'), 'milestone-1 files must not appear in the scope');
+    } finally {
+      cleanup(tmpDir);
+    }
+  });
+
+  test('real execution: with the phase\'s task commits recorded, an interleaved unrelated commit stays out of scope', () => {
+    const tmpDir = fs.realpathSync(createTempDir('gsd-5164-'));
+    try {
+      seedTwoMilestones(tmpDir);
+      const gamma = writeAndCommit(tmpDir, 'm2/gamma.js', 'm2 gamma\n', 'feat(03-01): milestone-2 phase 3 work');
+      writeAndCommit(tmpDir, 'other/interleaved.js', 'x\n', 'fix(quick): somebody else, mid-phase');
+      const delta = writeAndCommit(tmpDir, 'm2/delta.js', 'm2 delta\n', 'test(03-01): milestone-2 phase 3 tests');
+      writeAndCommit(
+        tmpDir,
+        '.planning/phases/03-beta/03-01-SUMMARY.md',
+        `# Summary\n\n## Task Commits\n\n1. **Task 1: work** - \`${gamma}\`\n2. **Task 2: tests** - \`${delta}\`\n\n## Next\n`,
+        'docs(03-01): summary',
+      );
+
+      const files = runFence(bashFence, tmpDir);
+
+      assert.deepEqual(files, ['m2/delta.js', 'm2/gamma.js'], `got: ${JSON.stringify(files)}`);
     } finally {
       cleanup(tmpDir);
     }

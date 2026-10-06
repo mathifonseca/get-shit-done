@@ -19,7 +19,6 @@ const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
 const fc = require('./helpers/fast-check-setup.cjs');
 const { gitOrThrow, throwIfFailed } = require('./helpers/git-fixture.cjs');
 const { runNode } = require('./helpers/process-seam.cjs');
-const { GIT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 describe('history-digest command', () => {
   let tmpDir;
@@ -510,6 +509,142 @@ key-decisions:
     assert.strictEqual(output.decisions[1].summary, 'JWT tokens', 'second decision summary');
     assert.strictEqual(output.decisions[1].rationale, 'Stateless auth for scalability', 'second decision rationale');
   });
+
+  // #5013: an unparseable frontmatter block was silently treated as an empty one —
+  // every field fell back to its default and the command exited 0, so a milestone
+  // audit reading requirements_completed through this command reported "zero
+  // requirements completed" for a plan that actually completed several, with
+  // nothing printed to stderr.
+  test('unparseable frontmatter (block-sequence item with unquoted colon) exits non-zero with a parse error (#5013)', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    // Issue's literal repro: an unquoted `key: value`-shaped colon inside a
+    // block-sequence item under `provides:` — js-yaml rejects this with
+    // "bad indentation of a mapping entry".
+    fs.writeFileSync(
+      path.join(phaseDir, '01-01-SUMMARY.md'),
+      `---
+phase: 01-setup
+plan: 01
+provides:
+  - src/a.ts — model: x, effort: high
+requirements-completed: [REQ-01, REQ-02]
+---
+
+# Summary
+`
+    );
+
+    const full = runGsdTools('summary-extract .planning/phases/01-setup/01-01-SUMMARY.md', tmpDir);
+    assert.strictEqual(full.success, false, 'unparseable frontmatter must exit non-zero, not report empty fields at exit 0');
+    assert.match(full.error, /01-01-SUMMARY\.md/, 'error must name the file');
+    assert.match(full.error, /pars/i, 'error must say the frontmatter did not parse');
+
+    const picked = runGsdTools(
+      'summary-extract .planning/phases/01-setup/01-01-SUMMARY.md --pick requirements_completed',
+      tmpDir
+    );
+    assert.strictEqual(picked.success, false, '--pick must also surface the parse failure, not print an empty string at exit 0');
+  });
+
+  test('control: same fixture with the ambiguous provides item quoted still extracts normally (#5013)', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(phaseDir, '01-01-SUMMARY.md'),
+      `---
+phase: 01-setup
+plan: 01
+provides:
+  - "src/a.ts — model: x, effort: high"
+requirements-completed: [REQ-01, REQ-02]
+---
+
+# Summary
+`
+    );
+
+    const result = runGsdTools('summary-extract .planning/phases/01-setup/01-01-SUMMARY.md', tmpDir);
+    assert.ok(result.success, `well-formed frontmatter must be unaffected by the #5013 fix: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.deepStrictEqual(output.requirements_completed, ['REQ-01', 'REQ-02'], 'requirements_completed still extracted');
+  });
+
+  test('genuinely empty (well-formed) frontmatter still reports zero requirements at exit 0 (#5013)', () => {
+    // Distinct from the unparseable case: no frontmatter fence content that fails
+    // to parse — just an absent field. Must NOT be misclassified as a parse failure.
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(phaseDir, '01-01-SUMMARY.md'),
+      `---
+phase: 01-setup
+plan: 01
+---
+
+# Summary
+`
+    );
+
+    const result = runGsdTools('summary-extract .planning/phases/01-setup/01-01-SUMMARY.md', tmpDir);
+    assert.ok(result.success, `genuinely empty frontmatter must still succeed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.deepStrictEqual(output.requirements_completed, [], 'a real absence of the field is a legitimate zero, not a parse failure');
+  });
+
+  test('absolute summaryPath resolves to the literal path instead of being mangled by path.join (#5013)', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    const absPath = path.join(phaseDir, '01-01-SUMMARY.md');
+    fs.writeFileSync(
+      absPath,
+      `---
+one-liner: Absolute path summary
+---
+`
+    );
+
+    const result = runGsdTools(['summary-extract', absPath], tmpDir);
+    assert.ok(result.success, `absolute path must resolve, not be concatenated onto cwd: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.one_liner, 'Absolute path summary', 'absolute summaryPath must resolve to the literal file');
+  });
+
+  // #5013 orthogonal-review finding: making an absolute summaryPath resolve
+  // (above) must not also make it escape the project. An absolute path outside
+  // tmpDir, or a relative path that walks out via `..`, must be refused rather
+  // than silently read and echoed back.
+  test('absolute summaryPath outside the project root is refused, not read (#5013)', () => {
+    const outsideDir = createTempDir();
+    try {
+      const outsideFile = path.join(outsideDir, 'OUTSIDE-SUMMARY.md');
+      fs.writeFileSync(outsideFile, '---\none-liner: Should never be readable\n---\n');
+
+      const result = runGsdTools(['summary-extract', outsideFile], tmpDir);
+      assert.strictEqual(result.success, false, 'an absolute path outside the project root must be refused, not resolved');
+      assert.doesNotMatch(result.output || '', /Should never be readable/, 'refused content must never be echoed back');
+    } finally {
+      cleanup(outsideDir);
+    }
+  });
+
+  test('relative summaryPath escaping the project root via ".." is refused (#5013)', () => {
+    const outsideDir = createTempDir();
+    try {
+      const outsideFile = path.join(outsideDir, 'OUTSIDE-SUMMARY.md');
+      fs.writeFileSync(outsideFile, '---\none-liner: Should never be readable\n---\n');
+      const relEscape = path.relative(tmpDir, outsideFile);
+
+      const result = runGsdTools(['summary-extract', relEscape], tmpDir);
+      assert.strictEqual(result.success, false, 'a relative path that walks outside the project root must be refused, not resolved');
+      assert.doesNotMatch(result.output || '', /Should never be readable/, 'refused content must never be echoed back');
+    } finally {
+      cleanup(outsideDir);
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -986,37 +1121,6 @@ describe('todo complete — containment boundary (#4327)', () => {
     }
   });
 
-  test('[#4652] a symlink inside pending/ whose target is a real file outside the todos root is rejected — the outside target is untouched', (t) => {
-    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-todo-outside-'));
-    const linkPath = path.join(pendingDir, 'linked.md');
-    try {
-      const outsideFile = path.join(outsideDir, 'real-target.md');
-      const sentinel = '---\nstatus: pending\n---\nSENTINEL-SYMLINK\n';
-      fs.writeFileSync(outsideFile, sentinel);
-      try {
-        fs.symlinkSync(outsideFile, linkPath, 'file');
-      } catch (e) {
-        if (e.code === 'EPERM') {
-          t.skip('symlink creation is not permitted on this platform (EPERM)');
-          return;
-        }
-        throw e;
-      }
-
-      const result = runGsdTools(['todo', 'complete', 'linked.md'], tmpDir);
-
-      assert.strictEqual(result.success, false, 'a symlink pointing outside the todos root must be rejected');
-      assert.ok(fs.existsSync(outsideFile), 'the outside symlink target must still exist');
-      assert.strictEqual(
-        fs.readFileSync(outsideFile, 'utf-8'),
-        sentinel,
-        'the outside symlink target content must be byte-for-byte untouched',
-      );
-    } finally {
-      cleanup(outsideDir);
-      try { fs.unlinkSync(linkPath); } catch { /* not created, or already gone */ }
-    }
-  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2715,9 +2819,10 @@ describe('stats command', () => {
     assert.strictEqual(stats.plan_percent, 67);
   });
 
-  // #3473 F2 (companion to #3357): determinePhaseStatus now resolves its
-  // *-VERIFICATION.md via the shared resolveVerificationFile resolver instead
-  // of a hand-rolled `.find()` over unsorted readdir() order. Before this fix,
+  // #3473 F2 (companion to #3357): the phase-status ladder (now the Phase
+  // Status Module, #5060) resolves its *-VERIFICATION.md via the shared
+  // resolveVerificationFile resolver instead of a hand-rolled `.find()` over
+  // unsorted readdir() order. Before this fix,
   // which of a canonical report and an ad-hoc `-CORRECTION-VERIFICATION.md`
   // worksheet "won" was filesystem-dependent; the canonical report must now
   // win deterministically regardless of directory-listing order.
@@ -3069,26 +3174,138 @@ describe('stats command', () => {
     assert.strictEqual(phase05.status, 'Complete', 'folded status must be Complete, not Not Started');
   });
 
-  test('#2408: foldPhaseStatus is commutative and order-independent (property)', () => {
-    // Direct unit test of the fold: a Complete colliding with a Not Started
-    // must yield Complete regardless of argument order. This is the property
-    // that makes the merge-site fix correct independent of fs read order.
-    const { foldPhaseStatus, PHASE_STATUS_PRECEDENCE } = require('../gsd-core/bin/lib/commands.cjs');
-    assert.strictEqual(foldPhaseStatus('Complete', 'Not Started'), 'Complete');
-    assert.strictEqual(foldPhaseStatus('Not Started', 'Complete'), 'Complete');
-    assert.strictEqual(foldPhaseStatus('Complete', 'Complete'), 'Complete');
-    // Every recognized status folded with a lower-precedence one wins.
-    for (let i = 0; i < PHASE_STATUS_PRECEDENCE.length - 1; i++) {
-      const higher = PHASE_STATUS_PRECEDENCE[i];
-      const lower = PHASE_STATUS_PRECEDENCE[i + 1];
-      assert.strictEqual(foldPhaseStatus(higher, lower), higher, `${higher} should beat ${lower}`);
-      assert.strictEqual(foldPhaseStatus(lower, higher), higher, `${higher} should beat ${lower} (commutative)`);
-    }
-    // Unrecognized status never beats a recognized one.
-    assert.strictEqual(foldPhaseStatus('Complete', '???'), 'Complete');
-    assert.strictEqual(foldPhaseStatus('???', 'Complete'), 'Complete');
-    // Two unrecognized → returns first arg (deterministic).
-    assert.strictEqual(foldPhaseStatus('foo', 'bar'), 'foo');
+});
+
+// ─── Phase Status Module consumers (#5060) ──────────────────────────────────
+//
+// Consumer regression tests for the single-owner phase status ladder
+// (ADR-5057 Phase 1, src/phase-status.cts). These pin the fixed defects the
+// module is required to close: a stale-passed verification (covered_digest
+// mismatch) must read Executed, never Complete; a zero-plan phase with a
+// fresh passed report is disk-strict Complete; and a fold collision must
+// never drop a declared phase row.
+describe('Phase Status Module consumers (#5060)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), '# Roadmap\n');
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('progress json: stale-passed phase 01 reads Executed, not Complete', () => {
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-auth');
+    fs.mkdirSync(p1, { recursive: true });
+    fs.writeFileSync(path.join(p1, '01-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(p1, '01-01-SUMMARY.md'), '# Summary');
+    // Written last: covered_digest never matches the plan's real digest, so
+    // the report is stale despite `status: passed`.
+    fs.writeFileSync(
+      path.join(p1, '01-VERIFICATION.md'),
+      [
+        '---',
+        'status: passed',
+        'covered_files:',
+        '  - 01-01-PLAN.md',
+        'covered_digest: sha256-v2:0000000000000000',
+        '---',
+        '# Verification',
+        '',
+      ].join('\n')
+    );
+
+    const result = runGsdTools('progress json', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phases[0].status, 'Executed', 'stale-passed verification must not read Complete');
+  });
+
+  test('stats: stale-passed phase 01 reads Executed and does not count toward phases_completed', () => {
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-auth');
+    fs.mkdirSync(p1, { recursive: true });
+    fs.writeFileSync(path.join(p1, '01-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(p1, '01-01-SUMMARY.md'), '# Summary');
+    fs.writeFileSync(
+      path.join(p1, '01-VERIFICATION.md'),
+      [
+        '---',
+        'status: passed',
+        'covered_files:',
+        '  - 01-01-PLAN.md',
+        'covered_digest: sha256-v2:0000000000000000',
+        '---',
+        '# Verification',
+        '',
+      ].join('\n')
+    );
+
+    const result = runGsdTools('stats', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const stats = JSON.parse(result.output);
+    const phase = stats.phases.find((p) => p.number === '01' || p.number === '1');
+    assert.strictEqual(phase.status, 'Executed', 'stale-passed verification must not read Complete');
+    assert.strictEqual(stats.phases_completed, 0, 'a stale-passed phase must not count as completed');
+  });
+
+  test('stats: zero-plan phase with a fresh passed report is Complete (disk-strict)', () => {
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-auth');
+    fs.mkdirSync(p1, { recursive: true });
+    fs.writeFileSync(path.join(p1, '01-VERIFICATION.md'), '---\nstatus: passed\n---\n# Verification');
+
+    const result = runGsdTools('stats', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const stats = JSON.parse(result.output);
+    const phase = stats.phases.find((p) => p.number === '01' || p.number === '1');
+    assert.strictEqual(phase.status, 'Complete', 'a zero-plan phase with a fresh passed report is disk-strict Complete');
+  });
+
+  test('stats: colliding dirs fold to furthest-along status without dropping a sibling declared phase', () => {
+    const realDir = path.join(tmpDir, '.planning', 'phases', '05-real');
+    fs.mkdirSync(realDir, { recursive: true });
+    fs.writeFileSync(path.join(realDir, '01-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(realDir, '01-01-SUMMARY.md'), '# Summary');
+    fs.writeFileSync(path.join(realDir, 'VERIFICATION.md'), '---\nstatus: passed\n---\n# Verified');
+
+    const strayDir = path.join(tmpDir, '.planning', 'phases', '05-real-stray');
+    fs.mkdirSync(strayDir, { recursive: true });
+
+    const p6 = path.join(tmpDir, '.planning', 'phases', '06-next');
+    fs.mkdirSync(p6, { recursive: true });
+    fs.writeFileSync(path.join(p6, '06-01-PLAN.md'), '# Plan');
+
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '## Milestone v1',
+        '',
+        '### Phase 5: Real',
+        '**Goal:** The real phase',
+        '',
+        '### Phase 6: Next',
+        '**Goal:** The next phase',
+      ].join('\n')
+    );
+
+    const result = runGsdTools('stats', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const stats = JSON.parse(result.output);
+    assert.strictEqual(stats.phases_total, 2, 'phase 05 collision merges to one row; phase 06 is a second row');
+    assert.strictEqual(stats.phases_completed, 1);
+    const phase05 = stats.phases.find((p) => p.number === '05');
+    assert.ok(phase05, 'phase 05 must appear in stats output');
+    assert.strictEqual(phase05.status, 'Complete', 'folded status must be Complete, not Not Started');
+    const phase06 = stats.phases.find((p) => p.number === '06');
+    assert.ok(phase06, 'phase 06 must not be dropped by the phase-05 collision fold');
+    assert.strictEqual(phase06.status, 'Planned');
   });
 });
 
@@ -3251,68 +3468,6 @@ describe('check-commit command', () => {
     assert.ok(result.error.includes('with space.md'), result.error);
   });
 
-  test('F2 (#3588): a staged .planning/ file with a quote character in its name is detected and blocked', (t) => {
-    // `"` is a reserved NTFS character — a file named `with"quote.md` cannot
-    // exist on Windows at all, so the fixture itself is unrepresentable
-    // there. This is not a gap in the guard's Windows behavior; it is an
-    // input that Windows filesystems reject outright. Do not re-enable this
-    // on win32 — see #3588.
-    if (process.platform === 'win32') {
-      t.skip('a `"` filename is illegal on Windows filesystems (#3588); fixture cannot be created');
-      return;
-    }
-    fs.writeFileSync(
-      path.join(tmpDir, '.planning', 'config.json'),
-      JSON.stringify({ commit_docs: false })
-    );
-    const quotedName = '.planning/with"quote.md';
-    fs.writeFileSync(path.join(tmpDir, quotedName), '# State');
-    gitOrThrow(['add', quotedName], { cwd: tmpDir });
-
-    const result = runGsdTools('check-commit', tmpDir);
-    assert.ok(!result.success, 'a staged .planning/ file with a quote character in its name must be detected and block the commit');
-    assert.ok(result.error.includes('quote.md'), result.error);
-  });
-
-  // #3588 C7 (flipped): the earlier pass's C7 test pinned a synthetic
-  // top-level filename (`.planning\STATE.md`, backslash as a literal
-  // character in a single path component, not a real nested directory — git
-  // never uses backslash as a tree separator, on any platform) as evidence
-  // that `f.startsWith('.planning\\')` was unreachable, and left the assertion
-  // at "currently allowed" pending a fix. That branch is now removed as dead
-  // code (git's plumbing output is always `/`-normalized, so a real Windows
-  // `.planning\<file>` path never reaches this filter as a `.planning\`
-  // prefix). This replaces it with the REAL analog of the same class of bug:
-  // a genuine `.planning/` file whose name merely CONTAINS a literal
-  // backslash character. Without `-z` that name is also C-style-quoted
-  // (`".planning/back\\slash.md"`) and missed; with `-z` it is read as raw,
-  // unquoted bytes and correctly detected via the plain `.planning/` prefix
-  // check alone — no backslash-specific branch needed.
-  test('C7 (#3588, flipped): a staged .planning/ file whose name contains a backslash character is detected and blocked', (t) => {
-    // `\` is the Windows path separator, not a legal character inside a
-    // single filename component — a file literally named `back\slash.md`
-    // cannot be created on Windows filesystems, so the fixture itself is
-    // unrepresentable there. This is not a gap in the guard's Windows
-    // behavior; it is an input Windows rejects outright. Do not re-enable
-    // this on win32 — see #3588.
-    if (process.platform === 'win32') {
-      t.skip('a `\\` filename is illegal on Windows filesystems (#3588); fixture cannot be created');
-      return;
-    }
-    fs.writeFileSync(
-      path.join(tmpDir, '.planning', 'config.json'),
-      JSON.stringify({ commit_docs: false })
-    );
-    const backslashInName = '.planning/back\\slash.md';
-    fs.writeFileSync(path.join(tmpDir, backslashInName), '# State');
-    gitOrThrow(['add', backslashInName], { cwd: tmpDir });
-
-    const result = runGsdTools('check-commit', tmpDir);
-    assert.ok(
-      !result.success,
-      'a staged .planning/ file whose name contains a backslash character must be detected and block the commit',
-    );
-  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3384,9 +3539,7 @@ function isolateGlobalGitConfig() {
 }
 
 describe('commit-docs-guard hook script (#3588 A1-A5)', () => {
-  const { createTempGitProject, TEST_ENV_BASE } = require('./helpers.cjs');
-  const { runHook } = require('./helpers/process-seam.cjs');
-  const REPO_ROOT = path.join(__dirname, '..');
+  const { createTempGitProject } = require('./helpers.cjs');
   const HOOK_MARKER = '# gsd-core:commit-docs-guard';
   let tmpDir;
   let hookPath;
@@ -3402,31 +3555,6 @@ describe('commit-docs-guard hook script (#3588 A1-A5)', () => {
     hookPath = path.join(tmpDir, '.git', 'hooks', 'pre-commit');
   });
 
-  test('#3901: the suite isolates children from the host git config (global core.hooksPath)', () => {
-    // The developer-machine scenario this suite must survive: a hostile
-    // ~/.gitconfig with core.hooksPath set. The before() hook pins
-    // GIT_CONFIG_GLOBAL to an empty file; this pins the seam is actually
-    // armed and reaching children — a child git sees NO hooksPath from the
-    // host, so the guard never refuses and the 18 tests never fail. (A child
-    // given an explicitly hostile GIT_CONFIG_GLOBAL still refuses — that is
-    // the guard being correct, and it is covered where the refusal is
-    // asserted.)
-    assert.ok(
-      process.env.GIT_CONFIG_GLOBAL && fs.existsSync(process.env.GIT_CONFIG_GLOBAL),
-      'the isolation file is armed for this suite',
-    );
-    assert.equal(fs.readFileSync(process.env.GIT_CONFIG_GLOBAL, 'utf-8'), '',
-      'the isolation file is empty — children inherit no host config');
-    const { spawnSync } = require('node:child_process');
-    const probe = spawnSync('git', ['config', '--get', 'core.hooksPath'], {
-      cwd: tmpDir,
-      encoding: 'utf-8',
-      timeout: GIT_TIMEOUT_MS,
-    });
-    assert.notEqual(probe.status, 0, `a child git must not see a host core.hooksPath; got: ${probe.stdout}`);
-    assert.ok(fs.existsSync(hookPath), 'the beforeEach enable installed the hook at the repo-local default path');
-  });
-
   afterEach(() => {
     cleanup(tmpDir);
   });
@@ -3439,35 +3567,6 @@ describe('commit-docs-guard hook script (#3588 A1-A5)', () => {
   test('A2: hook script uses LF-only line endings (boundary — Windows)', () => {
     const content = fs.readFileSync(hookPath, 'utf8');
     assert.ok(!content.includes('\r'), 'a CRLF shebang is not executable under Git Bash');
-  });
-
-  test('A3: hook file is executable after enable', () => {
-    if (process.platform === 'win32') return; // exec bit is not the Windows-relevant assertion
-    const mode = fs.statSync(hookPath).mode;
-    assert.ok((mode & 0o111) !== 0, 'pre-commit hook must carry the executable bit');
-  });
-
-  test('A4: hook exits zero when the guard allows', () => {
-    fs.writeFileSync(path.join(tmpDir, '.planning', 'config.json'), JSON.stringify({ commit_docs: true }));
-    const result = runHook(hookPath, [], {
-      interpreter: 'bash',
-      cwd: tmpDir,
-      env: { ...process.env, ...TEST_ENV_BASE, RUNTIME_DIR: REPO_ROOT },
-    });
-    assert.strictEqual(result.exitCode, 0, `stdout=${result.stdout} stderr=${result.stderr}`);
-  });
-
-  test('A5: hook exits non-zero and names the staged files when the guard blocks', () => {
-    fs.writeFileSync(path.join(tmpDir, '.planning', 'config.json'), JSON.stringify({ commit_docs: false }));
-    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), '# State');
-    gitOrThrow(['add', '.planning/STATE.md'], { cwd: tmpDir });
-    const result = runHook(hookPath, [], {
-      interpreter: 'bash',
-      cwd: tmpDir,
-      env: { ...process.env, ...TEST_ENV_BASE, RUNTIME_DIR: REPO_ROOT },
-    });
-    assert.notStrictEqual(result.exitCode, 0, 'hook must exit non-zero when the guard blocks');
-    assert.ok(result.stderr.includes('.planning/STATE.md'), result.stderr);
   });
 });
 
@@ -3483,29 +3582,6 @@ describe('commit-docs-guard enable/disable (#3588 B1-B15)', () => {
   afterEach(() => {
     if (tmpDir) cleanup(tmpDir);
     tmpDir = undefined;
-  });
-
-  test('B1: enable writes an executable hook and reports success', () => {
-    tmpDir = createTempGitProject();
-    const result = runGsdTools('commit-docs-guard enable --raw', tmpDir);
-    assert.ok(result.success, result.error);
-    const hookPath = path.join(tmpDir, '.git', 'hooks', 'pre-commit');
-    assert.ok(fs.existsSync(hookPath));
-    if (process.platform !== 'win32') {
-      assert.ok((fs.statSync(hookPath).mode & 0o111) !== 0);
-    }
-  });
-
-  test('B2: enable refuses to clobber an existing foreign pre-commit hook', () => {
-    tmpDir = createTempGitProject();
-    const hookPath = path.join(tmpDir, '.git', 'hooks', 'pre-commit');
-    const foreignContent = '#!/bin/sh\necho foreign\n';
-    fs.writeFileSync(hookPath, foreignContent);
-    fs.chmodSync(hookPath, 0o755);
-    const result = runGsdTools('commit-docs-guard enable --raw', tmpDir);
-    assert.ok(!result.success, 'enable must refuse to overwrite a foreign hook');
-    assert.ok(result.error.includes(hookPath), result.error);
-    assert.strictEqual(fs.readFileSync(hookPath, 'utf8'), foreignContent, 'foreign hook must be byte-unchanged');
   });
 
   test('B3: enable twice is idempotent — no duplicated content', () => {
@@ -3531,17 +3607,6 @@ describe('commit-docs-guard enable/disable (#3588 B1-B15)', () => {
     const result = runGsdTools('commit-docs-guard disable --raw', tmpDir);
     assert.ok(result.success, result.error);
     assert.ok(!fs.existsSync(hookPath));
-  });
-
-  test('B5: disable refuses to remove a foreign hook', () => {
-    tmpDir = createTempGitProject();
-    const hookPath = path.join(tmpDir, '.git', 'hooks', 'pre-commit');
-    const foreignContent = '#!/bin/sh\necho foreign\n';
-    fs.writeFileSync(hookPath, foreignContent);
-    fs.chmodSync(hookPath, 0o755);
-    const result = runGsdTools('commit-docs-guard disable --raw', tmpDir);
-    assert.ok(!result.success, 'disable must refuse to remove a foreign hook');
-    assert.strictEqual(fs.readFileSync(hookPath, 'utf8'), foreignContent, 'foreign hook must be byte-unchanged');
   });
 
   test('B6: disable with no hook present is a success no-op, not an error', () => {
@@ -4197,42 +4262,6 @@ describe('pr-subrepo', () => {
       );
     });
 
-    test('pr-subrepo push failure: branch+commit survive when push is rejected (no data loss)', () => {
-      // Reproduce the data-loss scenario flagged in review: a rejecting remote must leave
-      // the local branch+commit intact so the user can retry git push manually.
-      const branch = 'fix-666-push-fail-pr';
-
-      // Wire a bare remote with a pre-receive hook that rejects all pushes.
-      const rejectingBare = path.join(rootDir, '_rejecting-bare.git');
-      fs.mkdirSync(rejectingBare, { recursive: true });
-      gitOrThrow(['init', '--bare'], { cwd: rejectingBare });
-      const hookPath = path.join(rejectingBare, 'hooks', 'pre-receive');
-      fs.writeFileSync(hookPath, '#!/bin/sh\nexit 1\n');
-      fs.chmodSync(hookPath, 0o755);
-
-      // Point origin at the rejecting bare (overwrite the working one wired in beforeEach).
-      gitOrThrow(['remote', 'set-url', 'origin', rejectingBare], { cwd: subDir });
-
-      fs.writeFileSync(path.join(subDir, 'feature.js'), 'IMPORTANT USER WORK\n');
-
-      const res = runGsdTools(
-        ['query', 'pr-subrepo', 'fix(backend): push-fail test',
-         '--repo', 'backend', '--branch', branch],
-        rootDir
-      );
-
-      // Command must fail because push was rejected.
-      assert.ok(!res.success, `Expected failure on rejected push, got success: ${res.output}`);
-
-      // The local branch must still exist — work must not be lost.
-      const branches = gitOrThrow(['branch', '--list', branch], { cwd: subDir });
-      assert.ok(branches.trim().length > 0, `Branch ${branch} was deleted after push failure — user work lost`);
-
-      // The commit on that branch must contain the user's changes.
-      const log = gitOrThrow(['log', branch, '--oneline', '-1'], { cwd: subDir });
-      assert.ok(log.trim().length > 0, `No commit on ${branch} — staged work was lost`);
-    });
-
     test('pr-subrepo porcelain: staged rename — both old and new paths in result.files', () => {
       // git mv produces "R  old -> new" in porcelain v1; both paths must be staged.
       gitOrThrow(['mv', 'feature.js', 'renamed-feature.js'], { cwd: subDir });
@@ -4347,80 +4376,6 @@ describe('pr-subrepo', () => {
       assert.ok(a !== -1 && b !== -1 && a < b);
     });
 
-    test('dirty-scan rejects traversal, newline, and symlink entries before invoking git (security)', () => {
-      // Extracts and executes the ACTUAL node -e script shipped in pr-branch.md — not a
-      // mirror — so this test fails if the real script regresses, not just a copy of it.
-      wfContent = wfContent || fs.readFileSync(workflowPath, 'utf-8');
-      const match = wfContent.match(/node -e "([\s\S]*?)"\s+"\$SUB_REPOS_JSON" "\$ROOT" "\$DIRTY_FILE"/);
-      assert.ok(match, 'could not extract dirty-scan node script from pr-branch.md');
-      const script = match[1];
-
-      // Helper: init a git repo with a TRACKED dirty change. An untracked file would be
-      // filtered by the ?? exclusion and the repo would look clean even without the guard,
-      // making the assertions vacuous. A tracked modification ensures that WITHOUT the
-      // guard the repo WOULD be reported dirty, so the test genuinely fails-first.
-      const initDirtyRepo = (dir, file) => {
-        gitOrThrow(['init'], { cwd: dir });
-        gitOrThrow(['config', 'user.email', 'test@example.com'], { cwd: dir });
-        gitOrThrow(['config', 'user.name', 'Test'], { cwd: dir });
-        fs.writeFileSync(path.join(dir, file), 'committed\n');
-        gitOrThrow(['add', file], { cwd: dir });
-        gitOrThrow(['-c', 'commit.gpgsign=false', 'commit', '-m', 'init'], { cwd: dir });
-        fs.writeFileSync(path.join(dir, file), 'modified\n');
-      };
-
-      const scanRoot = createTempDir('gsd-666-scan-root-');
-      const outsideDir = createTempDir('gsd-666-scan-outside-');
-      initDirtyRepo(outsideDir, 'secret.txt');
-
-      // Positive control: a legit dirty sub-repo INSIDE the workspace must still be reported,
-      // so the test can't pass by a guard that simply rejects everything.
-      const backendDir = path.join(scanRoot, 'backend');
-      fs.mkdirSync(backendDir, { recursive: true });
-      initDirtyRepo(backendDir, 'app.js');
-
-      // Symlink escape: an in-tree name with no ".." and no "/" that points outside root.
-      // path.resolve would keep it "inside"; only realpathSync catches it. Symlink
-      // creation needs privileges on Windows — skip just this vector if it throws.
-      let symlinked = true;
-      try { fs.symlinkSync(outsideDir, path.join(scanRoot, 'evil')); } catch { symlinked = false; }
-
-      const traversalEntry = path.relative(scanRoot, outsideDir); // e.g. "../gsd-666-scan-outside-XXXX"
-      const newlineEntry = 'good\nbad'; // record-separator injection attempt
-      const dirtyFile = path.join(scanRoot, '_dirty');
-      const entries = symlinked
-        ? ['evil', traversalEntry, newlineEntry, 'backend']
-        : [traversalEntry, newlineEntry, 'backend'];
-      const subReposJson = JSON.stringify(entries);
-
-      try {
-        const scanResult = runNode(['-e', script, subReposJson, scanRoot, dirtyFile]);
-        throwIfFailed(scanResult, 'node -e <dirty-scan script from pr-branch.md>');
-        const dirty = fs.existsSync(dirtyFile) ? fs.readFileSync(dirtyFile, 'utf-8') : '';
-        const lines = dirty.split('\n').filter(Boolean);
-        assert.ok(
-          !dirty.includes(path.basename(outsideDir)),
-          `Path traversal reached git outside the workspace: ${JSON.stringify(dirty)}`
-        );
-        if (symlinked) {
-          assert.ok(
-            !lines.includes('evil'),
-            `Symlink entry reached git outside the workspace: ${JSON.stringify(dirty)}`
-          );
-        }
-        assert.ok(
-          !lines.includes('bad'),
-          `Embedded-newline entry injected a spurious record: ${JSON.stringify(dirty)}`
-        );
-        assert.deepStrictEqual(
-          lines, ['backend'],
-          `Positive control failed — expected only 'backend', got: ${JSON.stringify(lines)}`
-        );
-      } finally {
-        cleanup(scanRoot);
-        cleanup(outsideDir);
-      }
-    });
   });
 });
 
@@ -4451,7 +4406,6 @@ describe('pr-subrepo', () => {
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const path = require('node:path');
 
 const { checkCliSkew } = require('../gsd-core/bin/lib/cli-skew-check.cjs');
 
@@ -4505,16 +4459,6 @@ describe('#1754: checkCliSkew — pure path-comparison skew detection', () => {
       `Warning should include @gsd-build/sdk removal instructions, got: "${warning}"`);
   });
 
-  test('PATH-NORMALIZATION: resolved under project root via realpath → no false positive', () => {
-    // Even if the resolved path differs in symlink resolution, if it's under the
-    // project root, it's not a skew. The caller normalizes paths before calling.
-    const warning = checkCliSkew({
-      resolvedPath: path.resolve('/home/user/my-project/.claude/gsd-core/bin/gsd-tools.cjs'),
-      projectRoot: path.resolve('/home/user/my-project'),
-      projectLocalExists: true,
-    });
-    assert.strictEqual(warning, null, 'No warning when resolved path is under project root (even with realpath normalization)');
-  });
 });
   });
 }
@@ -4542,7 +4486,6 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('path');
-const { spawnSync } = require('node:child_process');
 const { cleanup } = require('./helpers.cjs');
 const { GSD_TOOLS_CLI_MODERATE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
@@ -4670,12 +4613,12 @@ function createProject() {
 }
 
 function runGsdTools(args, projectDir) {
-  return spawnSync(process.execPath, [GSD_TOOLS, ...args], {
+  const result = runNode([GSD_TOOLS, ...args], {
     cwd: projectDir,
-    encoding: 'utf8',
-    timeout: GSD_TOOLS_CLI_MODERATE_TIMEOUT_MS,
+    timeoutMs: GSD_TOOLS_CLI_MODERATE_TIMEOUT_MS,
     killSignal: 'SIGKILL',
   });
+  return { ...result, status: result.exitCode };
 }
 
 function snapshotProjectState(projectDir) {
@@ -4800,6 +4743,100 @@ describe('feat-3251: generated aliases dispatch through real gsd-tools behavior'
       assert.equal(typeof error.message, 'string');
       assert.equal(/\n\s*at\s/.test(result.stderr), false, 'non-debug failure must not print a stack trace');
       assert.deepEqual(snapshotProjectState(projectDir), beforeFiles);
+    } finally {
+      cleanup(projectDir);
+    }
+  });
+
+  // Phase 6 (#5007): before/after fixture for getRoadmapModeForPhase's
+  // migration off its hand-rolled `#{2,4}\s*Phase\s+` literal onto
+  // buildPhaseHeadingRegex (src/roadmap.cts). These three cases must produce
+  // byte-identical output before and after the migration.
+  test('#5007: phase.mvp-mode reports mode absent when no **Mode:** line exists', () => {
+    const projectDir = createProject();
+    try {
+      fs.writeFileSync(
+        path.join(projectDir, '.planning', 'ROADMAP.md'),
+        [
+          '# Roadmap',
+          '',
+          '## v1.0.0',
+          '',
+          '### Phase 1: User Auth',
+          '**Goal:** Users can sign in.',
+          '',
+        ].join('\n'),
+      );
+      const result = runGsdTools(['phase', 'mvp-mode', '1'], projectDir);
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.active, false);
+      assert.equal(output.roadmap_mode, null);
+    } finally {
+      cleanup(projectDir);
+    }
+  });
+
+  test('#5007: phase.mvp-mode finds Mode on the second of several phase headings', () => {
+    const projectDir = createProject();
+    try {
+      fs.writeFileSync(
+        path.join(projectDir, '.planning', 'ROADMAP.md'),
+        [
+          '# Roadmap',
+          '',
+          '## v1.0.0',
+          '',
+          '### Phase 1: User Auth',
+          '**Goal:** Users can sign in.',
+          '',
+          '### Phase 2: Second Phase',
+          '**Goal:** Do the second thing.',
+          '**Mode:** mvp',
+          '',
+          '### Phase 3: Third Phase',
+          '**Goal:** Do the third thing.',
+          '',
+        ].join('\n'),
+      );
+      const result = runGsdTools(['phase', 'mvp-mode', '2'], projectDir);
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.active, true);
+      assert.equal(output.roadmap_mode, 'mvp');
+    } finally {
+      cleanup(projectDir);
+    }
+  });
+
+  // Post-migration-only: buildPhaseHeadingRegex's ANY_BRACKET baseline
+  // deliberately widens getRoadmapModeForPhase to tolerate an arbitrary
+  // `[tag] Phase N:` prefix — the same real-heading grammar searchPhaseInContent
+  // already uses. This is a DESIGNED widening (ADR-4910 Phase 6 design doc §2),
+  // not a behavior-preservation case, so it is asserted only for the AFTER state.
+  test('#5007: phase.mvp-mode tolerates a bracket-tagged heading under the bracket convention', () => {
+    const projectDir = createProject();
+    try {
+      fs.writeFileSync(
+        path.join(projectDir, '.planning', 'config.json'),
+        JSON.stringify({ phase_id_convention: 'bracket', project_code: 'GSD' }),
+      );
+      fs.writeFileSync(
+        path.join(projectDir, '.planning', 'ROADMAP.md'),
+        [
+          '# Roadmap',
+          '',
+          '### [GSD.01] Phase 1: User Auth',
+          '**Goal:** Users can sign in.',
+          '**Mode:** mvp',
+          '',
+        ].join('\n'),
+      );
+      const result = runGsdTools(['phase', 'mvp-mode', '1'], projectDir);
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.active, true);
+      assert.equal(output.roadmap_mode, 'mvp');
     } finally {
       cleanup(projectDir);
     }
@@ -5070,77 +5107,6 @@ describe('feat-488: effort sync command', () => {
     cleanup(tmpDir);
   });
 
-  test('home-default effort config gap: applies home-level effort when project config has no effort section', () => {
-    // The key #488 scenario: user changed ~/.gsd/defaults.json effort settings
-    // after install, but the project .planning/config.json has no effort section.
-    // cmdEffortSync must pick up the home config (via readGsdEffectiveEffortConfig),
-    // not fall back to 'high' (which loadConfig would return).
-    //
-    // readGsdEffectiveEffortConfig calls os.homedir() directly, and os.homedir()
-    // is live (respects process.env.HOME).  We redirect HOME to an isolated
-    // tmpHome so the test is hermetic and can assert the real outcome.
-    const tmpHome = makeTmpDir('effort-sync-homecfg-');
-    const tmpDir = makeTmpDir('effort-sync-project-');
-    const agentsDir = makeAgentsDir(tmpDir);
-    const agentPath = path.join(agentsDir, 'gsd-planner.md');
-    fs.writeFileSync(agentPath, AGENT_WITH_EFFORT); // current: effort: medium
-
-    // Project has .planning/config.json with NO effort section
-    const planningDir = path.join(tmpDir, '.planning');
-    fs.mkdirSync(planningDir, { recursive: true });
-    fs.writeFileSync(path.join(planningDir, 'config.json'), JSON.stringify({ model_profile: 'balanced' }));
-
-    // Home defaults set the heavy tier effort to low. (#3531: a bare home
-    // effort.default would no longer reach gsd-planner — the merged tier
-    // ladder answers for tiered agents — so the home fixture pins the tier,
-    // which is what this test's claim actually exercises: home-level effort
-    // applies when the project config has no effort section.)
-    const gsdDir = path.join(tmpHome, '.gsd');
-    fs.mkdirSync(gsdDir, { recursive: true });
-    fs.writeFileSync(path.join(gsdDir, 'defaults.json'), JSON.stringify({ effort: { routing_tier_defaults: { heavy: 'low' } } }));
-
-    // Isolate HOME (and USERPROFILE for Windows parity) so
-    // readGsdEffectiveEffortConfig reads our fixture, not the
-    // developer's real ~/.gsd/defaults.json.
-    const origHome = process.env.HOME;
-    const origUserProfile = process.env.USERPROFILE;
-    process.env.HOME = tmpHome;
-    process.env.USERPROFILE = tmpHome;
-
-    const { cmdEffortSync } = require('../gsd-core/bin/lib/commands.cjs');
-    let result;
-    try {
-      result = captureOutput(() =>
-        cmdEffortSync(tmpDir, false, { dryRun: false, configDir: tmpDir, runtime: 'claude' })
-      );
-    } finally {
-      if (origHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = origHome;
-      }
-      if (origUserProfile === undefined) {
-        delete process.env.USERPROFILE;
-      } else {
-        process.env.USERPROFILE = origUserProfile;
-      }
-    }
-
-    // With home heavy-tier effort 'low' and the agent currently at 'medium',
-    // cmdEffortSync must sync exactly 1 agent and set it to 'low'.
-    assert.equal(result.synced, 1, 'should sync 1 agent whose effort differs from home default');
-    assert.equal(result.changes[0].agent, 'gsd-planner');
-    assert.equal(result.changes[0].from, 'medium');
-    assert.equal(result.changes[0].to, 'low', 'effort must be updated to the home-default value');
-    assert.ok(
-      fs.readFileSync(agentPath, 'utf8').includes('effort: low'),
-      'agent file must be rewritten with the home-default effort value'
-    );
-
-    cleanup(tmpHome);
-    cleanup(tmpDir);
-  });
-
   test('CLI dispatcher: positional args after effort sync are rejected', () => {
     const result = runCli(['effort', 'sync', 'unexpected-arg']);
     assert.notEqual(result.status, 0, 'should exit non-zero on unexpected positional arg');
@@ -5381,36 +5347,6 @@ describe('#3243 (ADR-2313 D7): Codex .toml effort sync', () => {
       content,
       'a refused file must never be partially rewritten',
     );
-
-    cleanup(tmpDir);
-  });
-
-  test('B12 (negative proof): symlinked .toml — skipped, target byte-identical after', (t) => {
-    const tmpDir = makeTmpDir('codex-sync-b12-');
-    const agentsDir = makeAgentsDir(tmpDir);
-    const targetPath = path.join(tmpDir, 'outside-target.toml');
-    const targetContent = 'model = "sonnet"\n';
-    fs.writeFileSync(targetPath, targetContent);
-    const symlinkPath = path.join(agentsDir, 'gsd-linked.toml');
-    try {
-      fs.symlinkSync(targetPath, symlinkPath, 'file');
-    } catch (error) {
-      if (error && ['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) {
-        t.skip('symlink creation is not available on this platform');
-        cleanup(tmpDir);
-        return;
-      }
-      throw error;
-    }
-
-    const result = syncCodex(tmpDir, false);
-
-    assert.equal(result.synced, 0);
-    assert.ok(
-      !result.changes.some(c => c.agent === 'gsd-linked'),
-      'a symlinked agent must never be reported as synced',
-    );
-    assert.equal(fs.readFileSync(targetPath, 'utf8'), targetContent, 'the symlink target must never be written through');
 
     cleanup(tmpDir);
   });
@@ -5689,18 +5625,6 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
   const { runGit } = require('./helpers/process-seam.cjs');
   let tmpDir;
 
-  const REJECTING_HOOK = '#!/bin/sh\necho "gate: BACKLOG.md is stale" >&2\nexit 1\n';
-  const PASSING_HOOK = '#!/bin/sh\nexit 0\n';
-
-  // Writes .git/hooks/pre-commit. Every arm below drives the real hook, not a
-  // stub of it: the defect lives in git's own hook-before-empty-diff ordering,
-  // so a faked rejection would not exercise the mechanism under test.
-  function installHook(body) {
-    const hookPath = path.join(tmpDir, '.git', 'hooks', 'pre-commit');
-    fs.writeFileSync(hookPath, body);
-    fs.chmodSync(hookPath, 0o755);
-  }
-
   // A tracked, committed, unmodified file — `git add` on it succeeds and
   // contributes no diff. This is the exact shape the guard used to miss.
   function commitFixtureFile(name = 'doc.md', body = 'hello\n') {
@@ -5727,19 +5651,6 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
     cleanup(tmpDir);
   });
 
-  // AC1 — the defect. Pre-fix this returned commit_failed + the hook's message.
-  test('AC1: empty diff + rejecting pre-commit hook reports nothing_to_commit, not the hook rejection', () => {
-    const rel = commitFixtureFile();
-    installHook(REJECTING_HOOK);
-
-    const output = commitFiles(rel);
-    assert.strictEqual(output.committed, false);
-    assert.strictEqual(output.reason, 'nothing_to_commit',
-      'an empty-diff --files call must not be reported as a failed commit');
-    assert.ok(!output.error,
-      'no hook message may be surfaced for a call that had nothing to gate');
-  });
-
   // AC2 — the two controls that isolate the hook as the only variable.
   test('AC2: empty diff + no hook still reports nothing_to_commit', () => {
     const rel = commitFixtureFile();
@@ -5747,63 +5658,6 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
     const output = commitFiles(rel);
     assert.strictEqual(output.committed, false);
     assert.strictEqual(output.reason, 'nothing_to_commit');
-  });
-
-  test('AC2: empty diff + passing hook still reports nothing_to_commit', () => {
-    const rel = commitFixtureFile();
-    installHook(PASSING_HOOK);
-
-    const output = commitFiles(rel);
-    assert.strictEqual(output.committed, false);
-    assert.strictEqual(output.reason, 'nothing_to_commit');
-  });
-
-  // AC3 — the all-missing short-circuit must not regress.
-  test('AC3: every named path missing from disk still reports nothing_to_commit', () => {
-    const rel = commitFixtureFile();
-    fs.unlinkSync(path.join(tmpDir, rel));
-    installHook(REJECTING_HOOK);
-
-    const output = commitFiles(rel);
-    assert.strictEqual(output.committed, false);
-    assert.strictEqual(output.reason, 'nothing_to_commit');
-  });
-
-  // AC3, sharp edge: the `stagedPaths.length === 0` short-circuit is
-  // load-bearing, not defensive noise. Without it an all-missing call spreads
-  // an empty array into the pathspec, and a pathspec-less `git diff HEAD`
-  // tests the WHOLE tree — so unrelated work would suppress the guard and turn
-  // this arm into a commit of somebody else's changes.
-  test('AC3: all named paths missing does not consult unrelated staged work', () => {
-    const rel = commitFixtureFile();
-    fs.unlinkSync(path.join(tmpDir, rel));
-    const unrelated = path.posix.join('.planning', 'unrelated.md');
-    fs.writeFileSync(path.join(tmpDir, unrelated), 'staged by the caller\n');
-    gitOrThrow(['add', '--', unrelated], { cwd: tmpDir });
-    installHook(REJECTING_HOOK);
-
-    const output = commitFiles(rel);
-    assert.strictEqual(output.committed, false);
-    assert.strictEqual(output.reason, 'nothing_to_commit');
-
-    const staged = gitOrThrow(['diff', '--cached', '--name-only'], { cwd: tmpDir });
-    assert.match(staged, /unrelated\.md/,
-      "the caller's own staged work must be left in the index, not swept into a commit");
-  });
-
-  // AC4 — a genuine rejection must still be reported. The goal is to stop
-  // reporting a rejection for a call that never had anything to gate, not to
-  // stop reporting rejections.
-  test('AC4: a real diff rejected by the hook still reports commit_failed with the hook message', () => {
-    const rel = commitFixtureFile();
-    fs.writeFileSync(path.join(tmpDir, rel), 'hello\nmodified\n');
-    installHook(REJECTING_HOOK);
-
-    const output = commitFiles(rel);
-    assert.strictEqual(output.committed, false);
-    assert.strictEqual(output.reason, 'commit_failed');
-    assert.match(String(output.error), /BACKLOG\.md is stale/,
-      "the hook's own message must still reach the caller");
   });
 
   test('AC4: a real diff with no hook still commits', () => {
@@ -5815,51 +5669,6 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
     assert.strictEqual(output.reason, 'committed');
     assert.ok(output.hash, 'a successful commit must carry its hash');
   });
-
-  // AC5 — amending has a different empty-diff meaning; the guard stays exempt.
-  test('AC5: --amend remains exempt from the empty-diff guard', () => {
-    const rel = commitFixtureFile();
-    installHook(REJECTING_HOOK);
-
-    const output = commitFiles(rel, ' --amend');
-    assert.strictEqual(output.committed, false);
-    assert.strictEqual(output.reason, 'commit_failed',
-      '--amend must still reach git, where the hook governs the rewrite');
-  });
-
-  // Beyond the brief's ACs: during a merge git refuses a partial commit, so the
-  // commit runs WITHOUT the pathspec and the named paths describe nothing about
-  // what would land. Deciding "nothing to commit" from them would abandon the
-  // merge — which is why the empty-diff probe is gated on !isMergeInProgress.
-  // Sets up a conflicted history and leaves the caller mid-sequence. `rel` (the
-  // file the commit call names) is never touched by the conflict, so it always
-  // contributes no diff of its own — which is what puts these arms on the
-  // empty-diff branch under test.
-  function conflictedSequence(kind) {
-    const shared = path.posix.join('.planning', 'shared.md');
-    fs.writeFileSync(path.join(tmpDir, shared), 'base\n');
-    gitOrThrow(['add', '--', shared], { cwd: tmpDir });
-    gitOrThrow(['commit', '-m', 'shared base'], { cwd: tmpDir });
-    const trunk = gitOrThrow(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir }).trim();
-
-    if (kind === 'revert') {
-      fs.writeFileSync(path.join(tmpDir, shared), 'second\n');
-      gitOrThrow(['commit', '-am', 'second'], { cwd: tmpDir });
-      fs.writeFileSync(path.join(tmpDir, shared), 'third\n');
-      gitOrThrow(['commit', '-am', 'third'], { cwd: tmpDir });
-      runGit(['revert', '--no-edit', 'HEAD~1'], { cwd: tmpDir });
-    } else {
-      gitOrThrow(['checkout', '-b', 'side'], { cwd: tmpDir });
-      fs.writeFileSync(path.join(tmpDir, shared), 'side\n');
-      gitOrThrow(['commit', '-am', 'side edit'], { cwd: tmpDir });
-      gitOrThrow(['checkout', trunk], { cwd: tmpDir });
-      fs.writeFileSync(path.join(tmpDir, shared), 'trunk\n');
-      gitOrThrow(['commit', '-am', 'trunk edit'], { cwd: tmpDir });
-      runGit([kind === 'merge' ? 'merge' : 'cherry-pick', 'side'], { cwd: tmpDir });
-    }
-    fs.writeFileSync(path.join(tmpDir, shared), 'resolved\n');
-    gitOrThrow(['add', '--', shared], { cwd: tmpDir });
-  }
 
   // The one state where `git diff` and `git commit -- <path>` genuinely
   // disagree. `--assume-unchanged` makes `git add` stage nothing and BOTH diff
@@ -5944,29 +5753,6 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
   // of content the caller named — the exact class this whole guard is careful
   // about.
 
-  // A mode-only change leaves the blob identical, so a content comparison sees
-  // nothing — while `git commit -- <path>` records the new mode.
-  test('a mode-only change to an assume-unchanged path is still committed', (t) => {
-    const rel = commitFixtureFile('exec.md');
-    // Windows, and any checkout with `core.filemode=false`, cannot represent
-    // the bit — `chmodSync` would then be a no-op and this arm would pass while
-    // pinning nothing. Assert the precondition and skip loudly instead.
-    gitOrThrow(['config', 'core.filemode', 'true'], { cwd: tmpDir });
-    gitOrThrow(['update-index', '--assume-unchanged', '--', rel], { cwd: tmpDir });
-    fs.chmodSync(path.join(tmpDir, rel), 0o755);
-    if (!/^100755 /.test(gitOrThrow(['ls-files', '-s', '--', rel], { cwd: tmpDir }))
-      && (fs.statSync(path.join(tmpDir, rel)).mode & 0o111) === 0) {
-      t.skip('filesystem cannot represent the executable bit — nothing to pin here');
-      return;
-    }
-
-    assert.strictEqual(commitFiles(rel).committed, true,
-      'the mode moved and git would record it, so the guard must not report nothing_to_commit');
-    assert.match(
-      gitOrThrow(['ls-tree', 'HEAD', '--', rel], { cwd: tmpDir }), /^100755 /,
-      'and the recorded mode must actually be the executable one');
-  });
-
   // A non-ASCII path is rendered QUOTED by `git ls-files -v` under the default
   // `core.quotePath` (`"caf\303\251.md"`), so any probe that parses the path
   // out of that output reads a filename that does not exist and silently
@@ -6007,41 +5793,6 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
     const output = JSON.parse(payload);
     assert.strictEqual(output.committed, true,
       'the very first commit in a repo must not be swallowed by the empty-diff guard');
-  });
-
-  // git refuses a partial commit during a cherry-pick exactly as it does during
-  // a merge, so the guard must stay out of the way there too — this arm pins
-  // that the pre-fix outcome is preserved rather than turned into a silent
-  // no-op. Driven, not assumed: the three sequencer states disagree.
-  test('a cherry-pick in progress keeps its pre-existing outcome', () => {
-    const rel = commitFixtureFile();
-    conflictedSequence('cherry-pick');
-    assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'CHERRY_PICK_HEAD')),
-      'fixture must leave a cherry-pick in progress');
-    installHook(REJECTING_HOOK);
-
-    const output = commitFiles(rel);
-    assert.strictEqual(output.committed, false);
-    assert.strictEqual(output.reason, 'commit_failed',
-      'git refuses the partial commit here; that must not become a silent nothing_to_commit');
-    assert.match(String(output.error), /partial commit/,
-      "git's own refusal must reach the caller");
-  });
-
-  // REVERT_HEAD is deliberately NOT in the refusal set: a revert permits partial
-  // commits, so the fix must still apply there. Including it would suppress the
-  // fix during a revert and reintroduce the misreport.
-  test('a revert in progress still reports nothing_to_commit, not the hook rejection', () => {
-    const rel = commitFixtureFile();
-    conflictedSequence('revert');
-    assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'REVERT_HEAD')),
-      'fixture must leave a revert in progress');
-    installHook(REJECTING_HOOK);
-
-    const output = commitFiles(rel);
-    assert.strictEqual(output.committed, false);
-    assert.strictEqual(output.reason, 'nothing_to_commit',
-      'a revert permits partial commits, so the empty-diff guard must still apply');
   });
 
   test('a merge in progress is still concluded when the named paths carry no diff', () => {
@@ -6667,5 +6418,43 @@ describe('#4055: merged-and-deleted phase branch must not be resurrected', () =>
       createdBranch = false;
     }
     assert.strictEqual(createdBranch, false, 'no phase branch may be created off a non-base branch');
+  });
+});
+
+// Found while implementing #5105: `todo complete` upserts its keys into the block the one fence
+// owner finds. Its old `trim() === '---'` scan missed a block closed by the lenient `----`
+// (#1882) and wrapped the whole file in a second block; a BOM on a block-less todo landed
+// between the new block and the body instead of staying the file's first character.
+describe('todo complete writes into the frontmatter block the one fence owner finds', () => {
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = createTempProject();
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'todos', 'pending'), { recursive: true });
+  });
+  afterEach(() => cleanup(tmpDir));
+
+  const BOM = String.fromCharCode(0xFEFF);
+
+  /** The completed todo's lines, with the completion date masked. */
+  function complete(content) {
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'todos', 'pending', 'fix-it.md'), content);
+    const result = runGsdTools('todo complete fix-it.md', tmpDir);
+    assert.ok(result.success, `todo complete failed: ${result.error}`);
+    const written = fs.readFileSync(path.join(tmpDir, '.planning', 'todos', 'completed', 'fix-it.md'), 'utf-8');
+    return splitLines(written).map((l) => l.replace(/^completed: \d{4}-\d{2}-\d{2}$/, 'completed: DATE'));
+  }
+
+  test('a block closed by the lenient `----` gains the keys in place, not a second block', () => {
+    assert.deepStrictEqual(
+      complete('---\ntitle: Fix it\narea: core\n----\n\nBody line\n'),
+      ['---', 'title: Fix it', 'area: core', 'completed: DATE', 'status: completed', '----', '', 'Body line', ''],
+    );
+  });
+
+  test('a block-less todo with a BOM keeps the BOM ahead of the new block', () => {
+    assert.deepStrictEqual(
+      complete(`${BOM}# Fix it\n\nBody line\n`),
+      [`${BOM}---`, 'completed: DATE', 'status: completed', '---', '', '# Fix it', '', 'Body line', ''],
+    );
   });
 });

@@ -7,7 +7,7 @@ const path = require('node:path');
 const { gitOrThrow } = require('./helpers/git-fixture.cjs');
 const { createTempDir, cleanup } = require('./helpers.cjs');
 
-const { computeMigrationPlan, applyMigration } = require('../gsd-core/bin/lib/roadmap-upgrade.cjs');
+const { computeMigrationPlan, applyMigration, rewriteRoadmapLines } = require('../gsd-core/bin/lib/roadmap-upgrade.cjs');
 
 /**
  * Build a git project whose `.planning/` is GITIGNORED (commit_docs:false) —
@@ -166,5 +166,173 @@ describe('roadmap upgrade config activation (#4698 Blocker 1)', () => {
     assert.equal(result.applied, true);
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     assert.equal(config.phase_id_convention, null, 'config must be untouched when the plan converted zero phases');
+  });
+});
+
+// ADR-5057 §6 (Phase 13, #5217): every planning-artifact write the migration
+// makes goes through its seam — headings/bullets through the sectionizer,
+// PROJECT.md prose through PlanningDoc, STATE.md through its own write seam.
+describe('roadmap upgrade writes through the planning seams (#5217)', () => {
+  const ROADMAP = ['## v1.0: First Milestone', '', '### Phase 1: Foo', '', '### Phase 2: Bar', ''].join('\n');
+
+  function setup(prefix, roadmap) {
+    const dir = createTempDir(prefix);
+    makeGitignoredPlanningRepo(dir);
+    fs.mkdirSync(path.join(dir, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.planning', 'ROADMAP.md'), roadmap);
+    return dir;
+  }
+
+  test('PROJECT.md and STATE.md prose references are rewritten; a reference inside a fenced block is not', (t) => {
+    const dir = setup('m13-crossref-', ROADMAP);
+    t.after(() => cleanup(dir));
+    const project = path.join(dir, '.planning', 'PROJECT.md');
+    const state = path.join(dir, '.planning', 'STATE.md');
+    fs.writeFileSync(project, 'Phase 1: Foo shipped.\n```\nPhase 2: Bar in a fence\n```\n');
+    fs.writeFileSync(state, '# Project State\n\n**Current Phase:** Phase 2: Bar\n');
+
+    const plan = computeMigrationPlan(dir);
+    const result = applyMigration(dir, plan, { dryRun: false });
+
+    assert.equal(result.applied, true);
+    assert.ok(result.editedFiles.includes('PROJECT.md'));
+    assert.ok(result.editedFiles.includes('STATE.md'));
+    assert.equal(
+      fs.readFileSync(project, 'utf8'),
+      'Phase 1-01: Foo shipped.\n```\nPhase 2: Bar in a fence\n```\n',
+    );
+    const stateAfter = fs.readFileSync(state, 'utf8');
+    assert.ok(stateAfter.includes('**Current Phase:** Phase 1-02: Bar'), 'STATE.md body reference rewritten');
+    assert.ok(!stateAfter.includes('Phase 2: Bar'), 'no legacy reference left in STATE.md');
+  });
+
+  test('a CRLF PROJECT.md round-trips with every terminator intact', (t) => {
+    const dir = setup('m13-crlf-project-', ROADMAP);
+    t.after(() => cleanup(dir));
+    const project = path.join(dir, '.planning', 'PROJECT.md');
+    fs.writeFileSync(project, 'Phase 1: Foo shipped.\r\nbody\r\n');
+
+    applyMigration(dir, computeMigrationPlan(dir), { dryRun: false });
+
+    assert.equal(fs.readFileSync(project, 'utf8'), 'Phase 1-01: Foo shipped.\r\nbody\r\n');
+  });
+
+  test('a STATE.md with frontmatter keeps its frontmatter fields while the body reference is rewritten', (t) => {
+    const dir = setup('m13-state-fm-', ROADMAP);
+    t.after(() => cleanup(dir));
+    const state = path.join(dir, '.planning', 'STATE.md');
+    fs.writeFileSync(state, '---\nstatus: executing\n---\n\n# Project State\n\n**Current Phase:** Phase 2: Bar\n');
+
+    applyMigration(dir, computeMigrationPlan(dir), { dryRun: false });
+
+    const after = fs.readFileSync(state, 'utf8');
+    assert.ok(after.startsWith('---\n'), 'frontmatter fence kept');
+    assert.ok(after.includes('status: executing'), 'frontmatter field kept');
+    assert.ok(after.includes('**Current Phase:** Phase 1-02: Bar'), 'body reference rewritten');
+  });
+
+  for (const target of ['PROJECT.md', 'STATE.md']) {
+    test(`an unreadable ${target} (unterminated frontmatter) refuses the migration and rolls everything back`, (t) => {
+      const dir = setup(`m13-unreadable-${target.slice(0, 3).toLowerCase()}-`, ROADMAP);
+      t.after(() => cleanup(dir));
+      const file = path.join(dir, '.planning', target);
+      const unreadable = '---\ntitle: never closed\nPhase 1: Foo\n';
+      fs.writeFileSync(file, unreadable);
+      const before = fs.readFileSync(path.join(dir, '.planning', 'ROADMAP.md'), 'utf8');
+
+      const plan = computeMigrationPlan(dir);
+      assert.ok(plan.crossRefEdits.some((edit) => edit.file === target), `precondition: ${target} has planned edits`);
+
+      assert.throws(() => applyMigration(dir, plan, { dryRun: false }), /Migration failed and rolled back/);
+      assert.equal(fs.readFileSync(path.join(dir, '.planning', 'ROADMAP.md'), 'utf8'), before);
+      assert.equal(fs.readFileSync(file, 'utf8'), unreadable);
+      assert.equal(fs.existsSync(path.join(dir, '.planning', 'config.json')), false);
+    });
+  }
+
+  test('rewriteRoadmapLines: identical headings in two milestones stay distinct by line index; heading, checklist and fenced edits', () => {
+    const lines = [
+      '## v1.0: A', // 0
+      '### Phase 1: Same', // 1
+      '- [ ] Phase 1: Same', // 2
+      '## v2.0: B', // 3
+      '### Phase 1: Same', // 4
+      '```', // 5
+      '### Phase 1: Same', // 6 (fenced example)
+      '- [ ] Phase 1: Same', // 7 (fenced example)
+      '```', // 8
+    ];
+    const edits = [
+      { lineIndex: 1, from: '### Phase 1: Same', to: '### Phase 1-01: Same' },
+      { lineIndex: 2, from: '- [ ] Phase 1: Same', to: '- [ ] Phase 1-01: Same' },
+      { lineIndex: 4, from: '### Phase 1: Same', to: '### Phase 2-01: Same' },
+      { lineIndex: 6, from: '### Phase 1: Same', to: '### FENCED-MUST-NOT-APPEAR' },
+      { lineIndex: 7, from: '- [ ] Phase 1: Same', to: '- [ ] FENCED-MUST-NOT-APPEAR' },
+    ];
+
+    const out = rewriteRoadmapLines(lines.join('\n'), edits).split('\n');
+
+    assert.equal(out[1], '### Phase 1-01: Same');
+    assert.equal(out[2], '- [ ] Phase 1-01: Same');
+    assert.equal(out[4], '### Phase 2-01: Same');
+    assert.deepEqual(out.slice(5), lines.slice(5), 'fenced example block is byte-identical');
+    assert.equal(out.length, lines.length);
+  });
+
+  test('rewriteRoadmapLines: a CRLF roadmap keeps every terminator, converted lines included', () => {
+    const content = '## v1.0: A\r\n### Phase 1: Foo\r\n- [x] Phase 1: Foo\r\ntext';
+    const edits = [
+      { lineIndex: 1, from: '### Phase 1: Foo\r', to: '### Phase 1-01: Foo\r' },
+      { lineIndex: 2, from: '- [x] Phase 1: Foo\r', to: '- [x] Phase 1-01: Foo\r' },
+    ];
+    assert.equal(
+      rewriteRoadmapLines(content, edits),
+      '## v1.0: A\r\n### Phase 1-01: Foo\r\n- [x] Phase 1-01: Foo\r\ntext',
+    );
+  });
+
+  test('a planned heading edit the seam cannot rewrite throws and rolls everything back', (t) => {
+    // `###Phase 1:` has no space after the hashes, so it is not a CommonMark
+    // heading: the planner's own regex reads it, the sectionizer does not.
+    const dir = setup('m13-refused-', ['## v1.0: First Milestone', '', '###Phase 1: Foo', ''].join('\n'));
+    t.after(() => cleanup(dir));
+    const before = fs.readFileSync(path.join(dir, '.planning', 'ROADMAP.md'), 'utf8');
+
+    const plan = computeMigrationPlan(dir);
+    assert.ok(plan.roadmapEdits.length >= 1, 'precondition: the planner plans an edit for the heading');
+
+    assert.throws(() => applyMigration(dir, plan, { dryRun: false }), /Migration failed and rolled back/);
+    assert.equal(fs.readFileSync(path.join(dir, '.planning', 'ROADMAP.md'), 'utf8'), before);
+    assert.equal(fs.existsSync(path.join(dir, '.planning', 'config.json')), false);
+  });
+
+  test('a plan file edited after the plan was computed is refused, never clobbered, and the rename rolls back', (t) => {
+    const dir = setup('m13-stale-plan-', ROADMAP);
+    t.after(() => cleanup(dir));
+    const oldDir = path.join(dir, '.planning', 'phases', '01-foo');
+    fs.mkdirSync(oldDir, { recursive: true });
+    const planFile = path.join(oldDir, '01-01-PLAN.md');
+    fs.writeFileSync(planFile, 'edited after planning\n');
+
+    const plan = {
+      alreadyMigrated: false,
+      phases: [
+        {
+          oldId: '1',
+          newId: '1-01',
+          oldDir: '01-foo',
+          newDir: '1-01-foo',
+          dependsOnRewrites: [
+            { oldName: '01-01-PLAN.md', finalName: '01-01-PLAN.md', from: 'content at plan time\n', to: 'rewritten\n' },
+          ],
+        },
+      ],
+      roadmapEdits: [],
+      crossRefEdits: [],
+    };
+
+    assert.throws(() => applyMigration(dir, plan, { dryRun: false }), /changed since the migration plan was computed/);
+    assert.equal(fs.readFileSync(planFile, 'utf8'), 'edited after planning\n');
+    assert.equal(fs.existsSync(path.join(dir, '.planning', 'phases', '1-01-foo')), false, 'rename rolled back');
   });
 });

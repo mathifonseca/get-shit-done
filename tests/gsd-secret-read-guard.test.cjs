@@ -31,6 +31,7 @@
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fc = require('fast-check');
 const { runHook: runHookSeam } = require('./helpers/process-seam.cjs');
 const { QUICK_SPAWN_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
@@ -591,5 +592,215 @@ describe('gsd-secret-read-guard: container --env-file exemption (#4639)', () => 
     block('grep KEY .env.foundation');
     assertBlocked(runHook(read('.env.foundation')), 'Read .env.foundation', { tool: 'Read' });
     block("bash -c 'cat .env.foundation'");
+  });
+});
+
+describe('gsd-secret-read-guard: name-only git pathspecs and copy destinations (#4856)', () => {
+  // `git check-ignore`, `git ls-files` and `git rm --cached` report or drop a
+  // path's ignore / tracking status without printing the file, and a `cp`/`mv`
+  // whose secret name is only the destination writes that name instead of
+  // reading it. Only those operand positions are exempt: option values, other
+  // git subcommands and every other operand are still checked, and an option
+  // the exemption does not list fails closed.
+  const allows = [
+    // The issue's four commands and the triage acceptance criteria.
+    'git check-ignore -v .env',
+    'git ls-files --error-unmatch .env',
+    'git rm --cached .env',
+    'cp .env.example .env',
+    'git check-ignore -v .env.production',
+    'mv .env.example .env',
+    // Pathspec shapes: several names, `--`, clustered flags, and git's own
+    // option permutation (`--cached` after the pathspec is still the option).
+    'git check-ignore -q .env .secrets',
+    'git ls-files -- .env',
+    'git ls-files -co --exclude-standard .env.local',
+    'git rm -r --cached -- .secrets',
+    'git rm .env --cached',
+    // Global options before the subcommand.
+    'git -C /p check-ignore -v .env',
+    'git --no-pager -c core.quotepath=off ls-files .env',
+    'git --git-dir=/p/.git rm --cached .env',
+    // Prefix wrappers, compounds and nested shells reach the same exemption.
+    'sudo git rm --cached .env',
+    'cd /p && git check-ignore -q .env || echo tracked',
+    "bash -c 'git rm --cached .env'",
+    // Listed no-value flags and `--` ahead of exactly two operands.
+    'cp -n .env.example .env',
+    'cp -fv .env.example .env',
+    'mv -i -- .env.example config/.env.local',
+  ];
+  for (const cmd of allows) {
+    test(`allows ${JSON.stringify(cmd)}`, () => {
+      assertAllowed(runHook(bash(cmd)), cmd);
+    });
+  }
+
+  const blocks = [
+    // Content-revealing git subcommands stay denied (the issue's list).
+    ['git diff -- .env', '.env'],
+    ['git log -p -- .env', '.env'],
+    ['git blame .env', '.env'],
+    ['git cat-file -p :.env', ':.env'],
+    ['git grep KEY -- .env', '.env'],
+    // `git rm` is exempt only with `--cached`; after `--` it is a pathspec.
+    ['git rm .env', '.env'],
+    ['git rm -- --cached .env', '.env'],
+    // An option value is not a pathspec. `--pathspec-from-file` echoes the
+    // file's lines in its "did not match" error, so its value stays checked,
+    // and any unlisted option — including a cluster ending in the
+    // value-taking `-X` — withdraws the exemption from the whole segment.
+    ['git rm --cached --pathspec-from-file=.env', '--pathspec-from-file=.env'],
+    ['git ls-files --exclude-from=.env', '--exclude-from=.env'],
+    ['git ls-files -X .env', '.env'],
+    ['git ls-files -ciX .env', '.env'],
+    // Global option values stay checked, `-C` consumes its value (so the
+    // subcommand below is `show`), and an unknown global option fails closed.
+    ['git -C .secrets ls-files .env', '.secrets'],
+    ['git -C ls-files show HEAD:.env', 'HEAD:.env'],
+    ['git --frobnicate ls-files .env', '.env'],
+    // The exemption never reaches another segment, a substitution or a redirect.
+    ['git ls-files .env && cat .env', '.env'],
+    ['git check-ignore -v "$(cat .env)"', '.env'],
+    ['git check-ignore --stdin < .env', '.env'],
+    ['git ls-files .env | xargs cat', '.env'],
+    ['cp .env.example .env && cat .env', '.env'],
+    // cp / mv: a secret source stays denied.
+    ['mv .env backup', '.env'],
+    ['cp .env.local .env', '.env.local'],
+    // Operand-count boundary around the exempt shape of exactly two:
+    // one operand (limit-1) has no destination to exempt …
+    ['cp .env', '.env'],
+    ['mv .env', '.env'],
+    // … and three (limit+1), or `-t`, make the secret a source.
+    ['cp .env.example .env /tmp', '.env'],
+    ['cp -t /tmp .env.example .env', '.env'],
+    ['cp --target-directory=/tmp .env.example .env', '.env'],
+    // Even a listed option after the operands: under POSIXLY_CORRECT it is
+    // the destination directory and `.env` becomes a source.
+    ['cp .env.example .env -f', '.env'],
+    // A backup keeps the old secret as `.env~`, a name the guard does not classify.
+    ['cp -b .env.example .env', '.env'],
+    ['cp --backup=numbered .env.example .env', '.env'],
+    ['mv -S .bak .env.example .env', '.env'],
+    // A link or an exchange makes the destination share or swap the secret.
+    ['cp -s .env.example .env', '.env'],
+    ['cp -l .env.example .env', '.env'],
+    ['mv --exchange .env.example .env', '.env'],
+  ];
+  for (const [cmd, expectedPath] of blocks) {
+    test(`blocks ${JSON.stringify(cmd)}`, () => {
+      assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: expectedPath });
+    });
+  }
+
+  // ── Properties over the git / cp / mv argv parsers ────────────────────────
+  // Commands are word arrays drawn from vocabularies this test declares from
+  // `git <subcommand> -h` and coreutils, never read back from the hook's own
+  // tables, so a table edit cannot silently reshape the input space. Every run
+  // spawns the hook, which keeps numRuns small; fast-check prints the seed
+  // and the counterexample on failure.
+  const PROPERTY_RUNS = { seed: 4856, numRuns: 40 };
+  const SECRET = fc.constantFrom('.env', '.env.local', '.secrets', 'config/.env.production', '.ENV');
+  const BENIGN = fc.constantFrom('README.md', 'src/a.js', '.env.example', 'notes.txt', '.envrc');
+  const NAME_ONLY = {
+    'check-ignore': { short: ['q', 'v', 'z', 'n'], long: ['--quiet', '--verbose', '--non-matching', '--no-index'] },
+    'ls-files': {
+      short: ['c', 'd', 'm', 'o', 'i', 's', 'k', 'u', 'z', 't', 'v', 'f'],
+      long: ['--cached', '--others', '--error-unmatch', '--exclude-standard', '--full-name', '--deduplicate'],
+    },
+    rm: { short: ['r', 'f', 'n', 'q'], long: ['--force', '--dry-run', '--quiet', '--ignore-unmatch'], requires: '--cached' },
+    copy: { short: ['f', 'i', 'n', 'v'], long: ['--force', '--interactive', '--no-clobber', '--verbose'] },
+  };
+  // Not a no-value option of any carve-out: value-taking, backup, link,
+  // exchange, target-directory, `=`-valued and unknown forms, plus a cluster
+  // that pairs a letter some carve-out lists with one no carve-out lists.
+  const UNLISTED = fc.oneof(
+    fc.constantFrom('--frobnicate', '-X', '-x', '-Q', '--format=x', '--abbrev=7', '--backup', '-b',
+      '-S', '--exchange', '--target-directory=/tmp', '--pathspec-from-file=list.txt'),
+    fc.tuple(fc.constantFrom('v', 'f', 'n', 'q', 'c'), fc.constantFrom('X', 'Q', 'S', 'b')).map(([l, u]) => `-${l}${u}`),
+  );
+  // One element may hold an option and its value (`-C /p`), so an insertion
+  // never lands between the two.
+  const GIT_GLOBALS = fc.array(
+    fc.constantFrom('--no-pager', '-P', '--no-optional-locks', '--no-advice', '-C /p', '-c core.quotepath=off'),
+    { maxLength: 2 },
+  );
+  // A listed long option, or a single-dash cluster of 1–3 listed letters.
+  const listedOption = (spec) => fc.oneof(
+    fc.array(fc.constantFrom(...spec.short), { minLength: 1, maxLength: 3 }).map((ls) => `-${ls.join('')}`),
+    fc.constantFrom(...spec.long),
+  );
+
+  // Options and secret pathspecs interleaved in any order (git permutes
+  // options), behind any git global options. Always ends in a pathspec.
+  const exemptGitCommand = fc.constantFrom('check-ignore', 'ls-files', 'rm').chain((sub) => {
+    const spec = NAME_ONLY[sub];
+    return fc.tuple(GIT_GLOBALS, fc.array(fc.oneof(listedOption(spec), SECRET), { maxLength: 4 }), fc.nat(), SECRET)
+      .map(([globals, args, at, lastPathspec]) => {
+        const words = [...args, lastPathspec];
+        if (spec.requires) words.splice(at % words.length, 0, spec.requires);
+        return ['git', ...globals, sub, ...words];
+      });
+  });
+  // Listed options, an optional `--`, one non-secret source, a secret destination.
+  const exemptCopyCommand = fc.tuple(
+    fc.constantFrom('cp', 'mv'), fc.array(listedOption(NAME_ONLY.copy), { maxLength: 3 }), fc.boolean(), BENIGN, SECRET,
+  ).map(([cmd, options, dashDash, source, destination]) => [cmd, ...options, ...(dashDash ? ['--'] : []), source, destination]);
+  const exemptCommand = fc.oneof(exemptGitCommand, exemptCopyCommand);
+
+  test('property: listed options in any order or cluster keep a name-only position exempt', () => {
+    fc.assert(fc.property(exemptCommand, (words) => {
+      const cmd = words.join(' ');
+      assertAllowed(runHook(bash(cmd)), cmd);
+    }), PROPERTY_RUNS);
+  });
+
+  test('property: one unlisted option anywhere after the command word withdraws the exemption', () => {
+    fc.assert(fc.property(exemptCommand, UNLISTED, fc.nat(), (words, unlisted, at) => {
+      const i = 1 + (at % words.length);
+      const mutated = [...words.slice(0, i), unlisted, ...words.slice(i)];
+      const cmd = mutated.join(' ');
+      const out = assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash' });
+      assert.ok(mutated.includes(out.path), `${cmd}: the block must name a secret word of the command, got ${out.path}`);
+    }), PROPERTY_RUNS);
+  });
+
+  test('property: a cp/mv option after an operand withdraws the exemption, even a listed one', () => {
+    // A trailing option is an operand under POSIXLY_CORRECT, so the
+    // destination the hook would exempt is not the one cp/mv writes.
+    fc.assert(fc.property(exemptCopyCommand, fc.oneof(listedOption(NAME_ONLY.copy), UNLISTED), fc.nat(), (words, option, at) => {
+      const firstOperand = words.findIndex((w, k) => k > 0 && (!w.startsWith('-') || words[k - 1] === '--'));
+      const i = firstOperand + 1 + (at % (words.length - firstOperand));
+      const mutated = [...words.slice(0, i), option, ...words.slice(i)];
+      const cmd = mutated.join(' ');
+      assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: words[words.length - 1] });
+    }), PROPERTY_RUNS);
+  });
+
+  test('property: a secret outside a name-only position is always blocked', () => {
+    // A cp/mv source; `git rm` without `--cached` before `--` (after it,
+    // `--cached` is a pathspec); or any operand of a git subcommand without a
+    // carve-out, including a wrong-case spelling of one that has it — whatever
+    // listed options surround it.
+    const copySource = fc.tuple(
+      fc.constantFrom('cp', 'mv'), fc.array(listedOption(NAME_ONLY.copy), { maxLength: 3 }), SECRET, fc.oneof(BENIGN, SECRET),
+    ).map(([cmd, options, source, destination]) => ({ words: [cmd, ...options, source, destination], secret: source }));
+    const otherGitSubcommand = fc.tuple(
+      GIT_GLOBALS,
+      fc.constantFrom('show', 'diff', 'log', 'blame', 'cat-file', 'grep', 'add', 'LS-FILES', 'Check-Ignore'),
+      fc.array(listedOption(NAME_ONLY['ls-files']), { maxLength: 3 }),
+      SECRET,
+    ).map(([globals, sub, options, secret]) => ({ words: ['git', ...globals, sub, ...options, secret], secret }));
+    const rmWithoutCached = fc.tuple(
+      GIT_GLOBALS, fc.array(listedOption(NAME_ONLY.rm), { maxLength: 3 }), fc.boolean(), SECRET,
+    ).map(([globals, options, cachedAfterDashDash, secret]) => ({
+      words: ['git', ...globals, 'rm', ...options, ...(cachedAfterDashDash ? ['--', '--cached'] : []), secret],
+      secret,
+    }));
+    fc.assert(fc.property(fc.oneof(copySource, rmWithoutCached, otherGitSubcommand), ({ words, secret }) => {
+      const cmd = words.join(' ');
+      assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: secret });
+    }), PROPERTY_RUNS);
   });
 });

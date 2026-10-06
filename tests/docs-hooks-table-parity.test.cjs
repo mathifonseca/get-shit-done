@@ -13,14 +13,14 @@
  * SessionStart. Nine files carried the wrong rows (ARCHITECTURE.md +
  * INVENTORY.md × en, ja-JP, zh-CN, ko-KR, pt-BR).
  *
- * Truth source: the literal hook-spec array in `buildKimiHooksTomlBlock`
- * (src/runtime-hooks-surface.cts) — its own comment pins the invariant
- * "mirrors applySettingsJsonHooks' settings.json wiring 1:1" — unioned with
- * literal-event probe lines (`settings.hooks.<Event>.some(…
- * referencesHook(…, 'gsd-…'))`). Registrations written through the
- * runtime-resolved variables (`preToolEvent`/`postToolEvent`) are NOT
- * statically parseable and are covered only via the mirror invariant; hooks
- * registered on other surfaces (statusline, plugin-surface) are out of
+ * Truth source: the settings-json registration tables
+ * (`SETTINGS_JSON_HOOK_ROWS` / `SETTINGS_JSON_EXTENDED_ROWS`, #5207) read as
+ * data — `pre`/`post` rows resolve to their canonical non-Gemini events
+ * (docs document the canonical Claude wiring; BeforeTool/AfterTool are the
+ * Gemini twins) — unioned with the literal hook-spec array in
+ * `buildKimiHooksTomlBlock` (src/runtime-hooks-surface.cts), the other
+ * adapter, which is still a source-text contract. Hooks registered on other
+ * surfaces (statusline, plugin-surface) are out of
  * scope. Docs rows are exempt when their Event cell is not exactly one
  * registered event (multi-event `A` / `B` cells, `statusLine`, `(helper)`,
  * host-native names) — note docs/how-to/install-on-your-runtime.md also
@@ -32,6 +32,8 @@ const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+
+const hooksSurface = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const SURFACE_PATH = path.join(ROOT, 'src', 'runtime-hooks-surface.cts');
@@ -94,18 +96,10 @@ function registeredHookEvents() {
   const specRe = /event:\s*'([A-Za-z]+)',\s*command:\s*cmd\('([^']+)'\)/g;
   // allow-test-rule: source-text-is-the-product (#3839)
   while ((m = specRe.exec(src)) !== null) add(path.basename(m[2]), m[1]);
-  // Probe lines paired with a literal event:
-  // settings.hooks.<Event>.some(… referencesHook(…, '<name>'))
-  const probeRe = /settings\.hooks\.([A-Za-z]+)\.some\(\(entry: HookGroup\) =>\s*\n\s*entry\.hooks && entry\.hooks\.some\(\(h: HookEntry\) => referencesHook\(h as Record<string, unknown>, '([^']+)'\)/g;
-  // allow-test-rule: source-text-is-the-product (#3839)
-  while ((m = probeRe.exec(src)) !== null) add(m[2], m[1]);
-  // Probe lines paired with the runtime-resolved variables — statically
-  // resolved to their non-Gemini canonical events (docs document the
-  // canonical Claude/GS wiring; BeforeTool/AfterTool are the Gemini twins):
-  // const preToolEvent = hookEvents === 'gemini' ? 'BeforeTool' : 'PreToolUse'
-  const dynRe = /settings\.hooks\[(preToolEvent|postToolEvent)\]\.some\(\(entry: HookGroup\) =>\s*\n\s*entry\.hooks && entry\.hooks\.some\(\(h: HookEntry\) => referencesHook\(h as Record<string, unknown>, '([^']+)'\)/g;
-  // allow-test-rule: source-text-is-the-product (#3839)
-  while ((m = dynRe.exec(src)) !== null) add(m[2], m[1] === 'preToolEvent' ? 'PreToolUse' : 'PostToolUse');
+  // The settings-json adapter's registration tables, read as data.
+  const CANONICAL_EVENT = { SessionStart: 'SessionStart', pre: 'PreToolUse', post: 'PostToolUse' };
+  for (const row of hooksSurface.SETTINGS_JSON_HOOK_ROWS) add(row.file, CANONICAL_EVENT[row.event]);
+  for (const row of hooksSurface.SETTINGS_JSON_EXTENDED_ROWS) add(row.file, row.event);
   return map;
 }
 

@@ -1,7 +1,7 @@
 {
   "id": "teach",
   "role": "feature",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "title": "Teach phase (codify learnings)",
   "description": "Routes a completed phase's learnings to the right durable surface — rules, skill, MCP tool or hook — as HITL proposals in NN-TEACH.md. Never auto-writes a surface; silent no-op when the knob is off or no candidate matches a surface signal.",
   "tier": "full",

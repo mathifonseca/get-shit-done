@@ -19,7 +19,7 @@ const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, captureConsole } = require('./helpers.cjs');
 
 const INSTALL_JS = path.join(__dirname, '..', 'bin', 'install.js');
 // ADR-857 phase 5f-1b: settings-json hook registration moved from install.js into
@@ -70,57 +70,72 @@ function readInstallSources() {
 }
 
 describe('workflow-guard hook registration (#1767)', () => {
-  test('install.js constructs a command path variable for gsd-workflow-guard.js', () => {
-    const content = readInstallSources();
-    const lines = content.split('\n');
-    // Every registered JS hook has a command variable constructed via
-    // buildHookCommand() or string concatenation. Filter out references
-    // that are only in the cleanup/uninstall arrays.
-    const commandConstructionLines = lines.filter(line =>
-      line.includes('gsd-workflow-guard.js') &&
-      (line.includes('buildHookCommand') || line.includes("'node '"))
-    );
-    assert.ok(
-      commandConstructionLines.length > 0,
-      [
-        'install.js must construct a command path for gsd-workflow-guard.js',
-        '(e.g. buildHookCommand or node + dirName pattern).',
-        'Currently only referenced in gsdHooks cleanup array.',
-      ].join(' ')
-    );
+  // Behavioral (#5207): hook registration is a table consumed by one loop in
+  // applySettingsJsonHooks; drive the real function against a temp target.
+  const WORKFLOW_GUARD = 'gsd-workflow-guard.js';
+  const WORKFLOW_GUARD_MATCHER = 'Bash|Edit|Write|MultiEdit';
+  const { applySettingsJsonHooks } = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
+
+  function registerWorkflowGuard(t, seed) {
+    const targetDir = createTempDir('workflow-guard-reg-');
+    t.after(() => cleanup(targetDir));
+    fs.mkdirSync(path.join(targetDir, 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(targetDir, 'hooks', WORKFLOW_GUARD), '// stub\n');
+    const settings = JSON.parse(JSON.stringify(seed || {}));
+    const localCmd = (f) => `node ${path.join(targetDir, 'hooks', f)}`;
+    const apply = () => captureConsole(() => applySettingsJsonHooks(settings, {
+      runtime: 'claude',
+      isGlobal: false,
+      targetDir,
+      postToolEvent: 'PostToolUse',
+      hookEvents: 'claude',
+      extendedHookEvents: [],
+      hooksSurface: 'settings-json',
+      updateCheckCommand: null,
+      contextMonitorCommand: null,
+      promptGuardCommand: null,
+      readGuardCommand: null,
+      readInjectionScannerCommand: null,
+      configReloadCommand: null,
+      hookOpts: { portableHooks: false, runtime: 'claude' },
+      localCmd,
+      localShellCmd: localCmd,
+    }));
+    return { settings, apply };
+  }
+
+  const workflowGuardEntries = (settings) =>
+    (settings.hooks.PreToolUse || []).filter(e => e.hooks.some(h => h.command.includes('gsd-workflow-guard')));
+
+  test('registers gsd-workflow-guard.js with a command constructed for its path', (t) => {
+    const { settings, apply } = registerWorkflowGuard(t);
+    apply();
+    const entries = workflowGuardEntries(settings);
+    assert.equal(entries.length, 1);
+    assert.ok(entries[0].hooks[0].command.endsWith(path.join('hooks', WORKFLOW_GUARD)));
   });
 
-  test('install.js has a hasWorkflowGuardHook dedup check', () => {
-    const content = readInstallSources();
-    // Every registered hook has a dedup check: hasXxxHook = settings.hooks[...].some(...)
-    const hasDedup = content.includes('hasWorkflowGuardHook') ||
-      content.includes('hasWorkflowGuard');
-    assert.ok(
-      hasDedup,
-      'install.js must have a dedup check variable for workflow-guard (like hasPromptGuardHook)'
-    );
+  test('registers it once: a second install pass does not duplicate the entry', (t) => {
+    const { settings, apply } = registerWorkflowGuard(t);
+    apply();
+    apply();
+    assert.equal(workflowGuardEntries(settings).length, 1);
   });
 
-  test('install.js pushes workflow-guard entry with correct matcher', () => {
-    const content = readInstallSources();
-    // Extract the workflow-guard registration section. It should install the
-    // Bash-aware matcher and upgrade old edit-only entries on reinstall.
-    const workflowGuardSection = content.match(
-      /workflowGuardCommand[\s\S]*?Configure commit validation hook/i
-    );
-    assert.ok(
-      workflowGuardSection,
-      'install.js must have a push block for workflow-guard with a console.log confirmation'
-    );
-    assert.ok(
-      workflowGuardSection[0].includes("const workflowGuardMatcher = 'Bash|Edit|Write|MultiEdit'") &&
-        workflowGuardSection[0].includes('matcher: workflowGuardMatcher'),
-      'workflow guard must be registered for Bash so worktree-agent git safety checks can run'
-    );
-    assert.ok(
-      workflowGuardSection[0].includes('workflowGuardHookEntry.matcher = workflowGuardMatcher'),
-      'installer must upgrade existing workflow guard hook entries to the Bash-aware matcher'
-    );
+  test('registers the Bash-aware matcher and upgrades an old edit-only entry on reinstall', (t) => {
+    const fresh = registerWorkflowGuard(t);
+    fresh.apply();
+    assert.equal(workflowGuardEntries(fresh.settings)[0].matcher, WORKFLOW_GUARD_MATCHER,
+      'workflow guard must be registered for Bash so worktree-agent git safety checks can run');
+
+    const old = registerWorkflowGuard(t, {
+      hooks: { PreToolUse: [{ matcher: 'Write|Edit', hooks: [{ type: 'command', command: `node /x/hooks/${WORKFLOW_GUARD}` }] }] },
+    });
+    old.apply();
+    const entries = workflowGuardEntries(old.settings);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].matcher, WORKFLOW_GUARD_MATCHER,
+      'installer must upgrade existing workflow guard hook entries to the Bash-aware matcher');
   });
 });
 
@@ -134,7 +149,15 @@ describe('hook registration completeness anti-pattern guard', () => {
     // Cursor hooks (gsd-cursor-*.js) are registered by writeCursorHooksJson in
     // runtime-hooks-surface module, not by direct buildHookCommand calls in install.js.
     // They are validated behaviorally in the describe block below.
-    const jsHooks = GSD_UNINSTALL_HOOKS.filter(h => h.endsWith('.js') && !MODULE_OWNED_HOOKS.has(h));
+    // Hooks registered by a row of the settings-json tables (#5207) are
+    // validated behaviorally by the registration tests; only a hook outside the
+    // tables still needs a literal command construction in the sources.
+    const surface = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
+    const tableOwned = new Set([
+      ...surface.SETTINGS_JSON_HOOK_ROWS.map(r => r.file),
+      ...surface.SETTINGS_JSON_EXTENDED_ROWS.map(r => r.file),
+    ]);
+    const jsHooks = GSD_UNINSTALL_HOOKS.filter(h => h.endsWith('.js') && !MODULE_OWNED_HOOKS.has(h) && !tableOwned.has(h));
 
     const missing = [];
     for (const hook of jsHooks) {

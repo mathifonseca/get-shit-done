@@ -333,9 +333,6 @@ describe('#4660 — plan-phase.md captures the full letter-suffixed --research-p
 // ---------------------------------------------------------------------------
 
 const EXECUTE_PHASE = path.join(__dirname, '..', 'gsd-core', 'workflows', 'execute-phase.md');
-const COMPLETION_RECONCILIATION = path.join(
-  __dirname, '..', 'gsd-core', 'workflows', 'execute-phase', 'steps', 'completion-reconciliation.md',
-);
 const CODE_REVIEW_DISPOSITION = path.join(
   __dirname, '..', 'gsd-core', 'workflows', 'execute-phase', 'steps', 'code-review-disposition.md',
 );
@@ -400,10 +397,11 @@ const CLASS1_CONTROLS = [
 
 describe('#4748 — the $((10#$PHASE_INT)) split sites carry a letter suffix into PHASE_N instead of aborting', () => {
   const sites = [
-    // execute-phase.md: plan selection (safe_resume_gate) and the TDD gate a
-    // few lines below are the same two lines twice; both must be under test.
-    { name: 'execute-phase.md', file: EXECUTE_PHASE, anchor: 'PHASE_INT=${PHASE_NUMBER%%', count: 2, input: 'PHASE_NUMBER', output: 'PHASE_N' },
-    { name: 'completion-reconciliation.md', file: COMPLETION_RECONCILIATION, anchor: 'SPOT_PHASE_INT=${SPOT_PHASE_NUMBER%%', count: 1, input: 'SPOT_PHASE_NUMBER', output: 'SPOT_PHASE_N' },
+    // #5164 (epic #5056 Phase 7): the execute-phase.md safe_resume_gate / TDD gate and the
+    // completion-reconciliation.md spot-check no longer split the id in shell — they ask
+    // `check evaluation-scope --plan`, whose letter-suffix handling is `planSubjectPattern`
+    // (pinned in tests/safe-resume-gate-anchoring.test.cjs and
+    // tests/execute-phase-decimal-arithmetic.test.cjs). tdd.md keeps the one shell example.
     { name: 'tdd.md', file: TDD_REF, anchor: 'PHASE_INT=${PHASE%%', count: 1, input: 'PHASE', output: 'PHASE_N' },
   ];
 

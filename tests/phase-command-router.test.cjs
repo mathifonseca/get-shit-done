@@ -17,7 +17,7 @@
  *   - All assertions on return values and captured call arguments.
  */
 
-const { describe, test, before, after } = require('node:test');
+const { describe, test, before, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 
 const { routePhaseCommand } = require('../gsd-core/bin/lib/phase-command-router.cjs');
@@ -637,6 +637,250 @@ describe('bug-1437 — phase.list-plans is wired in gsd-tools', () => {
         false,
         'without the opt-in signal the seam must leave no audit artifact'
       );
+    });
+  });
+}
+
+// ─── 7. Config audit.enabled opt-in (#4975) ──────────────────────────────────
+//
+// `audit.enabled: true` in the project config must enable the opt-in audit
+// trail on the phase seam exactly like GSD_AUDIT=1. Before the fix the seam
+// called isAuditEnabled() with no config, so the documented key was inert.
+{
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { createTempDir, cleanup, runGsdTools } = require('./helpers.cjs');
+
+  const GATE_ENV_KEYS = ['GSD_AUDIT', 'GSD_AUDIT_ARGS', 'GSD_WORKSTREAM', 'GSD_PROJECT'];
+
+  /** Clear every env var the audit gate reads; restore them after the test. */
+  function pinGateEnv(t) {
+    const saved = Object.fromEntries(GATE_ENV_KEYS.map((k) => [k, process.env[k]]));
+    t.after(() => {
+      for (const k of GATE_ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    });
+    for (const k of GATE_ENV_KEYS) delete process.env[k];
+  }
+
+  /** Temp project; `configText` undefined means no .planning/config.json at all. */
+  function makeProject(t, configText) {
+    const tmp = createTempDir('gsd-4975-phase-');
+    t.after(() => cleanup(tmp));
+    fs.mkdirSync(path.join(tmp, '.planning'), { recursive: true });
+    if (configText !== undefined) {
+      fs.writeFileSync(path.join(tmp, '.planning', 'config.json'), configText);
+    }
+    return tmp;
+  }
+
+  function captureStderr(t) {
+    const writes = [];
+    t.mock.method(process.stderr, 'write', (chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    return writes;
+  }
+
+  function readTrail(cwd) {
+    const trailPath = path.join(cwd, '.planning', '.gsd-trace.jsonl');
+    if (!fs.existsSync(trailPath)) return null;
+    return fs.readFileSync(trailPath, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  }
+
+  /** One ok dispatch (next-decimal), then one InvalidArgs dispatch (remove with no phase number). */
+  function dispatchOkThenInvalidArgs(cwd) {
+    const errors = [];
+    const phase = makePhase({ cmdPhaseNextDecimal: () => {} });
+    const route = (args) => routePhaseCommand({ phase, args, cwd, raw: false, error: (m) => errors.push(m) });
+    route(['phase', 'next-decimal', '5']);
+    route(['phase', 'remove']);
+    return errors;
+  }
+
+  /** The child env for a CLI run: no ambient audit, workstream, or json-errors signal. */
+  const CLI_ENV = Object.freeze({ GSD_AUDIT: '', GSD_AUDIT_ARGS: '', GSD_WORKSTREAM: '', GSD_PROJECT: '', GSD_JSON_ERRORS: '' });
+
+  /** Every stderr line that is a structured JSON object (the DispatchLogger record). */
+  function structuredStderrRecords(stderr) {
+    const records = [];
+    for (const line of stderr.split(/\r?\n/)) {
+      let value;
+      try { value = JSON.parse(line); } catch { continue; }
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) records.push(value);
+    }
+    return records;
+  }
+
+  describe('phase-command-router — config audit.enabled opt-in (#4975)', () => {
+    test('audit.enabled true with no GSD_AUDIT writes the audit trail and the structured stderr error line', (t) => {
+      pinGateEnv(t);
+      const tmp = makeProject(t, JSON.stringify({ audit: { enabled: true } }));
+      const stderrWrites = captureStderr(t);
+
+      const errors = dispatchOkThenInvalidArgs(tmp);
+
+      const trail = readTrail(tmp);
+      assert.notEqual(trail, null, 'audit.enabled true must produce .planning/.gsd-trace.jsonl on the phase seam');
+      assert.deepEqual(trail.map((e) => e.result.kind), ['ok', 'InvalidArgs']);
+      assert.deepEqual(trail.map((e) => e.command), ['phase next-decimal', 'phase remove']);
+
+      assert.equal(stderrWrites.length, 1, 'exactly one structured stderr line, for the error dispatch only');
+      const stderrRecord = JSON.parse(stderrWrites[0]);
+      assert.equal(stderrRecord.kind, 'InvalidArgs');
+      assert.equal(stderrRecord.arg, '<phase-number>');
+      assert.equal(stderrRecord.traceId, trail[1].traceId, 'the stderr line and the trail event are the same dispatch');
+
+      assert.deepEqual(errors, ['phase remove accepts exactly one phase number'],
+        'the router\'s own error translation is unchanged');
+    });
+
+    test('negative proof: absent, false, or malformed audit config injects no logger — no trail, no stderr line', (t) => {
+      pinGateEnv(t);
+      const fixtures = [
+        ['no config.json', undefined],
+        ['audit.enabled false', JSON.stringify({ audit: { enabled: false } })],
+        ['audit section is a scalar', JSON.stringify({ audit: true })],
+        ['unparseable config', '{"audit":'],
+      ];
+      const stderrWrites = captureStderr(t);
+      for (const [label, configText] of fixtures) {
+        const tmp = makeProject(t, configText);
+        const errors = dispatchOkThenInvalidArgs(tmp);
+        assert.equal(readTrail(tmp), null, `${label}: no audit trail may be written`);
+        assert.deepEqual(errors, ['phase remove accepts exactly one phase number'], `${label}: error translation unchanged`);
+      }
+      assert.deepEqual(stderrWrites, [], 'with observability off the seam writes nothing to stderr (no logger injected)');
+    });
+
+    test('regression fixture from #4975: gsd-tools honours audit.enabled on both live seams with no GSD_AUDIT', (t) => {
+      // Issue steps 3-7: hand-written {"audit":{"enabled":true}}, then one
+      // cjs-adapter dispatch (audit-open, ok) and one phase-router dispatch
+      // (phase remove, InvalidArgs). Before the fix: no trail, plain error only.
+      const tmp = makeProject(t, JSON.stringify({ audit: { enabled: true } }));
+
+      const auditOpen = runGsdTools(['audit-open'], tmp, CLI_ENV);
+      assert.equal(auditOpen.success, true, auditOpen.error);
+      const phaseRemove = runGsdTools(['phase', 'remove'], tmp, CLI_ENV);
+      assert.equal(phaseRemove.success, false, 'phase remove with no phase number is still a usage error');
+
+      const trail = readTrail(tmp);
+      assert.notEqual(trail, null, 'the audit trail must exist');
+      assert.deepEqual(trail.map((e) => [e.command, e.result.kind]), [
+        ['audit-open run', 'ok'],
+        ['phase remove', 'InvalidArgs'],
+      ]);
+
+      const records = structuredStderrRecords(phaseRemove.error);
+      assert.equal(records.length, 1, 'phase remove emits exactly one structured stderr record');
+      assert.equal(records[0].kind, 'InvalidArgs');
+      assert.equal(records[0].traceId, trail[1].traceId);
+    });
+
+    test('negative proof: with audit.enabled absent or false the --json-errors envelope is byte-for-byte unchanged', (t) => {
+      const runs = [
+        ['no config.json', undefined],
+        ['empty config', '{}'],
+        ['audit.enabled false', JSON.stringify({ audit: { enabled: false } })],
+      ].map(([label, configText]) => {
+        const tmp = makeProject(t, configText);
+        const r = runGsdTools(['phase', 'remove', '--json-errors'], tmp, CLI_ENV);
+        return { label, tmp, r };
+      });
+
+      for (const { label, tmp, r } of runs) {
+        assert.equal(r.success, false, `${label}: still a usage error`);
+        const envelope = JSON.parse(r.error);
+        assert.equal(envelope.ok, false, `${label}: stderr is exactly the one-line --json-errors envelope`);
+        assert.equal(envelope.message, 'phase remove accepts exactly one phase number');
+        assert.equal(readTrail(tmp), null, `${label}: no audit trail may be written`);
+      }
+      const [baseline, ...others] = runs;
+      for (const { label, r } of others) {
+        assert.equal(r.error, baseline.r.error, `${label}: stderr must be byte-identical to the no-config run`);
+      }
+    });
+  });
+}
+
+// ─── 8. phase uat-passed: the exit status follows the verdict (#5170) ─────────
+//
+// Real CLI, child process, argv exactly as `verify-work.md` passes it. The JSON
+// on stdout is the verdict and is unchanged; only the process exit code now
+// follows it (ADR-5057 §4, status mode): passed:true -> 0, passed:false -> 1.
+{
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
+
+  const PASSING_UAT = [
+    '---', 'status: passed', '---', '', '# UAT Results', '',
+    '### 1. Login works', 'expected: User logs in successfully', 'result: passed', '',
+  ].join('\n');
+  const PENDING_UAT = [
+    '---', 'status: partial', '---', '', '# UAT Results', '',
+    '### 1. Login works', 'expected: User logs in successfully', 'result: pending', '',
+  ].join('\n');
+
+  function projectWithUat(content) {
+    const tmpDir = createTempProject();
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      ['# Roadmap', '', '- [ ] Phase 1: Feature', '', '### Phase 1: Feature', '**Goal:** Build feature', '**Plans:** 1 plans', ''].join('\n'),
+    );
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-feature');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, 'feature-UAT.md'), content, 'utf-8');
+    return { tmpDir, phaseDir };
+  }
+
+  describe('phase-command-router — phase uat-passed exit status follows the verdict (#5170)', () => {
+    let fixture;
+    afterEach(() => { if (fixture) cleanup(fixture.tmpDir); fixture = undefined; });
+
+    test('uat-passed exits 1 on failing verdict', () => {
+      fixture = projectWithUat(PENDING_UAT);
+      const failing = ['--require-verification', '--uat-only'].map((flag) => runGsdTools(['phase', 'uat-passed', '1', flag], fixture.tmpDir));
+      for (const result of failing) {
+        assert.equal(result.exitCode, 1, `a failing verdict exits 1: ${result.error}`);
+        const out = JSON.parse(result.output);
+        assert.equal(out.passed, false, 'the verdict JSON is still delivered on stdout, unchanged');
+        assert.equal(out.phase, '1');
+        assert.ok(Array.isArray(out.blockers) && out.blockers.length > 0);
+      }
+    });
+
+    test('uat-passed exits 1 on failing verdict under --exit-contract=v2 as well', () => {
+      fixture = projectWithUat(PENDING_UAT);
+      const result = runGsdTools(['phase', 'uat-passed', '1', '--uat-only', '--exit-contract=v2'], fixture.tmpDir);
+      assert.equal(result.exitCode, 1);
+      assert.equal(JSON.parse(result.output).passed, false);
+    });
+
+    test('uat-passed exits 0 on passing verdict', () => {
+      fixture = projectWithUat(PASSING_UAT);
+      const result = runGsdTools(['phase', 'uat-passed', '1', '--uat-only'], fixture.tmpDir);
+      assert.equal(result.exitCode, 0, `a passing verdict exits 0: ${result.error}`);
+      assert.equal(JSON.parse(result.output).passed, true);
+    });
+
+    test('uat-only exit follows verdict: failing 1, passing 0 on the same phase after the row passes', () => {
+      fixture = projectWithUat(PENDING_UAT);
+      const before = runGsdTools(['phase', 'uat-passed', '1', '--uat-only'], fixture.tmpDir);
+      assert.equal(before.exitCode, 1);
+      fs.writeFileSync(path.join(fixture.phaseDir, 'feature-UAT.md'), PASSING_UAT, 'utf-8');
+      const after = runGsdTools(['phase', 'uat-passed', '1', '--uat-only'], fixture.tmpDir);
+      assert.equal(after.exitCode, 0);
+    });
+
+    test('a phase it cannot read keeps its error() contract: exit 1, nothing on stdout', () => {
+      fixture = projectWithUat(PASSING_UAT);
+      const result = runGsdTools(['phase', 'uat-passed', '99'], fixture.tmpDir);
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.output, '', 'an error() carries no verdict on stdout — callers tell it from a verdict by that');
     });
   });
 }

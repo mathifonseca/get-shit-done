@@ -207,6 +207,43 @@ function runGit(args, options = {}) {
   return spawnSeam('git', args, options);
 }
 
+const GIT_BASH_NOT_FOUND =
+  "process-seam: interpreter 'bash' on win32 runs Git for Windows' bash.exe, which was not "
+  + 'found at GSD_BASH_PATH or a standard Git for Windows location. Set GSD_BASH_PATH to it. '
+  + "A PATH lookup is not used: it can reach WSL's System32 bash.exe.";
+
+/**
+ * #5082: on win32 a bare `bash` is ambiguous. PATH can put WSL's launcher
+ * (%SystemRoot%\System32\bash.exe) ahead of Git for Windows' bash, and WSL
+ * bash cannot see the Windows node install or C:\ paths, so bash-driven tests
+ * fail with no hint that the wrong bash ran. `'bash'` resolves through the
+ * installer's own Git Bash policy (resolveBashExecutable in
+ * src/runtime-hooks-surface.cts), so hooks and tests cannot disagree about
+ * which bash is Git Bash. Other interpreters and platforms pass through.
+ *
+ * The built lib is required here, lazily, and only on win32: every
+ * bash-driven test loads this module, and an unbuilt tree must not break the
+ * ones that never need it (the builtLib() rule in tests/helpers.cjs).
+ *
+ * @param {string} interpreter
+ * @returns {string|null} the command to spawn; null when win32 has no Git Bash.
+ */
+function resolveInterpreter(interpreter) {
+  if (interpreter !== 'bash' || process.platform !== 'win32') return interpreter;
+  let hooksSurface;
+  try {
+    hooksSurface = require('../../gsd-core/bin/lib/runtime-hooks-surface.cjs');
+  } catch (cause) {
+    throw new Error(
+      "tests/helpers/process-seam.cjs resolves interpreter 'bash' on win32 through the built "
+        + 'runtime lib (gsd-core/bin/lib), which is not present. Run `npm run build:lib` first — '
+        + '`npm test` does this for you via its pretest script.',
+      { cause },
+    );
+  }
+  return hooksSurface.resolveBashExecutable();
+}
+
 /**
  * Run a hook script, matching how tests/read-guard.test.cjs and
  * tests/workflow-guard.test.cjs invoke hooks/*.js today:
@@ -234,11 +271,25 @@ function runGit(args, options = {}) {
  * @param {object} [options] - see spawnSeam.
  * @param {string} [options.interpreter] - binary used to run `target`.
  *   Defaults to `process.execPath` (matching read-guard/workflow-guard
- *   today); pass `'bash'` to run a shell script instead.
+ *   today); pass `'bash'` to run a shell script instead (on win32, Git Bash —
+ *   see resolveInterpreter).
  */
 function runHook(target, args = [], options = {}) {
   const { interpreter = process.execPath, ...spawnOptions } = options;
-  return spawnSeam(interpreter, [target, ...args], spawnOptions);
+  const command = resolveInterpreter(interpreter);
+  if (command === null) {
+    // Validate as spawnSeam would, so a contract violation throws on every
+    // host, not only on one that has Git Bash.
+    resolveTimeoutMs(spawnOptions.timeoutMs);
+    return toSeamResult({
+      error: Object.assign(new Error(GIT_BASH_NOT_FOUND), { code: 'ENOENT' }),
+      status: null,
+      signal: null,
+      stdout: '',
+      stderr: GIT_BASH_NOT_FOUND,
+    });
+  }
+  return spawnSeam(command, [target, ...args], spawnOptions);
 }
 
 module.exports = { runNode, runGit, runHook, OUTCOME, toSeamResult };
