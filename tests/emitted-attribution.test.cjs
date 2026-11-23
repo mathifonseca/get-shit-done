@@ -40,9 +40,14 @@ const { execFileSync } = require('node:child_process');
 const fc = require('fast-check');
 
 const { cleanup, createTempDir } = require('./helpers.cjs');
+const { isolatedEnv } = require('./helpers/isolated-env.cjs');
 const { BUILD_SCRIPT, buildParityManifest, buildInstallTree, PKG_VERSION } = require('./helpers/install-shared.cjs');
 const {
   resolveChangedPaths,
+  resolveBase,
+  isReleaseMergePr,
+  RELEASE_MERGE_NEXT_CANDIDATES,
+  readAckTrailers,
   resolveAttributionBase,
   resolveAttributionInputs,
   baseRefCandidates,
@@ -60,9 +65,10 @@ const {
   measuredPackageVersion,
   WORKTREE_TIMEOUT_MS,
   BUILD_LIB_TIMEOUT_MS,
-  BUILD_TIMEOUT_MS,
+  EMITTED_RUNTIME_BUILD_TIMEOUT_MS,
   CHUNK_TIMEOUT_CEILING_MS,
 } = require('./helpers/emitted-runtime.cjs');
+const { runNode, runGit, assertSeamExit, OUTCOME } = require('./helpers/process-seam.cjs');
 
 const { EXPECTED_MANIFEST_COUNT, loadManifests } = require('./helpers/emitted-provenance.cjs');
 // ADR-3942 §6: scripts/lint-emitted-drift-ack.cjs (the legacy JSON-ack-file pre-merge
@@ -129,8 +135,8 @@ const FRESH_FIXTURE_GIT_TIMEOUT_MS = 30_000;
 const HEAVY_REAL_TREE_TEST_TIMEOUT_MS = 480_000;
 
 /**
- * Runs the exact same script as the shared BUILD_TIMEOUT_MS constant
- * (scripts/build-hooks.js) but at 4x that constant's bound. This site
+ * Runs the exact same script (scripts/build-hooks.js) as the shared BUILD_TIMEOUT_MS
+ * class norm in tests/helpers/timeouts.cjs (30000ms) but at 4x that norm's bound. This site
  * sits inside "differential attribution over the real tree", the single
  * heaviest test in the suite, where elevated system load plausibly
  * justifies the wider margin -- not equalized to the lighter shared norm
@@ -1174,7 +1180,7 @@ const goodBaseline = (sha) => ({
 });
 
 test('a stale baseline cache key is detected, not used', () => {
-  // ADR-2719 §5: the one thing that has to be exactly right.
+  // ADR-2719 §5: "That key discipline is load-bearing — a stale baseline mis-attributes silently."
   const r = resolveBaseline({
     expectedSha: SHA_A,
     env: {},
@@ -1356,14 +1362,17 @@ test('#2854: the cache is used exactly when it is valid for the sha under test',
   }), { numRuns: 200 });
 });
 
-test('#2854: the gate is pinned to the SAME base the tree was merged with', () => {
-  // The deepest half of this bug. "Rebase check" merges `pull_request.base.sha`,
-  // pinned by #2472 so all 12 matrix jobs agree on one tree. But resolveBase()
+test('#2854: the gate pin GSD_EMITTED_BASE equals the rebase step pin CI_REBASE_BASE_SHA', () => {
+  // The deepest half of this bug. "Rebase check" is handed `pull_request.base.sha`
+  // (CI_REBASE_BASE_SHA, pinned by #2472). But resolveBase()
   // otherwise falls through to `origin/next`, which `fetch-depth: 0` leaves at the
-  // LIVE tip. When `next` advanced mid-flight the gate compared a tree built on
-  // base.sha against a baseline at a NEWER commit — so the correctly-keyed cache
+  // LIVE tip. When `next` advanced mid-flight the gate compared the tree against
+  // a baseline at a NEWER commit — so the correctly-keyed cache
   // was rejected as "stale" and the run died. Worse than dying would be surviving:
   // a baseline at the wrong commit attributes other people's merges to this PR.
+  // This test pins only that the two workflow values are equal. On a pull_request lane
+  // the checked-out tree is GitHub's merge ref, whose base can be newer than that
+  // sha, so the pin is a floor for the attribution base, not the tree's base (#5797).
   //
   // Two surfaces read one value, which is the generative-divergence shape this repo
   // has been bitten by before, so the parity is asserted rather than assumed.
@@ -1384,9 +1393,8 @@ test('#2854: the gate is pinned to the SAME base the tree was merged with', () =
     assert.ok(mergedBase, `job ${name}: rebase step must pin CI_REBASE_BASE_SHA`);
     assert.equal(gateBase, mergedBase,
       `job ${name}: the emitted gate's base (GSD_EMITTED_BASE=${JSON.stringify(gateBase)}) must equal ` +
-      `the commit the tree was merged with (CI_REBASE_BASE_SHA=${JSON.stringify(mergedBase)}). ` +
-      'Diverging them makes the differential compare a tree against a baseline from a ' +
-      'different commit, which mis-attributes unrelated merges to this PR.');
+      `the rebase step's pin (CI_REBASE_BASE_SHA=${JSON.stringify(mergedBase)}). ` +
+      'Diverging them gives the two steps different pins for one run.');
   }
 });
 
@@ -1443,17 +1451,17 @@ test('base-ref candidates are ordered most-specific first and de-duplicated', ()
   // pinned rather than left implicit.
   assert.deepEqual(
     baseRefCandidates({ GSD_EMITTED_BASE: 'abc123', GITHUB_BASE_REF: 'next' }),
-    ['abc123', 'origin/next', 'next'],
+    ['abc123', 'origin/next', 'next', 'upstream/next'],
     'an explicit override wins, then the Actions base ref, then the defaults',
   );
   assert.deepEqual(
     baseRefCandidates({ GITHUB_BASE_REF: 'release/1.9' }),
-    ['origin/release/1.9', 'release/1.9', 'origin/next', 'next'],
+    ['origin/release/1.9', 'release/1.9', 'upstream/next', 'origin/next', 'next'],
     'a non-next base ref is honored before falling back',
   );
   assert.deepEqual(
     baseRefCandidates({}),
-    ['origin/next', 'next'],
+    ['upstream/next', 'origin/next', 'next'],
     'with no env, the repo defaults are the only candidates',
   );
   // De-duplication matters: GITHUB_BASE_REF=next must not produce origin/next twice.
@@ -1525,9 +1533,13 @@ test(
     // proved that the hard way (#2767 review) when its first `git rev-parse HEAD` failed
     // closed. Reusing the SAME helper `buildBaselineAtRef` now uses (below) rather than
     // hand-rolling the flag here keeps the fix from silently diverging per call site.
-    const run = (...args) => execFileSync('git', [...safeDirArgs(REPO_ROOT), ...args], {
-      cwd: REPO_ROOT, encoding: 'utf8', timeout: REAL_REPO_GIT_TIMEOUT_MS, env: gitEnv, stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
+    const run = (...args) => {
+      const r = runGit([...safeDirArgs(REPO_ROOT), ...args], {
+        cwd: REPO_ROOT, timeoutMs: REAL_REPO_GIT_TIMEOUT_MS, env: gitEnv,
+      });
+      assertSeamExit(assert, r);
+      return r.stdout.trim();
+    };
 
     const headSha = run('rev-parse', 'HEAD');
     run('read-tree', 'HEAD');
@@ -1540,11 +1552,13 @@ test(
 
     // Precondition, ASSERTED not assumed: the synthetic commit truly lacks the file —
     // otherwise this test would prove nothing.
-    assert.throws(
-      () => execFileSync('git', [...safeDirArgs(REPO_ROOT), 'cat-file', '-e', `${syntheticSha}:scripts/gen-emitted-baseline.cjs`], {
-        cwd: REPO_ROOT, encoding: 'utf8', timeout: REAL_REPO_GIT_TIMEOUT_MS, stdio: 'pipe',
-      }),
-      /./,
+    const catFile = runGit(
+      [...safeDirArgs(REPO_ROOT), 'cat-file', '-e', `${syntheticSha}:scripts/gen-emitted-baseline.cjs`],
+      { cwd: REPO_ROOT, timeoutMs: REAL_REPO_GIT_TIMEOUT_MS },
+    );
+    assert.equal(catFile.outcome, OUTCOME.EXITED, catFile.summary);
+    assert.notEqual(
+      catFile.exitCode, 0,
       'the synthetic ref must genuinely lack the generator script for this test to prove anything',
     );
 
@@ -2096,13 +2110,21 @@ test('property: reported added/dropped are exactly the set differences', () => {
  * Hermetic git in a throwaway repo: fixed identity, no signing, no global hooks. Shares
  * `FRESH_FIXTURE_GIT_TIMEOUT_MS` with the other from-scratch git fixtures in this file
  * rather than introducing a second timeout constant for the identical shape.
+ *
+ * `date` (git's `<unix-seconds> +0000` form) pins both the author and committer date of
+ * the commit `args` creates, through `isolatedEnv` with the fixture dir as HOME. Only a
+ * fixture whose meaning depends on commit-date order passes it (the stacked-PR row
+ * below); every other call keeps the inherited env.
  */
-function gitFixture(cwd, args) {
+function gitFixture(cwd, args, { date } = {}) {
+  const env = date === undefined
+    ? undefined
+    : isolatedEnv({ home: cwd, override: { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
   return execFileSync('git', [
     '-c', 'user.name=gsd-test', '-c', 'user.email=gsd-test@example.invalid',
     '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null',
     ...safeDirArgs(cwd), ...args,
-  ], { cwd, encoding: 'utf8', timeout: FRESH_FIXTURE_GIT_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  ], { cwd, env, encoding: 'utf8', timeout: FRESH_FIXTURE_GIT_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 /**
@@ -2131,6 +2153,91 @@ function makeForkedRepo(baseAdvance) {
   const tipSha = gitFixture(root, ['rev-parse', 'HEAD']);
   gitFixture(root, ['checkout', '-q', 'release']);
   return { root, forkSha, tipSha };
+}
+
+// The feature starts at upstream's newer tip; the fork's origin stays behind.
+function makeRemoteBaseRepo(t, { origin = true, upstream = true } = {}) {
+  const fixture = makeForkedRepo(1);
+  const { root, forkSha, tipSha } = fixture;
+  t.after(() => cleanup(root));
+  if (origin) gitFixture(root, ['update-ref', 'refs/remotes/origin/next', forkSha]);
+  if (upstream) gitFixture(root, ['update-ref', 'refs/remotes/upstream/next', tipSha]);
+  gitFixture(root, ['checkout', '-q', '-b', 'feature', tipSha]);
+  gitFixture(root, ['branch', '-D', 'next']);
+  return fixture;
+}
+
+test('#5187: an unpinned fork uses upstream/next instead of stale origin/next', (t) => {
+  const { root, tipSha } = makeRemoteBaseRepo(t);
+  assert.deepEqual(resolveBase({}, { cwd: root }), { ref: 'upstream/next', sha: tipSha });
+  assert.deepEqual(resolveAttributionBase({}, { cwd: root }), {
+    ref: 'upstream/next', tipSha, sha: tipSha,
+  });
+});
+
+test('#5187: an origin-only clone still resolves origin/next', (t) => {
+  const { root, forkSha } = makeRemoteBaseRepo(t, { upstream: false });
+  assert.deepEqual(resolveBase({}, { cwd: root }), { ref: 'origin/next', sha: forkSha });
+});
+
+test('#5187: a checkout without base refs keeps the null result', (t) => {
+  const { root } = makeRemoteBaseRepo(t, { origin: false, upstream: false });
+  assert.equal(resolveBase({}, { cwd: root }), null);
+  assert.equal(resolveAttributionBase({}, { cwd: root }), null);
+});
+
+test('#5187: an explicit pin takes precedence over CI and upstream refs', (t) => {
+  const { root, forkSha } = makeRemoteBaseRepo(t);
+  assert.deepEqual(resolveBase({ GSD_EMITTED_BASE: forkSha, GITHUB_BASE_REF: 'next' }, { cwd: root }), {
+    ref: forkSha, sha: forkSha,
+  });
+});
+
+test('#5187: the CI remote base takes precedence over upstream/next', (t) => {
+  const { root, forkSha } = makeRemoteBaseRepo(t);
+  assert.deepEqual(resolveBase({ GITHUB_BASE_REF: 'next' }, { cwd: root }), {
+    ref: 'origin/next', sha: forkSha,
+  });
+});
+
+test('#5187: the CI local base takes precedence over upstream/next', (t) => {
+  const { root, forkSha } = makeRemoteBaseRepo(t, { origin: false });
+  gitFixture(root, ['branch', 'ci-base', forkSha]);
+  assert.deepEqual(resolveBase({ GITHUB_BASE_REF: 'ci-base' }, { cwd: root }), {
+    ref: 'ci-base', sha: forkSha,
+  });
+});
+
+for (const hasBase of [true, false]) {
+  test(`#5187: ${hasBase ? 'failure' : 'skip'} output names the resolved base and GSD_EMITTED_BASE`, (t) => {
+    const { root } = makeRemoteBaseRepo(t, { origin: hasBase, upstream: hasBase });
+    const probe = path.join(root, 'base-output.test.cjs');
+    fs.writeFileSync(probe, `
+      const { test } = require('node:test');
+      const assert = require('node:assert/strict');
+      const { resolveAttributionBase } = require(${JSON.stringify(require.resolve('./helpers/emitted-runtime.cjs'))});
+      test('attribution output probe', (t) => {
+        const base = resolveAttributionBase({}, {
+          cwd: __dirname, diagnostic: (message) => t.diagnostic(message),
+        });
+        if (!base) { t.skip('no base ref resolvable'); return; }
+        assert.fail('forced attribution failure');
+      });
+    `);
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    delete env.GSD_RUN_TESTS_LEDGER_FILE;
+    delete env.GSD_RUN_TESTS_EVENTS_FILE;
+    const result = runNode(['--test', '--test-reporter=tap', probe], {
+      cwd: root, timeoutMs: FRESH_FIXTURE_GIT_TIMEOUT_MS,
+      env,
+    });
+    assert.equal(result.outcome, OUTCOME.EXITED);
+    assert.equal(result.exitCode, hasBase ? 1 : 0);
+    assert.match(result.stdout, hasBase ? /resolved base: upstream\/next/ : /resolved base: none/);
+    assert.match(result.stdout, /GSD_EMITTED_BASE=<ref\|sha>/);
+    if (!hasBase) assert.match(result.stdout, /# skipped 1/);
+  });
 }
 
 for (const baseAdvance of [0, 1, 2]) {
@@ -2262,6 +2369,497 @@ test('#5008: every differential input is pinned to the merge-base, never the tip
   }
 });
 
+// A pull_request run checks out GitHub's merge ref (refs/pull/N/merge), which GitHub
+// builds on the base tip it last saw, while `pull_request.base.sha` (the job's
+// GSD_EMITTED_BASE pin) can be older. The "Rebase check" merge of that older sha is then
+// a no-op, so `merge-base(pin, HEAD)` is the old sha and the measured range sweeps in
+// base-branch commits the PR never authored, with their ack trailers (PR #5119, run
+// 40129863190: 34 `next` commits, four keys "declared twice"). The fixture is that shape:
+// B0 = the stale pin, B1/B2 = base-only commits declaring one key with two reasons,
+// M = merge(B2 <- PR head) with B2 as its first parent, checked out detached.
+function makeStalePinMergeRefRepo(t) {
+  const root = createTempDir('gsd-stale-pin-merge-ref-');
+  t.after(() => cleanup(root));
+  gitFixture(root, ['init', '-q', '-b', 'next']);
+  fs.writeFileSync(path.join(root, 'shared.txt'), 'v0\n');
+  gitFixture(root, ['add', '-A']);
+  gitFixture(root, ['commit', '-q', '-m', 'B0: the base sha the PR event recorded']);
+  const b0 = gitFixture(root, ['rev-parse', 'HEAD']);
+
+  gitFixture(root, ['checkout', '-q', '-b', 'pr']);
+  fs.writeFileSync(path.join(root, 'pr-only.txt'), 'pr\n');
+  gitFixture(root, ['add', '-A']);
+  gitFixture(root, ['commit', '-q', '-m', 'the PR\'s own change']);
+
+  gitFixture(root, ['checkout', '-q', 'next']);
+  for (const [i, reason] of [[1, 'first reason'], [2, 'a different reason']]) {
+    fs.writeFileSync(path.join(root, 'shared.txt'), `v${i}\n`);
+    gitFixture(root, ['add', '-A']);
+    gitFixture(root, ['commit', '-q', '-m', `B${i}: base-only change`, '-m',
+      `Emitted-Drift-Ack-Growth: verify-work.md — ${reason}`]);
+  }
+  const b2 = gitFixture(root, ['rev-parse', 'HEAD']);
+
+  // What actions/checkout leaves on a pull_request run: the merge ref detached, the
+  // base branch only as a remote-tracking ref, no local branch of that name.
+  gitFixture(root, ['checkout', '-q', '--detach', b2]);
+  gitFixture(root, ['merge', '-q', '--no-ff', '--no-edit', 'pr']);
+  const mergeRef = gitFixture(root, ['rev-parse', 'HEAD']);
+  gitFixture(root, ['update-ref', 'refs/remotes/origin/next', b2]);
+  gitFixture(root, ['branch', '-q', '-D', 'next']);
+  return { root, b0, b2, mergeRef };
+}
+
+test('a stale pull_request base pin measures from the newest base commit the merge ref contains', (t) => {
+  const { root, b0, b2, mergeRef } = makeStalePinMergeRefRepo(t);
+  assert.equal(gitFixture(root, ['rev-parse', `${mergeRef}^1`]), b2, 'fixture: the merge ref is built on B2');
+
+  const base = resolveAttributionBase({ GSD_EMITTED_BASE: b0, GITHUB_BASE_REF: 'next' }, { cwd: root });
+  assert.equal(base.sha, b2,
+    'the attribution base must be the newest base-branch commit HEAD contains (B2), not the stale pin (B0)');
+
+  // The #5008 single-origin wiring: the changed-path range and the ack-trailer range both
+  // move with the base, so neither sees the base-only commits.
+  const { changedPaths, ack } = resolveAttributionInputs(base, {
+    cwd: root,
+    resolveBaselineFn: () => ({ ok: true, via: 'build', baseline: {} }),
+    readJson: () => null,
+  });
+  assert.deepEqual(changedPaths, ['pr-only.txt'], 'only the PR\'s own path may be in the changed set');
+  assert.deepEqual(ack.errors, [], 'base-only trailers must not reach the PR\'s ack range');
+  assert.deepEqual([...ack.growth.entries()], []);
+});
+
+test('the base advance is bounded: the pin holds off the PR lane, and a base tip HEAD lacks never counts', (t) => {
+  const { root, b0, b2 } = makeStalePinMergeRefRepo(t);
+
+  // No GITHUB_BASE_REF (a local run, a release lane, merge_group): the pin is the base.
+  assert.equal(resolveAttributionBase({ GSD_EMITTED_BASE: b0 }, { cwd: root }).sha, b0,
+    'without GITHUB_BASE_REF the explicit pin must be honored as is');
+
+  // The base branch advancing mid-run (a commit HEAD does not contain) cannot move it.
+  gitFixture(root, ['checkout', '-q', '-b', 'later', b2]);
+  fs.writeFileSync(path.join(root, 'shared.txt'), 'v3\n');
+  gitFixture(root, ['add', '-A']);
+  gitFixture(root, ['commit', '-q', '-m', 'B3: lands on next after the merge ref was built']);
+  const b3 = gitFixture(root, ['rev-parse', 'HEAD']);
+  gitFixture(root, ['checkout', '-q', '-']);
+  gitFixture(root, ['update-ref', 'refs/remotes/origin/next', b3]);
+  assert.equal(resolveAttributionBase({ GSD_EMITTED_BASE: b0, GITHUB_BASE_REF: 'next' }, { cwd: root }).sha, b2,
+    'a base commit HEAD does not contain must never become the attribution base');
+
+  // A remote-tracking ref that does not resolve leaves the pin's merge-base in place.
+  assert.equal(resolveAttributionBase({ GSD_EMITTED_BASE: b0, GITHUB_BASE_REF: 'no-such-branch' }, { cwd: root }).sha, b0);
+});
+
+test('the base advance never moves below the pin when the base-branch ref is older than it', (t) => {
+  const { root, b0, b2, mergeRef } = makeStalePinMergeRefRepo(t);
+  // origin/next behind the pin: the pin's merge-base is newer, so it holds.
+  gitFixture(root, ['update-ref', 'refs/remotes/origin/next', b0]);
+  const messages = [];
+  assert.equal(resolveAttributionBase({ GSD_EMITTED_BASE: b2, GITHUB_BASE_REF: 'next' },
+    { cwd: root, diagnostic: (m) => messages.push(m) }).sha, b2,
+  'an origin ref older than the pin must not pull the attribution base backwards');
+  assert.equal(gitFixture(root, ['rev-parse', 'HEAD']), mergeRef, 'fixture: HEAD stays the merge ref');
+  // The floor is kept on purpose, and the skip says so, naming both shas.
+  assert.equal(messages.length, 2, `the resolved-base line plus exactly one kept-floor line: ${messages.join(' | ')}`);
+  const kept = messages[1];
+  assert.match(kept, /does not descend from it/);
+  assert.ok(kept.includes(b2), `the kept-floor line must name the pin's merge-base ${b2}: ${kept}`);
+  assert.ok(kept.includes(b0), `the kept-floor line must name the origin/next commit ${b0}: ${kept}`);
+  assert.ok(!messages.some((m) => m.includes('measuring from')), 'no advance diagnostic when the floor is kept');
+});
+
+test('a base-branch ref on an unrelated history keeps the pin and reports the failed lookup', (t) => {
+  const { root, b0, mergeRef } = makeStalePinMergeRefRepo(t);
+  // origin/next on an orphan history: `git merge-base <orphan> HEAD` exits 1 (no common ancestor).
+  gitFixture(root, ['checkout', '-q', '--orphan', 'unrelated']);
+  gitFixture(root, ['rm', '-rq', '--cached', '.']);
+  fs.writeFileSync(path.join(root, 'orphan.txt'), 'orphan\n');
+  gitFixture(root, ['add', 'orphan.txt']);
+  gitFixture(root, ['commit', '-q', '-m', 'an unrelated root']);
+  const orphan = gitFixture(root, ['rev-parse', 'HEAD']);
+  gitFixture(root, ['checkout', '-q', '-f', '--detach', mergeRef]);
+  gitFixture(root, ['update-ref', 'refs/remotes/origin/next', orphan]);
+  assert.throws(() => gitFixture(root, ['merge-base', orphan, 'HEAD']),
+    (err) => err.status === 1, 'fixture: merge-base must exit 1 on unrelated histories');
+
+  const messages = [];
+  const base = resolveAttributionBase({ GSD_EMITTED_BASE: b0, GITHUB_BASE_REF: 'next' },
+    { cwd: root, diagnostic: (m) => messages.push(m) });
+  assert.equal(base.sha, b0, 'an unrelated origin/next must keep the pin\'s merge-base');
+  assert.equal(messages.length, 2, `the resolved-base line plus exactly one kept-floor line: ${messages.join(' | ')}`);
+  assert.match(messages[1], /keeping the pin's merge-base/);
+  assert.ok(messages[1].includes(b0), `the kept-floor line must name the pin's merge-base ${b0}: ${messages[1]}`);
+  assert.match(messages[1], /origin\/next/);
+  assert.match(messages[1], /failed/);
+  // The failing command is the relatedness check itself, not a later step of the walk.
+  assert.ok(messages[1].includes(`merge-base ${orphan} HEAD`),
+    `the failed line must name the relatedness check \`merge-base ${orphan} HEAD\`: ${messages[1]}`);
+});
+
+// Fresh review case (f): origin/next's first-parent chain is rooted at R1, outside the floor's
+// history, which joined `next` only through a second-parent merge J = merge(A1 <- C1). HEAD is
+// a PR on C1 and contains no commit of that chain, so the walk ends at the root R1, which has
+// no first parent. That is "no chain commit is in HEAD", not a git failure: the floor is kept
+// and the line must say so truthfully.
+test('a first-parent chain rooted outside HEAD keeps the pin and says no base commit is in HEAD', (t) => {
+  const root = createTempDir('gsd-rooted-chain-');
+  t.after(() => cleanup(root));
+  const commit = (file, body, message) => {
+    fs.writeFileSync(path.join(root, file), body);
+    gitFixture(root, ['add', file]);
+    gitFixture(root, ['commit', '-q', '-m', message]);
+    return gitFixture(root, ['rev-parse', 'HEAD']);
+  };
+  gitFixture(root, ['init', '-q', '-b', 'next']);
+  const r1 = commit('a.txt', 'r1\n', 'R1: next\'s first-parent root');
+  commit('a.txt', 'a1\n', 'A1');
+  gitFixture(root, ['checkout', '-q', '--orphan', 'other']);
+  gitFixture(root, ['rm', '-rq', '--cached', '.']);
+  commit('c.txt', 'r2\n', 'R2: a second root');
+  const c1 = commit('c.txt', 'c1\n', 'C1: the pin');
+  gitFixture(root, ['checkout', '-q', '-b', 'pr']);
+  commit('p.txt', 'p\n', 'PR on C1');
+  gitFixture(root, ['checkout', '-q', '-f', 'next']);
+  gitFixture(root, ['merge', '-q', '--no-ff', '--no-edit', '--allow-unrelated-histories', 'other']);
+  const tip = commit('a.txt', 'b\n', 'B: next after J');
+  gitFixture(root, ['checkout', '-q', '-f', '--detach', 'pr']);
+  gitFixture(root, ['update-ref', 'refs/remotes/origin/next', tip]);
+  gitFixture(root, ['branch', '-q', '-D', 'next', 'other', 'pr']);
+  assert.deepEqual(
+    gitFixture(root, ['rev-list', '--first-parent', tip, `^${c1}`]).split('\n').at(-1), r1,
+    'fixture: the walk above the floor must end at the root R1');
+
+  const messages = [];
+  const base = resolveAttributionBase({ GSD_EMITTED_BASE: c1, GITHUB_BASE_REF: 'next' },
+    { cwd: root, diagnostic: (m) => messages.push(m) });
+  assert.equal(base.sha, c1, 'the pin\'s merge-base must be kept');
+  assert.equal(messages.length, 2, `the resolved-base line plus exactly one kept-floor line: ${messages.join(' | ')}`);
+  assert.ok(messages[1].includes(c1), `the kept-floor line must name the pin's merge-base ${c1}: ${messages[1]}`);
+  assert.match(messages[1], /no origin\/next first-parent commit is in HEAD/);
+  assert.doesNotMatch(messages[1], /failed/, 'no git command failed, so the line must not say one did');
+});
+
+// Re-review (b80a5ce1a) Minor 1: the walk's fallthrough. The pin B0 is the merged base and
+// origin/next has since gained a commit HEAD lacks, landed either as a merge M = merge(B0 <- S)
+// or as a plain commit B1. Nothing listed above the floor is in HEAD, so the newest contained
+// chain commit is the FIRST parent of the oldest listed one, B0. Taking any other parent (S,
+// which HEAD lacks) would break "never lands on a commit HEAD lacks".
+for (const landed of ['a merge commit', 'a plain commit']) {
+  test(`a merged-base pin is kept silently when origin/next gained ${landed} HEAD lacks`, (t) => {
+    const root = createTempDir('gsd-fallthrough-first-parent-');
+    t.after(() => cleanup(root));
+    const commit = (file, body, message) => {
+      fs.writeFileSync(path.join(root, file), body);
+      gitFixture(root, ['add', file]);
+      gitFixture(root, ['commit', '-q', '-m', message]);
+      return gitFixture(root, ['rev-parse', 'HEAD']);
+    };
+    gitFixture(root, ['init', '-q', '-b', 'next']);
+    const b0 = commit('a.txt', 'b0\n', 'B0: the pin, which the merge ref is built on');
+    gitFixture(root, ['checkout', '-q', '-b', 'pr']);
+    commit('p.txt', 'p\n', 'P: the PR');
+    gitFixture(root, ['checkout', '-q', '--detach', b0]);
+    gitFixture(root, ['merge', '-q', '--no-ff', '--no-edit', 'pr']);
+    const mergeRef = gitFixture(root, ['rev-parse', 'HEAD']);
+    gitFixture(root, ['checkout', '-q', 'next']);
+    let side = null;
+    if (landed === 'a merge commit') {
+      gitFixture(root, ['checkout', '-q', '-b', 'side', b0]);
+      side = commit('s.txt', 's\n', 'S: a side commit');
+      gitFixture(root, ['checkout', '-q', 'next']);
+      gitFixture(root, ['merge', '-q', '--no-ff', '--no-edit', 'side']);
+    } else {
+      commit('a.txt', 'b1\n', 'B1: lands after the merge ref was built');
+    }
+    const tip = gitFixture(root, ['rev-parse', 'HEAD']);
+    gitFixture(root, ['checkout', '-q', '--detach', mergeRef]);
+    gitFixture(root, ['update-ref', 'refs/remotes/origin/next', tip]);
+
+    const messages = [];
+    const base = resolveAttributionBase({ GSD_EMITTED_BASE: b0, GITHUB_BASE_REF: 'next' },
+      { cwd: root, diagnostic: (m) => messages.push(m) });
+    assert.equal(base.sha, b0,
+      `the pin B0 must be kept${side ? `, never the side commit S ${side} that HEAD lacks` : ''}`);
+    assert.equal(messages.length, 1, `only the resolved-base line is expected: ${messages.join(' | ')}`);
+  });
+}
+
+// Re-review (b80a5ce1a) Nit 1: a shallow clone. origin/next is T = commit(parents B1, B0),
+// so the relatedness check finds B0 through T's second parent, and nothing listed above the
+// floor B0 (T, B1) is in HEAD = merge(B0 <- P). Cloned with --depth 2, B1 is a shallow
+// boundary: `rev-list --parents` reports it as a root, but its real first parent is B0, the
+// floor. Read from the raw commit, the walk keeps B0 silently instead of reporting a root.
+test('a shallow boundary is not mistaken for a root: the real first parent keeps the pin silently', (t) => {
+  const work = createTempDir('gsd-shallow-boundary-');
+  t.after(() => cleanup(work));
+  const src = path.join(work, 'src');
+  fs.mkdirSync(src);
+  const commit = (file, body, message) => {
+    fs.writeFileSync(path.join(src, file), body);
+    gitFixture(src, ['add', file]);
+    gitFixture(src, ['commit', '-q', '-m', message]);
+    return gitFixture(src, ['rev-parse', 'HEAD']);
+  };
+  gitFixture(src, ['init', '-q', '-b', 'next']);
+  const b0 = commit('a.txt', 'b0\n', 'B0: the pin');
+  gitFixture(src, ['checkout', '-q', '-b', 'pr']);
+  commit('p.txt', 'p\n', 'P: the PR');
+  gitFixture(src, ['checkout', '-q', '--detach', b0]);
+  gitFixture(src, ['merge', '-q', '--no-ff', '--no-edit', 'pr']);
+  gitFixture(src, ['branch', '-q', 'mergeref']);
+  gitFixture(src, ['checkout', '-q', 'next']);
+  const b1 = commit('a.txt', 'b1\n', 'B1: lands after the merge ref was built');
+  const tip = gitFixture(src, ['commit-tree', `${b1}^{tree}`, '-p', b1, '-p', b0, '-m', 'T: next, joined to B0 again']);
+  gitFixture(src, ['update-ref', 'refs/heads/next', tip]);
+
+  const clone = path.join(work, 'clone');
+  gitFixture(work, ['clone', '-q', '--depth', '2', '--no-single-branch', `file://${src}`, clone]);
+  gitFixture(clone, ['checkout', '-q', '--detach', 'refs/remotes/origin/mergeref']);
+  assert.equal(gitFixture(clone, ['rev-list', '--parents', '-n', '1', b1]), b1,
+    'fixture: in the shallow clone rev-list must report B1 as a root (a graft)');
+
+  const messages = [];
+  const base = resolveAttributionBase({ GSD_EMITTED_BASE: b0, GITHUB_BASE_REF: 'next' },
+    { cwd: clone, diagnostic: (m) => messages.push(m) });
+  assert.equal(base.sha, b0, 'the pin B0 must be kept');
+  assert.equal(messages.length, 1, `only the resolved-base line is expected: ${messages.join(' | ')}`);
+});
+
+// Final re-review (3b73800e0) Major 1: a shallow boundary whose real first parent is PRESENT
+// but not in HEAD. `next` is B0 <- P <- B1, then T = commit(parents B1, B0); the merge ref is
+// merge(B0 <- PR) and a branch x points at P. A --depth 2 clone of all branches fetches P
+// through x but grafts B1 (its parent is cut), so nothing listed above the floor B0 is in HEAD
+// and B1's raw first parent is P, which descends from B0 but HEAD lacks. The single advance
+// postcondition (the chosen commit must be in HEAD) keeps the floor and says why.
+test('a shallow boundary whose real parent HEAD lacks keeps the pin: an advance must land in HEAD', (t) => {
+  const work = createTempDir('gsd-shallow-parent-outside-head-');
+  t.after(() => cleanup(work));
+  const src = path.join(work, 'src');
+  fs.mkdirSync(src);
+  const commit = (file, body, message) => {
+    fs.writeFileSync(path.join(src, file), body);
+    gitFixture(src, ['add', file]);
+    gitFixture(src, ['commit', '-q', '-m', message]);
+    return gitFixture(src, ['rev-parse', 'HEAD']);
+  };
+  gitFixture(src, ['init', '-q', '-b', 'next']);
+  const b0 = commit('a.txt', 'b0\n', 'B0: the pin');
+  gitFixture(src, ['checkout', '-q', '-b', 'pr']);
+  commit('p.txt', 'p\n', 'PR: the PR');
+  gitFixture(src, ['checkout', '-q', '--detach', b0]);
+  gitFixture(src, ['merge', '-q', '--no-ff', '--no-edit', 'pr']);
+  gitFixture(src, ['branch', '-q', 'mergeref']);
+  gitFixture(src, ['checkout', '-q', 'next']);
+  const pSha = commit('a.txt', 'P\n', 'P: lands after the merge ref was built');
+  gitFixture(src, ['branch', '-q', 'x', pSha]);
+  const b1 = commit('a.txt', 'b1\n', 'B1');
+  const tip = gitFixture(src, ['commit-tree', `${b1}^{tree}`, '-p', b1, '-p', b0, '-m', 'T: next, joined to B0 again']);
+  gitFixture(src, ['update-ref', 'refs/heads/next', tip]);
+
+  const clone = path.join(work, 'clone');
+  gitFixture(work, ['clone', '-q', '--depth', '2', '--no-single-branch', `file://${src}`, clone]);
+  gitFixture(clone, ['checkout', '-q', '--detach', 'refs/remotes/origin/mergeref']);
+  assert.equal(gitFixture(clone, ['rev-list', '--parents', '-n', '1', b1]), b1, 'fixture: B1 must be a shallow boundary');
+  gitFixture(clone, ['cat-file', '-e', pSha]); // fixture: P is present (fetched through x)
+  assert.throws(() => gitFixture(clone, ['merge-base', '--is-ancestor', pSha, 'HEAD']),
+    (err) => err.status === 1, 'fixture: HEAD must not contain P');
+
+  const messages = [];
+  const base = resolveAttributionBase({ GSD_EMITTED_BASE: b0, GITHUB_BASE_REF: 'next' },
+    { cwd: clone, diagnostic: (m) => messages.push(m) });
+  assert.equal(base.sha, b0, `the pin B0 must be kept, never P ${pSha}, which HEAD lacks`);
+  assert.equal(messages.length, 2, `the resolved-base line plus exactly one kept-floor line: ${messages.join(' | ')}`);
+  assert.ok(messages[1].includes(pSha), `the kept-floor line must name P ${pSha}: ${messages[1]}`);
+  assert.match(messages[1], /is not in HEAD/);
+  assert.match(messages[1], /shallow/);
+});
+
+// A rooted chain (as in the row titled "a first-parent chain rooted outside HEAD ...") whose root R1 carries a decoy `parent <PR tip>` that
+// git does not treat as a parent: in the commit MESSAGE, or as a stray header after
+// `committer` (written with hash-object --literally). git reads parents only from the lines
+// directly after `tree`, so R1 is a root and the floor is kept with the rooted-chain line.
+for (const decoy of ['in its message', 'as a header after committer']) {
+  test(`a root with a decoy parent line ${decoy} is still a root: the pin is kept`, (t) => {
+    const root = createTempDir('gsd-decoy-parent-root-');
+    t.after(() => cleanup(root));
+    const commit = (file, body, message) => {
+      fs.writeFileSync(path.join(root, file), body);
+      gitFixture(root, ['add', file]);
+      gitFixture(root, ['commit', '-q', '-m', message]);
+      return gitFixture(root, ['rev-parse', 'HEAD']);
+    };
+    gitFixture(root, ['init', '-q', '-b', 'other']);
+    commit('c.txt', 'r2\n', 'R2: a root');
+    const c1 = commit('c.txt', 'c1\n', 'C1: the pin');
+    const prTip = commit('p.txt', 'p\n', 'PR on C1');
+    const tree = gitFixture(root, ['rev-parse', `${c1}^{tree}`]);
+    let r1;
+    if (decoy === 'in its message') {
+      r1 = gitFixture(root, ['commit-tree', tree, '-m', 'R1: next\'s first-parent root', '-m', `parent ${prTip}`]);
+    } else {
+      const objectFile = path.join(root, '.git', 'r1-object');
+      fs.writeFileSync(objectFile, `tree ${tree}\nauthor t <t@example.invalid> 1700000000 +0000\n` +
+        `committer t <t@example.invalid> 1700000000 +0000\nparent ${prTip}\n\nR1: a stray parent header\n`);
+      r1 = gitFixture(root, ['hash-object', '-t', 'commit', '-w', '--literally', objectFile]);
+    }
+    assert.equal(gitFixture(root, ['rev-list', '--parents', '-n', '1', r1]), r1, 'fixture: git must read R1 as a root');
+    const a1 = gitFixture(root, ['commit-tree', tree, '-p', r1, '-m', 'A1']);
+    const j = gitFixture(root, ['commit-tree', tree, '-p', a1, '-p', c1, '-m', 'J: next merges the C1 line']);
+    const tip = gitFixture(root, ['commit-tree', tree, '-p', j, '-m', 'B: next']);
+    gitFixture(root, ['checkout', '-q', '--detach', prTip]);
+    gitFixture(root, ['update-ref', 'refs/remotes/origin/next', tip]);
+
+    const messages = [];
+    const base = resolveAttributionBase({ GSD_EMITTED_BASE: c1, GITHUB_BASE_REF: 'next' },
+      { cwd: root, diagnostic: (m) => messages.push(m) });
+    assert.equal(base.sha, c1, `the pin C1 must be kept, never the PR tip ${prTip}`);
+    assert.equal(messages.length, 2, `the resolved-base line plus exactly one kept-floor line: ${messages.join(' | ')}`);
+    assert.match(messages[1], /no origin\/next first-parent commit is in HEAD/);
+    assert.ok(messages[1].includes(r1), `the kept-floor line must name the root R1 ${r1}: ${messages[1]}`);
+  });
+}
+
+test('a pin that is already the merged base is kept and says nothing about an advance', (t) => {
+  const { root, b2 } = makeStalePinMergeRefRepo(t);
+  const messages = [];
+  // origin/next is at B2, the pin's own merge-base (the usual PR-lane case). What this row
+  // pins is the observable result: the base stays B2 and no advance diagnostic is emitted.
+  const base = resolveAttributionBase({ GSD_EMITTED_BASE: b2, GITHUB_BASE_REF: 'next' },
+    { cwd: root, diagnostic: (m) => messages.push(m) });
+  assert.equal(base.sha, b2, 'the pin must be kept when it is already the newest base commit HEAD contains');
+  assert.equal(messages.length, 1, 'only the resolved-base line is expected; a second call would be an advance report');
+  assert.match(messages[0], /emitted-attribution resolved base:/);
+  assert.ok(!messages.some((m) => m.includes('measuring from')), 'no advance diagnostic when nothing advanced');
+});
+
+test('an advance reports itself and names both the pin\'s merge-base and the advanced sha', (t) => {
+  const { root, b0, b2 } = makeStalePinMergeRefRepo(t);
+  const messages = [];
+  const base = resolveAttributionBase({ GSD_EMITTED_BASE: b0, GITHUB_BASE_REF: 'next' },
+    { cwd: root, diagnostic: (m) => messages.push(m) });
+  assert.equal(base.sha, b2);
+  assert.equal(messages.length, 2, 'the resolved-base line plus exactly one advance line');
+  const advance = messages[1];
+  assert.ok(advance.includes(b0), `the advance line must name the pin's merge-base ${b0}: ${advance}`);
+  assert.ok(advance.includes(b2), `the advance line must name the advanced sha ${b2}: ${advance}`);
+  assert.match(advance, /measuring from/);
+});
+
+test('a base-branch ref that does not resolve says so instead of silently keeping the pin', (t) => {
+  const { root, b0 } = makeStalePinMergeRefRepo(t);
+  const messages = [];
+  const base = resolveAttributionBase({ GSD_EMITTED_BASE: b0, GITHUB_BASE_REF: 'no-such-branch' },
+    { cwd: root, diagnostic: (m) => messages.push(m) });
+  assert.equal(base.sha, b0, 'behavior is unchanged: the pin\'s merge-base is kept');
+  assert.equal(messages.length, 2, 'the resolved-base line plus exactly one skipped-advance line');
+  assert.match(messages[1], /origin\/no-such-branch/);
+  assert.match(messages[1], /does not resolve/);
+});
+
+test('a genuine ack-trailer conflict in the PR\'s own commits still fails after the base advance', (t) => {
+  const { root, b0, b2 } = makeStalePinMergeRefRepo(t);
+  // Two PR-side commits on top of the merge ref declare one key with two reasons.
+  for (const [i, reason] of [[1, 'pr reason one'], [2, 'pr reason two']]) {
+    fs.writeFileSync(path.join(root, 'pr-only.txt'), `pr ${i}\n`);
+    gitFixture(root, ['add', '-A']);
+    gitFixture(root, ['commit', '-q', '-m', `PR commit ${i}`, '-m',
+      `Emitted-Drift-Ack-Growth: plan-phase.md — ${reason}`]);
+  }
+  const base = resolveAttributionBase({ GSD_EMITTED_BASE: b0, GITHUB_BASE_REF: 'next' }, { cwd: root });
+  assert.equal(base.sha, b2);
+  const { ack } = resolveAttributionInputs(base, {
+    cwd: root,
+    resolveBaselineFn: () => ({ ok: true, via: 'build', baseline: {} }),
+    readJson: () => null,
+  });
+  assert.equal(ack.errors.length, 1, 'the PR\'s own conflicting trailers must still be reported');
+  assert.match(ack.errors[0], /plan-phase\.md/);
+  assert.match(ack.errors[0], /declared twice/);
+});
+
+// trek-e's stacked shape (PR #5871 review 5865033613, Major 2): an upper PR P stacked on
+// a lower PR Q, both forked from the stale pin B0. `next` gains B1/B2 (base-only commits
+// declaring one key with two reasons), GitHub builds P's merge ref on B2, and then Q lands
+// on `next` as a merge commit N = merge(B2 <- Q) before the job checks out. Then
+// `merge-base --all origin/next HEAD` is {Q, B2}: two best common ancestors, neither an
+// ancestor of the other, whatever the dates. Which one plain `git merge-base` prints
+// depends on commit-date order; Q is dated after B2, so it prints Q, the pick the pre-fix
+// resolver used (the row asserts that, so a git tie-break change cannot silently stop the
+// row from discriminating the old bug). Measuring from Q would sweep B1/B2 back into the range
+// (Q..HEAD), which is #5797's symptom; the attribution base must be B2, the newest commit
+// on origin/next's FIRST-PARENT chain that HEAD contains.
+function makeStackedPrRepo(t) {
+  const root = createTempDir('gsd-stacked-pr-merge-ref-');
+  t.after(() => cleanup(root));
+  const at = (offset) => ({ date: `${1_700_000_000 + offset} +0000` });
+  const commit = (file, body, message, offset, trailer) => {
+    fs.writeFileSync(path.join(root, file), body);
+    gitFixture(root, ['add', '-A']);
+    gitFixture(root, ['commit', '-q', '-m', message, ...(trailer ? ['-m', trailer] : [])], at(offset));
+  };
+  gitFixture(root, ['init', '-q', '-b', 'next']);
+  commit('shared.txt', 'v0\n', 'B0: the base sha the PR event recorded', 0);
+  const b0 = gitFixture(root, ['rev-parse', 'HEAD']);
+  for (const [i, reason] of [[1, 'first reason'], [2, 'a different reason']]) {
+    commit('shared.txt', `v${i}\n`, `B${i}: base-only change`, 10 * i,
+      `Emitted-Drift-Ack-Growth: verify-work.md — ${reason}`);
+  }
+  const b2 = gitFixture(root, ['rev-parse', 'HEAD']);
+
+  gitFixture(root, ['checkout', '-q', '-b', 'lower', b0]);
+  commit('lower-pr.txt', 'q\n', 'Q: the lower PR', 30);
+  const q = gitFixture(root, ['rev-parse', 'HEAD']);
+  gitFixture(root, ['checkout', '-q', '-b', 'upper']);
+  commit('upper-pr.txt', 'p\n', 'P: the upper PR, stacked on Q', 40);
+
+  // GitHub builds P's merge ref on B2, the newest next it has seen ...
+  gitFixture(root, ['checkout', '-q', '--detach', b2]);
+  gitFixture(root, ['merge', '-q', '--no-ff', '--no-edit', 'upper'], at(50));
+  const mergeRef = gitFixture(root, ['rev-parse', 'HEAD']);
+  // ... and Q then lands on next as a merge commit, before this job checks out.
+  gitFixture(root, ['checkout', '-q', 'next']);
+  gitFixture(root, ['merge', '-q', '--no-ff', '--no-edit', 'lower'], at(60));
+  const nextTip = gitFixture(root, ['rev-parse', 'HEAD']);
+  gitFixture(root, ['checkout', '-q', '--detach', mergeRef]);
+  gitFixture(root, ['update-ref', 'refs/remotes/origin/next', nextTip]);
+  gitFixture(root, ['branch', '-q', '-D', 'next', 'lower', 'upper']);
+  return { root, b0, b2, q, mergeRef, nextTip };
+}
+
+test('a stacked PR whose lower PR landed as a merge commit measures from the first-parent base, not the side merge-base', (t) => {
+  const { root, b0, b2, q } = makeStackedPrRepo(t);
+  assert.deepEqual(
+    gitFixture(root, ['merge-base', '--all', 'refs/remotes/origin/next', 'HEAD']).split('\n').sort(),
+    [b2, q].sort(),
+    'fixture: origin/next and HEAD must have two best merge bases, Q and B2',
+  );
+  assert.equal(gitFixture(root, ['merge-base', 'refs/remotes/origin/next', 'HEAD']), q,
+    'fixture: plain git merge-base must pick Q (dated after B2), the side merge-base the pre-fix resolver used');
+
+  const base = resolveAttributionBase({ GSD_EMITTED_BASE: b0, GITHUB_BASE_REF: 'next' }, { cwd: root });
+  assert.equal(base.sha, b2,
+    'the attribution base must be B2, the newest origin/next first-parent commit HEAD contains, ' +
+    `not the side merge-base Q (${q})`);
+
+  const { changedPaths, ack } = resolveAttributionInputs(base, {
+    cwd: root,
+    resolveBaselineFn: () => ({ ok: true, via: 'build', baseline: {} }),
+    readJson: () => null,
+  });
+  assert.deepEqual([...changedPaths].sort(), ['lower-pr.txt', 'upper-pr.txt'],
+    'only the stack\'s own paths may be in the changed set, never base-only shared.txt');
+  assert.deepEqual(ack.errors, [], 'base-only trailers from B1/B2 must not reach the PR\'s ack range');
+  assert.deepEqual([...ack.growth.entries()], []);
+
+  // A current pin (B2) stays B2 and reports no advance: the base tip HEAD lacks (N) never counts.
+  const messages = [];
+  assert.equal(resolveAttributionBase({ GSD_EMITTED_BASE: b2, GITHUB_BASE_REF: 'next' },
+    { cwd: root, diagnostic: (m) => messages.push(m) }).sha, b2);
+  assert.ok(!messages.some((m) => m.includes('measuring from')), `no advance expected: ${messages.join(' | ')}`);
+});
+
 // ─── The real thing: the law, run against the actual tree ───────────────────
 //
 // Everything above exercises the pure law against synthetic input, which is what makes
@@ -2282,6 +2880,7 @@ test('#5008: every differential input is pinned to the merge-base, never the tip
 // comparing against those would be vacuous.
 
 test('differential attribution over the real tree', { timeout: HEAVY_REAL_TREE_TEST_TIMEOUT_MS }, async (t) => {
+  const resolved = resolveAttributionBase(process.env, { diagnostic: (message) => t.diagnostic(message) });
   if (process.platform === 'win32') {
     // Mirrors the golden harness: install output is platform-specific on Windows
     // (backslash paths), so parity is asserted on macOS + Linux. An explicit t.skip,
@@ -2305,7 +2904,6 @@ test('differential attribution over the real tree', { timeout: HEAVY_REAL_TREE_T
   // a PASS (ADR-2719 §6). Hard-failing instead would make the suite permanently red
   // wherever a base ref cannot exist by construction, which is not a propagation
   // finding — it is a statement about the checkout.
-  const resolved = resolveAttributionBase();
   if (!resolved) {
     t.skip(
       'no base ref resolvable — tried ' + baseRefCandidates().join(', ') +
@@ -2314,23 +2912,26 @@ test('differential attribution over the real tree', { timeout: HEAVY_REAL_TREE_T
     );
     return;
   }
-  // #5008: `baseSha` is the MERGE-BASE of `base` and HEAD, never the base tip. All three
-  // "before" inputs — the baseline, `resolveChangedPaths` (three-dot) and
-  // `readAckTrailers` (merge-base..HEAD) — are pinned to that ONE commit via
-  // `resolveAttributionInputs`, and pinned to the SHA rather than the ref name so a
-  // fetch landing mid-run cannot move two of them out from under the baseline. A
-  // baseline at the tip instead turns every base-only merge since HEAD forked into
-  // "unattributed" drift here.
+  // #5008/#5797: `baseSha` is the ATTRIBUTION BASE `resolveAttributionBase` returned, never
+  // the base tip: `merge-base(base, HEAD)`, advanced on a pull_request lane to the newest
+  // `origin/<GITHUB_BASE_REF>` first-parent commit HEAD contains when that descends from
+  // it (a release-merge PR keeps its fork point on `next`). All three "before" inputs —
+  // the baseline, `resolveChangedPaths` (three-dot) and `readAckTrailers`
+  // (`baseSha..HEAD`) — are pinned to that ONE commit via `resolveAttributionInputs`, and
+  // pinned to the SHA rather than the ref name so a fetch landing mid-run cannot move two
+  // of them out from under the baseline. A baseline at the tip instead turns every
+  // base-only merge since HEAD forked into "unattributed" drift here.
   const { ref: base, sha: baseSha } = resolved;
   assert.match(baseSha, /^[0-9a-f]{40}$/);
 
   // Phase 4 (#2724): the golden fixtures this used to read via `baselineManifestsAtRef`
   // (git show <base>:<fixture>) are deleted, so the baseline now comes through
-  // `resolveBaseline()`'s documented precedence: GSD_EMITTED_BASELINE env (CI's PR-lane
-  // cache restore) -> the on-disk cache (CI's push-to-next publish step) -> an in-job
-  // build at `base` (a throwaway git worktree + scripts/gen-emitted-baseline.cjs) ->
-  // explicit failure. The build fallback is deliberately the slow path — it exists so a
-  // cache miss degrades rather than fails outright (ADR-2719 §5).
+  // `resolveBaseline()`'s documented precedence: GSD_EMITTED_BASELINE env (an operator
+  // pin) -> the on-disk cache (where CI's PR-lane restore lands, #2854; published by the
+  // push-to-next step) -> an in-job build at the attribution base `baseSha`, not at
+  // `base` (a throwaway git worktree + scripts/gen-emitted-baseline.cjs) -> explicit
+  // failure. The build fallback is deliberately the slow path — it exists so a cache
+  // miss or a stale restore degrades rather than fails outright (ADR-2719 §5).
   const readBaselineJson = (p) => (fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : null);
   const { resolvedBaseline, changedPaths, ack } = resolveAttributionInputs(resolved, {
     resolveBaselineFn: resolveBaseline,
@@ -2341,7 +2942,7 @@ test('differential attribution over the real tree', { timeout: HEAVY_REAL_TREE_T
     // #2854: report the sources actually reached, not a hardcoded list of all three. An
     // early return could claim it "tried an in-job build" it never called, which sent
     // contributors hunting a rebuild that had not run.
-    `no usable emitted baseline for merge-base(${base}, HEAD)@${baseSha.slice(0, 12)} (tried ` +
+    `no usable emitted baseline measured from ${baseSha.slice(0, 12)} (resolved from ${base}) (tried ` +
     `${(resolvedBaseline.attempted || []).join(', ') || 'nothing'}):` +
     `\n  ${(resolvedBaseline.errors || []).join('\n  ')}`,
   );
@@ -2400,7 +3001,7 @@ test('differential attribution over the real tree', { timeout: HEAVY_REAL_TREE_T
 
   assert.ok(
     result.ok,
-    `emitted-attribution failed against merge-base(${base}, HEAD)@${baseSha.slice(0, 12)}:\n\n${formatReport(result)}`,
+    `emitted-attribution failed measured from ${baseSha.slice(0, 12)} (resolved from ${base}):\n\n${formatReport(result)}`,
   );
 });
 
@@ -2717,8 +3318,8 @@ describe('#3271: emitted-runtime-bounds', () => {
 
   test('the step bound fires before the per-test timeout', () => {
     assert.ok(
-      BUILD_TIMEOUT_MS < PER_TEST_TIMEOUT_MS,
-      `step bound ${BUILD_TIMEOUT_MS}ms must be under the per-test timeout ${PER_TEST_TIMEOUT_MS}ms, ` +
+      EMITTED_RUNTIME_BUILD_TIMEOUT_MS < PER_TEST_TIMEOUT_MS,
+      `step bound ${EMITTED_RUNTIME_BUILD_TIMEOUT_MS}ms must be under the per-test timeout ${PER_TEST_TIMEOUT_MS}ms, ` +
       'or node:test kills the test before buildBaselineAtRef can say which step stalled',
     );
   });
@@ -2739,7 +3340,7 @@ describe('#3271: emitted-runtime-bounds', () => {
     // chunk allows and lock in an impossible ladder.
     const realisticPreamble = 60_000;
     assert.ok(
-      BUILD_TIMEOUT_MS + realisticPreamble < PER_TEST_TIMEOUT_MS,
+      EMITTED_RUNTIME_BUILD_TIMEOUT_MS + realisticPreamble < PER_TEST_TIMEOUT_MS,
       'the generator bound plus a realistic worktree+build preamble must fit inside the per-test timeout',
     );
   });
@@ -2751,7 +3352,7 @@ describe('#3271: emitted-runtime-bounds', () => {
     // exported values rather than by scanning source text.
     assert.equal(WORKTREE_TIMEOUT_MS, 60_000);
     assert.equal(BUILD_LIB_TIMEOUT_MS, 180_000);
-    assert.equal(BUILD_TIMEOUT_MS, 360_000);
+    assert.equal(EMITTED_RUNTIME_BUILD_TIMEOUT_MS, 360_000);
     assert.equal(CHUNK_TIMEOUT_CEILING_MS, 600_000);
   });
 
@@ -2776,3 +3377,203 @@ describe('#3271: emitted-runtime-bounds', () => {
 // #3875 open-PR-deferred fragment-sweep machinery, plus tests/emitted-drift-acks/ itself
 // — the commit-trailer acknowledgment leaves no tree artifact to sweep, defer, or guard.
 // Every describe block that lived here exercised that now-deleted script and is gone with it.
+
+// ── #5902: a release-merge PR measures attribution from `next`, not from `main` ──────
+//
+// `release/X.Y.0` / `hotfix/X.Y.Z` -> `main` has `main` as its PR base, so a base-derived
+// range spans the whole release cycle (PRs already checked on `next`) and the ack
+// trailers read as stale. The base for that PR shape is merge-base(next, HEAD).
+
+/**
+ * `main` @ c0 -> `next` adds c1 (the fork point) -> `release/1.2.0` adds a commit ->
+ * `next` advances one commit. HEAD is left on `release/1.2.0`.
+ */
+function makeReleaseMergeRepo() {
+  const root = createTempDir('gsd-5902-release-merge-');
+  gitFixture(root, ['init', '-q', '-b', 'main']);
+  fs.writeFileSync(path.join(root, 'shared.txt'), 'main\n');
+  gitFixture(root, ['add', '-A']);
+  gitFixture(root, ['commit', '-q', '-m', 'main tip']);
+  const mainSha = gitFixture(root, ['rev-parse', 'HEAD']);
+
+  gitFixture(root, ['checkout', '-q', '-b', 'next']);
+  fs.writeFileSync(path.join(root, 'shared.txt'), 'next fork\n');
+  gitFixture(root, ['add', '-A']);
+  gitFixture(root, ['commit', '-q', '-m', 'next fork point']);
+  const forkSha = gitFixture(root, ['rev-parse', 'HEAD']);
+
+  gitFixture(root, ['checkout', '-q', '-b', 'release/1.2.0']);
+  fs.writeFileSync(path.join(root, 'release-only.txt'), 'release\n');
+  gitFixture(root, ['add', '-A']);
+  gitFixture(root, ['commit', '-q', '-m', 'release-only change']);
+
+  gitFixture(root, ['checkout', '-q', 'next']);
+  fs.writeFileSync(path.join(root, 'shared.txt'), 'next advanced\n');
+  gitFixture(root, ['add', '-A']);
+  gitFixture(root, ['commit', '-q', '-m', 'next advanced']);
+  gitFixture(root, ['checkout', '-q', 'release/1.2.0']);
+  assert.notEqual(mainSha, forkSha);
+  return { root, mainSha, forkSha };
+}
+
+const SAME_REPO = 'open-gsd/gsd-core';
+function prEnv(headRef, baseRef, extra = {}) {
+  return {
+    GITHUB_HEAD_REF: headRef,
+    GITHUB_BASE_REF: baseRef,
+    GITHUB_REPOSITORY: SAME_REPO,
+    GITHUB_EVENT_PATH: '/event.json',
+    ...extra,
+  };
+}
+const payloadReader = (fullName) => () => JSON.stringify({ pull_request: { head: { repo: { full_name: fullName } } } });
+
+for (const head of ['release/1.2.0', 'hotfix/1.2.1']) {
+  test(`#5902: ${head} -> main measures from merge-base(next, HEAD), ignoring GSD_EMITTED_BASE`, () => {
+    const { root, mainSha, forkSha } = makeReleaseMergeRepo();
+    try {
+      const messages = [];
+      const env = prEnv(head, 'main', { GSD_EMITTED_BASE: mainSha });
+      const r = resolveAttributionBase(env, {
+        cwd: root, readFile: payloadReader(SAME_REPO), diagnostic: (m) => messages.push(m),
+      });
+      assert.equal(r.sha, forkSha, 'the release-merge base must be the fork point on next');
+      assert.equal(r.ref, 'next');
+      assert.notEqual(r.sha, mainSha);
+      assert.ok(messages.some((m) => m.includes('next') && m.includes('release-merge')),
+        'the diagnostic must name the chosen base and say why');
+    } finally {
+      cleanup(root);
+    }
+  });
+}
+
+test('#5902: the release-merge base is the same sha baseline, changed paths and trailers consume', () => {
+  const { root, mainSha, forkSha } = makeReleaseMergeRepo();
+  try {
+    const env = prEnv('release/1.2.0', 'main', { GSD_EMITTED_BASE: mainSha });
+    const base = resolveAttributionBase(env, { cwd: root, readFile: payloadReader(SAME_REPO) });
+    const expectedShas = [];
+    const { changedPaths } = resolveAttributionInputs(base, {
+      cwd: root,
+      resolveBaselineFn: (o) => { expectedShas.push(o.expectedSha); return { ok: true, baseline: {} }; },
+      readJson: () => null,
+    });
+    assert.deepEqual(expectedShas, [forkSha]);
+    assert.deepEqual(changedPaths, ['release-only.txt']);
+  } finally {
+    cleanup(root);
+  }
+});
+
+const KEEPS_PIN = [
+  ['a fork payload', prEnv('release/1.2.0', 'main'), payloadReader('someone/gsd-core')],
+  ['an ordinary head to main', prEnv('fix/1-x', 'main'), payloadReader(SAME_REPO)],
+  ['a missing payload', prEnv('release/1.2.0', 'main'), () => { throw new Error('ENOENT'); }],
+  ['an unparseable payload', prEnv('release/1.2.0', 'main'), () => 'not json'],
+  ['release/1.2.0 into next', prEnv('release/1.2.0', 'next'), payloadReader(SAME_REPO)],
+  ['release/1.2 (too short)', prEnv('release/1.2', 'main'), payloadReader(SAME_REPO)],
+  ['release/1.2.0.0 (too long)', prEnv('release/1.2.0.0', 'main'), payloadReader(SAME_REPO)],
+  ['no GITHUB_EVENT_PATH', { ...prEnv('release/1.2.0', 'main'), GITHUB_EVENT_PATH: '' }, payloadReader(SAME_REPO)],
+];
+for (const [label, baseEnv, readFile] of KEEPS_PIN) {
+  test(`#5902: ${label} keeps GSD_EMITTED_BASE`, () => {
+    const { root, mainSha } = makeReleaseMergeRepo();
+    try {
+      assert.equal(isReleaseMergePr(baseEnv, { readFile }), false);
+      const r = resolveAttributionBase({ ...baseEnv, GSD_EMITTED_BASE: mainSha }, { cwd: root, readFile });
+      assert.equal(r.ref, mainSha);
+      assert.equal(r.sha, mainSha, 'merge-base(main, HEAD) is main itself in this fixture');
+    } finally {
+      cleanup(root);
+    }
+  });
+}
+
+test('#5902: the payload repo comparison is case-insensitive', () => {
+  assert.equal(isReleaseMergePr(prEnv('release/1.2.0', 'main'), { readFile: payloadReader('Open-GSD/GSD-Core') }), true);
+});
+
+test('#5902: the "Tried:" diagnostic lists the candidates actually tried', () => {
+  const { root, mainSha } = makeReleaseMergeRepo();
+  try {
+    const triedOf = (env, readFile) => {
+      const messages = [];
+      resolveAttributionBase(env, { cwd: root, readFile, diagnostic: (m) => messages.push(m) });
+      const line = messages.find((m) => m.includes('Tried: '));
+      return line.slice(line.indexOf('Tried: ') + 'Tried: '.length);
+    };
+    const releaseEnv = prEnv('release/1.2.0', 'main', { GSD_EMITTED_BASE: mainSha });
+    assert.equal(triedOf(releaseEnv, payloadReader(SAME_REPO)), RELEASE_MERGE_NEXT_CANDIDATES.join(', '));
+    const releaseLine = [];
+    resolveAttributionBase(releaseEnv, {
+      cwd: root, readFile: payloadReader(SAME_REPO), diagnostic: (m) => releaseLine.push(m),
+    });
+    assert.ok(releaseLine.some((m) => m.includes('resolved base') && !m.includes('to override')),
+      'a release-merge PR ignores GSD_EMITTED_BASE, so the override hint must be absent');
+    assert.deepEqual([...RELEASE_MERGE_NEXT_CANDIDATES], ['origin/next', 'upstream/next', 'next']);
+
+    const ordinaryEnv = prEnv('fix/1-x', 'main', { GSD_EMITTED_BASE: mainSha });
+    assert.equal(triedOf(ordinaryEnv, payloadReader(SAME_REPO)), baseRefCandidates(ordinaryEnv).join(', '));
+    const ordinaryLine = [];
+    resolveAttributionBase(ordinaryEnv, {
+      cwd: root, readFile: payloadReader(SAME_REPO), diagnostic: (m) => ordinaryLine.push(m),
+    });
+    assert.ok(ordinaryLine.some((m) => m.includes('resolved base') && m.includes('to override')),
+      'an ordinary PR keeps the GSD_EMITTED_BASE override hint');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('#5902: CI shape — main merged into the release branch does not move the base or leak main-only trailers', () => {
+  const { root, mainSha, forkSha } = makeReleaseMergeRepo();
+  try {
+    // A squash on main (never on next) carrying an ack trailer, as the previous release left it.
+    gitFixture(root, ['checkout', '-q', 'main']);
+    fs.writeFileSync(path.join(root, 'main-only.txt'), 'squash\n');
+    gitFixture(root, ['add', '-A']);
+    gitFixture(root, ['commit', '-q', '-m',
+      'chore: merge release v1.1.0 to main\n\nEmitted-Drift-Ack-Growth: x.md \u2014 reason']);
+    const squashSha = gitFixture(root, ['rev-parse', 'HEAD']);
+    assert.equal(gitFixture(root, ['branch', '--contains', squashSha, '--list', 'next']), '',
+      'the squash must not be reachable from next');
+
+    // CI "Rebase check": merge main into the release branch.
+    gitFixture(root, ['checkout', '-q', 'release/1.2.0']);
+    gitFixture(root, ['merge', '-q', '--no-ff', '-m', 'Merge main into release/1.2.0', 'main']);
+
+    const env = prEnv('release/1.2.0', 'main', { GSD_EMITTED_BASE: mainSha });
+    const base = resolveAttributionBase(env, { cwd: root, readFile: payloadReader(SAME_REPO) });
+    assert.equal(base.sha, forkSha, 'the base is still the fork point on next');
+
+    const ack = readAckTrailers({ baseRef: base.sha, cwd: root });
+    assert.equal(JSON.stringify(ack).includes('x.md'), false,
+      'no trailer of the main-only squash may reach the measured range');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('#5902 over #5797: a release-merge base stays on the fork point when origin/main descends from it', () => {
+  const { root, forkSha } = makeReleaseMergeRepo();
+  try {
+    // `main` contains the fork point, so the merge-ref advance would accept `main`'s tip.
+    gitFixture(root, ['checkout', '-q', 'main']);
+    gitFixture(root, ['merge', '-q', '--no-ff', '-m', 'Merge the fork point into main', forkSha]);
+    const mainTip = gitFixture(root, ['rev-parse', 'HEAD']);
+    gitFixture(root, ['update-ref', 'refs/remotes/origin/main', mainTip]);
+    gitFixture(root, ['checkout', '-q', 'release/1.2.0']);
+    gitFixture(root, ['merge', '-q', '--no-ff', '-m', 'Merge main into release/1.2.0', 'main']);
+
+    const messages = [];
+    const base = resolveAttributionBase(prEnv('release/1.2.0', 'main', { GSD_EMITTED_BASE: mainTip }), {
+      cwd: root, readFile: payloadReader(SAME_REPO), diagnostic: (m) => messages.push(m),
+    });
+    assert.equal(base.sha, forkSha, 'GITHUB_BASE_REF=main must not advance the release-merge base');
+    assert.equal(messages.filter((m) => m.includes('origin/main')).length, 0,
+      'a release-merge run must not report on the merge-ref advance at all');
+  } finally {
+    cleanup(root);
+  }
+});

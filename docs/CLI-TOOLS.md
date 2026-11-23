@@ -32,6 +32,43 @@ node gsd-tools.cjs <command> [args] [--raw] [--cwd <path>]
 | `--ws <name>`       | Workstream context for `.planning/workstreams/<name>` paths |
 | `--pick <field>`    | Extract one field from a command's JSON output — see [`--pick <field>` contract](#--pick-field-contract) below |
 
+These global flags are read once, before the command runs, and are never passed on to the command. The full global set is recorded under `global` in [`CLI-SURFACE-MANIFEST.json`](CLI-SURFACE-MANIFEST.json). Besides the flags above, it includes `--project-dir`, `--default`, `--json-errors` and `--exit-contract=<v>`.
+
+---
+
+### Command flags and the CLI surface manifest
+
+Each command declares its flags in one place, `src/cli-surface.cts` ([ADR-4909](adr/4909-shipped-surface-contract-seam.md) D1). [`docs/CLI-SURFACE-MANIFEST.json`](CLI-SURFACE-MANIFEST.json) is generated from those declarations. For each command it lists:
+- the command name and its aliases;
+- how many positional words it takes, and whether further words may appear among the flags (`freePositionals`), and whether a short flag such as `-n` is refused instead of read as a word (`rejectShortFlags`);
+- each flag and its kind;
+- the flags it requires;
+- whether the command reads the active workstream.
+
+Regenerate the manifest with `npm run gen:cli-surface-manifest`. `npm run lint:generated-sync` fails when it is stale.
+
+| Flag kind in the manifest | Accepted form |
+| --- | --- |
+| `value` | `--name <value>`. If the next token is missing or starts with `--`, the flag counts as absent. |
+| `value-or-bare` | As `value`, but a bare `--name` means "present and empty". |
+| `boolean` | `--name` |
+| `optional-value` | `--name` with or without a value |
+| `repeatable` | `--name <value>` any number of times; every non-empty value is kept, in order. An empty value counts as none. |
+| `list` | `--name a b c`. The values run until the command's next list flag, and repeated runs merge. |
+| `multiword` | `--name some words`. The words run until the next `--` token and are joined with spaces. |
+
+A command whose manifest entry lists `eq` also accepts those flags as `--name=<value>`. The flags listed under `nonEmpty` must have a value whenever they are passed; `emptyValue` and `emptyEq` name the ones for which a literal empty value (`--name ''`, `--name=`) still counts as a value. When a flag is repeated, the first occurrence wins. A command with `passthroughAfter: "--"` does not check anything after a literal `--`.
+
+A declared command rejects bad arguments before it does any work. Each rejection exits non-zero with reason `usage`, which `--json-errors` reports as `reason: "usage"`:
+
+| Input | Message names |
+| --- | --- |
+| A flag the command does not declare | the flag, and the flags it accepts |
+| A required flag missing, or given an empty value | `missing required flag --name` |
+| A flag that must not be empty given without a value | `Missing value for --name` |
+| A positional word the command does not take | the word |
+
+Commands listed under `undeclared` in the manifest still parse their own flags. Their declarations land in [#6088](https://github.com/open-gsd/gsd-core/issues/6088), [#6089](https://github.com/open-gsd/gsd-core/issues/6089) and [#6090](https://github.com/open-gsd/gsd-core/issues/6090); the last one removes the `undeclared` list.
 
 ---
 
@@ -108,21 +145,38 @@ node gsd-tools.cjs state update-progress
 node gsd-tools.cjs state add-decision --summary "..." [--phase N] [--rationale "..."]
 # Or from files:
 node gsd-tools.cjs state add-decision --summary-file path [--rationale-file path]
+# Text-file inputs (--summary-file, --rationale-file, --text-file, --note-file) are
+# read once and copied into STATE.md, so any readable regular file of up to 256 KiB is
+# accepted, including one in a temp/scratch directory outside the project; a relative
+# path resolves against the project root. A file that cannot be read, a FIFO, device
+# or directory, a file over 256 KiB, a required field left blank (an empty or
+# whitespace-only --summary, --text or --note, inline or as a file), or a missing
+# STATE.md is refused on stderr with a non-zero exit (reason "usage") and STATE.md is
+# not touched. A blank rationale, inline or file, just means no rationale.
+# (add-decision, add-blocker and add-roadmap-evolution only.)
 
 # Add/resolve blockers
 node gsd-tools.cjs state add-blocker --text "..."
+node gsd-tools.cjs state add-blocker --text-file path
 node gsd-tools.cjs state resolve-blocker --text "..."
 
 # Record session continuity (at least one of --stopped-at / --resume-file is required)
 node gsd-tools.cjs state record-session --stopped-at "..." [--resume-file path]
 
-# Phase start — update STATE.md Status/Last activity for a new phase
+# Phase start — update STATE.md Status/Last activity for a new phase. When some of the phase's plans
+# already have summaries (a gap-closure re-entry), Current Plan and `Plan: N of M` start at the first
+# plan still to run instead of 1, and a **Current focus:** value that wraps onto further lines is
+# replaced whole.
 node gsd-tools.cjs state begin-phase --phase N --name SLUG --plans COUNT
 
 # Agent-discoverable blocker signalling (used by discuss-phase / UI flows)
 node gsd-tools.cjs state signal-waiting --type TYPE --question "..." --options "A|B" --phase P
 node gsd-tools.cjs state signal-resume
 ```
+
+`state update`, `state patch` and `state record-session` take single-line values: a value containing a line break — CR, LF, U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR, each of which starts a new line for the STATE.md readers — is refused with an error naming the field or flag, before anything is written.
+
+`state record-session` lists the fields it wrote under `updated`, and under `replacedRecord` any Stopped At / Resume File value the write displaced (the `None` placeholder is not a record). In the session section, a line inside a fenced code block is an example: no session writer (`record-session`, `state update`/`patch` of a session field, `phase complete`) changes it, and neither the frontmatter sync nor `state-snapshot` reads it as a field. A field whose current value continues onto the next line is left unchanged, because a single-line write would orphan the rest (a line directly below shaped `words: text` counts as a continuation unless its label is bold or one STATE.md defines, such as `Resume file` or `Status`, since a wrapped sentence can take that shape): it is listed under `skipped` as `{ "field", "reason": "wrapped_value", "continuation" }` with a warning on stderr (the continuation is echoed up to 200 characters, then `…`), and when every field to update was skipped the call reports `"recorded": false`. With no session heading, Last session, Last Date and Resume file are not written in place — `state-snapshot` reads them from a session section only — and the call appends a `## Session` section (reported as `"created": true`, which an insert into an existing section is not) holding the new Last session and Stopped at, and the passed Resume file or else the body's existing one rather than `None` (a Stopped at skipped as wrapped carries its existing value); a carried value holding U+2028/U+2029 is left out and listed as `{ "field", "reason": "line_separator" }`, and when the document ends inside an unclosed code fence nothing is appended (it would land inside the fence) and each field the call writes (Last session, and Stopped at or Resume file when passed) that was not written in place or skipped for another reason is listed with `"reason": "unclosed_fence"`. `state record-session`, `state update` and `state patch` write a session field (Stopped At, Paused At, Resume File, Last session, Last Date) inside the session section — not a fenced example there, and not a copy in another section such as `## Session Continuity Archive` — which is where the frontmatter sync and `state-snapshot` read it. `record-session` inserts a field the section lacks; `state update` and `state patch` report it updated, and a document whose session section lacks the field, or that has no session section, reports it not found and is left unchanged. `state patch`, like `state update`, reports a field that already holds the requested value as updated. `state update` and `state patch` replace a field's first line only and do not check for a wrapped value, so a continuation line below it stays in place: fold a wrapped value onto one line before updating it with them.
 
 ### State Snapshot
 
@@ -156,6 +210,7 @@ Manage phases — directories, numbering, and roadmap sync.
 node gsd-tools.cjs find-phase <phase>
 
 # Calculate next decimal phase number for insertions
+# (bracket convention: canonical two-digit sub-phase, see below)
 node gsd-tools.cjs phase next-decimal <phase>
 
 # Append new phase to roadmap + create directory
@@ -163,8 +218,13 @@ node gsd-tools.cjs phase add <description>
 
 # Insert decimal phase after existing
 node gsd-tools.cjs phase insert <after> <description> [--sibling]
+# add, add-batch and insert also write the phase's ROADMAP record (#5221): a checklist entry
+# after the active checklist, else a progress-table row, else no readable record; the output's
+# roadmap_entry says which ("checklist" | "progress_table" | "none")
 
 # Remove phase, renumber subsequent
+# (bracket convention: also reports roadmap_lines_rewritten and
+# references_left_untouched, see below)
 node gsd-tools.cjs phase remove <phase> [--force]
 
 # Mark phase complete, update state + roadmap
@@ -183,10 +243,75 @@ node gsd-tools.cjs phase-plan-index <phase>
 # List phases with filtering
 node gsd-tools.cjs phases list [--type planned|executed|all] [--phase N] [--include-archived]
 
-# Archive (or, with --force, permanently delete) every current phase directory —
-# used by /gsd-new-milestone before roadmapping the next cycle
+# Archive every current phase directory into milestones/<label>-phases/ (label: `--archive-version` when given, else the current milestone version, else `archived-<date>`; `new-milestone` passes the outgoing version) —
+# used by /gsd-new-milestone before roadmapping the next cycle.
+# --force skips the uncommitted-changes check only; nothing is deleted.
 node gsd-tools.cjs phases clear [--confirm] [--force] [--archive-version <version>]
 ```
+
+### Bracket phase ids (`phase remove`, `phase next-decimal`)
+
+When `phase_id_convention` is `"bracket"` (see [CONFIGURATION.md](CONFIGURATION.md)),
+these commands work on the active milestone's `[CODE.MM] NN` identities:
+
+- `phase next-decimal <phase>` inventories every spelling the readers accept
+  for that parent, on disk and in `ROADMAP.md` (bracket and legacy directories,
+  headings, checklist rows), and returns the next sub-phase in canonical
+  two-digit form (`02.03`, not `2.3`). The legacy `999` backlog parent keeps
+  its upstream spelling.
+- `phase remove <phase>` accepts a bare number (`2`, `02`), a qualified id
+  (`CK.02-02`, `CK.02-01.01`) or the display form (`[CK.02] 02`). A qualified
+  directory name with a slug (`CK.02-02-two`) is accepted only when the slug
+  exactly matches the selected directory. It deletes
+  the phase, renumbers the milestone's later phases and sub-phases on disk and
+  in `ROADMAP.md` from one mapping, and leaves shipped and archived history
+  byte-identical. It refuses, before anything is deleted or renamed, in the
+  cases listed below.
+
+`phase remove` refuses, with nothing changed, when:
+
+- a qualified argument carries a slug that does not exactly match the
+  directory for its phase number;
+- the target has neither a directory nor a live heading or checklist row in the
+  active milestone window, or the argument names a `.00` sub-phase;
+- the phase is outside the active milestone, has executed plans (without
+  `--force`) or live sub-phases, or resolves only to legacy-spelled artifacts;
+- a pipe-table row keyed by the removed id would survive outside the
+  milestone's own Progress tables: a shared Progress table the rewrite cannot
+  attribute, or any other phase-keyed table (for example a Requirements
+  Traceability table) under a heading of any level. A Progress-table row is
+  one whose nearest heading is a Progress-titled heading, a phase heading or
+  the milestone heading itself;
+- a phase id in the active milestone, such as `02a`, is one the bracket grammar
+  cannot represent and the removal would renumber it;
+- the `STATE.md` current phase (frontmatter `current_phase`, the
+  `Current Phase` field, or the Current Position `Phase:` line, read in that
+  order) is the removed phase or a phase the removal renumbers, that is, the
+  target is the current phase or any phase before it. Bracket `phase remove` deletes only phases after the current phase, because
+  it does not rewrite the current-phase fields. To remove such a phase, point
+  the current phase at a phase before the target, or, when there is none,
+  clear the current-phase fields, then retry. A current phase qualified with
+  another milestone (`[CK.01] 02`) does not count.
+
+Known limits of bracket `phase remove`, which it neither rewrites nor refuses:
+
+- A checklist row for the removed id outside the active milestone window (a
+  stale copy elsewhere in `ROADMAP.md`) is kept as written and is not
+  reported.
+- The dash form is matched case-sensitively: `CK.02-03` is renumbered and
+  reported, `ck.02-03` is neither.
+- Paths are recognized only with forward slashes. A plan or summary filename
+  after a backslash (`phases\CK.02-03-three\03-01-PLAN.md`) is renumbered as
+  a bare artifact reference, where the forward-slash form is left alone.
+- An on-disk `CK.MM-NNa` directory with no `ROADMAP.md` line is not checked;
+  the unrepresentable-id refusal reads `ROADMAP.md` only.
+
+The bracket `phase remove` JSON output adds two fields:
+
+| Field | Meaning |
+|---|---|
+| `roadmap_lines_rewritten` | Number of `ROADMAP.md` edits: the deleted phase section counts once, plus each deleted owned line (checklist row, Progress row) and each line whose references were renumbered. |
+| `references_left_untouched` | Line numbers, in the written `ROADMAP.md`, of live lines in the active milestone that still mention the removed id or a pre-renumber id in any spelling (for example prose such as `Phase 03`). Review these by hand. Empty when nothing was left. |
 
 ### Milestone-scoped phase listing (`phases list`)
 
@@ -201,12 +326,13 @@ sentinel and out-of-window directories.
 
 ### `phases clear` and sentinel directories
 
-`phases clear` moves (or, with `--force` and no prior archive, permanently
-deletes) every phase directory under `.planning/phases/` except sentinels. It
-now excludes both `999.*` (backlog) and `0-*` (pre-milestone) directories via
-the same canonical sentinel predicate `phases list` uses — previously its own
-regex excluded `999` but not `0`, so a `0-*` directory could be destroyed on
-this irreversible path.
+`phases clear` moves every phase directory under `.planning/phases/` except
+sentinels into `milestones/<label>-phases/` (`--archive-version` when given, else the current milestone version, else `archived-<date>`); it never deletes. `--force`
+skips only the uncommitted-changes check, and those edits are archived with the
+directory. It excludes both `999.*` (backlog) and `0-*` (pre-milestone)
+directories via the same canonical sentinel predicate `phases list` uses —
+previously its own regex excluded `999` but not `0`, so a `0-*` directory was
+archived with the rest.
 
 ### `find-phase` plan/summary counts (live vs physical)
 
@@ -469,6 +595,8 @@ no checklist entry, has no checkbox to disagree with and is never listed
 | `plan_count` | number | Plans found for the phase |
 | `summary_count` | number | Summaries paired with a plan |
 
+`roadmap_record` (#5221) maps each phase number (leading zeros stripped per segment; under `phase_naming: custom`, also each custom id such as `AUTH`) to `true` when every recognised ROADMAP record of it — each checklist entry, under any bracket, and its progress-table Status cell — reads complete, else `false`; a phase with no checklist entry or table row is absent, and the whole field is `null` when the phase table does not parse or its `Phase`/`Status` headers are not recognised (a `Plans Complete` table headed in another case or wording). It reads the record only (whatever the disk says); `/gsd-ship` ships only a `true` phase.
+
 The selectors are unchanged: `checkbox_conflict` only reports the
 disagreement. To treat a phase as done despite its disk status, verify it
 (`verify-phase`) so a passing `*-VERIFICATION.md` exists.
@@ -511,7 +639,7 @@ rather than a number computed from a truncated, unscoped, or unreadable set:
 | `stats --raw` | `percent: null`, `plan_percent: null` |
 | `query progress --raw` | `percent: null` |
 | `state json --raw` | `progress.percent` is **omitted** from the `progress` object (not `0`, not present as `null`) |
-| `state update-progress --raw` | `false` — no write; `STATE.md`'s Progress field is left untouched, and a `[gsd-tools] WARNING:` line is written to stderr naming the scope |
+| `state update-progress --raw` | `false` — no write; `STATE.md`'s Progress field is left untouched, and a `[gsd-tools] WARNING:` line is written to stderr naming the scope; for an `unscoped` scope the line (and, without `--raw`, a `hint` field) also names the cause (STATE.md's milestone has no matching ROADMAP.md heading, STATE.md names none beside milestone headings, or a Phase title reads as a milestone heading) and its fix; `state sync` names the same cause where it skips Progress |
 
 `0` is a legitimate, real answer under a `complete` scope (e.g. a
 freshly-declared milestone with zero phases, or a phase with zero plan files)
@@ -585,11 +713,77 @@ node gsd-tools.cjs config-ensure-section
 node gsd-tools.cjs config-set <key> <value>
 
 # Get a config value
-node gsd-tools.cjs config-get <key>
+node gsd-tools.cjs config-get <key> [--default <value>] [--raw]
 
 # Set model profile
 node gsd-tools.cjs config-set-model-profile <profile>
+
+# Create config.json for a new project from the chosen settings
+node gsd-tools.cjs config-new-project '<choices-json>' [--dry-run]
 ```
+
+`config-get` prints the key's value as JSON. A key absent from the config falls back to the
+project root config (when a workstream is active), then to `--default`, then to the key's
+schema default; with none of those it fails with `CONFIG_KEY_NOT_FOUND` (`CONFIG_NO_FILE` when
+there is no `config.json`). `--default` is parsed
+exactly as `config-set` parses its value: `true`, `false` and `null` become those JSON values, a
+decimal number (`5`, `-1`, `.5`, `5.0`, `1e3`, with no surrounding spaces and no `0x` prefix)
+becomes a number, text starting with `[` or `{` is parsed as JSON (and stays a string if it is
+not valid JSON), and anything else is a string, including ` 5`, `0x10` and a number too large to
+represent (`1e400`). So `--default '[]'` prints `[]`,
+the same as a key set to an empty array.
+
+`--raw` prints the value as plain text for shell use. It is a display format, not JSON: an array
+prints its items joined by commas and an object prints `[object Object]`, so read structured
+values without `--raw`. Under `--raw`, a `--default` value prints exactly as typed (`007` stays
+`007`). Secret keys (`brave_search`, `firecrawl`, `exa_search`) print masked in both modes, and an
+unset one prints `(unset)`.
+
+`config-new-project` takes the chosen settings as one JSON object, nested by section
+(`'{"mode":"yolo","workflow":{"research":false}}'`), and layers them over the built-in and
+user defaults. It checks each choice with the same key and value rules as `config-set` and
+creates nothing if any choice is refused: an unknown key, a value the key does not accept,
+or a dotted key (`"workflow.research"`) in place of a nested one. A `null` choice is treated
+as not chosen: its key is still checked, and it takes the value it would have had without the
+choice (the built-in or user default). That is the creation-time counterpart of `config-set
+<key> null`, which removes the key from an existing config.
+
+An object is read as a section whenever settings live under its key, and its entries are
+checked one by one. An empty section sets nothing (`"workflow":{}`, `"agent_skills":{}`), with
+one exception: below the first level of a dynamic key family
+(`"model_profile_overrides":{"claude":{}}`) an empty object is refused as an unknown key, as
+`config-set` refuses it. Under a key with no settings below it, an object is a value, held to
+that key's rule as `config-set` holds it (`"model_overrides":{"gsd-executor":{}}` is written,
+`"mode":{}` is refused). Under a name that is neither, it is refused as an unknown key. A
+section given anything but an object is refused, unless its key is itself a setting
+(`agent_tools`), where the value is held to that setting's rule as `config-set` holds it. An
+empty or blank choices argument is the same as none.
+
+Two differences from `config-set` follow from the input being JSON rather than typed text:
+
+- Values are JSON-typed and never coerced. `config-set workflow.research true` parses the
+  text `true` to a boolean; the choice `"research":"true"` is a string and is refused.
+- A setting that also has per-entry settings under it (`review.max_prompt_tokens_per_reviewer`,
+  `agent_tools`) takes an object of those entries, each checked as `config-set` checks that
+  entry's own key: for the reviewer budget `{"codex":5000}` is accepted and `{"a":1}` is
+  refused, where `config-set` stores any object given to the setting whole.
+  `review.max_prompt_tokens_per_reviewer` also takes a number for itself.
+
+One difference does not: a `null` choice under `__proto__`, `prototype` or `constructor`, for a
+key that is otherwise known (`{"model_overrides":{"constructor":null}}`), is refused by the
+prototype-pollution guard.
+`config-set model_overrides.constructor null` reaches that guard only when the config has a
+`model_overrides` section; without one it finds nothing to remove and exits 0, having checked
+that the key is known but not that guard. The default config (`config-new-project '{}'`) has
+some of these sections (`agent_skills`) and not others (`model_overrides`, `agent_tools`,
+`features`), so the difference can hold after creation too.
+
+`--dry-run` prints the config that would be created and writes nothing, with secret keys
+masked as `config-set` masks them; any other flag is refused. The choices are checked first,
+so a refused choice, malformed JSON included, fails even when `config.json` already exists;
+with valid choices and an existing `config.json`, the command reports `already_exists` and
+leaves it untouched. The user defaults file is read only to build a new config, so a problem in
+it is not reported when the config already exists.
 
 ---
 
@@ -798,6 +992,44 @@ node gsd-tools.cjs resolve-model <agent-name>
 
 Agent names: `gsd-planner`, `gsd-executor`, `gsd-phase-researcher`, `gsd-project-researcher`, `gsd-research-synthesizer`, `gsd-verifier`, `gsd-plan-checker`, `gsd-integration-checker`, `gsd-roadmapper`, `gsd-debugger`, `gsd-codebase-mapper`, `gsd-nyquist-auditor`
 
+```bash
+# Resolve a specialist executor's model, falling back to another agent's resolution
+node gsd-tools.cjs query resolve-model <agent-name> --fallback-agent gsd-executor
+```
+
+| Flag | Effect |
+|---|---|
+| `--fallback-agent <name>` | When `<agent-name>` has no usable `model_overrides` entry and no catalog tier, `model` and `tier` resolve as `<name>` instead of the generic profile default. `effort` stays resolved by `<agent-name>`. A missing value (the flag as the last token, followed by another flag, or an empty value) is a usage error (`Missing value for --fallback-agent`, exit code 1), as for the other value flags. `<name>` must be a GSD agent; a value that is not one is ignored. JSON output adds `fallback_agent: "<name>"` when the fallback applied. Without the flag, output is unchanged. |
+
+---
+
+## Executor Routing and Dispatch Identity
+
+Used by `execute-phase` for per-plan executor routing (`agent_hint:`, see [PLAN.md](reference/plan-md.md#per-plan-executor-routing)).
+
+```bash
+# Resolve a plan's agent_hint to the subagent_type to dispatch
+node gsd-tools.cjs query resolve-agent --name <hint> [--json]
+# ...or read the hint from the plan on disk (honours workflow.agent_hint_routing)
+node gsd-tools.cjs query resolve-agent --plan <id> [--phase <n>] [--json]
+
+# Resolve and record the dispatch isolation decision for one plan
+node gsd-tools.cjs query dispatch-isolation --phase <n> --plan <id> [--force-isolation <mode>] [--json]
+
+# Record a dispatch isolation decision directly
+node gsd-tools.cjs query record-dispatch-isolation --isolation <harness-worktree|orchestrator-worktree|none> \
+  [--harness-flag <flag>] [--phase <n>] [--plan <id>] [--executor-type <agent>]
+```
+
+| Verb | Executor behavior |
+|---|---|
+| `resolve-agent` | With `--name`: prints the hint when an agent file for it exists on the active runtime, else `gsd-executor`. With `--plan` (and optional `--phase`): reads that plan's `agent_hint:` and resolves it the same way (`--json` carries `requested`, the hint or `null`, and `fallback`, true when the hint was not found or not used, as with `--name`); `workflow.agent_hint_routing: false`, an unknown plan, or a plan id found in more than one phase prints `gsd-executor`. A hint naming a GSD role other than `gsd-executor` (compared trimmed and case-insensitively) is refused: prints `gsd-executor`, writes a warning to stderr, and `--json` adds `refused: "non-executor-role"`. |
+| `dispatch-isolation` | Records the executor with the decision, derived from the plan files with the same rules as `resolve-agent --plan`. With `--plan`: `executor_type` is that plan's routed executor (the phase is looked up when `--phase` is empty). With `--phase` only: `executor_types` lists the routed executors of every plan in the phase other than `gsd-executor` (at most 64; names beyond the cap, or that do not fit the record, are reported on stderr: "capped at 64 names or did not fit the record"). With neither `--phase` nor `--plan`: `executor_types` lists the routed executors of every milestone phase. |
+| `record-dispatch-isolation` | `--executor-type` records that agent as the executor. A value that is not a bare agent name (letters, digits, `.`, `_`, `-`; no `..`; at most 128 characters) is recorded as `null`. An `--executor-type` naming a GSD non-executor role (for example `gsd-verifier`) is refused with a stderr warning (`warning: --executor-type "<name>" names a GSD non-executor role; recording no executor (#6213)`) and records no executor. |
+| `inspect-dispatch-isolation` | Records nothing; recording-only flags are rejected. |
+
+The isolation guards treat a dispatch as an executor when (a) it is `gsd-executor`; (b) any well-formed dispatch record in the project (keyed records under `.gsd/dispatch-isolation/` and the legacy slot), at most 24 hours old by `written_at`, names its type in `executor_type` or `executor_types`, whatever its phase or plan; or (c) its prompt carries the `[gsd:dispatch …]` marker and its type is not a GSD role (a GSD role is never an executor dispatch, and both hooks return before the record scan). Classification fails closed, treating a valid agent name that is not a GSD role as an executor, when the record scan hits its bound (more than 1024 entries in `.gsd/dispatch-isolation`), when `.gsd` or `.gsd/dispatch-isolation` exists but is a link, not a directory or unreadable, when a recent `.json` record file (the suffix is matched case-insensitively, so `.JSON` counts too) or the legacy slot is refused or malformed, when a recent record's `written_at` is more than 5 seconds in the future, or when any recent record has `executor_types_truncated: true`. While any of these holds, every valid non-GSD-role agent, host built-ins such as `Explore` included, is held to the worktree rule exactly as `gsd-executor` is; recover by case: (i) A legacy slot `.gsd/dispatch-isolation-sentinel.json` that is refused or malformed: remove it (or rewrite it as valid JSON). (ii) `.gsd` or `.gsd/dispatch-isolation` that is a link or any other non-directory: replace it with a real directory. (iii) A truncated record (more than 64 hinted executors in a phase or milestone, or names over the record's byte budget): shorten or reduce the `agent_hint` names; every phase- or milestone-level write rewrites the record, and the case clears 24 hours after the last write. (iv) A recent record whose `written_at` is in the future (beyond the clock-skew allowance), or a future-dated legacy slot: the legacy slot (`.gsd/dispatch-isolation-sentinel.json`) clears on the next dispatch-isolation write; a keyed file clears 24 hours after its mtime (the writer prunes it and the reader stops counting it) or when removed by hand. (v) A scan overflow (more than 1024 entries in `.gsd/dispatch-isolation`): remove stale entries from `.gsd/dispatch-isolation/` until 1024 or fewer remain, or remove the directory (it is recreated on the next write). (vi) An unreadable `.gsd` or `.gsd/dispatch-isolation` directory: restore read and execute permission on it. (vii) A recent keyed record file in `.gsd/dispatch-isolation/` that the reader refuses or rejects (malformed, wrong key, hard link, link, FIFO, device, unreadable (mode 000), no phase, oversize): remove it. Records are otherwise pruned after 24 hours. `--json` on `dispatch-isolation` adds `executor_types_truncated: true` when the phase-level list did not fit the record. A plain query that holds a recorded `none` writes no decision; it writes the executor identity it derives for its own scope to `.gsd/dispatch-isolation-identity/` (one file per scope), which the guards read beside the records above, with the same bounds and fail-closed cases; a query that cannot write that file still holds and records no decision, and any write that records a decision for a scope removes that scope's file. While a fresh caller `none` inside its ten-minute hold window is among the records read (of any scope), classification also fails closed in the states that stop that write: the held record's phase or plan is not a bare name, a directory sits at an identity file name (`all.json`, `phase+…`, `plan+…`), `.gsd/dispatch-isolation-identity` (or, with none, `.gsd`) cannot be written and searched, or `.gsd/.gitignore` is a link. Recovery is the same, reading `.gsd/dispatch-isolation-identity` wherever (ii), (v), (vi) and (vii) name `.gsd/dispatch-isolation`; (viii) for those states, remove the directory at the file name, restore read, write and execute permission, replace the linked `.gitignore` with a regular file, or record the decision again for a bare phase and plan; each also clears once no such caller `none` remains, at the latest ten minutes after the latest one's decision, except that an identity directory that cannot be listed is also a scan overflow (vi); a truncated identity file clears when a decision is recorded for its scope, when the next held query rewrites it, or 24 hours after it was written, or remove it. Background: [About executor identity](explanation/executor-identity.md).
+
 ---
 
 ## Verification Commands
@@ -900,12 +1132,12 @@ Reads the phase's `*-VERIFICATION.md` frontmatter and answers with one member of
 | `passed` | Report says `passed` and its covered-input fingerprint is current | `""` (continue) |
 | `gaps_found` | Report says `gaps_found` | `plan-phase` (`next_command` carries `--gaps`) |
 | `human_needed` | Report says `human_needed` | `verify-work` |
-| `stale` | Covered source changed after the verifier ran | `execute-phase` (its shared verification step re-runs the verifier) |
+| `stale` | Covered source changed after the verifier ran, or (older v1/v2 reports) a current plan/summary was never declared in `covered_files` | `execute-phase` (its shared verification step re-runs the verifier) |
 | `missing` | Phase directory exists but holds no report, or the report has no `status` | `execute-phase` (resumes at the verification gates) |
 | `unparseable` | The report's frontmatter is not YAML | `""` (fix the report itself) |
 | `phase_dir_not_found` | There is no phase directory at that path | `""` (a usage error — see below) |
 
-The JSON result carries `status`, `next_action`, `next_command` (the route projected for the project's runtime, for example `/gsd-execute-phase 3` or `$gsd-execute-phase 3` on Codex), and — additive since #5118 — `route`, the bare command from the same table entry, so the two can never disagree. `message` is present only where a usage error needs one. `staleCheckIndeterminate` is unchanged. The `init *` bundles expose the same bare command as `verification_route` beside `verification_next_command`, and each `planning inspect` phase carries `verification.route` beside `verification.status`.
+The JSON result carries `status`, `next_action`, `next_command` (the route projected for the project's runtime, for example `/gsd-execute-phase 3` or `$gsd-execute-phase 3` on Codex), and — additive since #5118 — `route`, the bare command from the same table entry, so the two can never disagree. `message` is present only where a usage error needs one. `uncovered_artifacts` (#4817) is present only on a `stale` result for an older v1/v2 report that never declared some current plan or summary in `covered_files`: it lists those file names, and `next_action` names them and says whether a covered file also changed, so "a covered file changed" and "an artifact was never covered" read differently. The remedy and route are the same. A report written by the current fingerprint verb (v4) cannot reach that state: it covers the phase's own artifacts itself. Newly written v4 fingerprints hash CRLF byte pairs as LF, preserving every other byte (including lone CR and non-UTF-8 input), so a line-ending-only checkout rewrite leaves the report fresh. Stored v1–v3 fingerprints are recomputed with their original raw-byte semantics; upgrading does not re-fingerprint them. `moved_files` (#4857) is present on a `stale` result whose digest moved and names the declared covered files modified after the report was written (by clean commit time, or mtime for an uncommitted edit; report paths and shared planning documents are excluded exactly as the digest excludes them), so an edit to a covered file reads differently from a missing artifact or a self-covering report. It is advisory: the digest alone decides staleness, and a stale report that carries no `moved_files` was not invalidated by an edit to a file it covers. `staleCheckIndeterminate` is unchanged. The `init *` bundles expose the same bare command as `verification_route` beside `verification_next_command`, and each `planning inspect` phase carries `verification.route` beside `verification.status`.
 
 - **`phase_dir_not_found`** is a usage error, not a verification state: nothing was there to look in (a dangling symlink and a path that is a regular file both read this way). It has no next command — re-running `execute-phase` could re-run a phase already archived under `.planning/milestones/`. Resolve the directory with `find-phase`.
 - **`unknown` no longer exists.** A `status` outside the set used to route as `unknown` to `execute-phase`; that is now the hard error below, and no command emits `unknown`.
@@ -914,6 +1146,28 @@ The JSON result carries `status`, `next_action`, `next_command` (the route proje
 - **Exact match, no folding (behavior change).** The check is an exact string match. Case-folded and legacy statuses — `Passed`, `pending`, `partial` — that `phase complete`'s warning pre-scan and `audit-uat` used to fold into a known status now hard-error like any other out-of-set value, on every command; correct the report's `status:` to an accepted value.
 - **`missing` on `verify-work`.** `/gsd-verify-work` runs the regeneration step for a `stale` report, and for a `missing` one only when every plan has a `SUMMARY.md` (the verify step never ran on an executed phase). A `missing` report on a phase that is not fully executed does not dispatch it: the command blocks with `next_command` (`execute-phase`) instead.
 - **Containment.** Two checks, both before any read. The phase directory must resolve under its phases root, and the report (and each `*-UAT.md` and `*-HUMAN-UAT.md`) must resolve inside its phase directory. Anything that escapes (a symlink out of the project) is never read and none of its content reaches any output: an escaped report reads `missing` from `verification status`, an escaped UAT file is treated as absent, and an escaped phase directory reads `missing` from `verification status` but `phase_dir_not_found` from `init verify-work`.
+
+### `verification all-summarized` (execute-phase's all-plans-summarized decision, #6096)
+
+```bash
+node gsd-tools.cjs verification all-summarized <phase-dir> [--filter-active] [--plan-index <json|@file:path>] [--phase-marked <true|false>] [--pick <field>]
+```
+
+When every plan in a phase has a `SUMMARY.md`, `execute-phase` has no plan work left to dispatch. Whether it then exits, presents a route, or resumes at the verification gates is decided here, by code, so a judgment such as "this change is test-only" cannot override the owner's staleness verdict. The result is `{ "decision": <one of the values below> }`, plus the full `verification status` result (`status`, `next_action`, `next_command`, `route`, ...) whenever the decision needed the report, so a caller can `--pick decision` and, for `present-route`, read `next_action` and `next_command` from the same call.
+
+`--filter-active` says a `--gaps-only` or wave filter is set. `--plan-index` is `phase-plan-index`'s own output (inline JSON, or the `@file:` form it prints for a large one); the blocked and not-ready skips are derived from it by the command, never asserted by the caller: an incomplete plan (no `has_summary`) with a non-empty `blocked_by` is a blocked skip, one with `ready: false` is a not-ready skip. It is required unless `--filter-active` already decides. `--phase-marked` is the roadmap checkbox from `roadmap.analyze` (`roadmap_complete`); any value other than `true`, including an empty one, reads as not marked. An unknown option, a missing or unparseable plan index, and a valueless option are errors.
+
+| `decision` | When (first match wins, in this order) |
+|------------|-----------------------------------------|
+| `exit-filtered` | `--filter-active` |
+| `exit-blocked` | the plan index holds a blocked skip |
+| `exit-not-ready` | the plan index holds a not-ready skip |
+| `resume-at-gates` | the owner's `route` is `execute-phase`: a `stale` or `missing` report, on both sides of `--phase-marked`, whatever the report's own `status` field says |
+| `update-roadmap` | a fresh `passed` report and the phase is not marked complete |
+| `exit-unchanged` | a fresh `passed` report and the phase is marked complete |
+| `present-route` | any other route (`gaps_found`, `human_needed`, `unparseable`, `phase_dir_not_found`) |
+
+The three plan-index exits never read the report, so they answer even when the report's `status` is outside the closed set; every other decision reads it and fails with `verification_status_invalid` like `verification status`. The branch is derived from the same `VERIFICATION_ROUTES` table as `verification status`, not a second one.
 
 ---
 
@@ -1094,6 +1348,11 @@ node gsd-tools.cjs scaffold verification --phase N
 node gsd-tools.cjs scaffold phase-dir --phase N --name "phase name"
 ```
 
+The verification scaffold omits frontmatter `status` until the verifier writes a verdict
+(`passed`, `gaps_found`, or `human_needed`). `verification status` therefore reports the
+fresh scaffold as `missing` and routes to `execute-phase`; phase completion stays blocked
+until verification passes. The UAT scaffold retains its blocking `status: pending`.
+
 ---
 
 ## Init Commands (Compound Context Loading)
@@ -1142,10 +1401,13 @@ if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 
 ```bash
 # Archive milestone
-node gsd-tools.cjs milestone complete <version> (--confirm | --dry-run) [--name <name>] [--no-archive-phases] [--force] [--archive-quick]
+node gsd-tools.cjs milestone complete <version> (--confirm | --dry-run) [--name <name>] [--no-archive-phases] [--force] [--archive-quick] [--release-map <file>]
 
 # Archive .planning/quick/* into milestones/<version>-quick/ WITHOUT the milestone complete close-out (#2142)
 node gsd-tools.cjs milestone archive-quick <version> [--dry-run]
+
+# Preflight, then create annotated release tags per sub-repo (#5705)
+node gsd-tools.cjs milestone release-tags --map <file.json> [--dry-run]
 
 # Mark requirements as complete
 node gsd-tools.cjs requirements mark-complete <ids>
@@ -1161,8 +1423,9 @@ node gsd-tools.cjs requirements mark-complete <ids>
 | `--name <name>` | Display name for the MILESTONES.md entry. Defaults to `<version>`. |
 | `--no-archive-phases` | Leave phase directories in place instead of moving them into `.planning/milestones/<version>-phases/`. |
 | `--archive-quick` | Opt-in (default OFF, #2142): also move every directory under `.planning/quick/` into `.planning/milestones/<version>-quick/`, (re)write that archive directory's `README.md` index, and clear STATE.md's `### Quick Tasks Completed` table rows. See "`milestone archive-quick`" below for the narrower standalone form and the full behavior. |
+| `--release-map <file>` | Opt-in (#5706): archive a per-repository release map. `<file>` is a JSON array of `{ repo, release, reference, environment, status, tag }` entries (fields and limits in [Per-repository release mapping](CONFIGURATION.md#per-repository-release-mapping)). The map is validated before anything is written; any problem fails the command with every error listed and changes nothing. On success the map is written to `.planning/milestones/<version>-RELEASE-MAP.json`, a `**Release mapping:**` table is added to the MILESTONES.md entry, and the JSON result carries `release_map: { path, entries }`. The file must be a regular file of at most 1 MiB. A later run for the same version never overwrites an archived map that differs. Without the flag, output and files are unchanged. |
 | `--force` | Override the unstarted-phase guard (see below). |
-| `--dry-run` | Print the archive plan (roadmap, requirements, phases, and — when `--archive-quick` is also passed — quick-task dirs to move) without mutating anything. |
+| `--dry-run` | Print the archive plan (roadmap, requirements, phases, and — when `--archive-quick` is also passed — quick-task dirs to move) without mutating anything. With `--release-map`, the map is validated and reported under `would_archive.release_map`. |
 
 **Unstarted-phase guard.** Before archiving, the command scans the ROADMAP scoped for `<version>` and refuses if any `### Phase N:` heading in that slice has no matching phase directory on disk (`disk_status: no_directory`). Phase 0 (pre-milestone) and Phase 999 (backlog) sentinels are excluded. The guard runs whenever `--force` is absent, independent of `STATE.md`'s `milestone:` field — if that field is present but does not match `<version>`, a WARNING naming both values is emitted to stderr and the scan still runs (#2946). Pass `--force --confirm` to override (`--confirm` is required for any mutating run — #3726; `--force` alone does not imply it).
 
@@ -1180,6 +1443,16 @@ A narrower sibling of `milestone complete --archive-quick`, for callers that nee
 It moves every directory under `.planning/quick/` into `.planning/milestones/<version>-quick/`, (re)writes that archive directory's `README.md` index, and clears STATE.md's `### Quick Tasks Completed` table rows — the same move/index/reset logic `milestone complete --archive-quick` uses. Unlike `milestone complete`, it never archives `ROADMAP.md`/`REQUIREMENTS.md`, never writes a `MILESTONES.md` entry, and runs neither the unstarted-phase guard nor the milestone-window refusal — so, unlike `milestone complete --archive-quick`, it can be safely re-run against an already-completed milestone. JSON result: `{ version, archived, entries, archive_dir, state_updated, warnings }`.
 
 `milestone archive-quick` is a second subcommand of `milestone` (alongside `complete`) — it is not a separate top-level command.
+
+**`milestone release-tags` (#5705)**
+
+Creates one annotated git tag per repository listed in `sub_repos`. `--map` points at a JSON file (at most 1 MiB) holding an array of at most 256 entries (`skip` entries count toward the limit): `{ "repo": "api", "tag": "v1.2.0", "ref": "HEAD", "message": "...", "skip": false }`. `repo` must be listed in `sub_repos` (a leading `./` and trailing `/` are ignored; absolute paths, `..` segments and backslash variants are rejected). `ref` defaults to `HEAD`; `message` defaults to the tag name; `skip: true` reports the repo as skipped without touching it.
+
+Every entry is validated before the first tag is written, so a predictable failure creates nothing anywhere. A tag that already exists at the requested commit is reported `already_tagged` (re-running the same map is safe); a tag at a different commit is a `tag_conflict` and is never overwritten. `--dry-run` runs the validation only and reports `would_create`. Nothing is pushed.
+
+Tag creation is not transactional across repositories. If a write fails after earlier ones succeeded, the remaining repositories are still attempted, `created` lists every `repo:tag` already written, and the command exits non-zero; re-run the same map to retry only the failed ones.
+
+JSON result: `{ ok, phase, repos, created, errors }`. `phase` is `preflight` (validation failed), `dry_run` or `apply`. `repos` is keyed by repo path (`repo:tag` when one repo receives two tags); each value has `status` (`created`, `already_tagged`, `skipped`, `would_create`, `failed`, `error`) plus `tag`, `commit`, and on failure `reason`, `error`, `existing_commit`, `requested_commit`. Reason codes: `no_sub_repos`, `invalid_request`, `too_many_entries`, `repo_not_configured`, `repo_path_invalid`, `repo_missing`, `not_a_git_repo`, `tag_invalid`, `ref_unresolved`, `tag_conflict`, `duplicate_entry`, `git_timeout`, `tag_create_failed`.
 
 ---
 
@@ -1264,6 +1537,11 @@ node gsd-tools.cjs quick-tasks-append --task "<description>" --directory "[<id>-
 node gsd-tools.cjs quick-tasks-append --task "<description>" --quick-id <id> --slug <slug> --status PASS
 # This append touches only the body table — it no longer forces a re-derive of the disk-derived
 # `progress.*` frontmatter, which previously overwrote curated values (#3356).
+# A --task over 240 characters (the #2618 todo-bullet bound; "characters" are UTF-16 code units,
+# JavaScript string length, so an emoji counts as 2) is still written in full and the command
+# still exits 0, but the JSON result's `warnings` (a string[], empty otherwise) carries one entry;
+# under --raw the warning goes to stderr. `quick-batch complete` returns the same `warnings` for
+# the row it appends. Pass a one-line title; detail belongs in the task's SUMMARY (#5830).
 # See "Milestone Commands" below for `milestone archive-quick` (#2142) — sweeps .planning/quick/* into
 # milestones/<version>-quick/ and clears this table, without a full `milestone complete`.
 
@@ -1420,7 +1698,7 @@ node gsd-tools.cjs worktree base-check --observed-fork-base <sha>
 node gsd-tools.cjs worktree set-baseref
 ```
 
-**`worktree base-check`** reads `worktree.baseRef` from a three-layer cascade — `.claude/settings.local.json`, then `.claude/settings.json`, then the user/global `settings.json` under `CLAUDE_CONFIG_DIR` (or `~/.claude`) — and compares the current `HEAD` SHA against `origin/HEAD`. Project-level settings take precedence over the user/global layer, so a machine-wide `worktree.baseRef:"head"` set via `/config` is honored when no project override exists. The `shouldDegrade` field is `true` when the execute-phase orchestrator will fall back to sequential execution. `--mode` declares who creates the isolated worktree (#3659): `harness-worktree` (the default — the runtime harness forks it) or `orchestrator-worktree` (GSD itself runs `git worktree add` with an explicit start-point). `worktree.baseRef:"head"` is honored by the orchestrator by construction and by the Claude Code harness as measured from all three settings layers (#4588; the #48 finding that the harness did not read the setting predates upstream claude-code#54940); Cursor, the other `harness-worktree` host, is unmeasured. With `"head"` set the check does not compare in either mode unless `--observed-fork-base` is given (below), with one further exception under `harness-worktree` and no observation: when a Claude Code `WorktreeCreate` hook is configured in any of the same three settings files, or one of them does not parse, the hook creates the agent worktree and Claude Code does not apply `worktree.baseRef` to it, so the check compares `HEAD` against `origin/HEAD` as if the setting were absent (#4588). The #4868 prior-worktree observation is **not** consulted on that path: a worktree sitting at `HEAD` records nothing about which creator made it, so one the plain harness left there before the hook was configured would read as evidence for the hook (#4881). Pass `--observed-fork-base` for a trusted verdict on a hook host. Hooks from managed policy settings, a `--settings` file, plugins, agent frontmatter or SDK registrations are not visible to the check; the exit-42 guard remains the backstop for those. `--observed-fork-base <sha>` supplies the fork base a worktree created for a dispatch was actually measured to have (`git rev-parse HEAD` inside it, before any commit — a full 40- or 64-hex sha, case-insensitive; abbreviations are refused because the comparison is exact); when given, it replaces the `origin/HEAD` inference as the fork side of the comparison and `"head"` no longer short-circuits — the verdict then reports a measurement, and a mismatch under `"head"` means the worktree was not forked from HEAD despite the setting. Invalid values for either flag fail closed with an error. Possible `reason` values:
+**`worktree base-check`** reads `worktree.baseRef` from a three-layer cascade — `.claude/settings.local.json`, then `.claude/settings.json`, then the user/global `settings.json` under `CLAUDE_CONFIG_DIR` (or `~/.claude`) — and compares the current `HEAD` SHA against `origin/HEAD`. Project-level settings take precedence over the user/global layer, so a machine-wide `worktree.baseRef:"head"` set via `/config` is honored when no project override exists. The result names the settings layer that produced the value in `baseRefLayer` (`runtime-local`, `runtime-shared`, `runtime-user`, or `null` when `worktree.baseRef` is set nowhere); a layer whose `baseRef` is not a string is skipped. The layer is provenance only: it does not change `shouldDegrade` or `reason`. A settings layer that cannot be read or parsed is skipped, and the resolver now writes its one-time unusable-config warning to stderr for it; stdout and the verdict are unaffected. The `shouldDegrade` field is `true` when the execute-phase orchestrator will fall back to sequential execution. `--mode` declares who creates the isolated worktree (#3659): `harness-worktree` (the default — the runtime harness forks it) or `orchestrator-worktree` (GSD itself runs `git worktree add` with an explicit start-point). `worktree.baseRef:"head"` is honored by the orchestrator by construction and by the Claude Code harness as measured from all three settings layers (#4588; the #48 finding that the harness did not read the setting predates upstream claude-code#54940); Cursor, the other `harness-worktree` host, is unmeasured. With `"head"` set the check does not compare in either mode unless `--observed-fork-base` is given (below), with one further exception under `harness-worktree` and no observation: when a Claude Code `WorktreeCreate` hook is configured in any of the same three settings files, or one of them does not parse, the hook creates the agent worktree and Claude Code does not apply `worktree.baseRef` to it, so the check compares `HEAD` against `origin/HEAD` as if the setting were absent (#4588). The #4868 prior-worktree observation is **not** consulted on that path: a worktree sitting at `HEAD` records nothing about which creator made it, so one the plain harness left there before the hook was configured would read as evidence for the hook (#4881). Pass `--observed-fork-base` for a trusted verdict on a hook host. Hooks from managed policy settings, a `--settings` file, plugins, agent frontmatter or SDK registrations are not visible to the check; the exit-42 guard remains the backstop for those. `--observed-fork-base <sha>` supplies the fork base a worktree created for a dispatch was actually measured to have (`git rev-parse HEAD` inside it, before any commit — a full 40- or 64-hex sha, case-insensitive; abbreviations are refused because the comparison is exact); when given, it replaces the `origin/HEAD` inference as the fork side of the comparison and `"head"` no longer short-circuits — the verdict then reports a measurement, and a mismatch under `"head"` means the worktree was not forked from HEAD despite the setting. Invalid values for either flag fail closed with an error. Possible `reason` values:
 
 | `reason` | `shouldDegrade` | Meaning |
 |---|---|---|

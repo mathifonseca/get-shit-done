@@ -36,7 +36,7 @@ Every expected cross-phase connection must resolve to WIRED (verified end-to-end
 
 **Project skills:** Check `.claude/skills/` or `.agents/skills/` directory if either exists:
 
-**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md
+**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md (agent type: `gsd-integration-checker`)
 1. List available skills (subdirectories)
 2. Read `SKILL.md` for each skill (lightweight index ~130 lines)
 3. Load specific `rules/*.md` files as needed during implementation
@@ -93,12 +93,17 @@ For each phase, extract what it provides and what it should consume.
 
 **From SUMMARYs, extract:**
 
+@~/.claude/gsd-core/references/gsd-run-resolver.md
+
 ```bash
 # #2962: zsh aborts the block on an unmatched for-list glob (nomatch); bash passes it through. nullglob both.
 shopt -s nullglob 2>/dev/null; setopt NULL_GLOB 2>/dev/null
 
+PLANNING_ROOT=$(gsd_run query planning.inspect ${GSD_WS:+--ws=${GSD_WS##* }} --pick generated_from.planning_root)
+: "${PLANNING_ROOT:?}"
+
 # Key exports from each phase
-for summary in .planning/phases/*/*-SUMMARY.md; do
+for summary in "${PLANNING_ROOT}"/phases/*/*-SUMMARY.md; do
   echo "=== $summary ==="
   grep -A 10 "Key Files\|Exports\|Provides" "$summary" 2>/dev/null
 done

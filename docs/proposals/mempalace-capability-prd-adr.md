@@ -157,7 +157,7 @@ Using the 12 canonical points and per-step `agentRoles` from `loop-host-contract
 | `discuss:post` | step | skill `mempalace-capture` | — | `CONTEXT.md` | `mempalace.capture_artifacts` | File CONTEXT → `decisions`; KG decision facts |
 | `plan:pre` | step | skill `mempalace-recall` | `MEMORY-RECALL.md` | `CONTEXT.md` | `mempalace.recall_on_plan` | Retrieve prior decisions/patterns/surprises for the plan |
 | `plan:post` | step | skill `mempalace-capture` | — | `PLAN.md` | `mempalace.capture_artifacts` | File PLAN → `planning` |
-| `execute:wave:post` | contribution | into `verifier` | — | — | `mempalace.capture_artifacts` | Capture confirmed problems→fixes into `problems` |
+| `execute:post` | contribution | into `verifier` | — | — | `mempalace.capture_artifacts` | Capture confirmed problems→fixes into `problems` |
 | `verify:post` | step | skill `mempalace-capture` | — | `SUMMARY.md` | `mempalace.capture_artifacts` | File milestones; mirror `extract-learnings` → KG + `learnings` |
 | `ship:post` | step | agent `gsd-mempalace-curator` | — | `UAT.md` | `mempalace.diary_journal` | Diary entry; cross-project tunnels; `sync --apply` |
 
@@ -218,7 +218,7 @@ All steps/contributions are `onError: skip`. No gates.
   ],
   "contributions": [
     { "point": "discuss:pre",        "into": "orchestrator", "fragment": { "path": "fragments/recall-discuss.md" }, "when": "mempalace.recall_on_discuss", "onError": "skip" },
-    { "point": "execute:wave:post",  "into": "verifier",     "fragment": { "path": "fragments/capture-problems.md" }, "when": "mempalace.capture_artifacts", "onError": "skip" }
+    { "point": "execute:post",       "into": "verifier",     "fragment": { "path": "fragments/capture-problems.md" }, "when": "mempalace.capture_artifacts", "onError": "skip" }
   ],
   "gates": []
 }
@@ -268,7 +268,7 @@ ADR-857 (the capability system + the `loop render-hooks` resolver + the workflow
 1. `capabilities/mempalace/capability.json` (above).
 2. `node scripts/gen-capability-registry.cjs --write` → regenerates `capability-registry.cjs` (do not hand-edit).
 3. Add `commands/gsd/mempalace-recall.md`, `commands/gsd/mempalace-capture.md`.
-4. Add `agents/gsd-mempalace-curator.md` (+ ripple to `scripts/research-profiles.cjs`/`docs/AGENTS.md` only if it's a research-profile agent — the curator is not, so likely n/a).
+4. Add `agents/gsd-mempalace-curator.md` (+ ripple to `scripts/research-profiles.cjs`/`docs/reference/agents.md` only if it's a research-profile agent — the curator is not, so likely n/a).
 5. Add `capabilities/mempalace/fragments/recall-discuss.md` + `fragments/capture-problems.md`.
 6. Config keys: new ⇒ federated automatically; **no** `loadConfig` whitelist edit.
 7. Confirm `id: mempalace` does **not** collide with a `CLUSTERS` key in `src/clusters.cts` (HARD consistency gate) — if it does, match exactly or rename.

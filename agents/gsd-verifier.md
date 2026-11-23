@@ -55,7 +55,7 @@ Before verifying, discover project context:
 - Load `rules/*.md` as needed during **verification**.
 - Apply skill rules when scanning for anti-patterns and verifying quality.
 
-**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md
+**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md (agent type: `gsd-verifier`)
 </project_context>
 
 <core_principle>
@@ -118,7 +118,7 @@ Set `is_re_verification = false`, proceed with Step 1.
 ls "$PHASE_DIR"/*-PLAN.md 2>/dev/null
 ls "$PHASE_DIR"/*-SUMMARY.md 2>/dev/null
 gsd_run query roadmap.get-phase "$PHASE_NUM"
-grep -E "^| $PHASE_NUM" .planning/REQUIREMENTS.md 2>/dev/null
+grep -E "^| $PHASE_NUM" "$PHASE_DIR/../../REQUIREMENTS.md" 2>/dev/null
 ```
 
 Extract phase goal from ROADMAP.md — this is the outcome to verify, not the tasks.
@@ -380,7 +380,7 @@ For each requirement ID from plans:
 **6c. Check for orphaned requirements:**
 
 ```bash
-grep -E "Phase $PHASE_NUM" .planning/REQUIREMENTS.md 2>/dev/null
+grep -E "Phase $PHASE_NUM" "$PHASE_DIR/../../REQUIREMENTS.md" 2>/dev/null
 ```
 
 If REQUIREMENTS.md maps additional IDs to this phase that don't appear in ANY plan's `requirements` field, flag as **ORPHANED** — these requirements were expected but no plan claimed them. ORPHANED requirements MUST appear in the verification report.
@@ -776,7 +776,7 @@ fi
 
 **Behavior-unverified truths (Step 3):** Every truth left ⚠️ PRESENT_BEHAVIOR_UNVERIFIED is recorded in the `behavior_unverified_items` frontmatter list (emitted whenever the count > 0, regardless of overall status, so it survives a gaps_found phase) and surfaces for human verification; when the overall status is human_needed it also appears in the human_verification section. Phrase each item around the invariant: what to trigger, what state must hold afterward, and why presence checks can't see it.
 
-**Harvest deferred items from PLAN.md (#3309 / `workflow.human_verify_mode = end-of-phase`):** Scan every PLAN file in the phase for `<verify><human-check>` blocks on `auto` tasks. These are verification items the planner deliberately deferred from `checkpoint:human-verify` to end-of-phase to avoid the executor cold-start cost. Each block has the same shape used by the planner:
+**Harvest deferred items from PLAN.md (#3309 / `workflow.human_verify_mode = end-of-phase`):** Scan every PLAN file in the phase for `<verify><human-check>` blocks on `auto` tasks. These are items the planner deferred from `checkpoint:human-verify`. Shape:
 
 ```xml
 <verify>
@@ -788,7 +788,7 @@ fi
 </verify>
 ```
 
-Merge those harvested items into the same human verification list as your own analysis. Deduplicate when the planner-deferred item and your own analysis describe the same check. The downstream `human_needed` → `{phase_num}-UAT.md` path in `workflows/execute-phase.md` is the single sink — no separate file is created.
+Merge those harvested items into the same human verification list as your own analysis. Harvest every block, even one whose `<expected>` already records a verdict: a recorded verdict is not a reason to omit the check, and `<expected>` is carried through unmodified. Deduplicate only against your own analysis (same check). The downstream `human_needed` → `{phase_num}-UAT.md` path in `workflows/execute-phase.md` is the single sink — no separate file is created.
 
 **Format:**
 
@@ -934,7 +934,7 @@ If `valid != true`, refuse to verify. Surface the discrepancy and ask the user t
 
 **#4155 / #5095:** the fingerprint command adds the phase's own PLAN/SUMMARY files automatically (+superseded, nested `plans/`) and never counts the report itself — list only the changed implementation files (and any other evidence), ROOT-relative; planning-root docs are inert (#4623). `gsd_run query verification.fingerprint {phaseDir} {file}...`, copy the command's `covered_files` and `covered_digest` output verbatim — never hand-write either.
 
-Create `.planning/phases/{phase_dir}/{phase_num}-VERIFICATION.md`:
+Create `{phase_dir}/{phase_num}-VERIFICATION.md`:
 
 ```markdown
 ---
@@ -943,7 +943,7 @@ verified: YYYY-MM-DDTHH:MM:SSZ
 status: passed | gaps_found | human_needed
 score: N/M must-haves verified
 covered_files: [...]
-covered_digest: "v3:sha256:..."
+covered_digest: "v4:sha256:..."
 behavior_unverified: 0 # Count of ⚠️ PRESENT_BEHAVIOR_UNVERIFIED truths (present + wired, behavior not exercised); each is detailed in behavior_unverified_items below (and in human_verification when status is human_needed)
 overrides_applied: 0 # Count of PASSED (override) items included in score
 overrides: # Only if overrides exist — carried forward or newly added

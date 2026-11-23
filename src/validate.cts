@@ -33,6 +33,7 @@
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseIdMod = require('./phase-id.cjs');
+import { phaseEntryRegExp } from './phase-entry-grammar.cjs';
 const {
   OPTIONAL_PROJECT_CODE_PREFIX_SOURCE,
   // #2528 review: taken from the owner rather than derived here by
@@ -243,9 +244,14 @@ export function buildRoadmapPhaseVariants(roadmapContent: string, convention?: s
   // opted in. A non-bracket repo compiles the base source unchanged.
   const capturing = convention === 'bracket';
   const g = capturing ? 1 : 0;
-  const phasePattern = new RegExp(`#{2,4}\\s*${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.ANY_BRACKET, convention, capturing)}([\\w][\\w.-]*)(?:\\s*\\([^)\\n]{0,200}\\))?\\s*:`, 'gi');
-  let m: RegExpExecArray | null;
-  while ((m = phasePattern.exec(roadmapContent)) !== null) {
+  // #5880: the headings come from the one tokenizer (real ATX headings, levels 2-4,
+  // outside fences, at line start); a raw scan also read a heading quoted in a code
+  // span, a blockquote or a sentence as a ROADMAP phase.
+  const phasePattern = new RegExp(`^${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.ANY_BRACKET, convention, capturing)}([\\w][\\w.-]*)(?:\\s*\\([^)\\n]{0,200}\\))?\\s*:`, 'i');
+  for (const heading of tokenizeHeadings(roadmapContent)) {
+    if (heading.level < 2 || heading.level > 4) continue;
+    const m = phasePattern.exec(heading.text);
+    if (!m) continue;
     const token = m[1 + g];
     const bracketId = g ? m[1] : undefined;
     if (bracketId && isSentinelPhaseId(`${bracketId}-${token}`, 'bracket')) sentinelOnly.add(token);
@@ -266,7 +272,7 @@ export function buildRoadmapPhaseVariants(roadmapContent: string, convention?: s
   // shape (bold bullet index + detail headings) where the icebox appears as both.
   // `validate health` stayed silent on the same repo, so the two verbs disagreed
   // — the disagreement `sentinelPhases` exists to close.
-  const checklistPattern = new RegExp(`-\\s*\\[[ xX]\\]\\s*\\*{0,2}${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY, convention, capturing)}([\\w][\\w.-]*)\\s*:`, 'gi');
+  const checklistPattern = phaseEntryRegExp(`${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY, convention, capturing)}([\\w][\\w.-]*)\\s*:`, 'gi');
   let cm: RegExpExecArray | null;
   while ((cm = checklistPattern.exec(roadmapContent)) !== null) {
     const cBracketId = g ? cm[1] : undefined;
@@ -287,7 +293,7 @@ export function buildNotStartedPhaseVariants(roadmapContent: string, convention?
   // Trailing class is `[:\s*]` — a SPACE terminates the token here, not only a
   // colon — so this site is the loosest of the three and the one where a
   // retro-granted bracket tolerance would suppress a live W006.
-  const uncheckedPattern = new RegExp(`-\\s*\\[\\s\\]\\s*\\*{0,2}${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY, convention)}([\\w][\\w.-]*)[:\\s*]`, 'gi');
+  const uncheckedPattern = phaseEntryRegExp(`${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY, convention)}([\\w][\\w.-]*)[:\\s*]`, 'gi', { state: 'unchecked' });
   let um: RegExpExecArray | null;
   while ((um = uncheckedPattern.exec(roadmapContent)) !== null) {
     for (const variant of phaseVariants(um[1])) notStartedPhases.add(variant);

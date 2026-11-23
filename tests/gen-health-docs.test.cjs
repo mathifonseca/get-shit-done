@@ -153,10 +153,14 @@ describe('gen-health-docs.cjs row content (representative codes)', () => {
   const rules = loadRealRules();
 
   // #5118: W030 (a verification report status outside the closed set) is the 34th rule.
-  test('produces a 37-row <error_codes> table: 34 rules + 3 pre-checks (E001, E010, I010)', () => {
+  // #5830: W031 (STATE.md far over its line target) is the 35th.
+  // #6430: W032 (the plugin's context monitor has no statusline feeding it) is the 36th.
+  test('produces a 39-row <error_codes> table: 36 rules + 3 pre-checks (E001, E010, I010)', () => {
     const rows = buildErrorCodeRows(rules);
-    assert.equal(rows.length, 37);
+    assert.equal(rows.length, 39);
     assert.ok(rows.some((r) => r.code === 'W030'), 'W030 has a generated row');
+    assert.ok(rows.some((r) => r.code === 'W031'), 'W031 has a generated row');
+    assert.ok(rows.some((r) => r.code === 'W032'), 'W032 has a generated row');
     const codes = rows.map((r) => r.code);
     for (const precheck of PRECHECK_CODES) {
       assert.ok(codes.includes(precheck.code), `missing pre-check code ${precheck.code}`);
@@ -194,6 +198,13 @@ describe('gen-health-docs.cjs row content (representative codes)', () => {
     assert.match(row, /Yes \(`--backfill`\)/);
   });
 
+  test('W030 renders the known-legacy-statuses Repairable override, not a bare "Yes" (#5291)', () => {
+    const region = renderErrorCodesRegion(rules);
+    const row = region.split('\n').find((line) => line.startsWith('| W030 |'));
+    assert.ok(row);
+    assert.match(row, /Yes \(known legacy statuses only\)/);
+  });
+
   test('W025 (workflow-layer diagnostic, not a Rule) is absent from the generated table', () => {
     const region = renderErrorCodesRegion(rules);
     assert.ok(
@@ -216,12 +227,12 @@ describe('gen-health-docs.cjs row content (representative codes)', () => {
     assert.ok(lastW < firstI, 'every W-code must sort before every I-code');
   });
 
-  test('renderRepairActionsRegion lists all 6 real repair actions, including the previously-undocumented addAiIntegrationPhaseKey', () => {
+  test('renderRepairActionsRegion lists all 7 real repair actions, including the previously-undocumented addAiIntegrationPhaseKey', () => {
     const region = renderRepairActionsRegion();
     for (const action of REMEDY_ACTION_ORDER) {
       assert.ok(region.includes(`| ${action} |`), `missing repair action row: ${action}`);
     }
-    assert.equal(REMEDY_ACTION_ORDER.length, 6);
+    assert.equal(REMEDY_ACTION_ORDER.length, 7);
     assert.ok(region.includes('addAiIntegrationPhaseKey'), '#3309: this action was "live in code, missing from docs"');
   });
 });

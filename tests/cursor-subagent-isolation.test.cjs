@@ -27,9 +27,9 @@ const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, runGsdTools } = require('./helpers.cjs');
 const { SENTINEL_RELATIVE_PATH, SENTINEL_STALE_MS } = require('../hooks/lib/isolation-sentinel.js');
-const { REASON_CODE } = require('../hooks/lib/isolation-deny-reason.js');
+const { REASON_CODE, REMEDY } = require('../hooks/lib/isolation-deny-reason.js');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { gitOrThrow, toLegacyResult } = require('./helpers/git-fixture.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
@@ -59,6 +59,10 @@ function runHook(payload, extraEnv = {}) {
   // `USERPROFILE` too so that redirection actually takes effect on Windows
   // instead of silently leaking the real CI runner's profile directory.
   if ('HOME' in extraEnv) env.USERPROFILE = extraEnv.HOME;
+  // #5017: the defaults store root is GSD_HOME when set, and the test runner exports a sandbox
+  // GSD_HOME to every test — so redirecting only HOME no longer redirects the store. A test that
+  // redirects HOME redirects the store with it, unless it names GSD_HOME itself.
+  if ('HOME' in extraEnv && !('GSD_HOME' in extraEnv)) env.GSD_HOME = extraEnv.HOME;
   return toLegacyResult(runNode([HOOK_PATH], {
     input: typeof payload === 'string' ? payload : JSON.stringify(payload),
     cwd: require('node:os').tmpdir(),
@@ -495,6 +499,67 @@ describe('gsd-cursor-subagent-start.js: realpath seam — in-process spoof cover
   });
 });
 
+describe('gsd-cursor-subagent-start.js: #6028 — the deny remedy agrees with a recorded degrade (in-process)', () => {
+  let cursorConfigDir;
+  let managedRootPath;
+  let rootPath;
+  let savedCursorConfigDir;
+  const cursorHookModule = require('../hooks/gsd-cursor-subagent-start.js');
+  const WRITTEN_AT = 1_700_000_000_000;
+  const clock = { now: () => WRITTEN_AT + 1 };
+  const dispatchIds = { phase: '665', plan: '665-02', source: 'marker' };
+  const outsideManagedRoot = (p) => (p === rootPath ? path.join(require('node:os').tmpdir(), 'gsd-cs-6028-primary') : p);
+
+  before(() => {
+    cursorConfigDir = createTempDir('gsd-cs-6028-');
+    managedRootPath = path.join(cursorConfigDir, 'worktrees');
+    rootPath = path.join(managedRootPath, 'root');
+    fs.mkdirSync(rootPath, { recursive: true });
+    gitOrThrow(['init'], { cwd: rootPath, timeoutMs: PROBE_TIMEOUT_MS });
+    gitOrThrow(['config', 'user.email', 'test@test.com'], { cwd: rootPath, timeoutMs: PROBE_TIMEOUT_MS });
+    gitOrThrow(['config', 'user.name', 'Test'], { cwd: rootPath, timeoutMs: PROBE_TIMEOUT_MS });
+    fs.mkdirSync(path.join(rootPath, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(rootPath, '.planning', 'config.json'), JSON.stringify({ runtime: 'cursor' }));
+    savedCursorConfigDir = process.env.CURSOR_CONFIG_DIR;
+    process.env.CURSOR_CONFIG_DIR = cursorConfigDir;
+  });
+  after(() => {
+    if (savedCursorConfigDir === undefined) delete process.env.CURSOR_CONFIG_DIR;
+    else process.env.CURSOR_CONFIG_DIR = savedCursorConfigDir;
+    cleanup(cursorConfigDir);
+  });
+
+  function evaluate() {
+    return cursorHookModule.evaluateRootIsolation(rootPath, 'gsd-executor', { clock, dispatchIds, realpath: outsideManagedRoot });
+  }
+
+  test('a fresh recorded none for ANOTHER phase: still denied with the same reason code, remedy is to record an applicable decision', (t) => {
+    writeSentinel(rootPath, { isolation: 'none', phase: '663', writtenAt: WRITTEN_AT });
+    t.after(() => cleanup(path.join(rootPath, '.gsd')));
+    const v = evaluate();
+    assert.equal(v.action, 'deny', 'the allow/deny decision is unchanged');
+    assert.equal(v.reasonCode, REASON_CODE.NOT_ISOLATED_WORKTREE, 'the stable reason code is unchanged');
+    assert.equal(v.remedy, REMEDY.RECORD_APPLICABLE_DECISION);
+    assert.equal(v.sentinelDiscarded.sentinel.isolation, 'none');
+  });
+
+  test('no sentinel: denied, the start-an-isolated-session remedy stays', () => {
+    const v = evaluate();
+    assert.equal(v.action, 'deny');
+    assert.equal(v.reasonCode, REASON_CODE.NOT_ISOLATED_WORKTREE);
+    assert.equal(v.remedy, REMEDY.ADD_FLAG);
+    assert.equal(v.sentinelDiscarded, null);
+  });
+
+  test('a fresh recorded harness-worktree for another phase: denied, the original remedy stays', (t) => {
+    writeSentinel(rootPath, { isolation: 'harness-worktree', harnessFlag: 'isolation="worktree"', phase: '663', writtenAt: WRITTEN_AT });
+    t.after(() => cleanup(path.join(rootPath, '.gsd')));
+    const v = evaluate();
+    assert.equal(v.action, 'deny');
+    assert.equal(v.remedy, REMEDY.ADD_FLAG);
+  });
+});
+
 describe('gsd-cursor-subagent-start.js: nonexistent workspace root does not crash or bypass the scan (#3045)', () => {
   let unisolatedProject;
   let nonexistentRoot;
@@ -822,6 +887,25 @@ describe('gsd-cursor-subagent-start.js: #3045 MAJOR "Cursor residual false-deny"
       cleanup(home);
     }
   });
+
+  test('#5017: the runtime fallback reads $GSD_HOME/.gsd/defaults.json when GSD_HOME is set, ahead of the home directory', () => {
+    const home = createTempDir('gsd-cs-5017-home-');
+    const gsdHome = createTempDir('gsd-cs-5017-gsdhome-');
+    try {
+      fs.mkdirSync(path.join(gsdHome, '.gsd'), { recursive: true });
+      fs.writeFileSync(path.join(gsdHome, '.gsd', 'defaults.json'), JSON.stringify({ runtime: 'cursor' }));
+      // The home directory has NO store: only the GSD_HOME one carries the runtime signal.
+      const r = runHook(subagentPayload([unconfiguredProject]), { HOME: home, GSD_HOME: gsdHome });
+      assert.equal(r.status, 0, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+      assert.equal(JSON.parse(r.stdout).permission, 'deny', `GSD_HOME defaults runtime must be enforced, got: ${r.stdout}`);
+      // A blank GSD_HOME falls back to the home directory (which has no store here) -> inert.
+      const blank = runHook(subagentPayload([unconfiguredProject]), { HOME: home, GSD_HOME: '' });
+      assert.equal(JSON.parse(blank.stdout).permission, undefined, `blank GSD_HOME must fall back to HOME, got: ${blank.stdout}`);
+    } finally {
+      cleanup(home);
+      cleanup(gsdHome);
+    }
+  });
 });
 
 describe('gsd-cursor-subagent-start.js: #3045 SECURITY F2 — sentinel bound to phase/plan, mismatch is "no applicable sentinel"', () => {
@@ -954,12 +1038,14 @@ describe('gsd-cursor-subagent-start.js: #3566 — per-install .gsd-runtime marke
 
   let savedHome;
   let savedUserProfile;
+  let savedGsdHome;
   let savedGsdRuntime;
   let project; // scaffold-shaped config ({}), per #2840's no-runtime-key template
 
   before(() => {
     savedHome = process.env.HOME;
     savedUserProfile = process.env.USERPROFILE;
+    savedGsdHome = process.env.GSD_HOME;
     savedGsdRuntime = process.env.GSD_RUNTIME;
     project = createTempDir('gsd-cs-3566-');
     fs.mkdirSync(path.join(project, '.planning'), { recursive: true });
@@ -972,6 +1058,8 @@ describe('gsd-cursor-subagent-start.js: #3566 — per-install .gsd-runtime marke
     else process.env.HOME = savedHome;
     if (savedUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = savedUserProfile;
+    if (savedGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = savedGsdHome;
     if (savedGsdRuntime === undefined) delete process.env.GSD_RUNTIME;
     else process.env.GSD_RUNTIME = savedGsdRuntime;
     cursorHookModule._setInstallRuntimeMarkerForTests(null);
@@ -985,6 +1073,7 @@ describe('gsd-cursor-subagent-start.js: #3566 — per-install .gsd-runtime marke
     fs.writeFileSync(path.join(home, '.gsd', 'defaults.json'), JSON.stringify({ runtime: defaultsRuntime }));
     process.env.HOME = home;
     process.env.USERPROFILE = home;
+    process.env.GSD_HOME = home; // #5017: the store root
     t.after(() => cleanup(home));
   }
 
@@ -1072,5 +1161,44 @@ describe('gsd-cursor-subagent-start.js: #3582 cold tree — RuntimeBuildError su
     // `user_message` remains free-form operator-facing text — not asserted here.
     assert.equal(typeof out.user_message, 'string');
     assert.ok(out.user_message.length > 0);
+  });
+});
+
+describe('gsd-cursor-subagent-start.js: #5682 — interleaved per-dispatch records (in-process, real record-dispatch-isolation writer)', () => {
+  const cursorHookModule = require('../hooks/gsd-cursor-subagent-start.js');
+  const FLAG = '--worktree';
+  const A = { phase: '21', plan: '21-13' };
+  const B = { phase: '23', plan: '23-15' };
+  let project;
+  let savedGsdRuntime;
+
+  before(() => {
+    savedGsdRuntime = process.env.GSD_RUNTIME;
+    delete process.env.GSD_RUNTIME;
+    project = makeGitProject('gsd-cs-5682-', JSON.stringify({ runtime: 'cursor' }));
+  });
+  after(() => {
+    cleanup(project);
+    if (savedGsdRuntime === undefined) delete process.env.GSD_RUNTIME;
+    else process.env.GSD_RUNTIME = savedGsdRuntime;
+  });
+
+  function record(args) {
+    const result = runGsdTools(['record-dispatch-isolation', ...args], project);
+    assert.ok(result.success, `record-dispatch-isolation failed: ${result.error}`);
+    assert.equal(JSON.parse(result.output).recorded, true);
+  }
+
+  test('#5682: two orchestrators interleaving records each get their own verdict from evaluateRootIsolation', () => {
+    record(['--isolation', 'none', '--phase', A.phase, '--plan', A.plan]);
+    record(['--isolation', 'harness-worktree', `--harness-flag=${FLAG}`, '--phase', B.phase, '--plan', B.plan]);
+    const written = JSON.parse(fs.readFileSync(path.join(project, SENTINEL_RELATIVE_PATH), 'utf-8')).written_at;
+    const clock = { now: () => written + 1 };
+
+    const forA = cursorHookModule.evaluateRootIsolation(project, 'gsd-executor', { clock, dispatchIds: A });
+    assert.equal(forA.action, 'allow', 'A\'s recorded sequential decision still governs its own dispatch');
+
+    const forB = cursorHookModule.evaluateRootIsolation(project, 'gsd-executor', { clock, dispatchIds: B });
+    assert.equal(forB.action, 'deny', 'B\'s harness-worktree decision still denies a non-isolated checkout');
   });
 });

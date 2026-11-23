@@ -9,10 +9,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeEol } from './text-lines.cjs';
-import { execGit, platformWriteSync, platformReadSync, platformEnsureDir, isSpawnTimeout, retryRenameSync } from './shell-command-projection.cjs';
+import { execGit, GIT_LOCATION_ENV_VARS, platformWriteSync, platformReadSync, platformEnsureDir, isSpawnTimeout, retryRenameSync } from './shell-command-projection.cjs';
 import { escapeRegex } from './pattern.cjs';
+import { stripInsertedMarker } from './phase-entry-grammar.cjs';
+import { recordManifestFileHashes, tryFileHash, type RewrittenFile } from './install-manifest-record.cjs';
 import { locateFrontmatterFence, type LocateFrontmatterFenceOptions } from './frontmatter-fence.cjs';
-import { requireSafePath, sanitizeForDisplay, tryWithinRoot, assertWithinRoot, PathAcceptance } from './security.cjs';
+import { requireSafePath, sanitizeForDisplay, tryWithinRoot, assertWithinRoot, isContainedIn, PathAcceptance } from './security.cjs';
+import type { ProjectContext } from './project-context.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import ioMod = require('./io.cjs');
 const { output, ERROR_REASON } = ioMod;
@@ -29,6 +32,9 @@ const { toPosixPath, generateSlugInternal, extractOneLinerFromBody } = coreUtils
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseIdMod = require('./phase-id.cjs');
 const {
+  customPhaseQuery,
+  customDirectoryOwner,
+  isCustomPhaseId,
   normalizePhaseName,
   comparePhaseNum,
   extractPhaseToken,
@@ -45,7 +51,7 @@ import phaseIdDisplayMod = require('./phase-id-display.cjs');
 const { renderBracketMilestoneDisplay } = phaseIdDisplayMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseLocatorMod = require('./phase-locator.cjs');
-const { getArchivedPhaseDirs, findPhaseInternal, listMilestonePhaseDirs } = phaseLocatorMod;
+const { phaseDirectoryOptions, getArchivedPhaseDirs, findPhaseInternal, listMilestonePhaseDirs } = phaseLocatorMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import roadmapParserMod = require('./roadmap-parser.cjs');
 const { extractCurrentMilestone, stripShippedMilestones: _stripShippedMilestones, getMilestoneInfo, getRoadmapPhaseInternal } = roadmapParserMod;
@@ -54,7 +60,7 @@ import planningScopeMod = require('./planning-scope.cjs');
 const { SCOPE } = planningScopeMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import modelResolverMod = require('./model-resolver.cjs');
-const { resolveModelInternal, resolveTierInternal, resolveModelForTier, resolveProviderEscalation, resolveEffortInternal, resolveFastModeInternal, resolveEffortForTier, resolveGranularityInternal, assertValidGranularityOverride } = modelResolverMod;
+const { computeProfileTier, resolveModelOverride, resolveModelInternal, resolveTierInternal, resolveModelForTier, resolveProviderEscalation, resolveEffortInternal, resolveFastModeInternal, resolveEffortForTier, resolveGranularityInternal, assertValidGranularityOverride } = modelResolverMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import agentCommandRouterMod = require('./agent-command-router.cjs');
 const { AGENT_FAILURE_CLASSES } = agentCommandRouterMod;
@@ -557,31 +563,50 @@ function cmdHistoryDigest(cwd: string, raw: boolean): void {
   }
 }
 
-function cmdResolveModel(cwd: string, agentType: string | undefined, raw: boolean): void {
+function cmdResolveModel(cwd: string, agentType: string | undefined, raw: boolean, fallbackAgent?: string): void {
   if (!agentType) {
     error('agent-type required');
   }
 
   const config = loadConfig(cwd);
   const profile = (config['model_profile'] as string) || 'balanced';
-  const model = resolveModelInternal(cwd, agentType);
+
+  // #6213: a hinted executor with no model_overrides entry and no catalog tier would otherwise
+  // resolve to the generic profile alias. With `--fallback-agent <catalog role>` it resolves as
+  // that role instead. The fallback must be an own key of MODEL_PROFILES, else the flag is ignored.
+  const agentModelsMap = MODEL_PROFILES as Record<string, unknown>;
+  // An override counts only when resolveModelInternal would actually use it (non-empty, mappable);
+  // an empty or unusable entry must not block the fallback.
+  const hasUsableOverride = resolveModelOverride(config, agentType) !== null;
+  let resolveAs = agentType;
+  let appliedFallback: string | null = null;
+  if (
+    typeof fallbackAgent === 'string' && fallbackAgent.length > 0 &&
+    Object.hasOwn(agentModelsMap, fallbackAgent) &&
+    !hasUsableOverride && computeProfileTier(config, agentType) === null
+  ) {
+    resolveAs = fallbackAgent;
+    appliedFallback = fallbackAgent;
+  }
+
+  const model = resolveModelInternal(cwd, resolveAs);
+  // The effort belongs to the hinted agent, not to the fallback role whose model it borrows.
   const effort = resolveEffortInternal(cwd, agentType);
 
   // Own-property guard: agentType is an unvalidated CLI positional, so a
   // prototype-chain value ("toString", "constructor") would otherwise return
   // an inherited truthy member from this plain object and misreport a
   // genuinely unknown agent as known (unknown_agent dropped from the result).
-  const agentModelsMap = MODEL_PROFILES as Record<string, unknown>;
-  const agentModels = Object.hasOwn(agentModelsMap, agentType) ? agentModelsMap[agentType] : undefined;
+  const agentModels = Object.hasOwn(agentModelsMap, resolveAs) ? agentModelsMap[resolveAs] : undefined;
   // #2229: `tier` is additive — existing keys and their values are untouched, so
   // every `--pick model` / `--pick profile` / `--raw` consumer is unaffected. It
   // exists because the model id is deliberately blank under resolve_model_ids:"omit",
   // which leaves a tier-sensitive guard with nothing to read.
-  const tier = resolveTierInternal(cwd, agentType);
+  const tier = resolveTierInternal(cwd, resolveAs);
   const result = agentModels
     ? { model, profile, effort, tier }
     : { model, profile, effort, tier, unknown_agent: true };
-  output(result, raw, model);
+  output(appliedFallback ? { ...result, fallback_agent: appliedFallback } : result, raw, model);
 }
 
 function cmdResolveGranularity(cwd: string, phaseType: string | undefined, raw: boolean, override?: string): void {
@@ -970,6 +995,7 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
   // cmdEffortSyncCodex and cmdEffortSyncOpencode, so a fault mid-write can
   // never leave an agent file truncated or empty.
   let fileFailureCount = 0;
+  const rewrittenFiles: RewrittenFile[] = [];
 
   for (const file of files) {
     const agentName = file.replace(/\.md$/, '');
@@ -987,6 +1013,9 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
       fileFailureCount++;
       continue;
     }
+
+    // #5683: hash BEFORE any rewrite — only a GSD-owned file gets re-recorded.
+    const preHash = tryFileHash(filePath);
 
     // Resolve using install-time logic: home defaults merged with project config.
     const universalEffort = resolveInstallTimeEffort(effortCfg, agentName);
@@ -1047,6 +1076,7 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
             if (originalModeInherit !== undefined) fs.chmodSync(tmpPathInherit, originalModeInherit);
           } catch { /* non-fatal: proceed with default tmp-file mode */ }
           retryRenameSync(tmpPathInherit, filePath);
+          rewrittenFiles.push({ path: filePath, preHash });
         } catch {
           try { fs.unlinkSync(tmpPathInherit); } catch { /* already gone or never created */ }
           skipped++;
@@ -1120,6 +1150,7 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
           if (originalModeSet !== undefined) fs.chmodSync(tmpPathSet, originalModeSet);
         } catch { /* non-fatal: proceed with default tmp-file mode */ }
         retryRenameSync(tmpPathSet, filePath);
+        rewrittenFiles.push({ path: filePath, preHash });
       } catch {
         try { fs.unlinkSync(tmpPathSet); } catch { /* already gone or never created */ }
         skipped++;
@@ -1131,6 +1162,9 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
     changes.push({ agent: agentName, from: currentEffort, to: newEffortValue });
     synced++;
   }
+
+  // #5683: keep the install manifest in step with the agents just rewritten.
+  if (!dryRun) recordManifestFileHashes(path.dirname(agentsDir), rewrittenFiles);
 
   output(
     { synced, skipped, changes, dry_run: dryRun, agents_dir: agentsDir },
@@ -1198,6 +1232,7 @@ function cmdEffortSyncCodex(raw: boolean, dryRun: boolean, configDir?: string): 
   const refused: CodexEffortSyncRefusal[] = [];
   const writeFailures: EffortSyncFileFailure[] = [];
   const readFailures: EffortSyncFileFailure[] = [];
+  const rewrittenFiles: RewrittenFile[] = [];
   let synced = 0;
   let skipped = 0;
 
@@ -1217,6 +1252,7 @@ function cmdEffortSyncCodex(raw: boolean, dryRun: boolean, configDir?: string): 
       continue;
     }
 
+    const preHash = tryFileHash(filePath); // #5683
     const parsed = parseCodexAgentToml(content);
     if (!parsed.ok) {
       // Never partially rewritten (40-design.md, ADR-2313 reader/writer
@@ -1286,6 +1322,7 @@ function cmdEffortSyncCodex(raw: boolean, dryRun: boolean, configDir?: string): 
           if (originalMode !== undefined) fs.chmodSync(tmpPath, originalMode);
         } catch { /* non-fatal: proceed with default tmp-file mode */ }
         retryRenameSync(tmpPath, filePath);
+        rewrittenFiles.push({ path: filePath, preHash });
       } catch (err) {
         // Reported, not thrown — the remaining agents still get processed.
         // Clean up the orphaned tmp file; filePath itself was never touched.
@@ -1299,6 +1336,8 @@ function cmdEffortSyncCodex(raw: boolean, dryRun: boolean, configDir?: string): 
     changes.push(...pendingChanges);
     synced++;
   }
+
+  if (!dryRun) recordManifestFileHashes(path.dirname(agentsDir), rewrittenFiles);
 
   output(
     { synced, skipped, changes, dry_run: dryRun, agents_dir: agentsDir, refused, write_failures: writeFailures, read_failures: readFailures },
@@ -1355,6 +1394,7 @@ function cmdEffortSyncOpencode(cwd: string, raw: boolean, dryRun: boolean, confi
   const changes: EffortSyncChange[] = [];
   const writeFailures: EffortSyncFileFailure[] = [];
   const readFailures: EffortSyncFileFailure[] = [];
+  const rewrittenFiles: RewrittenFile[] = [];
   let synced = 0;
   let skipped = 0;
 
@@ -1374,6 +1414,8 @@ function cmdEffortSyncOpencode(cwd: string, raw: boolean, dryRun: boolean, confi
       continue;
     }
 
+    const preHash = tryFileHash(filePath); // #5683
+
     // `target === null` covers both "no effort configured" (inherit) and "a
     // level OpenCode does not accept" — both must produce NO `variant:` key,
     // exactly what install writes.
@@ -1390,6 +1432,21 @@ function cmdEffortSyncOpencode(cwd: string, raw: boolean, dryRun: boolean, confi
     // null — it would leave an unresolvable `variant: null` key on disk
     // forever. Test presence with its own regex, and only compare values
     // once presence is known.
+    // Native OpenCode 2.x form (ADR-5331 D5): the effort rides on the model reference as
+    // `provider/model#variant`, with no separate `variant:` key. When the agent's `model:` carries a
+    // `#` suffix that suffix IS the effort, so the sync edits the model instead of adding a second,
+    // conflicting `variant:` line.
+    const modelLineMatch = /^model:[ \t]*(.+?)[ \t]*$/m.exec(fmMatch.body);
+    const modelValue = modelLineMatch ? modelLineMatch[1].replace(/\r$/, '').replace(/^(["'])(.*)\1$/, '$2') : null;
+    const hashAt = modelValue === null ? -1 : modelValue.lastIndexOf('#');
+    let modelFormContent: string | null = null;
+    let modelFormFrom: string | null = null;
+    if (modelValue !== null && hashAt > 0) {
+      const base = modelValue.slice(0, hashAt);
+      modelFormFrom = modelValue.slice(hashAt + 1);
+      if (target !== null && modelFormFrom === target) { skipped++; continue; }
+      modelFormContent = setFrontmatterKeyLine(content, 'model', target === null ? base : `${base}#${target}`);
+    }
     const variantPresent = /^variant:/m.test(fmMatch.body);
     const variantMatch = /^variant:[ \t]*(.+?)[ \t]*$/m.exec(fmMatch.body);
     // `null` (key absent) and `''` (key present, value empty) are distinct
@@ -1399,14 +1456,16 @@ function cmdEffortSyncOpencode(cwd: string, raw: boolean, dryRun: boolean, confi
     // of them actually has a `variant:` line to remove.
     const currentVariant = variantPresent ? (variantMatch ? variantMatch[1] : '') : null;
 
-    if (target === null) {
-      if (!variantPresent) { skipped++; continue; }
-    } else if (variantPresent && currentVariant === target) {
-      skipped++;
-      continue;
+    if (modelFormContent === null) {
+      if (target === null) {
+        if (!variantPresent) { skipped++; continue; }
+      } else if (variantPresent && currentVariant === target) {
+        skipped++;
+        continue;
+      }
     }
 
-    changes.push({ agent: agentName, from: currentVariant, to: target });
+    changes.push({ agent: agentName, from: modelFormContent === null ? currentVariant : modelFormFrom, to: target });
     synced++;
 
     if (!dryRun) {
@@ -1436,7 +1495,7 @@ function cmdEffortSyncOpencode(cwd: string, raw: boolean, dryRun: boolean, confi
       try {
         fs.writeFileSync(
           tmpPath,
-          target === null ? removeFrontmatterKeyLine(content, 'variant') : setFrontmatterKeyLine(content, 'variant', target),
+          modelFormContent ?? (target === null ? removeFrontmatterKeyLine(content, 'variant') : setFrontmatterKeyLine(content, 'variant', target)),
           originalMode !== undefined ? { mode: originalMode } : undefined,
         );
         // Not redundant with the `mode` option above: `mode` only applies
@@ -1449,6 +1508,7 @@ function cmdEffortSyncOpencode(cwd: string, raw: boolean, dryRun: boolean, confi
           if (originalMode !== undefined) fs.chmodSync(tmpPath, originalMode);
         } catch { /* non-fatal: proceed with default tmp-file mode */ }
         retryRenameSync(tmpPath, filePath);
+        rewrittenFiles.push({ path: filePath, preHash });
       } catch (err) {
         try { fs.unlinkSync(tmpPath); } catch { /* already gone or never created */ }
         changes.pop();
@@ -1474,6 +1534,8 @@ function cmdEffortSyncOpencode(cwd: string, raw: boolean, dryRun: boolean, confi
   // Making the exit code reflect failure would be a CLI-contract change
   // affecting all three cmdEffortSync* branches (claude, codex, opencode) and
   // is out of scope for this fix.
+  if (!dryRun) recordManifestFileHashes(path.dirname(agentsDir), rewrittenFiles);
+
   output(
     { synced, skipped, changes, dry_run: dryRun, agents_dir: agentsDir, write_failures: writeFailures, read_failures: readFailures },
     raw,
@@ -1962,7 +2024,76 @@ function stageDeclaredRemovals(cwd: string, removedDeclared: string[]): {
   return { removedEntries, removedPathspec, failures };
 }
 
-function cmdCommit(cwd: string, message: string | undefined, files: string[] | undefined, raw: boolean, amend: boolean, noVerify: boolean, filesRemoved?: string[]): void {
+/**
+ * #6043 (ADR-4908 §3): a committing verb commits in the checkout the process
+ * runs in. Returns the typed refusal when it cannot: not a git repository, or
+ * `cwd` / a path to commit resolves outside `ctx.worktreeRoot`.
+ * `cwd` and the worktree root are compared by realpath; a relative path is
+ * resolved lexically against the canonical `cwd`, so a `.planning` symlink
+ * inside the worktree stays inside; an absolute path is canonicalized through
+ * its nearest existing ancestor directory.
+ * A degraded context (git timed out or could not run) makes no claim about the
+ * worktree, so it never refuses.
+ */
+function commitRefusal(
+  ctx: ProjectContext,
+  cwd: string,
+  files: string[] | undefined,
+  filesRemoved: string[] | undefined,
+): { reason: 'not_git_repo' | 'outside_worktree'; message: string; skipped?: false } | null {
+  if (ctx.provenance.reason === 'not_git_repo') {
+    return { reason: 'not_git_repo', message: `commit refused: ${cwd} is not inside a git repository` };
+  }
+  if (ctx.provenance.degraded) return null;
+  const realOrSelf = (p: string): string => {
+    try {
+      return fs.realpathSync.native(p);
+    } catch {
+      return p;
+    }
+  };
+  // Nearest existing ancestor directory of an absolute path, realpath'd, with
+  // the not-yet-existing remainder re-appended (macOS /var <-> /private/var,
+  // Windows 8.3 short names like RUNNER~1).
+  const canonicalAbsolute = (abs: string): string => {
+    const rest: string[] = [path.basename(abs)];
+    let ancestor = path.dirname(abs);
+    for (;;) {
+      try {
+        return path.join(fs.realpathSync.native(ancestor), ...rest);
+      } catch {
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) return abs;
+        rest.unshift(path.basename(ancestor));
+        ancestor = parent;
+      }
+    }
+  };
+  const norm = (p: string): string => {
+    const slashed = p.replace(/\\/g, '/');
+    return process.platform === 'win32' ? slashed.toLowerCase() : slashed;
+  };
+  const inside = (target: string, root: string): boolean => isContainedIn(norm(target), norm(root), { sep: '/' });
+  const worktreeRoot = realOrSelf(path.resolve(ctx.worktreeRoot));
+  const realCwd = realOrSelf(path.resolve(cwd));
+  const declared = [...(files ?? []), ...(filesRemoved ?? [])];
+  const targets = declared.length > 0 ? declared : ['.planning/'];
+  // Lexical against the canonical cwd: a `.planning` symlink component is not followed.
+  const resolveTarget = (t: string): string =>
+    path.isAbsolute(t) ? canonicalAbsolute(path.resolve(t)) : path.resolve(realCwd, t);
+  const escaping = !inside(realCwd, worktreeRoot)
+    ? realCwd
+    : targets.map(resolveTarget).find((abs) => !inside(abs, worktreeRoot));
+  if (escaping === undefined) return null;
+  return {
+    reason: 'outside_worktree',
+    skipped: false,
+    message: `commit refused: ${escaping} is outside the worktree ${worktreeRoot}; ` +
+      'pass the checkout that owns the path with --project-dir to commit there',
+  };
+}
+
+function cmdCommit(cwd: string, message: string | undefined, files: string[] | undefined, raw: boolean, amend: boolean, noVerify: boolean, filesRemoved?: string[], ctx?: ProjectContext): void {
   if (!message && !amend) {
     error('commit message required');
   }
@@ -2000,6 +2131,17 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
     return;
   }
 
+  // #6043: refuse before branching or staging, and only AFTER the commit_docs
+  // skip above, so a benign skip is never turned into an error.
+  const refusal = ctx ? commitRefusal(ctx, cwd, files, filesRemoved) : null;
+  if (refusal) {
+    error(refusal.message, refusal.reason === 'not_git_repo' ? ERROR_REASON.COMMIT_NOT_GIT_REPO : ERROR_REASON.COMMIT_OUTSIDE_WORKTREE, {
+      committed: false,
+      ...(refusal.skipped === false ? { skipped: false } : {}),
+      hash: null,
+    });
+  }
+
   // Ensure branching strategy branch exists before first commit (#1278).
   // Pre-execution workflows (discuss, plan, research) commit artifacts but the branch
   // was previously only created during execute-phase — too late.
@@ -2029,7 +2171,7 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
       // phase — the phase arm must never branch-mutate for it (isSentinelPhaseId
       // is the invariant's single owner, src/phase-id.cts).
       if (phaseNum && !isSentinelPhaseId(phaseNum)) {
-        const phaseInfo = findPhaseInternal(cwd, phaseNum) as Record<string, unknown> | null;
+        const phaseInfo = findPhaseInternal(cwd, phaseNum, undefined, phaseDirectoryOptions(cwd, config)) as Record<string, unknown> | null;
         if (phaseInfo) {
           // #4126: shared with init.cts's cmdInitExecutePhase branch_name field
           // via the one canonical renderer (src/phase-id.cts) so an undeliverable
@@ -3283,6 +3425,8 @@ async function cmdWebsearch(query: string | undefined, options: WebsearchOptions
               'Accept': 'application/json',
               'X-Subscription-Token': apiKey
             },
+            // never follow redirects: X-Subscription-Token must not leave api.search.brave.com (#5409)
+            redirect: 'manual',
             signal: ac.signal
           }
         );
@@ -3311,7 +3455,9 @@ async function cmdWebsearch(query: string | undefined, options: WebsearchOptions
       const isRetryable = status === 429 || status >= 500;
 
       if (!isRetryable) {
-        // Non-retryable 4xx — fail immediately, no attempts field
+        // Non-retryable 4xx and every 3xx (redirect: 'manual' hands them back as-is, #5409) —
+        // fail immediately, no attempts field. Keep 3xx out of isRetryable.
+        response.body?.cancel().catch(() => {});
         output({ available: false, error: `API error: ${status}` }, raw, '');
         return;
       }
@@ -3352,6 +3498,7 @@ function cmdProgressRender(cwd: string, format: string | undefined, raw: boolean
     : null;
   const milestoneVersion = milestoneDisplay ?? milestone?.version ?? null;
 
+  const directoryContext = phaseDirectoryOptions(cwd);
   const phases: PhaseProgress[] = [];
   let totalPlans = 0;
   let totalSummaries = 0;
@@ -3390,9 +3537,11 @@ function cmdProgressRender(cwd: string, format: string | undefined, raw: boolean
           phaseName = recoverBracketPhaseName(dir, phaseToken);
         }
       } else {
+        const custom = customPhaseQuery(dir, directoryContext);
+        const owner = custom && customDirectoryOwner(dir, custom);
         const dm = dir.match(/^(\d+(?:\.\d+)*)-?(.*)/);
-        phaseNum = dm ? dm[1] : dir;
-        phaseName = dm && dm[2] ? dm[2].replace(/-/g, ' ') : '';
+        phaseNum = owner ? owner.id : dm ? dm[1] : dir;
+        phaseName = owner ? owner.slug.replace(/-/g, ' ') : dm && dm[2] ? dm[2].replace(/-/g, ' ') : '';
       }
       // #3183/#5060: canonical plan/summary counts and lifecycle status
       // (root+nested, superseded-excluded, canonical pairing) from the
@@ -3524,7 +3673,7 @@ function cmdTodoMatchPhase(cwd: string, phase: string | undefined, raw: boolean)
   );
 
   // Find phase directory to get expected file paths
-  const phaseInfoDisk = findPhaseInternal(cwd, phase) as Record<string, unknown> | null;
+  const phaseInfoDisk = findPhaseInternal(cwd, phase, undefined, phaseDirectoryOptions(cwd)) as Record<string, unknown> | null;
   const phasePlans: string[] = [];
   if (phaseInfoDisk && phaseInfoDisk['found']) {
     try {
@@ -3744,7 +3893,7 @@ function cmdScaffold(cwd: string, type: string, options: ScaffoldOptions, raw: b
   const today = realClock.localToday();
 
   // Find phase directory
-  const phaseInfo = phase ? findPhaseInternal(cwd, phase) as Record<string, unknown> | null : null;
+  const phaseInfo = phase && type !== 'phase-dir' ? findPhaseInternal(cwd, phase, undefined, phaseDirectoryOptions(cwd)) as Record<string, unknown> | null : null;
   const phaseDir = phaseInfo ? path.join(cwd, phaseInfo['directory'] as string) : null;
 
   if (phase && !phaseDir && type !== 'phase-dir') {
@@ -3766,7 +3915,8 @@ function cmdScaffold(cwd: string, type: string, options: ScaffoldOptions, raw: b
     }
     case 'verification': {
       filePath = path.join(phaseDir as string, `${padded}-VERIFICATION.md`);
-      content = `---\nphase: "${padded}"\nname: "${name || (phaseInfo?.['phase_name'] as string | undefined) || 'Unnamed'}"\ncreated: ${today}\nstatus: pending\n---\n\n# Phase ${phase}: ${name || (phaseInfo?.['phase_name'] as string | undefined) || 'Unnamed'} — Verification\n\n## Goal-Backward Verification\n\n**Phase Goal:** [From ROADMAP.md]\n\n## Checks\n\n| # | Requirement | Status | Evidence |\n|---|------------|--------|----------|\n\n## Result\n\n_Pending verification_\n`;
+      // No verdict exists until the verifier runs; an absent status reads as missing.
+      content = `---\nphase: "${padded}"\nname: "${name || (phaseInfo?.['phase_name'] as string | undefined) || 'Unnamed'}"\ncreated: ${today}\n---\n\n# Phase ${phase}: ${name || (phaseInfo?.['phase_name'] as string | undefined) || 'Unnamed'} — Verification\n\n## Goal-Backward Verification\n\n**Phase Goal:** [From ROADMAP.md]\n\n## Checks\n\n| # | Requirement | Status | Evidence |\n|---|------------|--------|----------|\n\n## Result\n\n_Pending verification_\n`;
       break;
     }
     case 'phase-dir': {
@@ -3775,14 +3925,14 @@ function cmdScaffold(cwd: string, type: string, options: ScaffoldOptions, raw: b
       }
       const slug = generateSlugInternal(name);
       // #3287: apply project_code prefix to stay consistent with phase.add/phase.insert
-      const scaffoldConfig = loadConfig(cwd);
-      const scaffoldProjectCode = (scaffoldConfig['project_code'] as string) || '';
-      const scaffoldPrefix = scaffoldProjectCode ? `${scaffoldProjectCode}-` : '';
-      const dirName = `${scaffoldPrefix}${padded}-${slug}`;
-      const phasesParent = planningPaths(cwd).phases;
-      platformEnsureDir(phasesParent);
-      const dirPath = path.join(phasesParent, dirName);
-      platformEnsureDir(dirPath);
+      const scaffoldConfig = phaseDirectoryOptions(cwd, undefined, '');
+      const roadmapPath = path.join(planningDir(cwd), 'ROADMAP.md');
+      const roadmap = scaffoldConfig.phaseNaming === 'custom' && fs.existsSync(roadmapPath)
+        ? fs.readFileSync(roadmapPath, 'utf8') : '';
+      const [{dirPath}] = phaseLocatorMod.createPhaseDirectories(cwd, [{
+        id: phase, slug: slug || '',
+        directoryId: scaffoldConfig.phaseNaming === 'custom' && isCustomPhaseId(phase) ? phase : padded,
+      }], {...scaffoldConfig, roadmap}, false);
       output({ created: true, directory: toPosixPath(path.relative(cwd, dirPath)), path: dirPath }, raw, dirPath);
       return;
     }
@@ -3883,7 +4033,7 @@ function cmdStats(cwd: string, format: string | undefined, raw: boolean): void {
       phasesByNumber.set(key, {
         number: key,
         ...(displayId ? { display_id: displayId } : {}),
-        name: phaseName.replace(/\(INSERTED\)/i, '').trim(),
+        name: stripInsertedMarker(phaseName),
         plans: 0,
         summaries: 0,
         phaseStatus: PHASE_STATUS.NOT_STARTED,
@@ -4099,7 +4249,12 @@ function cmdStats(cwd: string, format: string | undefined, raw: boolean): void {
 function cmdCheckCommit(cwd: string, raw: boolean): void {
   const config = loadConfig(cwd);
 
-  const stagedResult = execGit(['diff', '--cached', '--name-only', '-z'], { cwd });
+  // #5548: execGit scrubs the repo-location vars, but inside the pre-commit hook git sets them
+  // (GIT_DIR/GIT_WORK_TREE of an explicit --git-dir commit, GIT_INDEX_FILE of a `-a` / `<path>`
+  // commit) to name the repo being committed: hand them back or the guard finds no repo and allows.
+  const hookEnv: Record<string, string> = {};
+  for (const k of GIT_LOCATION_ENV_VARS) if (process.env[k] !== undefined) hookEnv[k] = process.env[k]!;
+  const stagedResult = execGit(['diff', '--cached', '--name-only', '-z'], { cwd, env: hookEnv });
   if (stagedResult.exitCode === 0) {
     const files = stagedResult.stdout.split('\0').filter(Boolean);
     const planningFiles = files.filter(f => f.startsWith('.planning/'));
@@ -4108,7 +4263,7 @@ function cmdCheckCommit(cwd: string, raw: boolean): void {
       const policy = resolveCommitDocsPolicy(
         config,
         detectPhaseNumberFromFiles(planningFiles),
-        () => isGitIgnored(cwd, '.planning'),
+        () => isGitIgnored(cwd, '.planning', hookEnv),
       );
       if (!policy.resolved) {
         error(

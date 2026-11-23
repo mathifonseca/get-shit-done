@@ -59,7 +59,7 @@ Before verifying, discover project context:
 
 **Project skills:** Check `.claude/skills/` or `.agents/skills/` directory if either exists:
 
-**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md
+**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md (agent type: `gsd-plan-checker`)
 1. List available skills (subdirectories)
 2. Read `SKILL.md` for each skill (lightweight index ~130 lines)
 3. Load specific `rules/*.md` files as needed during verification
@@ -87,7 +87,7 @@ If CONTEXT.md exists, add verification dimension: **Context Compliance**
 
 REVIEWS.md is audit trail and feedback input, not a hidden execution contract. /gsd:execute-phase primarily consumes PLAN.md plus normal phase context. Add verification dimension: **Review Incorporation**.
 
-- Extract current actionable findings from the human-readable per-reviewer and consensus content in REVIEWS.md. Do NOT look for a `CYCLE_SUMMARY: current_high=<N> current_actionable=<M>` line or `## Current HIGH Concerns` / `## Current Actionable Non-HIGH Concerns` section headers — those machine-readable fields exist only in the convergence orchestrator's return message, never in REVIEWS.md (which contains only human-readable review content).
+- Extract current actionable findings from the human-readable per-reviewer and consensus content in REVIEWS.md. Do NOT look for a `CYCLE_SUMMARY: current_high=<N> current_actionable=<M>` line or `## Current HIGH Concerns` / `## Current Actionable Non-HIGH Concerns` section headers — those machine-readable fields exist only in the return message of the convergence orchestrator or of `/gsd:review --cycle-summary`, never in REVIEWS.md (which contains only human-readable review content).
 - Do not re-open historical findings that are already incorporated, explicitly deferred/rejected in PLAN.md, or marked fully resolved.
 - Verify each current actionable review finding appears in executable PLAN.md content: a task, `<action>`, `<acceptance_criteria>`, `<verify>`, `must_haves`, threat model, artifact list, stale-path correction, or explicit deferral/rejection rationale using the Review Dispositions Ledger in `gsd-core/references/planner-reviews.md`.
 - If a current actionable finding remains only in REVIEWS.md and would be invisible to /gsd:execute-phase, return `## ISSUES FOUND`. Use WARNING by default; use BLOCKER when the missing incorporation can prevent the phase goal, create unsafe execution, or invalidate verification.
@@ -529,6 +529,11 @@ Each runnable `<automated>` command needs a `<fails_when>` sibling naming what o
 failure. Consume the `{FAILING_DIRECTIONS}` probe, never re-derive it:
 @~/.claude/gsd-core/references/failing-direction.md
 
+### Check 8g - Validate-Only Record (#4586)
+
+Each runnable `<automated>` command needs a `[VALIDATED: …]` or `[UNVALIDATABLE: …]` line in its `<verify>`.
+Severities, the read-only re-runs and the exemptions: @~/.claude/gsd-core/references/planner-verify-command-validation.md
+
 ## Dimension 9: Cross-Plan Data Contracts
 
 **Question:** When plans share data pipelines, are their transformations compatible?
@@ -695,6 +700,7 @@ issue:
 1. For each `<automated>` block piping a package-manager list command into grep with a `^` anchor: BLOCKER.
 2. For each `<automated>` block containing `2>/dev/null || echo` where the result feeds a `[ "$VAR" = ... ]` comparison: BLOCKER.
 3. For each `<automated>` block asserting a specific numeric count not cited as measured in this plan: WARNING.
+4. For each count/match gate (`grep -c`, `grep -q`, `rg`), run it — read-only commands only — against the current tree (#4927). Its baseline is the `[HEAD=<value> EXPECT<op><value>]` notation beside it (#4309), read from `verify plan-structure`, never re-derived: a `baseline_findings` B1 (already true at HEAD, no `GUARD MUTATION:`) is a BLOCKER, as is a gate that already passes at HEAD with no notation, or whose printed value differs from its notation's `HEAD`. A free-form `# baseline at HEAD:` comment (B2) is not a baseline: WARNING. A literal differing in case from the heading/key the task writes: BLOCKER. Never run a gate that builds, installs, or writes. See `planner-verify-command-grounding.md`.
 
 ## Dimension: Verify Command Path Resolvability (#2401)
 

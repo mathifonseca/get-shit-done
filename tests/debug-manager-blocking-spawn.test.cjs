@@ -144,3 +144,25 @@ describe('debug session manager: the debugger spawn must block (#4395)', () => {
     assert.match(manager, /ABANDONED/, 'the abandoned disposition must remain');
   });
 });
+
+// #5214: a captured run never reached the Agent() literal at all. The manager shelled out to
+// `claude --agent gsd-debugger` through Bash with run_in_background: true. The Bash guard hook denies
+// that shape (tests/gsd-secret-read-guard.test.cjs); the shipped prompt must also say so, so the model
+// is told the path is closed instead of discovering it from a denial.
+describe('debug session manager: no shell spawn of the debugger (#5214)', () => {
+  for (const [label, file] of [['full', MANAGER], ['compact', MANAGER_COMPACT]]) {
+    test(`${label} variant forbids spawning gsd-debugger through Bash`, () => {
+      const content = readFileNormalized(file);
+      assert.match(content, /Never spawn the debugger through Bash/, `${label} variant: rule heading`);
+      assert.match(content, /claude --agent gsd-debugger/, `${label} variant: names the forbidden shape`);
+      assert.match(content, /do not improvise a shell spawn/, `${label} variant: says what to do when Agent fails`);
+    });
+  }
+
+  test('the Step 2 Agent() call stays the only debugger spawn literal in each variant', () => {
+    for (const [label, file] of [['full', MANAGER], ['compact', MANAGER_COMPACT]]) {
+      debuggerSpawn(readFileNormalized(file), `${label} variant`);
+    }
+  });
+});
+

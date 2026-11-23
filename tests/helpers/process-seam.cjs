@@ -39,7 +39,7 @@
  *     the exact timeout boundary, spawnSync can report `error.code ===
  *     'ETIMEDOUT'` (the timer fired) on a result that ALSO carries
  *     `status: 0` (the child finished on its own first) — verified
- *     empirically via `tests/process-seam.test.cjs`'s at-the-bound case.
+ *     empirically via `tests/process-seam.process.test.cjs`'s at-the-bound case.
  *     `status` is only ever populated by a real exit, so it outranks an
  *     attached error: a process that returned a real exit code did not time
  *     out in any sense the caller cares about, and reporting TIMED_OUT while
@@ -71,8 +71,33 @@
  */
 
 const { spawnSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
 const DEFAULT_TIMEOUT_MS = 60000;
+
+// #5473: per-spawn stall evidence. A spawn that runs at least this long, or
+// that is killed, is appended to the file named by SPAWN_LOG_ENV (the CI
+// test-timings jsonl, which scripts/run-tests.cjs forwards to every chunk) so
+// a failing test can be lined up against scripts/diagnose-windows-spawn-watcher.cjs
+// events by UTC time and pid. SLOW_SPAWN_ENV overrides the threshold.
+const SPAWN_LOG_ENV = 'GSD_SEAM_SPAWN_LOG_FILE';
+const SLOW_SPAWN_ENV = 'GSD_SEAM_SLOW_SPAWN_MS';
+const DEFAULT_SLOW_SPAWN_MS = 2000;
+// #4689: every record states how much of its own timeout bound the spawn used
+// (`boundFraction`), and a spawn that used at least this fraction is flagged
+// `nearMiss`. A spawn is still only WRITTEN when it is slow (>= the slow
+// threshold), killed, or a near-miss. Every shared bound is >= 5000ms, so with the
+// default 2000ms slow threshold a near-miss adds no new records: it adds the two
+// fields to records already written. It adds records only for a bound under 4000ms
+// (or a raised GSD_SEAM_SLOW_SPAWN_MS). The value is that a class creeping toward
+// its bound shows as a rising `boundFraction`. A fraction of the bound, not a timeout.
+const NEAR_MISS_BOUND_FRACTION = 0.5;
+const BOUND_FRACTION_DECIMALS = 1000;
+const SPAWN_RECORD_TYPE = 'seam:spawn-stall';
+const MAX_ARGV_RECORDED = 3;
+const MAX_ARG_CHARS = 80;
+const STDERR_TAIL_CHARS = 4000;
 
 const OUTCOME = Object.freeze({
   EXITED: 'exited',
@@ -101,9 +126,100 @@ function resolveTimeoutMs(timeoutMs) {
 }
 
 /**
- * Classify a raw spawnSync() result into the seam's discriminated union.
+ * One-line, human-readable account of a seam result. A killed child has
+ * `exitCode: null`, which an `assert.equal(exitCode, 0)` reports as the bare
+ * `null !== 0`; this string carries the outcome, signal and timing that tell a
+ * timeout from a failure. Put it in assertion messages.
  */
-function toSeamResult(result) {
+function formatSeamResult(r) {
+  const parts = [
+    `outcome=${r.outcome}`,
+    `exitCode=${r.exitCode}`,
+    `timedOut=${r.timedOut}`,
+    `signal=${r.signal}`,
+    `code=${r.code}`,
+    `durationMs=${r.durationMs}`,
+    `pid=${r.pid}`,
+  ];
+  if (r.startedAt) parts.push(`startedAt=${r.startedAt}`, `endedAt=${r.endedAt}`);
+  return parts.join(' ');
+}
+
+/**
+ * Assert a seam result exited with `expected` (default 0). On failure the
+ * message names the outcome, signal and duration plus the child's stderr, so a
+ * timeout is never reported as a bare exit-code mismatch.
+ */
+function assertSeamExit(assert, r, expected = 0, extra = '') {
+  if (r.outcome === OUTCOME.EXITED && r.exitCode === expected) return;
+  assert.fail(
+    `expected exit ${expected}; got ${formatSeamResult(r)}${extra ? ` — ${extra}` : ''}\nstderr: ${String(r.stderr).slice(-STDERR_TAIL_CHARS)}`,
+  );
+}
+
+function slowThresholdMs() {
+  const raw = process.env[SLOW_SPAWN_ENV];
+  return typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : DEFAULT_SLOW_SPAWN_MS;
+}
+
+function currentTestFile() {
+  const main = require.main && require.main.filename ? require.main.filename : process.argv[1];
+  return main ? path.basename(main) : null;
+}
+
+/**
+ * Append a stall record for a slow, killed or near-miss (see
+ * NEAR_MISS_BOUND_FRACTION) spawn. Best-effort and silent on
+ * any failure: this observes the test run, it must never change its outcome.
+ * Also echoes a one-line stderr note so the evidence shows beside a failing
+ * test. Both are skipped when no log file is configured (local runs).
+ */
+function recordSpawnIfNoteworthy(command, args, timeoutMs, seamResult) {
+  const nearMiss = seamResult.durationMs >= timeoutMs * NEAR_MISS_BOUND_FRACTION;
+  const noteworthy =
+    seamResult.timedOut || seamResult.killed || seamResult.durationMs >= slowThresholdMs() || nearMiss;
+  if (!noteworthy) return;
+  const record = {
+    type: SPAWN_RECORD_TYPE,
+    file: currentTestFile(),
+    command: path.basename(String(command)),
+    argv: args.slice(0, MAX_ARGV_RECORDED).map((a) => String(a).slice(0, MAX_ARG_CHARS)),
+    durationMs: seamResult.durationMs,
+    timeoutMs,
+    // floor, not round, so nearMiss === (boundFraction >= NEAR_MISS_BOUND_FRACTION) always holds.
+    boundFraction: Math.floor((seamResult.durationMs / timeoutMs) * BOUND_FRACTION_DECIMALS) / BOUND_FRACTION_DECIMALS,
+    nearMiss,
+    outcome: seamResult.outcome,
+    timedOut: seamResult.timedOut,
+    signal: seamResult.signal,
+    exitCode: seamResult.exitCode,
+    code: seamResult.code,
+    pid: seamResult.pid,
+    startedAt: seamResult.startedAt,
+    endedAt: seamResult.endedAt,
+  };
+  const logFile = process.env[SPAWN_LOG_ENV];
+  if (!logFile) return;
+  try {
+    process.stderr.write(`[seam-spawn] ${record.command} ${formatSeamResult(seamResult)}\n`);
+  } catch {
+    // Observation only.
+  }
+  try {
+    fs.appendFileSync(logFile, `${JSON.stringify(record)}\n`);
+  } catch {
+    // Observation only.
+  }
+}
+
+/**
+ * Classify a raw spawnSync() result into the seam's discriminated union.
+ *
+ * `timing` ({startedAtMs, endedAtMs, durationMs}) is supplied by spawnSeam; a result that
+ * did not come from a real spawn (the missing-Git-Bash synthesis) omits it and
+ * reports `durationMs: 0` with null timestamps.
+ */
+function toSeamResult(result, timing) {
   const { error, status, signal } = result;
   const stdout = typeof result.stdout === 'string' ? result.stdout : '';
   const stderr = typeof result.stderr === 'string' ? result.stderr : '';
@@ -145,7 +261,19 @@ function toSeamResult(result) {
     signal: signal ?? null,
     killed,
     code: errorCode,
+    durationMs: timing ? timing.durationMs : 0,
+    pid: typeof result.pid === 'number' && result.pid > 0 ? result.pid : null,
+    startedAt: timing ? new Date(timing.startedAtMs).toISOString() : null,
+    endedAt: timing ? new Date(timing.endedAtMs).toISOString() : null,
+    summary: '',
   };
+}
+
+/** toSeamResult plus the one-line `summary`, which needs the finished fields. */
+function finishSeamResult(result, timing) {
+  const r = toSeamResult(result, timing);
+  r.summary = formatSeamResult(r);
+  return r;
 }
 
 /**
@@ -168,7 +296,8 @@ function toSeamResult(result) {
  *   the seam asserts nothing about which signal is used.
  * @returns {{outcome:string, exitCode:number|null, stdout:string,
  *   stderr:string, timedOut:boolean, signal:string|null, killed:boolean,
- *   code:string|null}}
+ *   code:string|null, durationMs:number, pid:number|null, startedAt:string|null,
+ *   endedAt:string|null, summary:string}}
  */
 function spawnSeam(command, args, options = {}) {
   if (!Array.isArray(args)) {
@@ -185,8 +314,18 @@ function spawnSeam(command, args, options = {}) {
   if (options.input !== undefined) spawnOptions.input = options.input;
   if (options.killSignal !== undefined) spawnOptions.killSignal = options.killSignal;
 
+  // stdin: with no `input`, spawnSync's default 'pipe' stdin is closed at once, so a
+  // child that reads stdin gets EOF immediately and never blocks on it. Observed on
+  // darwin (#4689): a `process.stdin.on('end')` child returned 'eof', status 0, in 78ms
+  // under the 60000ms default. The seam therefore leaves stdio at its default.
+  const startedAtMs = Date.now();
+  const t0 = process.hrtime.bigint();
   const result = spawnSync(command, args, spawnOptions);
-  return toSeamResult(result);
+  const durationMs = Math.round(Number(process.hrtime.bigint() - t0) / 1e6);
+  const endedAtMs = Date.now();
+  const seamResult = finishSeamResult(result, { startedAtMs, endedAtMs, durationMs });
+  recordSpawnIfNoteworthy(command, args, timeoutMs, seamResult);
+  return seamResult;
 }
 
 /**
@@ -281,7 +420,7 @@ function runHook(target, args = [], options = {}) {
     // Validate as spawnSeam would, so a contract violation throws on every
     // host, not only on one that has Git Bash.
     resolveTimeoutMs(spawnOptions.timeoutMs);
-    return toSeamResult({
+    return finishSeamResult({
       error: Object.assign(new Error(GIT_BASH_NOT_FOUND), { code: 'ENOENT' }),
       status: null,
       signal: null,
@@ -292,4 +431,18 @@ function runHook(target, args = [], options = {}) {
   return spawnSeam(command, [target, ...args], spawnOptions);
 }
 
-module.exports = { runNode, runGit, runHook, OUTCOME, toSeamResult };
+module.exports = {
+  runNode,
+  runGit,
+  runHook,
+  OUTCOME,
+  toSeamResult: finishSeamResult,
+  formatSeamResult,
+  assertSeamExit,
+  SPAWN_LOG_ENV,
+  SLOW_SPAWN_ENV,
+  SPAWN_RECORD_TYPE,
+  DEFAULT_TIMEOUT_MS,
+  NEAR_MISS_BOUND_FRACTION,
+  recordSpawnIfNoteworthy,
+};

@@ -30,6 +30,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { hostBehaviorsFor } from './runtime-name-policy.cjs';
 // #2544: the single source of truth for the CommonJS module-type marker. The
 // two helpers below are thin boolean-returning shims over these — see the
 // marker section for why this file no longer carries its own copy.
@@ -682,6 +683,182 @@ function resolveBashRunner(opts?: BashRunnerOpts): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// #5850 — PowerShell hook runner (Claude Code on Windows)
+// ---------------------------------------------------------------------------
+
+/**
+ * #5850 (owner ruling: always PowerShell on win32): every managed JS hook command
+ * Claude gets on Windows is a PowerShell command carrying an explicit
+ * `shell: "powershell"` (see projectPowerShellHookShell), whether or not Git Bash
+ * is discoverable. The POSIX `$(for ... done)` runner chain does not parse when
+ * Claude Code hosts the hook in PowerShell, and a blocking PreToolUse guard that
+ * cannot start blocks every tool call. An explicit `hookShell: 'bash'` still
+ * selects the chain (a test/projection seam, never set by the installer).
+ */
+function usesPowerShellHookShell(opts?: { platform?: string; runtime?: string; hookShell?: string }): boolean {
+  if (opts && opts.hookShell === 'bash') return false;
+  const platform = (opts && opts.platform) || process.platform;
+  const runtime = (opts && opts.runtime) || 'generic';
+  return platform === 'win32' && hostBehaviorsFor(runtime).powershellHooksOnWindows === true;
+}
+
+/**
+ * A PowerShell single-quoted string literal. PowerShell treats U+2018..U+201B
+ * as single-quote delimiters as well as the ASCII quote, and each is escaped by
+ * doubling itself.
+ */
+function powerShellQuote(value: string): string {
+  return `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, (q) => q + q)}'`;
+}
+
+/**
+ * A hook script path as a PowerShell argument. A path anchored on
+ * `"$CLAUDE_PROJECT_DIR"/...` (local installs) or `$HOME/...` (portable installs)
+ * becomes an expanding PowerShell expression; any other path is a single-quoted
+ * literal. A path carrying some OTHER shell variable (`$FOO`) is a POSIX token
+ * with no PowerShell spelling here: null, and the caller leaves the entry alone.
+ */
+function powerShellScriptArg(scriptPath: string, opts: { literal?: boolean } = {}): string | null {
+  const projectDir = scriptPath.match(/^"\$CLAUDE_PROJECT_DIR"(\/.*)$/);
+  const homeDir = scriptPath.match(/^\$HOME(\/.*)$/);
+  const anchored = projectDir || homeDir;
+  if (anchored) {
+    const variable = projectDir ? '$env:CLAUDE_PROJECT_DIR' : '$HOME';
+    const suffix = anchored[1];
+    // Plain suffixes keep the readable double-quoted expansion; any character
+    // PowerShell treats specially inside double quotes (including the curly
+    // double quotes) moves the suffix into a single-quoted literal.
+    if (!/["`$\u201C\u201D\u201E]/.test(suffix)) return `"${variable}${suffix}"`;
+    return `(${variable} + ${powerShellQuote(suffix)})`;
+  }
+  // A real filesystem path (the installer's own configDir) may contain `$`; a
+  // token read back from settings.json may not (it would never expand).
+  if (!opts.literal && scriptPath.includes('$')) return null;
+  return powerShellQuote(shellCmdProjection.posixNormalize(scriptPath));
+}
+
+/**
+ * The PowerShell counterpart of buildNodeRunnerChainToken: the baked install-time
+ * node first (the minimal-PATH guarantee), then node on PATH, resolved when the
+ * hook fires. `scriptToken` is an already-quoted PowerShell argument.
+ */
+function buildPowerShellHookCommand(scriptToken: string, opts?: NodeNormOpts): string | null {
+  const execPath = (opts && opts.execPath) || (typeof process.execPath === 'string' ? process.execPath : '');
+  if (!execPath) return null;
+  const baked = powerShellQuote(shellCmdProjection.posixNormalize(normalizeNodePath(execPath, opts)));
+  // The `exit` tail: `powershell -Command` collapses a native exit code to 0/1
+  // unless the script exits with it, and a blocking guard denies with exit 2. A
+  // runner that never started leaves $LASTEXITCODE null and exits 1, not 0.
+  return `& ((@(${baked}) + @(Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -like '*.exe' } | ForEach-Object { $_.Source })) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1) ${scriptToken}; exit $(if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 1 })`;
+}
+
+/**
+ * Local installs anchor the script under `"$CLAUDE_PROJECT_DIR"/<dir>`; the
+ * PowerShell spelling of that variable is `$env:CLAUDE_PROJECT_DIR`.
+ */
+function buildPowerShellLocalHookCommand(
+  opts: { localPrefix?: string | null; hookFile?: string | null } & NodeNormOpts,
+): string | null {
+  if (!opts.localPrefix || !opts.hookFile) return null;
+  const arg = powerShellScriptArg(`${opts.localPrefix}/hooks/${opts.hookFile}`);
+  return arg === null ? null : buildPowerShellHookCommand(arg, opts);
+}
+
+/**
+ * The statusLine spelling. Claude Code runs a statusLine command through Git Bash
+ * when it is installed and through PowerShell when it is not, and a statusLine has
+ * no `shell` key to pin that. One command line that both hosts run is
+ * `powershell -NoProfile -Command "..."` with a body free of `$`, backticks and
+ * backslashes (all special inside bash double quotes). null when a path carries
+ * one of those, so the statusLine is skipped rather than written broken.
+ */
+function buildPowerShellStatusLineCommand(scriptPath: string, opts?: NodeNormOpts): string | null {
+  const execPath = (opts && opts.execPath) || (typeof process.execPath === 'string' ? process.execPath : '');
+  if (!execPath) return null;
+  const baked = shellCmdProjection.posixNormalize(normalizeNodePath(execPath, opts));
+  const script = shellCmdProjection.posixNormalize(scriptPath);
+  if ([baked, script].some((p) => /["`$\\]/.test(p))) return null;
+  const b = powerShellQuote(baked);
+  const sc = powerShellQuote(script);
+  return `powershell -NoProfile -Command "if (Test-Path -LiteralPath ${b}) { & ${b} ${sc} } else { & node ${sc} }"`;
+}
+
+const POWERSHELL_STATUSLINE_COMMAND = /^powershell -NoProfile -Command "if \(Test-Path -LiteralPath '(?:[^']|'')*'\) \{ & '(?:[^']|'')*' '((?:[^']|'')*)' \} else \{ & node '((?:[^']|'')*)' \}"$/;
+
+function unquotePowerShell(value: string): string {
+  return value.replace(/(['\u2018\u2019\u201A\u201B])\1/g, '$1');
+}
+
+/**
+ * Read the script back out of a PowerShell runner or statusLine command, as the
+ * POSIX path/token pair projectLegacySettingsHookCommand takes. null when the
+ * command is not one of GSD's PowerShell shapes.
+ */
+function parsePowerShellScript(command: string): { scriptPath: string; scriptToken: string } | null {
+  // A path bash would expand or re-quote (`$`, backtick, `"`) has no faithful POSIX
+  // spelling here: refuse, and the entry stays as written. (A portable install under
+  // a directory named with one of them therefore stays PowerShell on a POSIX host.)
+  const posixUnsafe = /["`$]/;
+  const status = command.match(POWERSHELL_STATUSLINE_COMMAND);
+  if (status) {
+    const scriptPath = unquotePowerShell(status[2]);
+    return posixUnsafe.test(scriptPath) ? null : { scriptPath, scriptToken: JSON.stringify(scriptPath) };
+  }
+  const runner = command.replace(/^&\s+/, '').trim().match(/^\(\(@\('(?:[^']|'')*'\) \+ @\(Get-Command node [\s\S]*?Select-Object -First 1\)\s+(.+?); exit \$\(if [\s\S]*\)$/);
+  if (!runner) return null;
+  const arg = runner[1];
+  let m = arg.match(/^'((?:[^']|'')*)'$/);
+  if (m) {
+    const scriptPath = unquotePowerShell(m[1]);
+    return posixUnsafe.test(scriptPath) ? null : { scriptPath, scriptToken: JSON.stringify(scriptPath) };
+  }
+  m = arg.match(/^"\$env:CLAUDE_PROJECT_DIR(\/[^"]*)"$/) || arg.match(/^\(\$env:CLAUDE_PROJECT_DIR \+ '((?:[^']|'')*)'\)$/);
+  if (m) {
+    const rel = unquotePowerShell(m[1]);
+    if (posixUnsafe.test(rel)) return null;
+    const token = `"$CLAUDE_PROJECT_DIR"${rel}`;
+    return { scriptPath: token, scriptToken: token };
+  }
+  m = arg.match(/^"\$HOME(\/[^"]*)"$/) || arg.match(/^\(\$HOME \+ '((?:[^']|'')*)'\)$/);
+  if (m) {
+    const rel = unquotePowerShell(m[1]);
+    if (posixUnsafe.test(rel)) return null;
+    return { scriptPath: `$HOME${rel}`, scriptToken: `"$HOME${rel}"` };
+  }
+  return null;
+}
+
+// Recognizes buildPowerShellHookCommand's output once the `& ` call operator is stripped.
+const POWERSHELL_RUNNER_COMMAND = /^\(\(@\('(?:[^']|'')*'\) \+ @\(Get-Command node [\s\S]*?Select-Object -First 1\)\s+\S/;
+
+function isPowerShellRunnerCommand(command: unknown): boolean {
+  return typeof command === 'string' && /^&\s+/.test(command) && POWERSHELL_RUNNER_COMMAND.test(command.replace(/^&\s+/, '').trim());
+}
+
+/**
+ * Set the explicit `shell: "powershell"` on every hook whose command is the
+ * PowerShell runner, so Claude Code does not depend on its own Git Bash
+ * detection to pick the shell. Returns true when a hook changed. Idempotent.
+ */
+function projectPowerShellHookShell(settings: Settings): boolean {
+  if (!settings || !settings.hooks) return false;
+  let changed = false;
+  for (const entries of Object.values(settings.hooks)) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (!entry || !Array.isArray(entry.hooks)) continue;
+      for (const h of entry.hooks) {
+        if (!h || !isPowerShellRunnerCommand(h.command) || !isManagedHookCommand(h.command, { surface: 'settings-json' })) continue;
+        if (h.shell === 'powershell') continue;
+        h.shell = 'powershell';
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+// ---------------------------------------------------------------------------
 // Shared: rewriteLegacyManagedNodeHookCommands
 // ---------------------------------------------------------------------------
 
@@ -689,6 +866,7 @@ interface HookEntry {
   command?: string;
   args?: unknown[];
   timeout?: number;
+  shell?: string;
 }
 
 interface HookGroup {
@@ -706,6 +884,8 @@ interface Settings {
 interface RewriteOpts {
   platform?: string;
   runtime?: string;
+  // #5850: the baked node path (a test seam; Git Bash discovery plays no part).
+  execPath?: string;
 }
 
 // #3662 — recognize the two runtime-resolving command shapes the installer
@@ -718,20 +898,82 @@ function rewriteLegacyManagedNodeHookCommands(settings: Settings, runnerToken: s
   if (!settings || !settings.hooks || !runnerToken) return false;
   if (!opts) opts = {};
   const platform = opts.platform || process.platform;
+  const usePowerShell = usesPowerShellHookShell({ platform, runtime: opts.runtime });
   let changed = false;
-  for (const entries of Object.values(settings.hooks)) {
+  // #5850: the managed statusLine is a command like a hook. It is converted to the
+  // shell-neutral PowerShell spelling on the PowerShell path, and back to the POSIX
+  // chain when a PowerShell statusLine reaches a POSIX host (shared config root).
+  const statusLine = (settings as { statusLine?: HookEntry }).statusLine;
+  const statusLineGroups: HookGroup[] = statusLine && typeof statusLine.command === 'string'
+    && (usePowerShell || POWERSHELL_STATUSLINE_COMMAND.test(statusLine.command))
+    ? [{ hooks: [statusLine] }]
+    : [];
+  const toPowerShell = (h: HookEntry, scriptPath: string): string | null => (
+    h === statusLine
+      ? buildPowerShellStatusLineCommand(scriptPath, opts)
+      : (() => {
+        const arg = powerShellScriptArg(scriptPath);
+        return arg === null ? null : buildPowerShellHookCommand(arg, opts);
+      })()
+  );
+  const assign = (h: HookEntry, command: string | null): void => {
+    if (!command || h.command === command) return;
+    h.command = command;
+    if (h.shell === 'powershell' && !usePowerShell) delete h.shell;
+    changed = true;
+  };
+  for (const entries of [...Object.values(settings.hooks), statusLineGroups]) {
     if (!Array.isArray(entries)) continue;
     for (const entry of entries) {
       if (!entry || !Array.isArray(entry.hooks)) continue;
       for (const h of entry.hooks) {
         if (!h || typeof h.command !== 'string') continue;
         if (Array.isArray(h.args) && h.args.length > 0) continue;
+
+        if (!usePowerShell && platform !== 'win32') {
+          // #5850: a PowerShell entry on a POSIX host (a config root shared with
+          // Windows) is a syntax error in bash; converge it back to the POSIX chain.
+          const ps = parsePowerShellScript(h.command);
+          if (ps) {
+            if (!isManagedHookBasename(ps.scriptPath, { surface: 'settings-json' })) continue;
+            assign(h, projectLegacySettingsHookCommand({
+              runnerToken,
+              scriptPath: ps.scriptPath,
+              scriptToken: ps.scriptToken,
+              runtime: opts.runtime || 'generic',
+              platform,
+            }));
+            continue;
+          }
+        }
+
         let trimmed = h.command.trim();
         const hadPowerShellCallOperator = platform === 'win32' && /^&\s+/.test(trimmed);
         if (hadPowerShellCallOperator) {
           trimmed = trimmed.replace(/^&\s+/, '').trim();
         }
-        if (CHAIN_RUNNER_COMMAND.test(trimmed) || RESOLVER_RUNNER_COMMAND.test(trimmed)) continue;
+        if (usePowerShell) {
+          // #5850: already the PowerShell runner: nothing to do. A POSIX chain
+          // (or a legacy bare/foreign-node entry) is re-projected below.
+          if (POWERSHELL_RUNNER_COMMAND.test(trimmed) || POWERSHELL_STATUSLINE_COMMAND.test(trimmed)) continue;
+          const chain = trimmed.match(/^"\$\(for n in [\s\S]*?printf '%s' "\$n" && break; done\)"\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*$/);
+          if (chain) {
+            const chainScript = chain[1] || chain[2] || chain[3] || '';
+            if (!isManagedHookBasename(chainScript, { surface: 'settings-json' })) continue;
+            assign(h, toPowerShell(h, chainScript));
+            continue;
+          }
+          // The #3662 bash resolver shape needs bash too; its script is a plain
+          // or `$HOME`-relative path, both spelled for PowerShell.
+          const resolver = trimmed.match(/^(?:"[^"]*bash(?:\.exe)?"|bash)\s+"[^"]*gsd-node-runner\.sh"\s+"[^"]*"\s+(?:"([^"]+)"|(\S+))\s*$/);
+          if (resolver) {
+            const resolverScript = resolver[1] || resolver[2] || '';
+            if (!isManagedHookBasename(resolverScript, { surface: 'settings-json' })) continue;
+            assign(h, toPowerShell(h, resolverScript));
+            continue;
+          }
+        }
+        if (CHAIN_RUNNER_COMMAND.test(trimmed) || RESOLVER_RUNNER_COMMAND.test(trimmed) || POWERSHELL_RUNNER_COMMAND.test(trimmed)) continue;
 
         const m = trimmed.match(/^node\s+("([^"]+)"|'([^']+)'|(\S+))\s*$/) ||
                   trimmed.match(/^("([^"]+)"|'([^']+)'|(\S+))\s+("([^"]+)"|'([^']+)'|(\S+))\s*$/);
@@ -753,6 +995,11 @@ function rewriteLegacyManagedNodeHookCommands(settings: Settings, runnerToken: s
         }
 
         if (!isManagedHookBasename(scriptPath, { surface: 'settings-json' })) continue;
+
+        if (usePowerShell) {
+          assign(h, toPowerShell(h, scriptPath));
+          continue;
+        }
 
         const projectedCommand = projectLegacySettingsHookCommand({
           runnerToken,
@@ -965,12 +1212,9 @@ function _installEngineSymlinkGuard(): InstallEngineSymlinkGuard {
   return mod;
 }
 
-function reconcileCodexHooksJsonEvent(targetDir: string, eventName: string, opts: ReconcileCodexOpts = {}): ReconcileResult {
+// Shared by install preflight and the hooks writer; resolving never writes.
+function resolveCodexHooksJsonDestination(targetDir: string): string {
   const hooksJsonPath = path.join(targetDir, 'hooks.json');
-  const managedCommand = typeof opts.managedCommand === 'string' ? opts.managedCommand : null;
-  const commandWindows = typeof opts.commandWindows === 'string' ? opts.commandWindows : null;
-  const matcher = typeof opts.matcher === 'string' ? opts.matcher : undefined;
-  const timeout = typeof opts.timeout === 'number' ? opts.timeout : undefined;
   // #2586 Major 2: every Codex hooks.json writer funnels through this one
   // function, and atomicWriteFileSync's final step is a rename(2) onto
   // `hooksJsonPath` — which, when that path is a symlink, REPLACES the
@@ -1006,6 +1250,16 @@ function reconcileCodexHooksJsonEvent(targetDir: string, eventName: string, opts
     // is supposed to mean.
     effectiveHooksJsonPath = fs.realpathSync(hooksJsonPath);
   }
+  return effectiveHooksJsonPath;
+}
+
+function reconcileCodexHooksJsonEvent(targetDir: string, eventName: string, opts: ReconcileCodexOpts = {}): ReconcileResult {
+  const hooksJsonPath = path.join(targetDir, 'hooks.json');
+  const managedCommand = typeof opts.managedCommand === 'string' ? opts.managedCommand : null;
+  const commandWindows = typeof opts.commandWindows === 'string' ? opts.commandWindows : null;
+  const matcher = typeof opts.matcher === 'string' ? opts.matcher : undefined;
+  const timeout = typeof opts.timeout === 'number' ? opts.timeout : undefined;
+  const effectiveHooksJsonPath = resolveCodexHooksJsonDestination(targetDir);
   let parsed: Record<string, unknown> = {};
   let currentContent: string | null = null;
   if (fs.existsSync(effectiveHooksJsonPath)) {
@@ -1149,7 +1403,16 @@ function buildCodexHookWindowsShimIR(scriptAbsPath: string, absoluteRunnerToken:
   const scriptQuoted = JSON.stringify(targetAbs);
   const cmdPath = scriptAbsPath.replace(/\.js$/, '.cmd');
   const hookCommand = JSON.stringify(shellCmdProjection.posixNormalize(cmdPath));
-  const runnerQuoted = JSON.stringify(interpreter);
+  // #4838: node is resolved when the hook fires. The install-time path dies when a
+  // version manager (WinGet) removes the versioned directory on upgrade, and a
+  // shim that only knew that path failed silently until the installer re-ran.
+  // Order: explicit GSD_NODE_PATH; the install-time path while it still exists
+  // (keeps the #3662 minimal-PATH guarantee); node.exe on PATH. `where $PATH:`
+  // searches PATH only, never the current directory, so repo content cannot
+  // become the runner. `%` is doubled so cmd.exe cannot expand a variable out
+  // of an install path.
+  const bakedBat = JSON.stringify(interpreter).slice(1, -1).replace(/%/g, '%%');
+  const scriptBat = scriptQuoted.replace(/%/g, '%%');
   return {
     invocation: { interpreter, target: scriptAbsPath },
     cmdPath,
@@ -1157,7 +1420,16 @@ function buildCodexHookWindowsShimIR(scriptAbsPath: string, absoluteRunnerToken:
     eol: { cmd: '\r\n' },
     passthroughArgs: true,
     render: {
-      cmd: () => `@ECHO OFF\r\n@SETLOCAL\r\n@${runnerQuoted} ${scriptQuoted} %*\r\n`,
+      cmd: () => [
+        '@ECHO OFF',
+        '@SETLOCAL',
+        '@SET "GSD_NODE="',
+        '@IF DEFINED GSD_NODE_PATH IF EXIST "%GSD_NODE_PATH%" SET "GSD_NODE=%GSD_NODE_PATH%"',
+        `@IF NOT DEFINED GSD_NODE IF EXIST "${bakedBat}" SET "GSD_NODE=${bakedBat}"`,
+        '@IF NOT DEFINED GSD_NODE FOR /F "delims=" %%N IN (\'where $PATH:node.exe 2^>NUL\') DO @IF NOT DEFINED GSD_NODE SET "GSD_NODE=%%N"',
+        `@"%GSD_NODE%" ${scriptBat} %*`,
+        '',
+      ].join('\r\n'),
     },
   };
 }
@@ -1425,6 +1697,8 @@ function cleanupOrphanedCodexContextMonitorScript(targetDir: string): CleanupCod
 // ---------------------------------------------------------------------------
 
 interface BuildHookCommandOpts {
+  /** #5850: the command is for settings.json `statusLine` (shell-neutral PowerShell spelling). */
+  statusLine?: boolean;
   portableHooks?: boolean;
   platform?: string;
   runtime?: string;
@@ -1457,10 +1731,10 @@ function configuredEntrypointsForHook(
   const bash = resolveBashExecutable(opts);
   if (isShellHook) {
     // An unresolved bash must still surface as an interpreterCandidates entry
-    // (the literal token, same as the portableHooks runner below) so
+    // (the sentinel token, same as the portableHooks runner below) so
     // validateConfiguredEntrypoints reports 'unresolved-interpreter' instead
     // of silently skipping the check because the field is absent.
-    return [{ ...target, interpreterCandidates: [bash === null ? 'bash' : bash] }];
+    return [{ ...target, interpreterCandidates: [bash === null ? UNRESOLVED_BASH_SENTINEL : bash] }];
   }
 
   // #4249: check the SAME stable alias buildNodeRunnerChainToken bakes as its
@@ -1475,7 +1749,8 @@ function configuredEntrypointsForHook(
     '/usr/bin/node',
   ].filter((candidate): candidate is string => Boolean(candidate));
 
-  if (!opts.portableHooks) {
+  // #5850: the PowerShell runner needs no bash resolver, portable or not.
+  if (!opts.portableHooks || usesPowerShellHookShell({ platform, runtime, hookShell: opts.hookShell })) {
     return [{ ...target, interpreterCandidates: nodeCandidates }];
   }
 
@@ -1483,7 +1758,7 @@ function configuredEntrypointsForHook(
     runtime,
     configPath,
     scriptPath: path.join(configDir, 'hooks', NODE_RUNNER_RESOLVER_HOOK),
-    interpreterCandidates: bash === null ? ['bash'] : [bash],
+    interpreterCandidates: bash === null ? [UNRESOLVED_BASH_SENTINEL] : [bash],
     platform,
   };
   return [runner, { ...target, interpreterCandidates: nodeCandidates }];
@@ -1501,6 +1776,20 @@ function recordConfiguredHookCommand(
     );
   }
   return command;
+}
+
+// #5100: the two null-runner branches of buildHookCommand share this. No
+// command was ever built, so track() (which needs one) cannot record the
+// hook — push the entry directly instead, so the gate sees it rather than
+// the hook going silently unregistered.
+function recordUnresolvedBashEntrypoint(
+  configDir: string,
+  hookName: string,
+  opts: BuildHookCommandOpts,
+): void {
+  if (opts.configuredEntrypoints) {
+    opts.configuredEntrypoints.push(...configuredEntrypointsForHook(configDir, hookName, opts));
+  }
 }
 
 function buildHookCommand(configDir: string, hookName: string, opts?: BuildHookCommandOpts): string | null {
@@ -1530,15 +1819,9 @@ function buildHookCommand(configDir: string, hookName: string, opts?: BuildHookC
     const runner = resolveBashRunner(opts);
     if (runner === null) {
       // #4249 (antigravity review): this early return skips `track()` below,
-      // so an unresolved bash on win32 (no Git Bash found) previously left
-      // this hook silently unregistered with nothing for
-      // validateConfiguredEntrypoints to reject — configuredEntrypointsForHook's
-      // own 'unresolved bash must still surface' comment describes intent this
-      // return never reached. Push the entry directly (no `command`, since
-      // none was ever built) so the gate actually sees it.
-      if (opts.configuredEntrypoints) {
-        opts.configuredEntrypoints.push(...configuredEntrypointsForHook(configDir, hookName, opts));
-      }
+      // which needs a command that was never built — record the entry
+      // directly so the gate can reject it.
+      recordUnresolvedBashEntrypoint(configDir, hookName, opts);
       return null;
     }
 
@@ -1571,6 +1854,21 @@ function buildHookCommand(configDir: string, hookName: string, opts?: BuildHookC
   // exactly what breaks with exit 127 when the config root is shared across
   // environments with different node layouts.
 
+  // #5850: Claude on win32 always gets the PowerShell runner (owner ruling),
+  // portable installs included: the `$HOME`-relative script path is spelled for
+  // PowerShell and needs no bash resolver.
+  if (usesPowerShellHookShell({ platform, runtime, hookShell })) {
+    const scriptPath = opts.portableHooks
+      ? `${projectPortableHookBaseDir({ configDir, homeDir: os.homedir() })}/hooks/${hookName}`
+      : shellCmdProjection.posixNormalize(configDir) + '/hooks/' + hookName;
+    // A statusLine is not shared across hosts and has no `$`-free `$HOME` spelling:
+    // it always carries the real absolute path, portable or not.
+    if (opts.statusLine) {
+      return track(buildPowerShellStatusLineCommand(shellCmdProjection.posixNormalize(configDir) + '/hooks/' + hookName, opts));
+    }
+    return track(buildPowerShellHookCommand(powerShellScriptArg(scriptPath, { literal: true }) as string, opts));
+  }
+
   if (opts.portableHooks) {
     // Portable installs route through the staged resolver: the baked absolute
     // path travels as the resolver's FIRST argument (tried first, so the
@@ -1584,9 +1882,13 @@ function buildHookCommand(configDir: string, hookName: string, opts?: BuildHookC
       configDir,
       homeDir: os.homedir(),
     });
-    // Absolute Git-Bash discovery on win32 when available (#580); `bash` on
-    // PATH otherwise — the same assumption .sh hooks already make.
-    const resolverRunner = resolveBashRunner(opts) || 'bash';
+    // #5100: same contract as the .sh early return. A bare `bash` is how
+    // win32 reaches WSL's System32 launcher, and the gate used to accept it.
+    const resolverRunner = resolveBashRunner(opts);
+    if (resolverRunner === null) {
+      recordUnresolvedBashEntrypoint(configDir, hookName, opts);
+      return null;
+    }
     return track(shellCmdProjection.projectShellCommandText({
       runnerToken: resolverRunner,
       argTokens: [
@@ -2170,7 +2472,10 @@ interface WindsurfManagedEntries {
  * top-level-array lift — Cascade's hooks.json is a brand-new surface with no
  * prior shape to migrate from).
  */
-function reconcileWindsurfHooksJson(hooksJsonPath: string, managedEntries: WindsurfManagedEntries | null): ReconcileResult {
+function planWindsurfHooksJson(
+  hooksJsonPath: string,
+  managedEntries: WindsurfManagedEntries | null,
+): { nextContent: string; changed: boolean; shouldWrite: boolean } {
   let parsed: Record<string, unknown> = {};
   let currentContent: string | null = null;
 
@@ -2213,8 +2518,67 @@ function reconcileWindsurfHooksJson(hooksJsonPath: string, managedEntries: Winds
   const nextContent = `${JSON.stringify(parsed, null, 2)}\n`;
   const changed = currentContent !== nextContent;
   const shouldWrite = changed && (currentContent !== null || Object.keys(parsed).length > 0);
+  return { nextContent, changed, shouldWrite };
+}
+
+/**
+ * #5978: the path a Windsurf hooks.json write must target. `atomicWriteFileSync` ends in a
+ * rename(2) that REPLACES a symlink at the destination and the empty-file removal below
+ * `unlinkSync`s it, so a dotfiles-managed `hooks.json -> ~/dotfiles/windsurf-hooks.json` was
+ * replaced or deleted unasked while its target kept GSD's entries. Same policy as the Kimi
+ * config.toml (`resolveKimiConfigDestination`) and the Codex hooks.json writer: refuse a symlink
+ * without GSD_ALLOW_SYMLINKED_DEST, with it resolve to the real target so the link is kept. A
+ * dangling link has no target to follow, so it is refused whatever the opt-in says.
+ */
+function resolveWindsurfHooksJsonDestination(hooksJsonPath: string): string {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(hooksJsonPath);
+  } catch (err) {
+    // Nothing at the path yet: a fresh install creates the file. Any other failure (EACCES, ELOOP)
+    // cannot be classified as "not a link", so it is not written through.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return hooksJsonPath;
+    throw err;
+  }
+  if (!stat.isSymbolicLink()) return hooksJsonPath;
+  if (!_installEngineSymlinkGuard().isSymlinkedDestOptIn()) {
+    throw new Error(
+      `Windsurf hooks.json at "${hooksJsonPath}" is a symlink, refusing to change it. ` +
+        'If this is an intentional user-owned symlink layout, re-run with GSD_ALLOW_SYMLINKED_DEST=1 (the link is kept).',
+    );
+  }
+  if (!fs.existsSync(hooksJsonPath)) {
+    throw new Error(
+      `Windsurf hooks.json at "${hooksJsonPath}" is a dangling symlink, refusing to replace it or write through it.`,
+    );
+  }
+  return fs.realpathSync(hooksJsonPath);
+}
+
+/**
+ * #5978: the refusal message when removing GSD's entries would change a symlinked Windsurf
+ * hooks.json without GSD_ALLOW_SYMLINKED_DEST, else null. The uninstall runs it before its first
+ * removal so a refused run leaves the whole install, the link and its target as they were. A link
+ * the removal would leave unchanged (no GSD entries) is not refused.
+ */
+function windsurfHooksJsonRemovalRefusal(targetDir: string): string | null {
+  const hooksJsonPath = path.join(targetDir, 'hooks.json');
+  if (!fs.existsSync(hooksJsonPath)) return null;
+  try {
+    if (!planWindsurfHooksJson(hooksJsonPath, null).shouldWrite) return null;
+    resolveWindsurfHooksJsonDestination(hooksJsonPath);
+    return null;
+  } catch (err) {
+    // An unparseable hooks.json would fail the removal partway through; report it before any removal.
+    return (err as Error).message;
+  }
+}
+
+function reconcileWindsurfHooksJson(hooksJsonPath: string, managedEntries: WindsurfManagedEntries | null): ReconcileResult {
+  const { nextContent, changed, shouldWrite } = planWindsurfHooksJson(hooksJsonPath, managedEntries);
   if (shouldWrite) {
-    atomicWriteFileSync(hooksJsonPath, nextContent, 'utf8');
+    // Reading followed the link harmlessly; the policy applies where the write lands.
+    atomicWriteFileSync(resolveWindsurfHooksJsonDestination(hooksJsonPath), nextContent, 'utf8');
   }
 
   return { changed: changed, wrote: shouldWrite, path: hooksJsonPath };
@@ -2243,6 +2607,35 @@ interface WriteWindsurfHooksJsonOpts {
 function writeWindsurfHooksJson(targetDir: string, src: string, opts?: WriteWindsurfHooksJsonOpts): { hooksJsonPath: string; changed: boolean; configuredEntrypoints: ConfiguredEntrypoint[] } {
   opts = opts || {};
   const hooksDir = path.join(targetDir, 'hooks');
+
+  // #5978 preflight: decide, before anything is written, whether hooks.json would change, and
+  // refuse a symlinked one that would (without GSD_ALLOW_SYMLINKED_DEST) while the install is
+  // still untouched, instead of throwing at the end with the hook scripts already staged.
+  {
+    const wouldInstall = new Set(
+      GSD_WINDSURF_HOOK_SCRIPTS.filter((script) => fs.existsSync(path.join(src, 'hooks', script))),
+    );
+    const preCommands: Record<string, string | null> = {};
+    for (const ev of WINDSURF_HOOK_EVENTS) {
+      const script = WINDSURF_EVENT_SCRIPT_MAP[ev];
+      preCommands[ev] = (script && wouldInstall.has(script))
+        ? buildHookCommand(targetDir, script, {
+            runtime: 'windsurf',
+            platform: opts.platform || process.platform,
+            configPath: path.join(targetDir, 'hooks.json'),
+            configuredEntrypoints: [],
+          })
+        : null;
+    }
+    const preEntries: WindsurfManagedEntries = {};
+    for (const ev of WINDSURF_HOOK_EVENTS) {
+      const cmd = preCommands[ev];
+      if (cmd) preEntries[ev] = buildWindsurfHookEntry(cmd);
+    }
+    const preHooksJson = path.join(targetDir, 'hooks.json');
+    if (planWindsurfHooksJson(preHooksJson, preEntries).shouldWrite) resolveWindsurfHooksJsonDestination(preHooksJson);
+  }
+
   fs.mkdirSync(hooksDir, { recursive: true });
 
   const srcHooksDir = path.join(src, 'hooks');
@@ -2338,7 +2731,9 @@ function removeWindsurfHooksJson(targetDir: string): { changed: boolean } {
         (k) => Array.isArray(hookTable[k]) && (hookTable[k] as unknown[]).length > 0,
       );
       if (!hasAnyEvents) {
-        fs.unlinkSync(hooksJsonPath);
+        // #5978: behind a symlink the reconcile above already emptied the file the link points
+        // at; unlinking the link path would delete the user's link, so it is kept.
+        if (!fs.lstatSync(hooksJsonPath).isSymbolicLink()) fs.unlinkSync(hooksJsonPath);
         // #2717: also remove the CommonJS marker GSD wrote into hooks/ — but
         // only if it still carries GSD's exact content (a user-authored
         // package.json is never deleted). Best-effort.
@@ -2466,6 +2861,14 @@ interface ApplySettingsJsonHooksOpts {
   hookOpts: BuildHookCommandOpts;
   localCmd: (hookFile: string) => string | null;
   localShellCmd: (hookFile: string) => string | null;
+  /**
+   * #4840: false when the runtime declares `context-warnings` unsupported
+   * (`hostBehaviors.unsupportedFeatures`) — it has no statusline writer for the
+   * metrics bridge file `gsd-context-monitor.js` reads, so the hook could never
+   * warn. The monitor is then not registered, and a registration left by an
+   * earlier install is stripped. Absent means supported.
+   */
+  contextWarnings?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -2539,6 +2942,9 @@ const SETTINGS_JSON_HOOK_ROWS: readonly SettingsJsonHookRow[] = deepFreeze([
   // Guard: only register if the hook file was actually installed (#1754, #1817).
   { file: 'gsd-check-update.js', event: 'SessionStart', command: { opts: 'updateCheckCommand' },
     configuredMessage: 'Configured update check hook', skipLabel: 'update check hook' },
+  // #5465: persists the gsd-core bin directory on PATH through $CLAUDE_ENV_FILE (SessionStart-only).
+  { file: 'gsd-path-export.js', event: 'SessionStart', timeout: 5, command: { build: 'js' },
+    configuredMessage: 'Configured PATH persistence hook', skipLabel: 'PATH persistence hook' },
   { file: 'gsd-context-monitor.js', event: 'post', matcher: 'Bash|Edit|Write|MultiEdit|Agent|Task', timeout: 10,
     command: { opts: 'contextMonitorCommand' },
     configuredMessage: 'Configured context window monitor hook', skipLabel: 'context monitor hook',
@@ -2681,6 +3087,32 @@ function pushHookGroup(entries: any[], matcher: string | undefined, command: str
   entries.push(matcher === undefined ? { hooks: [hook] } : { matcher, hooks: [hook] });
 }
 
+/** #4840: the hook that reads the statusline's metrics bridge file. */
+const CONTEXT_MONITOR_HOOK = 'gsd-context-monitor.js';
+
+/**
+ * #4840: remove GSD-managed registrations of `stem` from one event's groups,
+ * leaving user-authored hooks (even in the same group) untouched. Returns
+ * whether anything was removed. A group left with no hooks is dropped.
+ */
+function stripManagedHookRegistrations(entries: any[], stem: string): boolean {
+  let removed = false;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (!entry || !Array.isArray(entry.hooks)) continue;
+    const kept = entry.hooks.filter((h: HookEntry) => {
+      const managed = referencesHook(h as Record<string, unknown>, stem)
+        && isManagedHookCommand((h as { command?: string }).command, { surface: 'settings-json', includeLegacyAliases: true });
+      if (managed) removed = true;
+      return !managed;
+    });
+    if (kept.length === entry.hooks.length) continue;
+    if (kept.length === 0) entries.splice(i, 1);
+    else entry.hooks = kept;
+  }
+  return removed;
+}
+
 function applySettingsJsonHookTables(settings: any, opts: ApplySettingsJsonHooksOpts, tables: SettingsJsonHookTables): void {
   const { runtime, postToolEvent, hookEvents, extendedHookEvents, hooksSurface, targetDir, hookOpts } = opts;
 
@@ -2735,6 +3167,12 @@ function applySettingsJsonHookTables(settings: any, opts: ApplySettingsJsonHooks
       settings.hooks[key] = [];
     }
     const entries: any[] = settings.hooks[key];
+    if (row.file === CONTEXT_MONITOR_HOOK && opts.contextWarnings === false) {
+      if (stripManagedHookRegistrations(entries, hookStem(row.file))) {
+        console.log(`  ${green}✓${reset} Removed stale context monitor hook (${_capabilityTitle(runtime)} has no context metrics writer, #4840)`);
+      }
+      continue;
+    }
     const command = resolveRowCommand(row, opts);
     if ('build' in row.command && row.command.build === 'sh') shellCommands[row.file] = command;
 
@@ -2865,7 +3303,7 @@ function buildKimiHookEntryToml(spec: KimiHookEntrySpec): string | null {
  * unmatched (all tools) instead, which only widens when it fires, it never
  * narrows incorrectly.
  */
-function buildKimiHooksTomlBlock(targetDir: string, opts: { hookOpts: BuildHookCommandOpts }): string | null {
+function buildKimiHooksTomlBlock(targetDir: string, opts: { hookOpts: BuildHookCommandOpts; contextWarnings?: boolean }): string | null {
   const { hookOpts } = opts;
   const cmd = (hookName: string): string | null => {
     if (!fs.existsSync(path.join(targetDir, 'hooks', hookName))) return null;
@@ -2887,7 +3325,8 @@ function buildKimiHooksTomlBlock(targetDir: string, opts: { hookOpts: BuildHookC
     { event: 'PreToolUse', command: cmd('gsd-validate-commit.sh'), matcher: 'Shell', timeout: kimiBlockingGuardTimeout('gsd-validate-commit.sh') },
 
     // PostToolUse
-    { event: 'PostToolUse', command: cmd('gsd-context-monitor.js'), timeout: 10 },
+    // #4840: no metrics writer on kimi, so the warning registration is skipped (a block from an earlier install is replaced wholesale).
+    { event: 'PostToolUse', command: opts.contextWarnings === false ? null : cmd('gsd-context-monitor.js'), timeout: 10 },
     { event: 'PostToolUse', command: cmd('gsd-phase-boundary.sh'), matcher: 'WriteFile|StrReplaceFile', timeout: 5 },
     { event: 'PostToolUse', command: cmd('gsd-read-injection-scanner.js'), matcher: 'ReadFile', timeout: 5 },
     { event: 'PostToolUse', command: cmd('gsd-graphify-update.sh'), matcher: 'Shell', timeout: 5 },
@@ -2954,6 +3393,48 @@ function stripKimiHooksTomlBlock(content: string): string | null {
 }
 
 /**
+ * #5949: the path a Kimi config.toml read or write must target. `atomicWriteFileSync` ends in
+ * a rename(2) that REPLACES a symlink at the destination and `unlinkSync` removes it, so a
+ * dotfiles-managed `config.toml -> ~/dotfiles/kimi.toml` was destroyed unasked. Same policy as
+ * the Codex hooks.json writer (`resolveCodexHooksJsonDestination`): refuse a symlink without
+ * GSD_ALLOW_SYMLINKED_DEST, with it resolve to the real target. A dangling link has no target
+ * to follow, so it is refused whatever the opt-in says rather than replaced or created through.
+ */
+function resolveKimiConfigDestination(configPath: string): string {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(configPath);
+  } catch {
+    return configPath;
+  }
+  if (!stat.isSymbolicLink()) return configPath;
+  if (!_installEngineSymlinkGuard().isSymlinkedDestOptIn()) {
+    throw new Error(
+      `Kimi config.toml at "${configPath}" is a symlink — refusing to read or write it. ` +
+        'If this is an intentional user-owned symlink layout, re-run with GSD_ALLOW_SYMLINKED_DEST=1.',
+    );
+  }
+  if (!fs.existsSync(configPath)) {
+    throw new Error(
+      `Kimi config.toml at "${configPath}" is a dangling symlink — refusing to replace it or write through it.`,
+    );
+  }
+  return fs.realpathSync(configPath);
+}
+
+/**
+ * A GSD-only config.toml is removed when it is a regular file; behind a symlink its target is
+ * emptied instead, because unlinking the link path would delete the user's link (#5949).
+ */
+function removeOrEmptyKimiConfig(configPath: string, writePath: string): void {
+  if (writePath !== configPath) {
+    atomicWriteFileSync(writePath, '', 'utf8');
+  } else if (fs.existsSync(configPath)) {
+    fs.unlinkSync(configPath);
+  }
+}
+
+/**
  * Idempotently (re)write kimi's GSD-owned [[hooks]] block into its native
  * config.toml at `configPath` (resolved by the caller via
  * resolveKimiHooksTomlDir). No-ops (`{changed:false}`) when the computed
@@ -2963,16 +3444,20 @@ function stripKimiHooksTomlBlock(content: string): string | null {
 function writeKimiHooksToml(
   configPath: string,
   targetDir: string,
-  opts: { hookOpts: BuildHookCommandOpts },
+  opts: { hookOpts: BuildHookCommandOpts; contextWarnings?: boolean },
 ): { changed: boolean; path: string; entryCount: number; configuredEntrypoints: ConfiguredEntrypoint[] } {
   const configuredEntrypoints: ConfiguredEntrypoint[] = [];
   const trackedOpts = {
+    contextWarnings: opts.contextWarnings,
     hookOpts: {
       ...opts.hookOpts,
       configPath,
       configuredEntrypoints,
     },
   };
+  // #5949: reading follows a link harmlessly; the policy applies where a write would land. A
+  // symlinked config.toml is refused (resolveKimiConfigDestination) only when a write is needed,
+  // and with the opt-in the write lands on the link's real target, never replacing the link.
   const existing = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
   const stripped = stripKimiHooksTomlBlock(existing) ?? '';
   const block = buildKimiHooksTomlBlock(targetDir, trackedOpts);
@@ -2980,11 +3465,12 @@ function writeKimiHooksToml(
 
   if (!block) {
     if (stripped === existing) return { changed: false, path: configPath, entryCount: 0, configuredEntrypoints };
+    const writePath = resolveKimiConfigDestination(configPath);
     if (stripped.trim() === '') {
-      if (fs.existsSync(configPath)) fs.unlinkSync(configPath);
+      removeOrEmptyKimiConfig(configPath, writePath);
     } else {
-      fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      atomicWriteFileSync(configPath, stripped, 'utf8');
+      fs.mkdirSync(path.dirname(writePath), { recursive: true });
+      atomicWriteFileSync(writePath, stripped, 'utf8');
     }
     return { changed: true, path: configPath, entryCount: 0, configuredEntrypoints };
   }
@@ -2993,8 +3479,9 @@ function writeKimiHooksToml(
   const next = stripped.trim() === '' ? `${block}\n` : `${stripped}${separator}${block}\n`;
   if (next === existing) return { changed: false, path: configPath, entryCount, configuredEntrypoints };
 
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  atomicWriteFileSync(configPath, next, 'utf8');
+  const writePath = resolveKimiConfigDestination(configPath);
+  fs.mkdirSync(path.dirname(writePath), { recursive: true });
+  atomicWriteFileSync(writePath, next, 'utf8');
   return { changed: true, path: configPath, entryCount, configuredEntrypoints };
 }
 
@@ -3003,14 +3490,18 @@ function writeKimiHooksToml(
  * deletes the file if nothing but GSD's own block was ever in it.
  */
 function removeKimiHooksToml(configPath: string): { changed: boolean } {
+  // A dangling link has no content to strip: existsSync follows links and is false for it.
   if (!fs.existsSync(configPath)) return { changed: false };
   const existing = fs.readFileSync(configPath, 'utf8');
   const stripped = stripKimiHooksTomlBlock(existing);
   if (stripped === existing) return { changed: false };
+  // #5949: a symlinked config.toml holding a GSD block is refused without the opt-in; with it the
+  // strip lands on the link's real target and the link is kept (a GSD-only target is emptied).
+  const writePath = resolveKimiConfigDestination(configPath);
   if (stripped === null || stripped.trim() === '') {
-    fs.unlinkSync(configPath);
+    removeOrEmptyKimiConfig(configPath, writePath);
   } else {
-    atomicWriteFileSync(configPath, stripped, 'utf8');
+    atomicWriteFileSync(writePath, stripped, 'utf8');
   }
   return { changed: true };
 }
@@ -3120,9 +3611,44 @@ type ConfiguredEntrypointValidationResult =
   | { ok: true }
   | { ok: false; invalid: ConfiguredEntrypointInvalid[] };
 
+// #5100: the writer emits the bare `bash` token when the Git Bash policy
+// finds nothing, and the gate resolves that token through the same policy —
+// never a PATH scan. One shared definition so the two sides cannot drift.
+const UNRESOLVED_BASH_SENTINEL = 'bash';
+const WIN32_BARE_BASH_TOKENS = [UNRESOLVED_BASH_SENTINEL, 'bash.exe'];
+
+function isWin32BareBashToken(candidate: string, platform?: string): boolean {
+  if ((platform || process.platform) !== 'win32') return false;
+  // Equality already rejects any path: a string holding a separator can never
+  // equal a bare token, so no explicit separator guard is needed here.
+  return WIN32_BARE_BASH_TOKENS.includes(candidate.trim().toLowerCase());
+}
+
+// #5100: the literal `bash` sentinel means "Git Bash policy found nothing"
+// (#4249). Resolve that token through resolveBashExecutable, never a PATH
+// scan — WSL's System32\bash.exe is on PATH and cannot see Windows paths.
+function win32BareBashResolves(
+  candidate: string,
+  platform: string | undefined,
+  deps: { env?: NodeJS.ProcessEnv; existsSync?: (p: string) => boolean },
+): boolean | null {
+  if (!isWin32BareBashToken(candidate, platform)) return null;
+  return resolveBashExecutable({
+    platform: 'win32',
+    env: deps.env,
+    existsSync: deps.existsSync,
+  }) !== null;
+}
+
 function validateConfiguredEntrypoints(
   entries: ConfiguredEntrypoint[],
-  deps: { statSync?: typeof fs.statSync; accessSync?: typeof fs.accessSync; resolveExecutableBinary?: typeof resolveExecutableBinary } = {},
+  deps: {
+    statSync?: typeof fs.statSync;
+    accessSync?: typeof fs.accessSync;
+    resolveExecutableBinary?: typeof resolveExecutableBinary;
+    env?: NodeJS.ProcessEnv;
+    existsSync?: (p: string) => boolean;
+  } = {},
 ): ConfiguredEntrypointValidationResult {
   const statSync = deps.statSync ?? fs.statSync;
   const accessSync = deps.accessSync ?? fs.accessSync;
@@ -3175,9 +3701,11 @@ function validateConfiguredEntrypoints(
         invalid.push({ runtime: entry.runtime, configPath: entry.configPath, role: 'script', path: entry.scriptPath, reason: 'not-executable' });
       }
     }
-    if (entry.interpreterCandidates && !entry.interpreterCandidates.some(candidate =>
-      resolve(candidate, { platform: entry.platform, requireExecutable: true }) !== null,
-    )) {
+    if (entry.interpreterCandidates && !entry.interpreterCandidates.some(candidate => {
+      const bareBash = win32BareBashResolves(candidate, entry.platform, deps);
+      if (bareBash !== null) return bareBash;
+      return resolve(candidate, { platform: entry.platform, requireExecutable: true }) !== null;
+    })) {
       invalid.push({ runtime: entry.runtime, configPath: entry.configPath, role: 'interpreter', path: entry.interpreterCandidates.join(' | '), reason: 'unresolved-interpreter' });
     }
   }
@@ -3218,6 +3746,7 @@ export = {
   reconcileWindsurfHooksJson,
   writeWindsurfHooksJson,
   removeWindsurfHooksJson,
+  windsurfHooksJsonRemovalRefusal,
   WINDSURF_HOOK_EVENTS,
   WINDSURF_EVENT_SCRIPT_MAP,
   GSD_WINDSURF_PRE_WRITE_HOOK_SCRIPT,
@@ -3233,6 +3762,7 @@ export = {
   GSD_COPILOT_HOOK_FILE,
 
   // Codex hooks.json
+  resolveCodexHooksJsonDestination,
   reconcileCodexHooksJsonEvent,
   reconcileCodexHooksJsonSessionStart,
   ensureCodexHooksJsonSessionStart,
@@ -3251,6 +3781,7 @@ export = {
   // Kimi hooks.toml
   buildKimiHooksTomlBlock,
   stripKimiHooksTomlBlock,
+  resolveKimiConfigDestination,
   writeKimiHooksToml,
   removeKimiHooksToml,
   KIMI_HOOKS_TOML_MARKER_BEGIN,
@@ -3277,9 +3808,18 @@ export = {
   normalizeNodePath,
   resolveNodeRunner,
   buildNodeRunnerChainToken,
+  usesPowerShellHookShell,
+  buildPowerShellHookCommand,
+  buildPowerShellLocalHookCommand,
+  projectPowerShellHookShell,
   resolveBashExecutable,
   resolveBashRunner,
   NODE_RUNNER_RESOLVER_HOOK,
+  // #5100: the literal the writer records for an unresolved Git Bash and the
+  // gate resolves through the Git Bash policy. Exported so a consumer that
+  // needs to recognise that entry imports it rather than respelling it;
+  // bin/install.js keys on the entry having no command instead.
+  UNRESOLVED_BASH_SENTINEL,
 
   // Atomic write seam (shared with bin/install.js so all writes participate
   // in install.js's _cleanTmpFiles() scoped temp-cleanup).

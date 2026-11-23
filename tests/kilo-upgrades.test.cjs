@@ -35,7 +35,7 @@ const { spawnSync } = require('node:child_process');
 const { runNode, runGit } = require('./helpers/process-seam.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
-const { runMinimalInstall, BUILD_SCRIPT } = require('./helpers/install-shared.cjs');
+const { installRuntimeFixture, BUILD_SCRIPT } = require('./helpers/install-shared.cjs');
 const { cleanup } = require('./helpers.cjs');
 const { listAgentFiles } = require('./helpers/agent-roster.cjs');
 const { convertClaudeToKiloFrontmatter } = require('../bin/install.js');
@@ -61,9 +61,8 @@ function parseFrontmatter(content) {
 // ---------------------------------------------------------------------------
 
 for (const scope of ['global', 'local']) {
-  test(`kilo --${scope}: installs .../plugins/gsd-core.js byte-identical to the repo source (UPGRADE 1)`, (t) => {
-    const { configDir, root } = runMinimalInstall({ runtime: 'kilo', scope });
-    t.after(() => cleanup(root));
+  test(`kilo --${scope}: installs .../plugins/gsd-core.js byte-identical to the repo source (UPGRADE 1)`, () => {
+    const { configDir } = installRuntimeFixture({ runtime: 'kilo', scope });
 
     const installedPluginPath = path.join(configDir, 'plugins', 'gsd-core.js');
     assert.ok(fs.existsSync(installedPluginPath), `${installedPluginPath} must exist`);
@@ -111,8 +110,19 @@ test('.kilo/plugins/gsd-core.js loads as raw CommonJS and exposes id "gsd-core" 
 // forgets its twin would silently drift the two runtimes apart. This fails the
 // instant that happens.
 test('.kilo/plugins/gsd-core.js stays byte-identical to .opencode/plugins/gsd-core.js (Kilo is an OpenCode fork; parity guard, UPGRADE 1)', () => {
-  const kilo = fs.readFileSync(ADAPTER_SRC, 'utf8');
-  const opencode = fs.readFileSync(OPENCODE_ADAPTER_SRC, 'utf8');
+  const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
+  const kilo = splitLines(fs.readFileSync(ADAPTER_SRC, 'utf8')).join('\n');
+  // The OpenCode 2.x entrypoint (ADR-5331) lives between `gsd:opencode-v2` markers, and the OpenCode-only
+  // hook parity (Phase 3) between `gsd:opencode-parity` markers; both are intentionally absent from the
+  // Kilo mirror, which runs on the OpenCode 1.x line and keeps its output unchanged.
+  const kept = [];
+  let inBlock = false;
+  for (const line of splitLines(fs.readFileSync(OPENCODE_ADAPTER_SRC, 'utf8'))) {
+    if (/^\s*\/\/ >>> gsd:opencode-(?:v2|parity)/.test(line)) inBlock = true;
+    if (!inBlock) kept.push(line);
+    if (/^\s*\/\/ <<< gsd:opencode-(?:v2|parity)/.test(line)) inBlock = false;
+  }
+  const opencode = kept.join('\n');
   assert.equal(
     kilo,
     opencode,
@@ -235,18 +245,17 @@ const KILO_AGENT_PERMISSION_KEYS = [
 ];
 
 for (const scope of ['global', 'local']) {
-  test(`kilo --${scope}: native agents/*.md subagent projection with mode: subagent (UPGRADE 4)`, (t) => {
-    const { configDir, root } = runMinimalInstall({ runtime: 'kilo', scope });
-    t.after(() => cleanup(root));
+  test(`kilo --${scope}: native agents/*.md subagent projection with mode: subagent (UPGRADE 4)`, () => {
+    const { configDir } = installRuntimeFixture({ runtime: 'kilo', scope });
 
     const agentsDir = path.join(configDir, 'agents');
     assert.ok(fs.existsSync(agentsDir), `${agentsDir} must exist`);
 
     const expectedNames = listAgentFiles();
-    // Fork: 37, not upstream's 35 — the fork ships gsd-lens and
+    // Fork: 38, not upstream's 36 — the fork ships gsd-lens and
     // gsd-lens-synthesizer (multilens retro / plan-lens-review).
-    assert.equal(expectedNames.length, 37,
-      'sanity: shipped GSD agent roster is 37 files — update this boundary if the roster changes');
+    assert.equal(expectedNames.length, 38,
+      'sanity: shipped GSD agent roster is 38 files — update this boundary if the roster changes');
 
     const installedFiles = fs.readdirSync(agentsDir)
       .filter((f) => f.startsWith('gsd-') && f.endsWith('.md'));
@@ -333,9 +342,8 @@ const PLUGIN_GUARD_HOOKS = [
 ];
 
 for (const scope of ['global', 'local']) {
-  test(`kilo --${scope}: stages the guard hook scripts where the native plugin resolves them (#2305)`, (t) => {
-    const { manifest, configDir, root } = runMinimalInstall({ runtime: 'kilo', scope });
-    t.after(() => cleanup(root));
+  test(`kilo --${scope}: stages the guard hook scripts where the native plugin resolves them (#2305)`, () => {
+    const { manifest, configDir } = installRuntimeFixture({ runtime: 'kilo', scope });
 
     // The shared hooks bundle lands in the config dir, next to gsd-core/.
     for (const hook of PLUGIN_GUARD_HOOKS) {
@@ -371,8 +379,7 @@ for (const scope of ['global', 'local']) {
 }
 
 test('kilo: a disallowed write through the REAL installed tree is rejected by the worktree-path guard (#2305)', async (t) => {
-  const { configDir, root } = runMinimalInstall({ runtime: 'kilo', scope: 'global' });
-  t.after(() => cleanup(root));
+  const { configDir } = installRuntimeFixture({ runtime: 'kilo', scope: 'global' });
 
   // Build a GSD-shaped executor worktree: gsd-worktree-path-guard hard-blocks
   // only when cwd is a linked worktree on a worktree-agent-* branch and the

@@ -11,7 +11,7 @@ GSD assumptions analyzer. Deeply analyze the codebase for ONE phase; produce str
 
 @~/.claude/gsd-core/references/untrusted-input-boundary.md
 
-**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md
+**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md (agent type: `gsd-assumptions-analyzer`)
 
 <input>
 Via prompt: `<phase>` (number/name), `<phase_goal>` (ROADMAP.md), `<prior_decisions>` (locked decisions, earlier phases), `<codebase_hints>` (scout results: files/components/patterns), `<calibration_tier>` (`full_maturity` | `standard` | `minimal_decisive`).
@@ -29,7 +29,7 @@ Follow the tier exactly — controls output shape.
 
 <process>
 1. Read ROADMAP.md phase description
-2. Read prior CONTEXT.md (`find .planning/phases -name "*-CONTEXT.md"`)
+2. Read prior CONTEXT.md (`find "<scope root>/phases" -name "*-CONTEXT.md"` (scope root: `gsd_run query planning.inspect --pick generated_from.planning_root`))
 3. Glob/Grep for files related to phase goal terms
 4. Read 5-15 most relevant source files
 5. Form assumptions from what the codebase reveals

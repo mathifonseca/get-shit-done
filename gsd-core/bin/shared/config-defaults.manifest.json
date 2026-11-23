@@ -22,6 +22,7 @@
   "git": {
     "branching_strategy": "none",
     "create_tag": true,
+    "repo_tagging": "single",
     "base_branch": null,
     "phase_branch_template": "gsd/phase-{phase}-{slug}",
     "milestone_branch_template": "gsd/{milestone}-{slug}",
@@ -34,6 +35,7 @@
     "nyquist_validation": true,
     "ai_integration_phase": true,
     "agent_hint_routing": true,
+    "cross_runtime_execution": false,
     "human_verify_mode": "end-of-phase",
     "auto_advance": false,
     "_auto_chain_active": false,

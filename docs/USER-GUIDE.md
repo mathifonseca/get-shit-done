@@ -155,6 +155,14 @@ For onboarding an existing codebase before starting a new milestone, run `/gsd-o
 
 For the full command reference with all flags, see [`docs/COMMANDS.md`](COMMANDS.md). For configuration options (model profiles, workflow agents, git branching), see [`docs/CONFIGURATION.md`](CONFIGURATION.md).
 
+### The implicit first milestone
+
+`/gsd-new-project` does not register a milestone. On a fresh project there is no `MILESTONES.md`, no `milestone:` value in `STATE.md`, and no version token in `ROADMAP.md` — by design ([ADR-3180](adr/3180-planning-semantic-model-single-owner.md) §7.2 rule 5): a ROADMAP with no version token has no milestone identity, and the runtime must not invent one.
+
+The first milestone is therefore **implicit**: it is "everything between `/gsd-new-project` and the first `/gsd-complete-milestone <version>`". Its identity is recorded only at close time — the version from the command argument, the name from the separate `--name` value the close workflow passes alongside it (defaulting to the version when no name is given). There is no start-registration step to look for, and none is needed; `/gsd-new-milestone` (the cycle opener) is intended for the second milestone onward, where it reads the previous version from `MILESTONES.md` and records the new identity at cycle start.
+
+Until the first close, while `ROADMAP.md` carries no version token, the milestone-aware commands report no current milestone: `gsd_run query init.manager` emits `milestone_version: null` and `milestone_name: null`, and `gsd_run query init.new-milestone` emits `current_milestone: null` — the documented state, not data loss.
+
 ---
 
 ## Workflow Diagrams
@@ -450,7 +458,7 @@ cd ~/gsd-workspaces/feature-b
 
 GSD generates markdown files that become LLM system prompts. This means any user-controlled text flowing into planning artifacts is a potential indirect prompt injection vector. v1.27 introduced centralised security hardening:
 
-**Path Traversal Prevention:** All user-supplied file paths (`--text-file`, `--prd`) are validated to resolve within the project directory. macOS `/var` → `/private/var` symlink resolution is handled.
+**Path Traversal Prevention:** User-supplied file paths that GSD writes to or resolves into the project (e.g. `--prd`) are validated to resolve within the project directory. macOS `/var` → `/private/var` symlink resolution is handled. Read-once text inputs whose contents are copied into STATE.md (`--summary-file`, `--rationale-file`, `--text-file`, `--note-file`) are not confined and accept any readable file (#4926).
 
 **Prompt Injection Detection:** The `security.cjs` module scans for known injection patterns in user-supplied text before it enters planning artifacts.
 
@@ -459,7 +467,9 @@ GSD generates markdown files that become LLM system prompts. This means any user
 - `gsd-prompt-guard.js` — Scans Write/Edit calls to `.planning/` for injection patterns (always active, advisory-only)
 - `gsd-workflow-guard.js` — Warns on file edits outside GSD workflow context (opt-in via `hooks.workflow_guard`)
 - `gsd-write-guard.js` — Hard-blocks a whole-file `Write` that catastrophically shrinks a curated `.planning/` artifact (`ROADMAP.md`, milestone roadmaps, `STATE.md`) below 40% of its on-disk line count; files under 40 lines are exempt. The check is stateless per Write, comparing each payload against the file's *current* on-disk size — a single-shot collapse (the #973 shape) is blocked, but a sequence of individually-tolerated shrinks that erodes the file across several Writes is not detected. For a legitimate milestone reset or large deletion, bypass once with the single-use sentinel — write the target's path into `.planning/.gsd-allow-shrink` (fresh within 15 minutes; consumed by the allowed write) — or, interactively, with `GSD_ALLOW_PLANNING_SHRINK=1` in the runtime's environment. Scope the guarantee accordingly: this stops accidental and single-shot collapse, and is not a defense against a determined agent — the sentinel is a plain file, so anything with shell access can arm one; what it buys is that the bypass becomes a deliberate, path-bound, single-use and auditable action rather than a sentence to reason past (always active, blocking; #2255, fix 3 of #973)
-- `gsd-secret-read-guard.js` — Hard-blocks reads of secret files — `.env`, `.env.<suffix>` and `.secrets`, matched case-insensitively (`.ENV`, `.Secrets`) — through Read (`file_path`), Grep (an explicit `path`, or a `glob` that selects them, judged per brace alternative) and Bash (operands, input redirects, `$( )` / backtick / `<( )` bodies, and `git show <ref>:<path>` shapes). A shell interpreter (`bash`/`sh`/`zsh`/`dash`/`ksh`) has its script scanned however it arrives — `-c '…'`, a `<( )` file operand, a heredoc / here-string, or a pipe from a knowable `echo`/`printf` source (`echo cat .env | bash`) — as do `eval`'s joined operands, a `source`/`.` process-substitution operand, and `find … | xargs cat` pipelines (upstream literal names become the sub-command's read operands). A name is exempt when its **final extension** is `example`, `sample`, `template` or `dist`, so `.env.example` and equally `.env.local.example` / `.env.production.sample` stay readable (they are the templates GSD's own phase prompt reads). Stated cost: the exempt set is that unbounded family, not four fixed names — a real secret is not protected if it is named to end in one of those four extensions. Order matters, and only the last segment counts: `.env.example.local` is a secret and stays blocked. Trailing dots and spaces are stripped before the name is judged, because Windows resolves `.env.`, `.env ` and `.secrets.` to the protected file itself. Existence checks (`[ -f .env ]`, `ls .env*`, `test`, `stat`, `rm`, `touch`, `echo`, …) pass, and so do commands that name a secret without printing it: `git check-ignore`, `git ls-files` and `git rm --cached` on its path, and a one-source `cp`/`mv` whose only secret name is the destination (`cp .env.example .env`); an unlisted option (`-X <file>`, `--pathspec-from-file=`, `-t`, `--backup`, …) keeps the whole command checked (#4856). Not covered, by construction: `$VAR` indirection (`bash -c "$CMD"`), shell globs (`cat .e*`), interpreter one-liners, a piped script from a non-`echo`/`printf` source (`cat gen.sh | bash`, `curl … | sh`), reads inside scripts the agent runs, and a Grep `glob: '*'` reaching a `.env` that is not gitignored — none are statically resolvable by a hook. This replaces the `Read(.env)` / `Read(.env.*)` / `Read(.secrets)` permission deny rules the installer used to write: on Claude Code ≥ 2.1.259 any `Read()` deny rule makes every `cd DIR && grep …` compound prompt for approval even in `auto` mode, while a hook denial is not a permission rule and applies in `auto` and `bypassPermissions` alike (always active, blocking; #4221)
+- `gsd-secret-read-guard.js` — Hard-blocks reads of secret files — `.env`, `.env.<suffix>` and `.secrets`, matched case-insensitively (`.ENV`, `.Secrets`) — through Read (`file_path`), Grep (an explicit `path`, or a `glob` that selects them, judged per brace alternative) and Bash (operands, input redirects, `$( )` / backtick / `<( )` bodies, and `git show <ref>:<path>` shapes). A shell interpreter (`bash`/`sh`/`zsh`/`dash`/`ksh`) has its script scanned however it arrives — `-c '…'`, a `<( )` file operand, a heredoc / here-string, or a pipe from a knowable `echo`/`printf` source (`echo cat .env | bash`) or a bare `cat` printing a heredoc / here-string (`cat <<'EOF' | bash`) — as do `eval`'s joined operands, a `source`/`.` process-substitution operand, and `find … | xargs cat` pipelines (upstream literal names become the sub-command's read operands). Dollar-quoting is read the way the shell reads it: `$'…'` is judged by its decoded value, so `cat $'.e\x6ev'` is a read of `.env`, and a `\'` inside does not close the word. bash, zsh and dash read the same text differently, so a command holding `$'…'`, `$"…"`, `$${`, `$$(`, or a quote with `((` or `$[` is checked under all three readings as well as the plain scan and blocked on any; nothing the plain scan blocks is allowed. A `$'…'` word that never closes or has no single value to check is blocked outright, unless it follows an even run of `$`: `echo $$'x\'; ls` is the PID and a plain quote (#5255). A Bash command longer than 1,048,576 characters (UTF-16 code units, not bytes; a character outside the BMP, such as most emoji, counts as two) is blocked unscanned (`command-too-large`), a command whose nested shells, `$( )` substitutions, backticks or process substitutions go more than 3 levels deep is blocked (`nesting-too-deep`) rather than allowed unscanned, and so is one nested deep enough to overflow the parser, needing more than eight times that much scanning, or producing more than 524,288 separators (`;`, `|`, a newline …) across its scans (`command-too-complex`). Each scan re-reads what it scans, and a nested body is read again at each outer scan, so a script fed to a shell through a heredoc (`bash <<'EOF'`) that holds one of those forms is blocked from about 16,000 to 70,000 characters by shape, and from about 4,000 to 17,000 when that heredoc is itself inside `$( )` or another heredoc. The readings multiply that work, so a commit message written as `git commit -m "$(cat <<'EOF' …` with a `$'\t'` in it, or a quote beside a `((`, is blocked from about 70,000 characters (the budget covers every pass over the command, #5255). A name is exempt when its **final extension** is `example`, `sample`, `template` or `dist`, so `.env.example` and equally `.env.local.example` / `.env.production.sample` stay readable (they are the templates GSD's own phase prompt reads). Stated cost: the exempt set is that unbounded family, not four fixed names — a real secret is not protected if it is named to end in one of those four extensions. Order matters, and only the last segment counts: `.env.example.local` is a secret and stays blocked. Trailing dots and spaces are stripped before the name is judged, because Windows resolves `.env.`, `.env ` and `.secrets.` to the protected file itself. Existence checks (`[ -f .env ]`, `ls .env*`, `test`, `stat`, `rm`, `touch`, `echo`, …) pass, and so do commands that name a secret without printing it: `git check-ignore`, `git ls-files` and `git rm --cached` on its path, and a one-source `cp`/`mv` whose only secret name is the destination (`cp .env.example .env`); an unlisted option (`-X <file>`, `--pathspec-from-file=`, `-t`, `--backup`, …) keeps the whole command checked (#4856). A project can exempt specific committed files with `hooks.secret_read_exempt` — a list of repo-relative paths, honored only while each file is committed in `HEAD` as a regular file; Read and Grep `path` accept a relative or absolute path, Bash only the absolute one and only when every command in the line is one of `cat`/`head`/`tail`/`grep`/`egrep`/`fgrep`/`rg`/`wc`/`diff`/`cmp`/`sort`/`uniq`/`cut`/`nl`/`od`; files in a submodule cannot be exempted (see [Let agents read a committed env template](how-to/let-agents-read-a-committed-env-template.md), #4432). Not covered, by construction: `$VAR` indirection (`bash -c "$CMD"`) and `${…}` defaults (`cat ${x:-.env}`, and `echo ${x:-$(cat .env)}` in a command holding none of those forms, #5523), shell globs (`cat .e*`), interpreter one-liners, a script printed by a command substitution (`bash -c "$(cat <<'EOF' … EOF)"`, `eval "$(cat <<EOF … EOF)"`), a piped script from a source other than `echo`/`printf` or a `cat`/`tee` of a heredoc (`cat gen.sh | bash`, `curl … | sh`), reads inside scripts the agent runs, and a Grep `glob: '*'` reaching a `.env` that is not gitignored — none are statically resolvable by a hook. Shapes found while closing #5255 that a real shell still reads and the guard still allows are tracked in #5945 and #6132. This replaces the `Read(.env)` / `Read(.env.*)` / `Read(.secrets)` permission deny rules the installer used to write: on Claude Code ≥ 2.1.259 any `Read()` deny rule makes every `cd DIR && grep …` compound prompt for approval even in `auto` mode, while a hook denial is not a permission rule and applies in `auto` and `bypassPermissions` alike (always active, blocking; #4221)
+
+Git configuration supplied through `-c key=value` is also checked for the two command-valued forms in #5045: a shell alias (`alias.*` whose value starts with `!`) and `diff.external`. Their literal command strings are scanned by the same bounded shell analysis, so `git -c alias.x='!cat .env' x` and `git -c diff.external='cat .env' diff` are blocked. Benign scripts, secret-free templates, ordinary config values, and `core.pager` remain subject to the existing checks. Scanning is conservative: every matching value supplied before the Git subcommand is inspected, even if a later setting replaces it or that subcommand does not invoke it. Behind a Git option the guard does not recognize, the subcommand can no longer be located, so every later `-c` value on the command is inspected. This does not resolve config files, values obtained through `--config-env` / `GIT_CONFIG_*`, other command-valued keys (diff drivers, filters, credential helpers, SSH or GPG commands), or scripts hidden behind the existing indirection and nesting limits; those remain documented gaps.
 
 **CI Scanner:** `prompt-injection-scan.security.test.cjs` scans all agent, workflow, and command files for embedded injection vectors.
 
@@ -621,6 +631,8 @@ claude --dangerously-skip-permissions
 /gsd-pause-work --report         # Generate session summary
 ```
 
+`/gsd-ship` also reads the phase's ROADMAP.md record before it opens a PR: the phase must read complete there (checklist entry and progress-table Status), and `jq` must be installed. A phase that is unticked, has no entry, or sits in a progress table that cannot be read is refused with `PHASE_NOT_COMPLETE`, `PHASE_NOT_RECORDED` or `ROADMAP_TABLE_UNREADABLE`; `/gsd-verify-work` completes the phase. Details: [COMMANDS.md](COMMANDS.md#gsd-ship).
+
 > [!CAUTION]
 > **The permissions flag is optional.** It skips per-file confirmation while
 > GSD's sub-agents read and write files. Use it only in low-stakes or
@@ -688,6 +700,8 @@ Toggle at project setup (`/gsd-new-project` asks during workflow preferences) or
 /gsd-quick
 > "Fix the login button not responding on mobile Safari"
 ```
+
+`/gsd-quick` and `/gsd-fast` log each task to STATE.md's "Quick Tasks Completed" table as a one-line title; the detail stays in the task's SUMMARY.md (or, for `/gsd-fast`, its commit message). A description over 240 characters is still logged in full, with a warning. `/gsd-health` adds the advisory warning `W031` when STATE.md grows past three times its 100-line target. See [`quick-tasks-append`](CLI-TOOLS.md#utility-commands) and [`/gsd-health`](COMMANDS.md#gsd-health).
 
 ### Resuming After a Break
 
@@ -859,6 +873,20 @@ To assign different models on a non-Claude runtime:
 }
 ```
 
+#### OpenCode 1.x and 2.x (#5337)
+
+OpenCode 1.x and 2.x use the same `opencode` command and the same config directories, so GSD tells them apart by running `opencode --version` (5-second limit, no shell). The GSD plugin at `plugins/gsd-core.js` serves both: OpenCode 1.x loads its `server` export and OpenCode 2.x loads its `setup` export, and both run the same GSD guards (secret-read, injection scan, workflow, worktree, write).
+
+Differences GSD handles for you on 2.x: worktree dispatch sets the working directory of the spawned `opencode run` instead of passing `--dir`, and the reviewer lane carries a configured reasoning effort as a `#variant` suffix on the model (for example `provider/model#high`) instead of `--variant`. If the version cannot be read, set `GSD_OPENCODE_GENERATION=1` or `2` to choose explicitly. Kilo is unaffected and stays on the OpenCode 1.x behavior.
+
+**Moving from OpenCode 1.x to 2.x.** OpenCode 1.x is bug-fix-only for GSD until **2026-12-31** and the installer says so; see [How to move GSD from OpenCode 1.x to OpenCode 2.x](how-to/upgrade-opencode-1-to-2.md). `opencode upgrade --major` (OpenCode 1.19 and newer) replaces 1.x with 2.x (they share the `opencode` command and cannot be installed side by side); older 1.x installs reinstall OpenCode 2 instead. Your GSD files stay where they are, but the plugin installed by an older GSD is rejected by 2.x, so run `npx @opengsd/gsd-core@latest --opencode --global` (or `/gsd-update`) once afterwards; that installs the plugin that serves both generations and converges the `gsd` MCP entry in your config, keeping any comments in `opencode.jsonc`. OpenCode 2.x adds its own session tables to the data directory beside the 1.x ones, so 1.x keeps working there; a data directory that 2.x created from scratch cannot be opened by 1.x, and the installer warns when it sees that combination. Going back to 1.x after using 2.x means reinstalling 1.x, then re-running the GSD installer.
+
+**Uninstalling** (`--opencode --uninstall`, either generation) removes everything GSD installed — commands, agents, skills, the plugin, every hook helper, the install state and journal records, the `gsd` MCP entry, and the `~/.gsd/defaults.json` keys the install set once no other runtime needs them — and leaves your own files, comments and settings exactly as they were. Backups of files you had modified are kept.
+
+**Hooks and statusline on OpenCode.** Besides the guards, the plugin runs the opt-in community hooks (`hooks.community`: commit validation, phase boundary, session state) and the graphify auto-update hook (`graphify.auto_update`) on both generations; advisories from every hook are appended to the tool result the model reads. On 2.x the terminal client also shows GSD's statusline and update banner in the footer (installed as `plugins/gsd-statusline/`, shown inside GSD projects only). Not available on OpenCode: the agent-isolation guard (it enforces harness-managed worktrees, and OpenCode uses orchestrator-managed ones) and LSP-backed features (2.x keeps the `lsp` setting but runs no language servers).
+
+The plugin now starts its hook scripts with Node from `PATH` (override with `GSD_HOOK_RUNTIME`) instead of the OpenCode executable, which ran OpenCode rather than the script and left the guards silently inactive (#4849).
+
 #### Codex skill picker and agent scheduling (#774)
 
 GSD enriches each Codex install with an additional artifact:
@@ -1000,7 +1028,6 @@ Since v1.3.1, the installer pre-populates `~/.claude/settings.json` (or
 {
   "permissions": {
     "allow": [
-      "Bash(npx gsd-core *)",
       "Read(.planning/*)",
       "Edit(.planning/*)",
       "Read(STATE.md)",
@@ -1014,6 +1041,14 @@ These entries eliminate first-run approval prompts for GSD's own tool calls. The
 merge is non-destructive — your existing permissions are preserved and GSD entries
 are only appended. Uninstalling GSD removes exactly these entries and preserves
 any others.
+
+**The unscoped `npx gsd-core` rule is retired (#5054).** Earlier versions also
+wrote `Bash(npx gsd-core *)`. GSD is published as `@opengsd/gsd-core`, and the
+unscoped `gsd-core` name on npm belongs to a different owner, so that rule let
+Claude Code run whatever is published under that name without asking. The next
+install or upgrade removes that exact entry; rules you wrote yourself, including
+scoped `@opengsd/gsd-core` ones, are kept.
+Install and upgrade with `npx @opengsd/gsd-core@latest`.
 
 **Secret-file protection moved from deny rules to a hook (#4221).** Earlier
 versions also wrote three `permissions.deny` rules — `Read(.env)`,
@@ -1098,7 +1133,7 @@ To disable parallel execution entirely: `/gsd-settings` → set `parallelization
   ROADMAP.md              # Phase breakdown with status tracking
   STATE.md                # Decisions, blockers, session memory
   config.json             # Workflow configuration
-  MILESTONES.md           # Completed milestone archive
+  MILESTONES.md           # Completed milestone archive (absent until the first /gsd-complete-milestone — see "The implicit first milestone")
   HANDOFF.json            # Structured session handoff (from /gsd-pause-work)
   research/               # Domain research from /gsd-new-project
   reports/                # Session reports (from /gsd-pause-work --report)

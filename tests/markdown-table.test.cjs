@@ -650,6 +650,143 @@ describe('CLI: quick-tasks-append (#3356)', () => {
     });
   }
 
+  // #5830: an over-long description is still written verbatim (no text is
+  // shortened or dropped) but the result carries a warning. The limit is the
+  // #2618 240-character todo-bullet bound; exit code stays 0.
+  describe('#5830: description length warning', () => {
+    const { QUICK_TASK_DESCRIPTION_MAX_CHARS } = require('../gsd-core/bin/lib/markdown-table.cjs');
+
+    function appendTask(t, description, extraArgs = []) {
+      const tmpDir = createTempProject();
+      t.after(() => cleanup(tmpDir));
+      writeState(tmpDir, 25);
+      const r = runGsdTools(['quick-tasks-append', '--task', description, ...extraArgs], tmpDir);
+      const state = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf8');
+      return { r, state };
+    }
+
+    test('the limit is 240 characters, matching #2618', () => {
+      assert.equal(QUICK_TASK_DESCRIPTION_MAX_CHARS, 240);
+    });
+
+    // Parity: the Quick Tasks bound and the #2618 Pending Todos bullet cap
+    // are one number (STATE_MD_ENTRY_MAX_CHARS). The second assertion is
+    // behavioral, so it fails if init.cts ever stops capping at the shared
+    // constant, not only if the exported names disagree.
+    test('parity: the Quick Tasks bound equals the #2618 Pending Todos bullet cap', () => {
+      const { STATE_MD_ENTRY_MAX_CHARS } = require('../gsd-core/bin/lib/state-md-schema.cjs');
+      const { renderPendingTodosMarkdown } = require('../gsd-core/bin/lib/init.cjs');
+      assert.equal(QUICK_TASK_DESCRIPTION_MAX_CHARS, STATE_MD_ENTRY_MAX_CHARS);
+      const bullet = renderPendingTodosMarkdown([{
+        created: '2026-09-01',
+        area: 'api',
+        title: 'x'.repeat(STATE_MD_ENTRY_MAX_CHARS * 2),
+        path: '.planning/todos/pending/2026-09-01-x.md',
+      }], '/repo');
+      assert.equal(bullet.length, STATE_MD_ENTRY_MAX_CHARS, 'an over-long todo bullet is capped at the shared bound');
+    });
+
+    test('a long description warns, exits 0, and is stored verbatim', (t) => {
+      const description = 'Long summary sentence. '.repeat(40).trim();
+      assert.ok(description.length > 240, 'precondition: description exceeds the limit');
+      const { r, state } = appendTask(t, description);
+      assert.ok(r.success, `quick-tasks-append must still exit 0: ${r.error}`);
+      const out = JSON.parse(r.output);
+      assert.equal(out.ok, true);
+      assert.equal(out.warnings.length, 1, `expected one warning, got ${JSON.stringify(out.warnings)}`);
+      assert.ok(out.warnings[0].includes(String(description.length)), `warning must state the length: ${out.warnings[0]}`);
+      assert.ok(out.warnings[0].includes('240'), `warning must state the limit: ${out.warnings[0]}`);
+      assert.ok(out.row.includes(`| ${description} |`), 'the row carries the full description');
+      assert.ok(state.includes(`| 1 | ${description} |`), 'STATE.md carries the full description, unshortened');
+    });
+
+    test('a short description produces no warning', (t) => {
+      const { r } = appendTask(t, 'Fix thing');
+      assert.ok(r.success, r.error);
+      assert.deepEqual(JSON.parse(r.output).warnings, []);
+    });
+
+    test('boundary: 239 characters produces no warning', (t) => {
+      const description = 'a'.repeat(239);
+      const { r, state } = appendTask(t, description);
+      assert.ok(r.success, r.error);
+      assert.deepEqual(JSON.parse(r.output).warnings, []);
+      assert.ok(state.includes(`| ${description} |`));
+    });
+
+    test('boundary: exactly 240 characters produces no warning', (t) => {
+      const description = 'a'.repeat(240);
+      const { r, state } = appendTask(t, description);
+      assert.ok(r.success, r.error);
+      assert.deepEqual(JSON.parse(r.output).warnings, []);
+      assert.ok(state.includes(`| ${description} |`));
+    });
+
+    test('boundary: 241 characters warns and is stored verbatim', (t) => {
+      const description = 'a'.repeat(241);
+      const { r, state } = appendTask(t, description);
+      assert.ok(r.success, r.error);
+      const out = JSON.parse(r.output);
+      assert.equal(out.warnings.length, 1);
+      assert.ok(out.warnings[0].includes('241'), out.warnings[0]);
+      assert.ok(state.includes(`| ${description} |`));
+    });
+
+    test('the length is measured on the description, not on its escaped cell', (t) => {
+      // 240 characters, two of them `|`: the escaped cell is longer than 240,
+      // the description itself is not.
+      const description = 'a|b'.padEnd(239, 'c') + '|';
+      assert.equal(description.length, 240);
+      const { r } = appendTask(t, description);
+      assert.ok(r.success, r.error);
+      assert.deepEqual(JSON.parse(r.output).warnings, []);
+    });
+
+    // runGsdTools drops stderr on success, so the --raw cases go through the
+    // process seam directly to keep both streams.
+    function appendTaskRaw(t, description) {
+      const { runNode } = require('./helpers/process-seam.cjs');
+      const { TOOLS_PATH, SESSION_IDENTITY_ENV_KEYS } = require('./helpers.cjs');
+      const { SEAM_DEFAULT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+      const tmpDir = createTempProject();
+      t.after(() => cleanup(tmpDir));
+      writeState(tmpDir, 25);
+      const env = { ...process.env, ...Object.fromEntries(SESSION_IDENTITY_ENV_KEYS.map((k) => [k, ''])) };
+      const r = runNode([TOOLS_PATH, 'quick-tasks-append', '--task', description, '--raw'], {
+        cwd: tmpDir, env, timeoutMs: SEAM_DEFAULT_TIMEOUT_MS,
+      });
+      // Parse stdout as the row of the table it was appended to.
+      const table = parseMarkdownTable([
+        '| # | Description | Date | Commit | Directory |',
+        '|---|-------------|------|--------|-----------|',
+        r.stdout.trim(),
+      ].join('\n'));
+      assert.ok(table.ok, `stdout must be exactly one table row: ${JSON.stringify(r.stdout)}`);
+      return { r, rows: table.value.rows };
+    }
+
+    test('--raw at 241 characters: stdout is the row alone, stderr carries the warning, exit 0', (t) => {
+      const description = 'a'.repeat(241);
+      const { r, rows } = appendTaskRaw(t, description);
+      assert.equal(r.exitCode, 0, r.stderr);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]['#'], '1');
+      assert.equal(rows[0].Description, description);
+      assert.equal(rows[0].Directory, '—');
+      const warningLines = r.stderr.split('\n').filter((l) => l.startsWith('⚠ quick-tasks-append:'));
+      assert.equal(warningLines.length, 1, `expected one stderr warning, got ${JSON.stringify(r.stderr)}`);
+      assert.ok(warningLines[0].includes('241'), warningLines[0]);
+    });
+
+    test('--raw at 240 characters: no stderr warning', (t) => {
+      const description = 'a'.repeat(240);
+      const { r, rows } = appendTaskRaw(t, description);
+      assert.equal(r.exitCode, 0, r.stderr);
+      assert.equal(rows[0].Description, description);
+      assert.ok(!r.stderr.includes('quick-tasks-append:'), `unexpected stderr warning: ${JSON.stringify(r.stderr)}`);
+    });
+  });
+
   test('defect 2: a body-only append does not force a full progress re-derive — a curated total_phases divergent from disk survives', (t) => {
     const tmpDir = createTempProject();
     t.after(() => cleanup(tmpDir));
@@ -1681,7 +1818,8 @@ describe('migrateQuickTasksTable (#3730 option b)', () => {
 });
 
 describe('quick-tasks-migrate CLI and workflow wiring (#3730)', () => {
-  const { createTempProject, cleanup, runGsdTools } = require('./helpers.cjs');
+  const { createTempProject, cleanup, runGsdTools, homeSandboxEnv } = require('./helpers.cjs');
+  const { seedWorkstream } = require('./fixtures/index.cjs');
   const fs = require('node:fs');
   const path = require('node:path');
 
@@ -1707,6 +1845,122 @@ describe('quick-tasks-migrate CLI and workflow wiring (#3730)', () => {
     const second = runGsdTools('quick-tasks-migrate', tmpDir);
     assert.equal(second.success, true, `second migrate failed: ${second.error}`);
     assert.equal(JSON.parse(second.output).migrated, false, 'a canonical table is a no-op');
+  });
+
+  test('quick task migration and append target the selected workstream (#5051)', (t) => {
+    const tmpDir = createTempProject('gsd-5051-cli-');
+    t.after(() => cleanup(tmpDir));
+    const legacyState = [
+      '# State', '', '## Quick Tasks Completed', '',
+      '| Date | Slug | Scope | Artifacts |',
+      '|------|------|-------|-----------|',
+      '| 2026-04-17 | 260417-abc | bootstrap | roles/x |',
+    ].join('\n');
+    const workstreamDir = seedWorkstream(tmpDir, { name: 'alpha', state: legacyState });
+    const envWorkstreamDir = seedWorkstream(tmpDir, { name: 'beta', state: legacyState });
+    const statePath = path.join(workstreamDir, 'STATE.md');
+    const env = homeSandboxEnv(tmpDir);
+
+    const migrated = runGsdTools(['quick-tasks-migrate', '--ws', 'alpha'], tmpDir, env);
+    assert.equal(migrated.success, true, `migrate failed: ${migrated.error}`);
+    assert.equal(JSON.parse(migrated.output).migrated, true);
+    assert.match(fs.readFileSync(statePath, 'utf8'), /\| # \| Description \| Date \| Commit \| Status \| Directory \|/);
+
+    const appended = runGsdTools(
+      ['quick-tasks-append', '--ws', 'alpha', '--task', 'Fix thing'], tmpDir, env,
+    );
+    assert.equal(appended.success, true, `append failed: ${appended.error}`);
+    assert.match(fs.readFileSync(statePath, 'utf8'), /\| Fix thing \|/);
+
+    const viaEnv = runGsdTools(
+      ['quick-tasks-append', '--task', 'Via env'], tmpDir,
+      { ...env, GSD_WORKSTREAM: 'alpha' },
+    );
+    assert.equal(viaEnv.success, true, `env append failed: ${viaEnv.error}`);
+    assert.match(fs.readFileSync(statePath, 'utf8'), /\| Via env \|/);
+
+    const migratedViaEnv = runGsdTools('quick-tasks-migrate', tmpDir,
+      { ...env, GSD_WORKSTREAM: 'beta' });
+    assert.equal(migratedViaEnv.success, true, `env migrate failed: ${migratedViaEnv.error}`);
+    assert.equal(JSON.parse(migratedViaEnv.output).migrated, true);
+    assert.match(fs.readFileSync(path.join(envWorkstreamDir, 'STATE.md'), 'utf8'),
+      /\| # \| Description \| Date \| Commit \| Status \| Directory \|/);
+    assert.equal(fs.existsSync(path.join(tmpDir, '.planning', 'STATE.md')), false);
+  });
+
+  test('an active workstream leaves an existing root STATE.md untouched (#5051)', (t) => {
+    const tmpDir = createTempProject('gsd-5051-root-');
+    t.after(() => cleanup(tmpDir));
+    const legacyState = [
+      '# State', '', '## Quick Tasks Completed', '',
+      '| Date | Slug | Scope | Artifacts |',
+      '|------|------|-------|-----------|',
+      '| 2026-04-17 | 260417-abc | bootstrap | roles/x |',
+    ].join('\n');
+    const rootPath = path.join(tmpDir, '.planning', 'STATE.md');
+    fs.writeFileSync(rootPath, legacyState);
+    const workstreamDir = seedWorkstream(tmpDir, { name: 'alpha', state: legacyState, active: true });
+    const env = homeSandboxEnv(tmpDir);
+
+    const migrated = runGsdTools('quick-tasks-migrate', tmpDir, env);
+    assert.equal(migrated.success, true, `migrate failed: ${migrated.error}`);
+    assert.equal(JSON.parse(migrated.output).migrated, true);
+    assert.equal(fs.readFileSync(rootPath, 'utf8'), legacyState);
+
+    const appended = runGsdTools(['quick-tasks-append', '--task', 'Pointer task'], tmpDir, env);
+    assert.equal(appended.success, true, `append failed: ${appended.error}`);
+    assert.match(fs.readFileSync(path.join(workstreamDir, 'STATE.md'), 'utf8'), /\| Pointer task \|/);
+    assert.equal(fs.readFileSync(rootPath, 'utf8'), legacyState);
+  });
+
+  test('quick task migration and append target a selected project (#5051)', (t) => {
+    const tmpDir = createTempProject('gsd-5051-project-');
+    t.after(() => cleanup(tmpDir));
+    const projectDir = path.join(tmpDir, '.planning', 'client');
+    fs.mkdirSync(projectDir);
+    const statePath = path.join(projectDir, 'STATE.md');
+    fs.writeFileSync(statePath, [
+      '# State', '', '## Quick Tasks Completed', '',
+      '| Date | Slug | Scope | Artifacts |',
+      '|------|------|-------|-----------|',
+      '| 2026-04-17 | 260417-abc | bootstrap | roles/x |',
+    ].join('\n'));
+    const env = { ...homeSandboxEnv(tmpDir), GSD_PROJECT: 'client' };
+
+    const migrated = runGsdTools('quick-tasks-migrate', tmpDir, env);
+    assert.equal(migrated.success, true, 'project migrate failed: ' + migrated.error);
+    assert.equal(JSON.parse(migrated.output).migrated, true);
+
+    const appended = runGsdTools(['quick-tasks-append', '--task', 'Project task'], tmpDir, env);
+    assert.equal(appended.success, true, 'project append failed: ' + appended.error);
+    assert.match(fs.readFileSync(statePath, 'utf8'), /\| Project task \|/);
+    assert.equal(fs.existsSync(path.join(tmpDir, '.planning', 'STATE.md')), false);
+  });
+
+  test('migration reports a missing scoped STATE.md as an error (#5051)', (t) => {
+    const tmpDir = createTempProject('gsd-5051-missing-');
+    t.after(() => cleanup(tmpDir));
+    seedWorkstream(tmpDir, { name: 'alpha' });
+    const env = homeSandboxEnv(tmpDir);
+
+    const scoped = runGsdTools(['quick-tasks-migrate', '--ws', 'alpha'], tmpDir, env);
+    assert.equal(scoped.success, false);
+    assert.match(scoped.error, /quick-tasks-migrate: STATE\.md not found/);
+
+    const append = runGsdTools(['quick-tasks-append', '--ws', 'alpha', '--task', 'Missing task'], tmpDir, env);
+    assert.equal(append.success, false);
+    assert.match(append.error, /quick-tasks-append: STATE\.md not found/);
+    assert.match(append.error, /workstreams[\\/]alpha[\\/]STATE\.md/);
+
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'client'));
+    const projectScoped = runGsdTools('quick-tasks-migrate', tmpDir,
+      { ...env, GSD_PROJECT: 'client' });
+    assert.equal(projectScoped.success, false);
+    assert.match(projectScoped.error, /quick-tasks-migrate: STATE\.md not found/);
+
+    const root = runGsdTools('quick-tasks-migrate', tmpDir, env);
+    assert.equal(root.success, true);
+    assert.equal(JSON.parse(root.output).migrated, false);
   });
 
   test('quick and fast run the migration check first', () => {

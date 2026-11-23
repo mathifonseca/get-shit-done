@@ -22,23 +22,12 @@
  *   `--files`). Real, already reported, already queued as its own issue
  *   (#4461, filed separately by #4460's own reporter) — fixing it here
  *   would be exactly the scope creep the reporter took care to avoid.
- * - Tier 1's fence IS parseable bash, but its REPO_ROOT-prefix containment
- *   check is confirmed non-functional on Windows CI: `git rev-parse
- *   --show-toplevel` there returns a mixed-format path (`C:/Users/...` —
- *   drive letter, forward slashes) while GNU `realpath` (also bundled with
- *   Git for Windows) returns a genuine POSIX path for the IDENTICAL
- *   location (`/c/Users/...`) — confirmed via this test's own stderr
- *   diagnostics captured on a live Windows CI run of PR #4552, after three
- *   prior guesses at the same "--files widened to all 5 files" symptom
- *   (stripping `-m`, then two rounds of Node-side realpath-expansion
- *   fixes) each failed identically because none of them was the actual
- *   cause. The two path forms can never share a string prefix, so Tier 1
- *   misclassifies every `--files` entry as "outside the repository" on
- *   every Windows run, unconditionally and deterministically — a real,
- *   structural, pre-existing Tier 1 defect, not something introduced or
- *   fixable by this test. Same out-of-scope bucket as #4461 (this file's
- *   fences not being cross-platform-robust); not this fix's concern (see
- *   cr-2 in #4460's review notes).
+ * - Tier 1's fence is parseable bash and is covered by its own describe below (#5519). Its
+ *   REPO_ROOT containment check used to misclassify every `--files` entry as "outside the
+ *   repository" on Windows Git Bash, where `git rev-parse --show-toplevel` returns a mixed path
+ *   (`C:/Users/...`) and GNU `realpath` returns an MSYS POSIX path (`/c/Users/...`); both sides are
+ *   now normalized with `cygpath -m` and compared on a path boundary. Tier 1 is still seeded here,
+ *   not sourced, so these Tier 3 cases stay independent of it.
  *
  * Seeding REVIEW_FILES directly for both tiers isolates the test to Tier
  * 3's own logic — the actual subject of #4460 — independent of either
@@ -264,5 +253,130 @@ describe('#3926 / #5164: Tier 3 scopes to the phase\'s own commits, not a range'
     } finally {
       cleanup(tmpDir);
     }
+  });
+});
+
+// ─── #5519: the Tier 1 containment guard ─────────────────────────────────────
+// The fence below is extracted from code-review.md and EXECUTED verbatim (never reimplemented).
+describe('#5519: Tier 1 --files containment guard', () => {
+  const tier1 = extractFirstBashBlockAfter(fs.readFileSync(WORKFLOW_PATH, 'utf-8'), '**Tier 1 — --files override', '**Tier 2');
+  const OUTSIDE = 'Error: File path outside repository, skipping: ';
+
+  // Git for Windows reports the repository root in the mixed form (C:/R) while the resolver reports an MSYS POSIX
+  // path (/c/R/...); `cygpath -m` maps the second to the first. Simulated with bash functions so the real fence runs
+  // against both forms on any host: `node` is stubbed for the fence's resolver call (the path arrives in
+  // GSD_RESOLVE_PATH) and answers the way the MSYS resolver does.
+  const GIT_BASH_FORMS = String.raw`
+git() { if [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then echo "C:/R"; else command git "$@"; fi; }
+node() {
+  command node -e 'const path=require("path");let p=process.env.GSD_RESOLVE_PATH;if(p.length>2&&p[1]===":"&&p[2]==="/"){p="/"+p[0].toLowerCase()+p.slice(2);}else if(p[0]!=="/"){p="/c/R/"+p;}process.stdout.write(path.posix.normalize(p));'
+}
+cygpath() {
+  case "$2" in
+    /[a-zA-Z]/*) printf "%s" "$(printf "%s" "$2" | cut -c2 | tr a-z A-Z):$(printf "%s" "$2" | cut -c3-)" ;;
+    *) printf "%s" "$2" ;;
+  esac
+}
+`;
+
+  function runTier1(cwd, files, prelude = '') {
+    const script = [
+      '#!/usr/bin/env bash',
+      'set -uo pipefail',
+      prelude,
+      `FILES_OVERRIDE='${files.join(',')}'`,
+      tier1,
+      'printf "SCOPE:%s\\n" ${REVIEW_FILES[@]+"${REVIEW_FILES[@]}"}',
+    ].join('\n');
+    const scriptPath = path.join(cwd, '.tier1-script.sh');
+    fs.writeFileSync(scriptPath, script);
+    const r = spawnSync('bash', [scriptPath], { cwd, encoding: 'utf8', timeout: GIT_FIXTURE_TIMEOUT_MS });
+    if (r.error) throw new Error(`bash spawn failed: ${r.error.message}`);
+    // #6152: a list that resolves to no reviewable file exits non-zero (fail closed), so the status is reported, not asserted.
+    const lines = r.stdout.split('\n').map((l) => l.replace(/\r$/, ''));
+    return {
+      status: r.status,
+      outside: lines.filter((l) => l.startsWith(OUTSIDE)).map((l) => l.slice(OUTSIDE.length)),
+      // printf with an empty array still emits one bare `SCOPE:` line, which is not a file.
+      kept: lines.filter((l) => l.startsWith('SCOPE:') && l !== 'SCOPE:').map((l) => l.slice('SCOPE:'.length)),
+      stdout: r.stdout,
+    };
+  }
+
+  let tmp;
+  const withTmp = (fn) => () => {
+    tmp = createTempDir('gsd-5519-');
+    try { fn(tmp); } finally { cleanup(tmp); }
+  };
+
+  test('a relative path and an absolute path in either form are accepted when git and realpath report different forms', withTmp((dir) => {
+    const files = ['src/a.js', '/c/R/src/a.js', 'C:/R/src/a.js'];
+    const r = runTier1(dir, files, GIT_BASH_FORMS);
+    assert.deepEqual(r.outside, [], `no in-repository entry may be reported outside the repository:\n${r.stdout}`);
+    for (const f of files) {
+      assert.ok(r.stdout.includes(`Warning: File not found, skipping: ${f}`), `${f} passed containment (it only fails the existence check on this fake root)`);
+    }
+  }));
+
+  test('paths outside the repository are still rejected in the same forms, including a sibling sharing the repo-name prefix', withTmp((dir) => {
+    const files = ['../../etc/passwd', '/etc/passwd', '../R-other/x', 'C:/R-other/x', '/c/R-other/x'];
+    const r = runTier1(dir, files, GIT_BASH_FORMS);
+    assert.deepEqual(r.outside, files, `every entry must be rejected:\n${r.stdout}`);
+    assert.deepEqual(r.kept, []);
+  }));
+
+  test('real bash: in-repository files are kept; ../ escapes and a sibling sharing the repo-name prefix are rejected', () => {
+    withTmp((rawParent) => {
+    // Windows hands out 8.3 short temp paths (C:\Users\RUNNER~1\...) that git reports in long form; an
+    // 8.3-vs-long mismatch is a separate path-form concern from the one under test, so build the fixture
+    // under the native long name.
+    const parent = fs.realpathSync.native(rawParent);
+    const repo = path.join(parent, 'repo');
+    fs.mkdirSync(repo);
+    seedFixtureRepo(repo);
+    writeAndCommit(repo, 'src/a.js', 'a\n', 'chore: init');
+    fs.mkdirSync(path.join(parent, 'repo-other'));
+    fs.writeFileSync(path.join(parent, 'repo-other', 'f.js'), 'x\n');
+    fs.writeFileSync(path.join(parent, 'outside.js'), 'x\n');
+    const r = runTier1(repo, ['src/a.js', '../repo-other/f.js', '../outside.js', '../../etc/passwd']);
+    assert.deepEqual(r.kept, ['src/a.js'], `only the in-repository file is reviewed:\n${r.stdout}`);
+    assert.deepEqual(r.outside, ['../repo-other/f.js', '../outside.js', '../../etc/passwd']);
+    })();
+  });
+
+  test('without a GNU realpath the guard still verifies containment (the macOS shape, #6152)', withTmp((parent) => {
+    const repo = path.join(parent, 'repo');
+    fs.mkdirSync(repo);
+    seedFixtureRepo(repo);
+    writeAndCommit(repo, 'src/a.js', 'a\n', 'chore: init');
+    // The resolver is node, so no realpath is needed: an in-repository file is kept, an escape is still rejected.
+    const r = runTier1(repo, ['src/a.js', '../../etc/hosts'], 'realpath() { return 127; }');
+    assert.deepEqual(r.kept, ['src/a.js']);
+    assert.deepEqual(r.outside, ['../../etc/hosts']);
+  }));
+
+  test('an absolute path that holds .. segments is resolved and rejected, not trusted', withTmp((parent) => {
+    const repo = path.join(parent, 'repo');
+    fs.mkdirSync(repo);
+    seedFixtureRepo(repo);
+    writeAndCommit(repo, 'src/a.js', 'a\n', 'chore: init');
+    const escape = `${repo.replace(/\\/g, '/')}/../../etc/hosts`;
+    const r = runTier1(repo, [escape], 'realpath() { return 127; }');
+    assert.deepEqual(r.kept, []);
+    assert.deepEqual(r.outside, [escape], 'a ".." path that leaves the repository is not inside it');
+  }));
+
+  test('an empty repository root (git failed) accepts nothing', withTmp((dir) => {
+    const r = runTier1(dir, ['/etc/hosts', 'src/a.js'], 'git() { return 128; }');
+    assert.deepEqual(r.kept, []);
+    assert.deepEqual(r.outside, ['/etc/hosts', 'src/a.js']);
+    assert.notEqual(r.status, 0, 'nothing resolved, so the override fails closed');
+  }));
+
+  test('the platform notes document the Windows path-form handling instead of a limitation', () => {
+    const content = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
+    const notes = content.slice(content.indexOf('<platform_notes>'));
+    assert.match(notes, /cygpath -m/, 'platform_notes explains the cygpath -m normalization of the --files check');
+    assert.match(notes, /C:\/Users[^\n]*\n?[^\n]*\/c\/Users/, 'and names the two path forms Git Bash reports');
   });
 });

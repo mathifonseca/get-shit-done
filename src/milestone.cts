@@ -20,7 +20,7 @@ import { realClock } from './clock.cjs';
 import { transitionCore } from './state-transition.cjs';
 import { writeSetComplete } from './write-set.cjs';
 import type { WriteSet } from './write-set.cjs';
-import { updateTableCell, resetQuickTaskRows, QUICK_TASKS_SECTION_ABSENT } from './markdown-table.cjs';
+import { updateTraceabilityCell, leadingRequirementStatus, resetQuickTaskRows, traceabilityRowExists, QUICK_TASKS_SECTION_ABSENT } from './markdown-table.cjs';
 import { requireSafePath, PathAcceptance, type ContainedPath } from './security.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- audit.cjs is an export= CommonJS module
 import auditMod = require('./audit.cjs');
@@ -36,8 +36,15 @@ import stateContract = require('./state-contract.cjs');
 const { publishStateContract } = stateContract;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseIdMod = require('./phase-id.cjs');
-const { normalizePhaseName, matchPhaseDirs, isSentinelPhaseId, isSentinelPhaseDir, buildPhaseHeadingScanRegex, PHASE_HEADING_BASELINE } = phaseIdMod;
+const { isSentinelPhaseId, isSentinelPhaseDir, buildPhaseHeadingScanRegex, PHASE_HEADING_BASELINE } = phaseIdMod;
 import { escapeRegex } from './pattern.cjs';
+import {
+  loadReleaseMapFile,
+  renderReleaseMapMarkdown,
+  releaseMapArchivePath,
+  serializeReleaseMapArchive,
+  type ReleaseMapEntry,
+} from './milestone-release-map.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import roadmapParserMod = require('./roadmap-parser.cjs');
 const {
@@ -45,6 +52,9 @@ const {
   extractCurrentMilestone,
   getMilestoneInfo,
   sliceMilestoneWindow,
+  classifyMilestoneScalar,
+  readStateMilestoneScalar,
+  sameMilestoneVersion,
 } = roadmapParserMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningScopeMod = require('./planning-scope.cjs');
@@ -57,7 +67,7 @@ import planScanMod = require('./plan-scan.cjs');
 const { scanPhasePlans } = planScanMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- phase-locator.cjs is an export= CommonJS module
 import phaseLocatorMod = require('./phase-locator.cjs');
-const { listMilestonePhaseDirs } = phaseLocatorMod;
+const { phaseDirectoryOptions, listMilestonePhaseDirs, resolvePhaseDirectoryLookup, matchPhaseDirsForLookup } = phaseLocatorMod;
 const { planningPaths, resolvePhaseIdConvention } = planningWorkspace;
 const { extractFrontmatter } = frontmatterMod;
 // ADR-3408 §8.3 / #3469: `writeStateMd` gets sync and NO preservation — the
@@ -97,49 +107,12 @@ interface MilestoneCompleteOptions {
   // that Skip/absent must preserve today's behavior. Do NOT mirror
   // archivePhases' inverted `--no-archive-phases` shape.
   archiveQuick?: boolean;
-}
-
-/**
- * Scope an `updateTableCell` call to the `## Traceability` (or
- * `## Traceability Status`) heading's own section — up to the next H1/H2
- * heading — instead of handing it the WHOLE REQUIREMENTS.md content.
- *
- * F1 (#2245 review, BLOCKER): `updateTableCell` binds to the FIRST GFM table
- * found in whatever text it is given. The shipped requirements template
- * (gsd-core/templates/requirements.md) puts an `## Out of Scope` table
- * (`| Feature | Reason |`, no `Status` column) BEFORE `## Traceability` — so
- * an unscoped whole-file call targets the Out-of-Scope table instead, fails
- * with `{ok:false, reason:'unknown column: Status'}`, and the real
- * Traceability row is never flipped, while the checkbox surface still flips
- * and the command reports success (the #2140 silent-divergence class one
- * level deeper). Mirrors phase.cts's `editProgressHeadingSlice` scoping of
- * `## Progress` writes to that heading's own slice.
- *
- * Falls back to running `updateTableCell` against the whole `text` when no
- * `## Traceability` heading exists — matching the previous (unscoped)
- * behaviour for a REQUIREMENTS.md whose traceability table sits under some
- * other heading, or with no heading at all (never worse than before this fix).
- */
-function updateTraceabilityCell(
-  text: string,
-  match: (row: Record<string, string>, index: number) => boolean,
-  column: string,
-  newValue: string | ((current: string) => string),
-): ReturnType<typeof updateTableCell> {
-  const headingMatch = text.match(/^##[ \t]+Traceability(?:[ \t]+Status)?\b/im);
-  if (!headingMatch || headingMatch.index === undefined) {
-    return updateTableCell(text, match, column, newValue);
-  }
-  const headingOffset = headingMatch.index;
-  const before = text.slice(0, headingOffset);
-  const fromHeading = text.slice(headingOffset);
-  const nextHeadingOffset = fromHeading.search(/\n#{1,2}[ \t]/);
-  const scoped = nextHeadingOffset >= 0 ? fromHeading.slice(0, nextHeadingOffset) : fromHeading;
-  const after = nextHeadingOffset >= 0 ? fromHeading.slice(nextHeadingOffset) : '';
-
-  const result = updateTableCell(scoped, match, column, newValue);
-  if (!result.ok) return result;
-  return { ok: true, value: before + result.value + after };
+  // #5706 (epic #3628): path to a JSON release map (an array of
+  // `{repo, release, reference, environment, status, tag}` entries) supplied by
+  // the caller. Validated before the first write, archived as
+  // `<version>-RELEASE-MAP.json` and rendered into the MILESTONES.md entry.
+  // Absent, the command's output and on-disk effects are unchanged.
+  releaseMap?: string | null;
 }
 
 function cmdRequirementsMarkComplete(cwd: string, reqIdsRaw: string[], raw: boolean): void {
@@ -233,7 +206,8 @@ function cmdRequirementsMarkComplete(cwd: string, reqIdsRaw: string[], raw: bool
       // documented gaps_found response) leaves a row stranded at Gaps Found with
       // no inverse; a genuinely-satisfied requirement must be able to reach
       // Complete again via mark-complete, or the milestone is blocked forever.
-      if (/^(pending|gaps found)$/i.test(current.trim())) {
+      // #6238: read the status word, so `Pending (note)` advances like `Pending`.
+      if (leadingRequirementStatus(current, ['pending', 'gaps found']) !== null) {
         tableHit = true;
         return ' Complete ';
       }
@@ -280,7 +254,7 @@ function cmdRequirementsMarkComplete(cwd: string, reqIdsRaw: string[], raw: bool
     });
     const hasRow = statusProbe.ok;
     const doneCheckbox = new RegExp(`-\\s*\\[x\\]\\s*\\*\\*${reqEscaped}\\*\\*`, 'i').test(reqContent);
-    const doneTable = Boolean(hasRow && /^complete$/i.test(currentStatusCell.trim()));
+    const doneTable = Boolean(hasRow && leadingRequirementStatus(currentStatusCell, ['complete']) !== null);
 
     // #2788 defect 2: when a traceability table exists AND this ID has a row in
     // it, `updated`/`marked_complete` must reflect the ROW moving, not a
@@ -306,7 +280,9 @@ function cmdRequirementsMarkComplete(cwd: string, reqIdsRaw: string[], raw: bool
     // Surface traceability drift: checkbox reconciled (this run or before) but the
     // table has no row for this ID. This is what makes a partial reconcile
     // distinguishable from a full one (#2140).
-    if (hasTable && doneCheckbox && !hasRow) {
+    // #5844: a row in a table with no Status column is still a row; only the
+    // Status write is impossible there, so existence is read directly.
+    if (hasTable && doneCheckbox && !hasRow && !traceabilityRowExists(reqContent, reqId)) {
       tableUnmatched.push(reqId);
     }
   }
@@ -509,7 +485,7 @@ function cmdRequirementsRevertPhase(cwd: string, reqIdsRaw: string[], raw: boole
       (Object.values(row)[0] ?? '').trim().toLowerCase() === reqId.toLowerCase();
     let tableHit = false;
     const tableUpdate = updateTraceabilityCell(reqContent, rowMatch, 'Status', (current) => {
-      if (/^complete$/i.test(current.trim())) {
+      if (leadingRequirementStatus(current, ['complete']) !== null) {
         tableHit = true;
         return ' Gaps Found ';
       }
@@ -609,6 +585,40 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
   const phasesDir = planningPaths(cwd).phases;
   const today = realClock.localToday();
   const milestoneName = options.name || version;
+
+  // #5706 (epic #3628): validate the caller-supplied release map BEFORE any
+  // read-for-decision or write below, so a bad map leaves the tree untouched
+  // (no archive directory, no MILESTONES.md or STATE.md change). An archived
+  // map is a recorded value: a differing map for an already-archived version is
+  // refused rather than silently overwritten; an identical one is left as is.
+  let releaseMap: ReleaseMapEntry[] | null = null;
+  let releaseMapFile: string | null = null;
+  let releaseMapNeedsWrite = false;
+  if (typeof options.releaseMap === 'string') {
+    const loaded = loadReleaseMapFile(path.resolve(cwd, options.releaseMap));
+    if (!loaded.ok) {
+      error(`milestone complete: invalid --release-map — nothing has been changed.\n${loaded.errors.map((e) => `  - ${e}`).join('\n')}`);
+    } else {
+      releaseMap = loaded.map;
+      releaseMapFile = releaseMapArchivePath(archiveDir, version);
+      const serialized = serializeReleaseMapArchive(version, releaseMap);
+      let existingText: string | null = null;
+      try {
+        existingText = fs.readFileSync(releaseMapFile, 'utf-8');
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+          error(`milestone complete: ${path.basename(releaseMapFile)} already exists and cannot be read — nothing has been changed.`);
+        }
+      }
+      if (existingText !== null && existingText !== serialized) {
+        error(`milestone complete: ${path.basename(releaseMapFile)} already exists with a different release map; the archived map is a recorded value and is not overwritten — nothing has been changed.`);
+      }
+      releaseMapNeedsWrite = existingText === null;
+    }
+  }
+  const releaseMapReport = releaseMap && releaseMapFile
+    ? { path: path.relative(cwd, releaseMapFile).split(path.sep).join('/'), entries: releaseMap.length }
+    : null;
   // ADR-3408 §8.5 / #3469: "liberal but visible" — when the write-seam
   // composition's preservation stage restores a curated frontmatter value
   // over a disagreeing freshly-derived one, that divergence is surfaced
@@ -635,7 +645,7 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
   // `platformEnsureDir(archiveDir)` below — a refused run (scope not COMPLETE,
   // no --force) must be a true no-op on disk, and creating the archive
   // directory first left an empty directory behind even on refusal.
-  const isDirInMilestone = getMilestonePhaseFilter(cwd, version);
+  const isDirInMilestone = getMilestonePhaseFilter(cwd, version, undefined, undefined, phaseDirectoryOptions(cwd));
   if (isDirInMilestone.missingExplicitVersion) {
     error(`no phases found for milestone ${version} in ROADMAP.md`);
   }
@@ -663,6 +673,11 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
     );
   }
 
+  // #2761/#4304: resolve once for every phase-directory consumer in this
+  // command. The matcher opts in only for bracket; the milestone enumerator
+  // retains the full resolved value it already accepted.
+  const phaseConvention = resolvePhaseIdConvention(cwd);
+
   // Guard: prevent marking complete when ROADMAP still lists phases that have
   // no directory on disk (disk_status: no_directory). This catches the case
   // where the active milestone was erroneously marked complete before phases
@@ -689,13 +704,14 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
       try {
         const stateRaw = fs.existsSync(statePath) ? fs.readFileSync(statePath, 'utf-8') : null;
         if (stateRaw) {
-          const milestoneMatch = stateRaw.match(/^milestone:\s*(.+)/m);
-          if (milestoneMatch) stateVersion = milestoneMatch[1].trim();
+          // One owner for the STATE `milestone:` scalar (#5726): quoted, null and
+          // empty values and a body `milestone:` line are not drift.
+          stateVersion = classifyMilestoneScalar(readStateMilestoneScalar(stateRaw)).version;
         }
       } catch {
         /* skip — stateVersion stays null, scan still runs */
       }
-      if (stateVersion !== null && stateVersion !== version) {
+      if (stateVersion !== null && !sameMilestoneVersion(stateVersion, version)) {
         // #2946: emit a WARNING so the suspicious STATE mismatch is visible
         // rather than silently disarming the guard. Plain-text diagnostic on
         // stderr, matching the existing [gsd-tools] WARNING convention
@@ -745,9 +761,9 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
       // properly-scaffolded bracket phase reads as disk_status: 'no_directory'
       // — turning a real bracket project's own phases into false "ROADMAP
       // lists N unstarted phase(s)" failures on `milestone complete`.
-      const convention = resolvePhaseIdConvention(cwd);
+      const directoryContext = phaseDirectoryOptions(cwd, undefined, scopedContent);
       const { regex: phasePattern, phaseNumGroup } = buildPhaseHeadingScanRegex(
-        PHASE_HEADING_BASELINE.ANY_BRACKET, convention,
+        PHASE_HEADING_BASELINE.ANY_BRACKET, phaseConvention, directoryContext,
       );
       const noDirectoryPhases: string[] = [];
       let pm: RegExpExecArray | null;
@@ -770,12 +786,14 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
         // the #1445 /^999/ progress filters). (#1580)
         // #3185: canonical sentinel predicate (SENTINEL_RANGES [0,999]) — this local check already covered both 0 and 999; now delegates to the single canonical owner.
         if (isSentinelPhaseId(phaseNum)) continue;
-        const normalized = normalizePhaseName(phaseNum);
+        const lookup = resolvePhaseDirectoryLookup(cwd, phaseNum, undefined, directoryContext);
         // A phase has disk_status: 'no_directory' when no phase directory
         // with a matching token exists on disk. Use the same matchPhaseDirs
         // owner that roadmap.analyze uses to avoid false positives on decimal
-        // (2.1) and letter-suffix (12A) phase IDs. (#2528)
-        const hasDirectory = matchPhaseDirs(phaseDirEntries, normalized, convention).matches.length > 0;
+        // (2.1) and letter-suffix (12A) phase IDs. (#2528) Under #4304 the
+        // current checkout's bracket convention and migration-window legacy
+        // fallback are both owned by the shared lookup adapter.
+        const hasDirectory = matchPhaseDirsForLookup(phaseDirEntries, lookup, undefined, directoryContext).matches.length > 0;
         if (!hasDirectory) {
           noDirectoryPhases.push(phaseNum);
         }
@@ -806,7 +824,7 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
   let totalTasks = 0;
   const accomplishments: string[] = [];
 
-  // #2761 (round-11 BLOCKER): resolved ONCE, ambiently (no explicit `ws` —
+  // #2761: resolved ONCE above, ambiently (no explicit `ws` —
   // this function has none of its own and already resolves everything else
   // off `cwd` via planningPaths(cwd), matching the ambient-workstream
   // contract `resolvePhaseIdConvention`/`planningDir` share), and threaded
@@ -821,8 +839,6 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
   // the silent-inherit path without changing behavior for `null` /
   // `milestone-prefixed` projects, whose resolved convention is the same
   // value `undefined` would have lazily produced anyway.
-  const phaseConvention = resolvePhaseIdConvention(cwd);
-
   // #3597 (ADR-3180 Decision 2): SINGLE resolution of "which phase
   // directories belong to the current milestone" AND the SCOPE discriminator
   // that resolution came from — shared verbatim by the read-only stats loop
@@ -953,6 +969,7 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
         phases_archive_skipped: phasesArchiveSkippedForScope,
         phases_archive_skip_reason: phasesArchiveSkipReason,
         quick: quickDirsToArchive,
+        ...(releaseMapReport ? { release_map: { target: releaseMapReport.path, entries: releaseMapReport.entries } } : {}),
       },
       would_update: {
         milestones_md: path.relative(cwd, milestonesPath).split(path.sep).join('/'),
@@ -981,6 +998,11 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
   // committed to mutating.
   platformEnsureDir(archiveDir);
 
+  // #5706: archive the validated release map by recorded value.
+  if (releaseMap && releaseMapFile && releaseMapNeedsWrite) {
+    platformWriteSync(releaseMapFile, serializeReleaseMapArchive(version, releaseMap));
+  }
+
   // Archive ROADMAP.md
   if (fs.existsSync(roadmapPath)) {
     const roadmapContent = fs.readFileSync(roadmapPath, 'utf-8');
@@ -1008,7 +1030,7 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
 
   // Create/append MILESTONES.md entry
   const accomplishmentsList = accomplishments.map((a) => `- ${a}`).join('\n');
-  const milestoneEntry = `## ${version} ${milestoneName} (Shipped: ${today})\n\n**Phases completed:** ${phaseCount} phases, ${totalPlans} plans, ${totalTasks} tasks\n\n**Key accomplishments:**\n${accomplishmentsList || '- (none recorded)'}\n\n---\n\n`;
+  const milestoneEntry = `## ${version} ${milestoneName} (Shipped: ${today})\n\n**Phases completed:** ${phaseCount} phases, ${totalPlans} plans, ${totalTasks} tasks\n\n**Key accomplishments:**\n${accomplishmentsList || '- (none recorded)'}\n\n${releaseMap ? `${renderReleaseMapMarkdown(releaseMap)}\n` : ''}---\n\n`;
 
   // #3685: mirror requirementsUpdated's diff-tracking contract — the result
   // below used to report `milestones_updated: true` hardcoded, never
@@ -1279,6 +1301,7 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
     milestones_updated: milestonesUpdated,
     state_updated: stateUpdated,
     preservation_warnings: preservationWarnings,
+    ...(releaseMapReport ? { release_map: releaseMapReport } : {}),
   };
 
   output(result, raw);
@@ -1300,8 +1323,8 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
 function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
   const phasesDir = planningPaths(cwd).phases;
   const confirm = Array.isArray(args) && args.includes('--confirm');
-  // --force bypasses the uncommitted-changes guard. Only use when the caller
-  // has already archived or explicitly accepts loss of uncommitted work. (#1447)
+  // --force skips only the uncommitted-changes guard (#1447); the directories,
+  // uncommitted edits included, are still archived.
   const force = Array.isArray(args) && args.includes('--force');
   // #2288: explicit outgoing-version override for the archive destination.
   // new-milestone.md runs `state.milestone-switch` BEFORE `phases.clear --confirm`,
@@ -1335,29 +1358,28 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
     const entries = fs.readdirSync(phasesDir, { withFileTypes: true });
     // #3185 (ADR-3180 Decision 1): this carried the FIFTH copy of the
     // sentinel rule and its THIRD regex variant — `/^999(?:\.|$)/` — which
-    // excluded 999 but NOT 0. Because this is the DESTRUCTIVE path, that
-    // divergence meant a `0-*` directory `roadmap analyze` preserves as a
-    // sentinel was DELETED here. Routed through the canonical predicate so
-    // every reader of "is this a sentinel phase" agrees by construction.
+    // excluded 999 but NOT 0. That divergence meant a `0-*` directory
+    // `roadmap analyze` preserves as a sentinel was ARCHIVED here. Routed
+    // through the canonical predicate so every reader of "is this a sentinel phase" agrees by construction.
     // #3639: the DIR-AWARE recognizer — the convention-less id predicate
     // never saw bracket sentinel dirs (GSD.999-07-icebox), so they were
-    // counted for deletion here while the disk guards (post-#3639) preserve
-    // them; the destructive path must not be the one blind reader left.
+    // counted for archiving here while the disk guards (post-#3639) preserve
+    // them; this path must not be the one blind reader left.
     const dirs = entries.filter((e) => e.isDirectory() && !isSentinelPhaseDir(e.name));
 
     if (dirs.length > 0 && !confirm) {
       error(
-        `phases clear would delete ${dirs.length} phase director${dirs.length === 1 ? 'y' : 'ies'}. ` +
+        `phases clear would archive ${dirs.length} phase director${dirs.length === 1 ? 'y' : 'ies'} ` +
+          `into milestones/<label>-phases/ under the planning directory. ` +
           `Pass --confirm to proceed.`,
       );
     }
 
-    // Guard (#1447): refuse to hard-delete phase directories that contain
-    // uncommitted changes. This prevents data loss when `new-milestone` runs
-    // `phases.clear --confirm` before the operator has archived or committed
-    // phase work from the outgoing milestone.
-    // Use `--force` to bypass this guard only when you have verified that
-    // archive or commit of the outgoing phases is already done.
+    // Guard (#1447): refuse to archive phase directories that contain
+    // uncommitted changes, so `new-milestone` running `phases.clear --confirm`
+    // does not sweep phase work the operator has not committed into the
+    // archive unreviewed. `--force` skips only this check; the directories,
+    // uncommitted edits included, are still moved into the archive.
     if (dirs.length > 0 && !force) {
       // Compute the path relative to cwd for git status
       let relPhasesDir: string;
@@ -1385,8 +1407,8 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
       if (uncommittedLines.length > 0) {
         error(
           `phases clear aborted: ${uncommittedLines.length} uncommitted change${uncommittedLines.length === 1 ? '' : 's'} detected in phase directories. ` +
-            `Archive or commit outgoing phase work before running this command, ` +
-            `or pass --force to skip this check and permanently delete the phase directories. (#1447)`,
+            `Commit outgoing phase work before running this command, ` +
+            `or pass --force to skip this check and archive the phase directories with their uncommitted changes. (#1447)`,
         );
       }
     }
@@ -1407,8 +1429,8 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
 /**
  * #1871: move each non-999 phase directory under `phasesDir` into
  * `milestones/<version>-phases/` (collision-safe). Shared by `phases clear`
- * (archive-then-remove) and the internal milestone.complete phase archival so
- * phase history survives a milestone switch instead of being hard-deleted.
+ * and the internal milestone.complete phase archival so phase history
+ * survives a milestone switch; nothing is deleted.
  *
  * Archive-version precedence (#2288): an explicit `archiveVersionOverride` wins
  * first, then a live `getMilestoneInfo(cwd)` read (which itself defaults to a

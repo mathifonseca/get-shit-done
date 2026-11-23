@@ -21,7 +21,7 @@ Job: read REVIEW.md findings, fix source code intelligently (not blind applicati
 Before fixing code: **Project instructions** — read `./CLAUDE.md` if present, follow project-specific guidelines/security/conventions during fixes.
 
 **Project skills:** check `.claude/skills/` or `.agents/skills/`.
-**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md
+**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md (agent type: `gsd-code-fixer`)
 1. List available skills 2. Read `SKILL.md` for each (~130 lines) 3. Load specific `rules/*.md` as needed 4. Do NOT load full `AGENTS.md` (100KB+) 5. Follow skill rules relevant to your fix tasks.
 </project_context>
 
@@ -73,12 +73,12 @@ After applying each fix:
 | Language | Check Command |
 |----------|--------------|
 | JavaScript | `node -c {file}` (syntax check) |
-| TypeScript | `npx tsc --noEmit {file}` (if tsconfig.json exists) |
+| TypeScript | Project-aware check only, output filtered to `{file}`: the project's own typecheck (`npm run typecheck` / `tsc -b`) if it exists, else `npx tsc --noEmit -p <nearest tsconfig*.json>` whose `--listFilesOnly` output lists `{file}`; no config includes `{file}` → Tier 1 only. Never pass `{file}` to `tsc` positionally. |
 | Python | `python -c "import ast; ast.parse(open('{file}').read())"` |
 | JSON | `node -e "JSON.parse(require('fs').readFileSync('{file}','utf-8'))"` |
 | Other | Skip to Tier 1 only |
 
-**Scoping:** TypeScript errors in OTHER files are pre-existing — IGNORE; only fail on errors in the file you edited. `node -c` is unreliable for JSX/TS/ESM bare specifiers — if it fails because the type is unsupported, fall back to Tier 1 only, do NOT rollback. General rule: if errors existed BEFORE your edit, your fix didn't cause them — proceed to commit.
+**Scoping:** TypeScript errors in OTHER files are pre-existing — IGNORE; only fail on errors in the file you edited. A solution-style root `tsconfig.json` (`"files": []` plus `references`) checks no source files and exits 0 — NOT a passing check; use a referenced config whose `--listFilesOnly` lists `{file}`, or fall back to Tier 1. TypeScript procedure: prefer a `typecheck` script in the nearest `package.json`; else walk up from `{file}` to the nearest `tsconfig.json` (solution-style: try each referenced config in turn), run from that config's directory `npx tsc --noEmit -p <config> --listFilesOnly` and keep the first config listing `{file}` (none → Tier 1), then `npx tsc --noEmit -p <config>` (never `-b`: no build artifacts) keeping only output lines for `{file}`; roll back only for errors on lines you changed, otherwise treat as pre-existing and proceed. `node -c` is unreliable for JSX/TS/ESM bare specifiers — if it fails because the type is unsupported, fall back to Tier 1 only, do NOT rollback. General rule: if errors existed BEFORE your edit, your fix didn't cause them — proceed to commit.
 
 - Syntax check FAILS with NEW errors in your file → rollback_strategy immediately.
 - FAILS with pre-existing errors only → proceed to commit.
@@ -120,13 +120,16 @@ After applying each fix:
 <step name="setup_worktree">
 **Isolation: create a dedicated git worktree BEFORE touching any files.** This agent runs as a background process that commits — operating on the main working tree would race the foreground session (shared index/HEAD/files). Every instance runs in its own isolated worktree.
 
-**Honor `workflow.use_worktrees` (the documented opt-out; the same flag the sibling writer workflows `/gsd:execute-phase` and `/gsd:quick`, plus the `execute-plan` and `diagnose-issues` workflows, all honor — this is the only writer that hand-rolls its own worktree).** Read it directly via `node` from `.planning/config.json` (NOT the gsd-tools CLI — this step runs before the launcher preamble is sourced). When `false`: edit/commit in the main checkout directly — `wt="."`, `reviewfix_branch="$branch"`, no temp branch, no sentinel, no `git worktree add`, skip the whole cleanup tail. The hand-rolled worktree has no `node_modules` and cannot run the project's gates safely, so the opt-out is also the safe path.
+**Honor `workflow.use_worktrees` (the documented opt-out; the same flag the sibling writer workflows `/gsd:execute-phase` and `/gsd:quick`, plus the `execute-plan` and `diagnose-issues` workflows, all honor — this is the only writer that hand-rolls its own worktree).** Read it directly via `node` from the scoped config.json (path derived from `GSD_PROJECT`/`GSD_WS`, flat when unset; NOT the gsd-tools CLI — this step runs before the launcher preamble is sourced). When `false`: edit/commit in the main checkout directly — `wt="."`, `reviewfix_branch="$branch"`, no temp branch, no sentinel, no `git worktree add`, skip the whole cleanup tail. The hand-rolled worktree has no `node_modules` and cannot run the project's gates safely, so the opt-out is also the safe path.
 
 ```bash
-USE_WORKTREES=$(node -e '
+USE_WORKTREES=$(GSD_WS="${GSD_WS:-}" node -e '
   try {
     const fs = require("fs");
-    const p = (process.env.GSD_PROJECT_DIR || process.cwd()) + "/.planning/config.json";
+    const path = require("path");
+    const seg = (v) => (/^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(v || "") ? [v] : []);
+    const ws = seg((process.env.GSD_WS || "").replace(/^--ws\s+/, ""));
+    const p = path.join(process.env.GSD_PROJECT_DIR || process.cwd(), ".planning", ...seg(process.env.GSD_PROJECT), ...(ws.length ? ["workstreams", ...ws] : []), "config.json");
     const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
     process.stdout.write(String((cfg.workflow && cfg.workflow.use_worktrees) ?? true));
   } catch { process.stdout.write("true"); }
@@ -183,8 +186,10 @@ else
   # the session's permission scope; an absolute /tmp path prompts on every
   # read and breaks short-path handling on Windows). $$-PID + epoch suffix
   # keeps concurrent runs for the same phase from colliding.
-  main_repo="$(git worktree list --porcelain | awk '/^worktree / { sub(/^worktree /, ""); print; exit }')"
-  wt="$main_repo/.claude/worktrees/rf-${padded_phase}-$$-$(date +%s)"
+  # $session_root: toplevel of this session's checkout (the worktree that has $branch
+  # checked out; the first `git worktree list` entry is the main checkout, #5876).
+  session_root="$(git rev-parse --show-toplevel)"
+  wt="$session_root/.claude/worktrees/rf-${padded_phase}-$$-$(date +%s)"
   mkdir -p "$wt"
 
   # Attach to a NEW branch (git refuses to check out the same branch in two
@@ -220,16 +225,21 @@ if [ "$USE_WORKTREES" = "false" ]; then
 fi
 
 # Step 1: fast-forward $branch to capture commits made on $reviewfix_branch.
-# Run from main_repo (the user's checkout owns $branch). --ff-only means we
-# never silently drop/rewrite history on divergence — on failure this fails
-# loudly and leaves the temp branch for manual merge.
-main_repo="$(git worktree list --porcelain | awk '/^worktree / { sub(/^worktree /, ""); print; exit }')"
+# Run it in the worktree that has $branch checked out (#5876), found by the
+# `branch refs/heads/$branch` porcelain line (substr($0, 10) skips "worktree " and
+# keeps spaces) — not the first entry (the main checkout); `branch --show-current`
+# re-confirms the path has $branch checked out. --ff-only means we never silently drop/rewrite history on
+# divergence — on failure this fails loudly and leaves the temp branch.
+owner_wt="$(git worktree list --porcelain | awk -v ref="refs/heads/$branch" '
+  /^worktree / { path = substr($0, 10) }
+  $0 == "branch " ref { print path; exit }')"
 ff_status=0
-if git -C "$main_repo" merge --ff-only "$reviewfix_branch" 2>&1; then
+if [ -n "$owner_wt" ] && [ "$(git -C "$owner_wt" branch --show-current 2>/dev/null)" = "$branch" ] \
+   && git -C "$owner_wt" merge --ff-only "$reviewfix_branch" 2>&1; then
   ff_status=0
 else
   ff_status=$?
-  echo "WARN: could not fast-forward $branch to $reviewfix_branch (exit $ff_status)."
+  echo "WARN: could not fast-forward $branch to $reviewfix_branch in ${owner_wt:-<no worktree has it checked out>} (exit $ff_status)."
   echo "      The temp branch $reviewfix_branch is preserved for manual merge."
 fi
 
@@ -238,7 +248,7 @@ git worktree remove "$wt" --force
 
 # Step 3: delete the temp branch ONLY if the fast-forward succeeded.
 if [ "$ff_status" -eq 0 ]; then
-  git -C "$main_repo" branch -D "$reviewfix_branch" || true
+  git -C "$owner_wt" branch -D "$reviewfix_branch" || true
 fi
 
 # Step 4: drop the recovery sentinel ONLY after worktree remove succeeds —
@@ -256,17 +266,17 @@ Treat this as a finally-block obligation: even on early exit (config error, no f
 
 <step name="load_context">
 1. Read all `<required_reading>` files if present.
-2. Parse `<config>` block: `phase_dir`, `padded_phase`, `review_path` (full path to REVIEW.md), `fix_scope` ("critical_warning" default, or "all" includes Info), `fix_report_path` (output REVIEW-FIX.md path).
+2. Parse `<config>` block: `phase_dir`, `padded_phase`, `review_path` (full path to REVIEW.md), `fix_scope` ("critical_warning" default, or "all" includes Info and necessity), `fix_report_path` (output REVIEW-FIX.md path).
 3. `cat {review_path}`.
 4. Parse frontmatter `status:`. If `"clean"` or `"skipped"`: exit with "No issues to fix -- REVIEW.md status is {status}." — do NOT create REVIEW-FIX.md, exit 0 (not an error).
 5. Load project context (`<project_context>`): CLAUDE.md, skills.
 </step>
 
 <step name="parse_findings">
-1. Extract findings via `<finding_parser>` rules: `id`, `severity` (Critical CR-*/BL-*, Warning WR-*, Info IN-*), `title`, `file` (primary), `files` (all referenced, for multi-file fixes), `line` (or null), `issue`, `fix` (may be multi-line/code fences).
-2. Filter by `fix_scope`: `critical_warning` → CR-*/BL-*/WR-* only; `all` → + IN-*.
-3. Sort: Critical first, then Warning, then Info; same-severity keeps document order.
-4. Record `findings_in_scope` count for frontmatter.
+1. Extract findings via `<finding_parser>` rules: `id`, `severity` (Critical CR-*/BL-*, Warning WR-*, Info IN-*), `category` (`necessity` when the finding carries a `**Category:** necessity` line, #4100 — unnecessary code, not broken code), `title`, `file` (primary), `files` (all referenced, for multi-file fixes), `line` (or null), `issue`, `fix` (may be multi-line/code fences).
+2. Filter by `fix_scope`: `critical_warning` → CR-*/BL-*/WR-* only, and `critical_warning` excludes necessity findings (removal is the human's scope call; the marker overrides the prefix, so a WR-* carrying `**Category:** necessity` is out of scope and skipped with no edit); `all` → + IN-*, and `all` includes necessity findings, ordered last — record each as `fixed: requires human verification`.
+3. Sort: Critical first, then Warning, then Info, then necessity; same-severity keeps document order.
+4. Record `findings_in_scope` count for frontmatter. If `findings_in_scope` is 0, apply nothing: write REVIEW-FIX.md with `fixed: 0`, `skipped: 0`, `status: all_fixed`, and a body stating no finding was in scope and the out-of-scope findings remain in REVIEW.md.
 </step>
 
 <step name="apply_fixes">

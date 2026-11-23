@@ -210,7 +210,7 @@ const RATCHET_BASELINE = {
   'frontmatter-splice':      62,  // #5105: net-new module (the writer, split out of frontmatter);
                                    // CI run 36586350120 (PR #5114): measured 63.82%;
                                    // floor(63.82)-1. Replaces the provisional floor of 50.
-  'adr-parser':              68,
+  'adr-parser':              72,
   'config-schema':           74,  // CI run 33012034388 (2026-08-25): measured 75.51%; floor(75.51)-1
   'active-workstream-store': 86,  // CI run 33012034388 (2026-08-25): measured 87.42%; floor(87.42)-1
   'core-utils':              80,  // CI job 109435636183 (PR #5114): measured 81.13%; floor(81.13)-1
@@ -224,10 +224,15 @@ const RATCHET_BASELINE = {
                                    // floor(75.26)-1. Supersedes the #3007 59.62% measurement
                                    // (248 killed / 168 survived) — see scripts/mutation-matrix.cjs
                                    // for the RuntimeError classification-change diagnosis.
-  'state-contract':          65,  // #3227: CI run 32769289750, job 97565813640,
-                                   // `Stryker (state-contract)`: measured 66.25%; floor(66.25)-1.
+  'state-contract':          69,  // #5764: CI run 40800623930, job 123207881000,
+                                   // `Stryker (state-contract)`: measured 70.43%; floor(70.43)-1.
+                                   // (#3227 set 65 from a measured 66.25%.)
                                    // Below TARGET_MUTATION_SCORE (80) — ratchet candidate like
                                    // planning-inspect / model-catalog above; raise as tests improve.
+  'state-document':          50,  // #4998: CI 50.47% (run 39742269013); range minimum
+  'planning-document':       74,  // #4998: CI run 39736529871 (#5234): measured 75.14%; floor(75.14)-1
+  'dispatch-isolation':      86,  // #4904: net-new module; re-derived after parseRenewHeldMs moved in:
+                                   // CI run 40947108766 (PR #5126): measured 87.18%; floor(87.18)-1.
 };
 
 describe('mutation-matrix ratchet: floor equality enforcement', () => {

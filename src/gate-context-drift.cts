@@ -23,13 +23,17 @@ import { gateVerdict, gateUnreadable, gateUsageFailure, GATE_FAILURE_CODE } from
 import type { GateResult, GateVerdict } from './gate-verdict.cjs';
 import { readDirEvidence, statEvidence } from './gate-evidence.cjs';
 import { readWorkflowConfigValue } from './gate-config.cjs';
+import { runtimeCommand } from './runtime-slash.cjs';
 import { resolvePhaseDirByToken } from './gate-phase-context.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- planning-workspace.cjs is an export= CommonJS module
 import planningWorkspace = require('./planning-workspace.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- verification.cjs is an export= CommonJS module
 import verificationMod = require('./verification.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- phase-id.cjs is an export= CommonJS module
+import phaseIdMod = require('./phase-id.cjs');
 
-const { planningDir } = planningWorkspace;
+const { scopeToPhase } = phaseIdMod;
+const { planningDir, isPhaseSpecFile, findPhaseSpecIn } = planningWorkspace;
 const { defaultPhaseCleanCommitTimesMs } = verificationMod;
 
 interface ContextDriftEntry {
@@ -48,19 +52,15 @@ export function computeContextDrift(contextEffectiveMs: number, entries: Context
   return entries.filter((e) => e.effectiveMs < contextEffectiveMs).map((e) => e.file);
 }
 
-function buildContextDriftMessage(staleArtifacts: string[], phaseArg: string): string {
+function buildContextDriftMessage(staleArtifacts: string[], phaseArg: string, projectDir: string): string {
   const parts = [`CONTEXT.md decisions are newer than: ${staleArtifacts.join(', ')}.`];
   if (staleArtifacts.some((f) => f.endsWith('-RESEARCH.md'))) {
-    parts.push(`Regenerate research: /gsd:plan-phase ${phaseArg} --research.`);
+    parts.push(`Regenerate research: ${runtimeCommand(projectDir, `plan-phase ${phaseArg} --research`)}.`);
   }
   if (staleArtifacts.some((f) => f.endsWith('-PATTERNS.md'))) {
-    parts.push('Regenerate patterns: delete the PATTERNS.md file, then re-run /gsd:plan-phase.');
+    parts.push(`Regenerate patterns: delete the PATTERNS.md file, then re-run ${runtimeCommand(projectDir, 'plan-phase')}.`);
   }
-  if (
-    staleArtifacts.some(
-      (f) => f.endsWith('-VALIDATION.md') || (f.endsWith('-SPEC.md') && !f.endsWith('-AI-SPEC.md') && !f.endsWith('-UI-SPEC.md')),
-    )
-  ) {
+  if (staleArtifacts.some((f) => f.endsWith('-VALIDATION.md') || isPhaseSpecFile(f))) {
     parts.push('Regenerate or manually reconcile VALIDATION.md / SPEC.md against the current decisions.');
   }
   parts.push('Do not hand-inject the newer decisions into a prompt as a substitute for regenerating — that carries the staleness forward.');
@@ -98,7 +98,7 @@ function runContextDriftGate(cwd: string, phaseArg: string): GateVerdict {
 
   // Same phase-directory resolution rule the schema-drift gate uses (#1571, #2528):
   // matchPhaseDirs, never a naive substring test.
-  const phaseDir = resolvePhaseDirByToken(phasesDir, phaseArg);
+  const phaseDir = resolvePhaseDirByToken(cwd, phasesDir, phaseArg);
   if (!phaseDir) {
     return unresolvable();
   }
@@ -117,9 +117,9 @@ function runContextDriftGate(cwd: string, phaseArg: string): GateVerdict {
   const researchFile = phaseFiles.find((f) => f.endsWith('-RESEARCH.md'));
   const patternsFile = phaseFiles.find((f) => f.endsWith('-PATTERNS.md'));
   const validationFile = phaseFiles.find((f) => f.endsWith('-VALIDATION.md'));
-  const specFile = phaseFiles.find(
-    (f) => f.endsWith('-SPEC.md') && !f.endsWith('-AI-SPEC.md') && !f.endsWith('-UI-SPEC.md'),
-  );
+  // #5629: the shared phase-SPEC predicate (the init payloads' `has_spec` / `spec_path` use the same one).
+  // Scoped to this phase's own artifacts, as init scopes it, so a misfiled `02-SPEC.md` agrees in both.
+  const specFile = findPhaseSpecIn(scopeToPhase(phaseFiles, path.basename(phaseDir)));
   const upstreamFiles = [researchFile, patternsFile, validationFile, specFile].filter(
     (f): f is string => !!f,
   );
@@ -143,7 +143,7 @@ function runContextDriftGate(cwd: string, phaseArg: string): GateVerdict {
   // missing or malformed config is "key absent", nothing is printed).
   const action = readWorkflowConfigValue(cwd, 'workflow.context_drift_action').value === 'block' ? 'block' : 'warn';
   const block = staleArtifacts.length > 0 && action === 'block';
-  const message = staleArtifacts.length > 0 ? buildContextDriftMessage(staleArtifacts, phaseArg) : '';
+  const message = staleArtifacts.length > 0 ? buildContextDriftMessage(staleArtifacts, phaseArg, cwd) : '';
 
   return gateVerdict(block ? 'block' : (staleArtifacts.length > 0 ? 'advisory' : 'pass'), block, {
     block,

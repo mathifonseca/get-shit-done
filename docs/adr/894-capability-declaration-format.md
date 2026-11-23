@@ -345,3 +345,68 @@ This is **additive to §3's existing validation rule** (*"every `contribution.in
   `EXPECTED_FAMILY_BY_STEP`. The value is that the boundary moves from an unstated property of five
   workflow files to a named, reviewed constant with a test that fails when it changes — the same
   bar §3 set for points.
+
+## Amendment (2026-10-13): the built-in code reviewer is an execution-family role
+
+Issue [#4790](https://github.com/open-gsd/gsd-core/issues/4790).
+
+A capability could not deliver review guidance to the built-in `gsd-code-reviewer`. The reviewer is
+dispatched one hop below `execute:post` by the code-review skill, so no role in §3's vocabulary named
+it, and an `into: "code-reviewer"` contribution was rejected at install with `is not in the step's
+agentRoles [executor, verifier]`. Admitting the name alone would not have delivered anything: the
+reviewer prompt rendered no hooks.
+
+### Decision
+
+- **`code-reviewer` joins the execution family.** The partition table above becomes
+  `execution | executor, verifier, code-reviewer`. The `execute` step publishes all three; no other
+  step admits it, and `orchestrator` is still never admitted at an execute point. The role-family
+  separation of #4740 is unchanged, and `code-reviewer` maps to the agent `gsd-code-reviewer` in the
+  generator's role-to-agent presence check.
+- **The receiving boundary is `code-review.md`, not the execute host.** `execute:post` consumers
+  dispatch `step` and `gate` hooks only; a reviewer fragment is not injected from that envelope.
+  `code-review.md` renders the loop point the review step is registered at
+  (`workflow.code_review_point`, default `execute:post`), takes the active `contribution` hooks with
+  `into: code-reviewer`, and appends them once to the reviewer prompt after
+  `${AGENT_SKILLS_REVIEWER}`. The per-project `agent_skills.gsd-code-reviewer` channel is unchanged and
+  is never replaced. Because delivery lives in the review workflow, a standalone `/gsd-code-review`
+  receives the same rules as a review run from the execute loop.
+- **Delivery is advisory.** A failure to resolve the point, render the hooks or parse the envelope leaves
+  the prompt without the fragments; it never blocks the review. A literal closing tag inside a fragment
+  is escaped so third-party text cannot end the block early.
+
+### Consequences
+
+`into` is validated per step, not per point. A `code-reviewer` contribution declared at another execute
+point (`execute:pre`, `execute:wave:pre`) is rendered there but its `into` target is read only at
+`execute:post`, so it is not delivered to the reviewer; the reference states this.
+Restricting `into` to a subset of points is a separate contract change and is not made here.
+
+## Amendment (2026-11-18): the verifier gets a landing site at `execute:post`
+
+Issue [#5984](https://github.com/open-gsd/gsd-core/issues/5984).
+
+`verifier` has been an admitted `contribution.into` role at every execute point since the host contract was
+generated, but nothing delivered a verifier contribution to `gsd-verifier`: the agent is spawned once, by the
+`verifier_dispatch` step of `execute-phase/steps/verify-phase-goal.md`, and its prompt rendered no contributions. The
+contribution installed, was enabled and appeared in `loop render-hooks` output, then was dropped silently —
+including the first-party mempalace contribution. This is the same shape #4790 fixed for `code-reviewer`.
+
+### Decision
+
+- **The role stays; it gets a landing site** (the #4790 precedent: an admitted-but-undeliverable role is given a
+  landing site, not removed). `verifier_dispatch` renders `execute:post`, takes the active `contribution` hooks
+  with `into: verifier`, and appends them once to the `gsd-verifier` prompt after `${VERIFIER_SKILLS}`, inside a
+  `<capability_verifier_rules>` block. The per-project `agent_skills.gsd-verifier` channel is unchanged and never
+  replaced. Verifier contributions are not injected into any other agent, and code-reviewer contributions at the
+  same point are not injected into the verifier.
+- **Delivery is advisory.** A failure to render the point or parse the envelope leaves the prompt without the
+  fragments and never blocks verification. A literal closing tag inside a fragment is escaped.
+- **Delivery points are stated, not silent.** A verifier contribution is delivered at `execute:post` only
+  (`execute:wave:post` has no verifier; the agent is spawned once, after the phase). Declared at another execute
+  point it installs and renders but is not delivered; `gsd-core/references/loop-hook-dispatch.md` records this
+  as installed-but-not-delivered, as it does for `code-reviewer`. Refusing it at install would need `into`
+  validated per point, a separate contract change not made here. The `verify` step stays orchestrator-only.
+- **The first-party mempalace contribution moves to a delivered point.** `capture-problems` was declared at
+  `execute:wave:post`, where no verifier runs; it now sits at `execute:post` and its wording speaks of the phase.
+

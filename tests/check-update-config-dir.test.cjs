@@ -47,7 +47,7 @@ function buildProbeSource(hookPath) {
     'cp.spawn = function stubSpawn(command, args, opts) {',
     '  spawned = true;',
     '  capturedEnv = (opts && opts.env) || null;',
-    '  return { unref: function () {} };',
+    '  return { on: function () { return this; }, unref: function () {} };',
     '};',
     `require(${JSON.stringify(hookPath)});`,
     'const result = {',
@@ -74,7 +74,7 @@ function buildProbeSource(hookPath) {
  *   below to point at a fixture copy instead.
  */
 function probe({ homeDir, cwd, envOverrides = {}, hookPath = CHECK_UPDATE_PATH }) {
-  const childEnv = { ...process.env, HOME: homeDir, USERPROFILE: homeDir };
+  const childEnv = { ...process.env, HOME: homeDir, USERPROFILE: homeDir, GSD_HOME: homeDir };
   delete childEnv.CLAUDE_CONFIG_DIR;
   Object.assign(childEnv, envOverrides);
 

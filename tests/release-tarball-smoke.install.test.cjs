@@ -78,6 +78,100 @@ describe('release-tarball-smoke: install timeout ceiling', () => {
   });
 });
 
+describe('configured entrypoint UNC spellings', () => {
+  const configDir = '\\\\fileserver\\home\\Jane Doe\\.claude';
+  const literalScript = configDir + '\\hooks\\a-literal.js';
+  const basicScript = configDir + '\\hooks\\z-basic.ps1';
+  // Canonical identities come from the fixture paths, independently of the scanner.
+  const literalExpected = path.resolve('//fileserver/home/Jane Doe/.claude/hooks/a-literal.js');
+  const basicExpected = path.resolve('//fileserver/home/Jane Doe/.claude/hooks/z-basic.ps1');
+
+  test('a TOML literal registration preserves both leading UNC separators', () => {
+    const text = "command = 'node " + literalScript + "'";
+    assert.deepEqual(configuredEntrypointsIn(text, configDir), [literalExpected]);
+  });
+
+  test('literal and basic TOML registrations both contribute their distinct scripts', () => {
+    const text = "literal = 'node " + literalScript + "'\n"
+      + 'basic = ' + JSON.stringify('pwsh ' + basicScript);
+    assert.deepEqual(configuredEntrypointsIn(text, configDir).sort(), [literalExpected, basicExpected]);
+  });
+
+  test('literal and escaped registrations of the same script are deduplicated', () => {
+    const text = "literal = 'node " + literalScript + "'\n"
+      + 'basic = ' + JSON.stringify('node ' + literalScript);
+    assert.deepEqual(configuredEntrypointsIn(text, configDir), [literalExpected]);
+  });
+});
+
+// configuredEntrypointsIn scans unparsed config text, so it is parser-class
+// (TESTING-STANDARDS.md "Property-based testing tier"). Property: however a
+// registration spells a script path — forward slashes, JSON-escaped
+// backslashes, or TOML-literal single backslashes, under a drive or a UNC
+// home — every spelling resolves to that script's one canonical entry, distinct
+// scripts stay distinct, and no script is reported twice.
+describe('configured entrypoint spellings (property)', () => {
+  const fc = require('./helpers/fast-check-setup.cjs');
+
+  // Path segments without dots (no `.`/`..`, no early `.js` that would end the
+  // lazy match) and without quotes (the scanner's documented string delimiters).
+  const segment = fc.string({
+    unit: fc.constantFrom(...'abcXYZ019 _-éü'),
+    minLength: 1,
+    maxLength: 8,
+  }).filter((s) => s.trim() === s);
+  // Root segments in both separator forms, built independently of the scanner.
+  const driveRoot = fc.record({
+    letter: fc.constantFrom('C', 'D', 'Z'),
+    dirs: fc.array(segment, { minLength: 1, maxLength: 3 }),
+  }).map(({ letter, dirs }) => ({
+    native: `${letter}:\\${dirs.join('\\')}`,
+    posix: `${letter}:/${dirs.join('/')}`,
+  }));
+  const uncRoot = fc.array(segment, { minLength: 2, maxLength: 4 }).map((dirs) => ({
+    native: `\\\\${dirs.join('\\')}`,
+    posix: `//${dirs.join('/')}`,
+  }));
+  const script = fc.record({
+    dirs: fc.array(segment, { maxLength: 2 }),
+    name: segment,
+    ext: fc.constantFrom('js', 'cjs', 'mjs', 'sh', 'cmd', 'ps1'),
+  }).map(({ dirs, name, ext }) => [...dirs, `${name}.${ext}`]);
+
+  const SPELLINGS = {
+    forwardSlashJson: (s) => JSON.stringify({ command: `node "${s.posix}"` }),
+    escapedJson: (s) => JSON.stringify({ command: `node "${s.native}"` }),
+    tomlLiteral: (s) => `command = 'node ${s.native}'`,
+  };
+
+  test('every spelling of a script resolves to its single canonical entry', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(driveRoot, uncRoot),
+        fc.uniqueArray(script, { minLength: 1, maxLength: 3, selector: (parts) => parts.join('/') }),
+        fc.array(fc.shuffledSubarray(Object.keys(SPELLINGS), { minLength: 1 }), { minLength: 3, maxLength: 3 }),
+        (root, scripts, spellingsPerScript) => {
+          const configDir = `${root.native}\\.claude`;
+          const lines = [];
+          const expected = [];
+          scripts.forEach((parts, i) => {
+            const s = {
+              native: `${root.native}\\.claude\\${parts.join('\\')}`,
+              posix: `${root.posix}/.claude/${parts.join('/')}`,
+            };
+            for (const spelling of spellingsPerScript[i]) lines.push(SPELLINGS[spelling](s));
+            expected.push(path.resolve(s.posix));
+          });
+
+          const found = configuredEntrypointsIn(lines.join('\n'), configDir);
+
+          assert.deepEqual([...found].sort(), [...expected].sort());
+        },
+      ),
+    );
+  });
+});
+
 describe('release-tarball-smoke', () => {
   // Shared fixture state: pack the tarball once, install it once, reuse for all tests.
   let packDir;
@@ -278,6 +372,7 @@ describe('release-tarball-smoke', () => {
             ...isolatedNpmEnv(),
             HOME: runtimeRoot,
             USERPROFILE: runtimeRoot,
+            GSD_HOME: runtimeRoot,
             GSD_TEST_MODE: '',
             NO_UPDATE_NOTIFIER: '1',
             npm_config_update_notifier: 'false',
@@ -334,6 +429,7 @@ describe('release-tarball-smoke', () => {
           ...isolatedNpmEnv(),
           HOME: upgradedHome,
           USERPROFILE: upgradedHome,
+          GSD_HOME: upgradedHome,
           GSD_TEST_MODE: '',
           NO_UPDATE_NOTIFIER: '1',
           npm_config_update_notifier: 'false',
@@ -392,7 +488,7 @@ describe('release-tarball-smoke', () => {
       ].join('');
       const upgradedOfflineResult = spawnSync(process.execPath, ['-e', upgradedOfflineScript], {
         cwd: runtimeRoot,
-        env: { ...process.env, HOME: upgradedHome, USERPROFILE: upgradedHome, GSD_TEST_MODE: '' },
+        env: { ...process.env, HOME: upgradedHome, USERPROFILE: upgradedHome, GSD_HOME: upgradedHome, GSD_TEST_MODE: '' },
         encoding: 'utf8',
         timeout: CHILD_TIMEOUT_MS,
       });
@@ -419,7 +515,7 @@ describe('release-tarball-smoke', () => {
       ].join('');
       const legacyResult = spawnSync(process.execPath, ['-e', legacyChildScript], {
         cwd: runtimeRoot,
-        env: { ...process.env, HOME: runtimeRoot, USERPROFILE: runtimeRoot, GSD_TEST_MODE: '' },
+        env: { ...process.env, HOME: runtimeRoot, USERPROFILE: runtimeRoot, GSD_HOME: runtimeRoot, GSD_TEST_MODE: '' },
         encoding: 'utf8',
         timeout: CHILD_TIMEOUT_MS,
       });
@@ -447,7 +543,7 @@ describe('release-tarball-smoke', () => {
         ].join('');
         const result = spawnSync(process.execPath, ['-e', childScript], {
           cwd: runtimeRoot,
-          env: { ...process.env, HOME: runtimeRoot, USERPROFILE: runtimeRoot, GSD_TEST_MODE: '' },
+          env: { ...process.env, HOME: runtimeRoot, USERPROFILE: runtimeRoot, GSD_HOME: runtimeRoot, GSD_TEST_MODE: '' },
           encoding: 'utf8',
           timeout: CHILD_TIMEOUT_MS,
         });
@@ -574,6 +670,44 @@ describe('release-tarball-smoke', () => {
 
     assert.deepEqual(configuredEntrypointsIn(text, configDir), [path.resolve(scriptPath)]);
   });
+
+  // ── L: configuredEntrypointsIn reads a backslash-spelled registration ─────
+  //
+  // #5084: the anchor is posix-normalized, so a registration spelled with
+  // Windows-native separators (a hand-edited settings.json, another tool's
+  // writer) must be scanned in that same projection or the dangling-hook
+  // check skips it. The Windows-shaped configDir is a literal rather than a
+  // path.join result so this fails on every host: this suite runs on Linux
+  // in CI, where path.join never emits a backslash and I/J/K cannot see it.
+  test('L: configuredEntrypointsIn resolves a backslash-spelled registration like its forward-slash spelling', () => {
+    // settings.json / hooks.json: JSON doubles every backslash on write.
+    const jsonRegistration = (scriptPath) => JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: `node "${scriptPath}"` }] },
+        ],
+      },
+    });
+
+    const configDir = 'C:\\Users\\Jane Doe\\.claude';
+    const nativeScript = `${configDir}\\hooks\\gsd-ghost-hook.js`;
+    const expected = [path.resolve(nativeScript.replace(/\\/g, '/'))];
+    assert.deepEqual(configuredEntrypointsIn(jsonRegistration(nativeScript), configDir), expected, 'JSON-escaped spelling');
+
+    // config.toml literal string: backslashes stay single.
+    const tomlText = `command = 'node ${nativeScript}'`;
+    assert.deepEqual(configuredEntrypointsIn(tomlText, configDir), expected, 'TOML literal spelling');
+
+    // A UNC home pins the order: JSON's `\\\\server` must collapse to
+    // `\\server` before the projection, giving the anchor's `//server`.
+    const uncConfigDir = '\\\\fileserver\\home\\Jane Doe\\.claude';
+    const uncScript = `${uncConfigDir}\\hooks\\gsd-ghost-hook.js`;
+    assert.deepEqual(
+      configuredEntrypointsIn(jsonRegistration(uncScript), uncConfigDir),
+      [path.resolve(uncScript.replace(/\\/g, '/'))],
+      'UNC JSON-escaped spelling',
+    );
+  });
 });
 
 
@@ -645,6 +779,20 @@ function safeRealpath(p) {
       }
     }
   }
+}
+
+// Whether npm's effective cache dir is isolated from the caller's HOME: it
+// sits inside the sandbox HOME runNpm() injected, and that sandbox neither is
+// nor contains the caller's HOME. (#5083) A prefix check against the caller's
+// HOME cannot say this on Windows, where os.tmpdir() (%LOCALAPPDATA%\Temp) is
+// inside the user profile, so a correctly sandboxed cache still starts with
+// the HOME path. `pathApi` lets Test 6 run Windows-shaped paths on any host.
+function isIsolatedNpmCache({ cacheDir, sandboxHome, callerHome }, pathApi = path) {
+  const isWithin = (child, parent) => {
+    const rel = pathApi.relative(parent, child);
+    return rel === '' || (rel !== '..' && !rel.startsWith(`..${pathApi.sep}`) && !pathApi.isAbsolute(rel));
+  };
+  return isWithin(cacheDir, sandboxHome) && !isWithin(callerHome, sandboxHome);
 }
 
 describe('bug-131: runNpm isolates HOME from the caller environment', () => {
@@ -732,15 +880,17 @@ describe('bug-131: runNpm isolates HOME from the caller environment', () => {
   test('runNpm injects a HOME distinct from process.env.HOME', () => {
     // Capture what HOME runNpm actually passes to npm by asking npm to print
     // the value it sees for the $HOME env var. We do this via `npm config get
-    // cache` which reveals the cache path — if it's under process.env.HOME,
-    // the fix is absent; if it's under a tmp dir, the fix is present.
+    // cache` which reveals the cache path — if it's inside the sandbox HOME
+    // the child's helpers.cjs injected, the fix is present. The child reports
+    // that sandbox too: helpers.cjs creates a fresh one per process, so this
+    // process's isolatedNpmEnv() would name a different directory.
 
     const script = `
-      const { runNpm } = require(${JSON.stringify(path.join(__dirname, 'helpers.cjs'))});
+      const { runNpm, isolatedNpmEnv } = require(${JSON.stringify(path.join(__dirname, 'helpers.cjs'))});
       try {
         // npm config get cache prints the effective cache directory.
         const out = runNpm(['config', 'get', 'cache']);
-        process.stdout.write(out.trim());
+        process.stdout.write(JSON.stringify({ cacheDir: out.trim(), sandboxHome: isolatedNpmEnv().HOME }));
         process.exit(0);
       } catch (e) {
         process.stderr.write(e.message + '\\n');
@@ -768,14 +918,18 @@ describe('bug-131: runNpm isolates HOME from the caller environment', () => {
       `runNpm config get cache failed with exit ${exitCode}. stderr: ${stderr}`,
     );
 
-    const effectiveCacheDir = stdout.trim();
+    const { cacheDir: effectiveCacheDir, sandboxHome } = JSON.parse(stdout);
 
-    // The effective npm cache must NOT be inside the calling process's HOME.
-    // If it is, the fix was not applied and the Docker regression can still occur.
+    // The effective npm cache must be isolated from the calling process's HOME.
+    // If it is not, the fix was not applied and the Docker regression can still occur.
     const callerHome = os.homedir();
     assert.ok(
-      !effectiveCacheDir.startsWith(callerHome),
-      `npm cache dir ${effectiveCacheDir} is still under caller HOME ${callerHome} — fix not applied`,
+      isIsolatedNpmCache({
+        cacheDir: safeRealpath(effectiveCacheDir),
+        sandboxHome: safeRealpath(sandboxHome),
+        callerHome: safeRealpath(callerHome),
+      }),
+      `npm cache dir ${effectiveCacheDir} is not isolated in sandbox HOME ${sandboxHome} from caller HOME ${callerHome} — fix not applied`,
     );
 
     // It must be somewhere under the system tmp dir, confirming isolation.
@@ -910,6 +1064,173 @@ describe('bug-131: runNpm isolates HOME from the caller environment', () => {
         `captured options.timeout was ${JSON.stringify(captured.timeout)} — an unset bound ` +
         `is not a bound (DEFECT.UNBOUNDED-SUBPROCESS)`,
     );
+  });
+
+  // ── Test 5 — runNpm stays isolated when the caller's tmpdir is inside HOME ──
+  // (#5083) On Windows os.tmpdir() is %LOCALAPPDATA%\Temp, inside the user
+  // profile, so a correctly sandboxed cache still starts with the caller's
+  // HOME path. This test points the caller's HOME and temp vars at a nested
+  // layout, recreating that topology on every host, and checks the real npm
+  // subprocess against isIsolatedNpmCache().
+  test('runNpm remains isolated when the caller temp directory is inside HOME', (t) => {
+    const { runNode } = require('./helpers/process-seam.cjs');
+    const callerHome = createTempDir('gsd-npm-parent-home-');
+    t.after(() => cleanup(callerHome));
+    const callerTemp = path.join(callerHome, 'tmp');
+    fs.mkdirSync(callerTemp);
+    const script = [
+      "const os = require('node:os');",
+      `const { runNpm, isolatedNpmEnv } = require(${JSON.stringify(path.join(__dirname, 'helpers.cjs'))});`,
+      "const cacheDir = runNpm(['config', 'get', 'cache']).trim();",
+      'process.stdout.write(JSON.stringify({ cacheDir, sandboxHome: isolatedNpmEnv().HOME, callerHome: os.homedir(), tempDir: os.tmpdir() }));',
+    ].join('\n');
+    const result = runNode(['-e', script], {
+      timeoutMs: NPM_HARNESS_SPAWN_TIMEOUT_MS,
+      env: { ...process.env, HOME: callerHome, USERPROFILE: callerHome, GSD_HOME: callerHome, TMPDIR: callerTemp, TEMP: callerTemp, TMP: callerTemp },
+    });
+    assert.equal(result.exitCode, 0, result.stderr);
+    const actual = JSON.parse(result.stdout);
+    const paths = {
+      cacheDir: safeRealpath(actual.cacheDir),
+      sandboxHome: safeRealpath(actual.sandboxHome),
+      callerHome: safeRealpath(actual.callerHome),
+    };
+    assert.equal(paths.callerHome, safeRealpath(callerHome));
+    assert.equal(safeRealpath(actual.tempDir), safeRealpath(callerTemp));
+    assert.equal(path.dirname(paths.sandboxHome), safeRealpath(callerTemp));
+    assert.equal(path.relative(paths.sandboxHome, paths.cacheDir), '.npm');
+    assert.equal(isIsolatedNpmCache(paths), true);
+  });
+
+  // ── Test 6 — isIsolatedNpmCache() path matrix ────────────────────────────
+  // (#5083) Containment edge cases for the isolation check: sibling prefixes,
+  // parent escapes, cross-drive and case-insensitive Windows paths. CI runs
+  // this suite on Linux, so Windows-shaped rows go through path.win32.
+  test('the npm cache isolation check accepts a sandbox inside HOME and rejects one that is or contains HOME', async (t) => {
+    const winHome = 'C:\\Users\\dev';
+    const winSandbox = `${winHome}\\AppData\\Local\\Temp\\npm-home-AbC123`;
+    const posixSandbox = '/tmp/npm-home-AbC123';
+    const cases = [
+      {
+        label: 'Windows sandbox under %LOCALAPPDATA%\\Temp',
+        pathApi: path.win32,
+        paths: { cacheDir: `${winSandbox}\\.npm`, sandboxHome: winSandbox, callerHome: winHome },
+        isolated: true,
+      },
+      {
+        label: 'Windows npm default cache, outside the sandbox',
+        pathApi: path.win32,
+        paths: { cacheDir: `${winHome}\\AppData\\Local\\npm-cache`, sandboxHome: winSandbox, callerHome: winHome },
+        isolated: false,
+      },
+      {
+        label: 'Windows sandbox that is the caller HOME',
+        pathApi: path.win32,
+        paths: { cacheDir: `${winHome}\\.npm`, sandboxHome: winHome, callerHome: winHome },
+        isolated: false,
+      },
+      {
+        label: 'POSIX sandbox under /tmp',
+        pathApi: path.posix,
+        paths: { cacheDir: `${posixSandbox}/.npm`, sandboxHome: posixSandbox, callerHome: '/home/dev' },
+        isolated: true,
+      },
+      {
+        label: 'POSIX npm default cache, outside the sandbox',
+        pathApi: path.posix,
+        paths: { cacheDir: '/home/dev/.npm', sandboxHome: posixSandbox, callerHome: '/home/dev' },
+        isolated: false,
+      },
+      {
+        label: 'POSIX sandbox that contains the caller HOME',
+        pathApi: path.posix,
+        paths: { cacheDir: '/home/dev/.npm', sandboxHome: '/home', callerHome: '/home/dev' },
+        isolated: false,
+      },
+      {
+        label: 'POSIX sibling prefix is outside the sandbox',
+        pathApi: path.posix,
+        paths: { cacheDir: '/tmp/npm-home-AbC123-sibling/.npm', sandboxHome: '/tmp/npm-home-AbC123', callerHome: '/home/dev' },
+        isolated: false,
+      },
+      {
+        label: 'POSIX ..cache is a child name, not a parent escape',
+        pathApi: path.posix,
+        paths: { cacheDir: '/tmp/npm-home-AbC123/..cache', sandboxHome: '/tmp/npm-home-AbC123', callerHome: '/home/dev' },
+        isolated: true,
+      },
+      {
+        label: 'POSIX exact parent is outside the sandbox',
+        pathApi: path.posix,
+        paths: { cacheDir: '/tmp', sandboxHome: '/tmp/npm-home-AbC123', callerHome: '/home/dev' },
+        isolated: false,
+      },
+      {
+        label: 'POSIX parent escape to another directory is outside',
+        pathApi: path.posix,
+        paths: { cacheDir: '/tmp/outside/.npm', sandboxHome: '/tmp/npm-home-AbC123', callerHome: '/home/dev' },
+        isolated: false,
+      },
+      {
+        label: 'POSIX cache equal to the isolated sandbox is allowed',
+        pathApi: path.posix,
+        paths: { cacheDir: '/tmp/npm-home-AbC123', sandboxHome: '/tmp/npm-home-AbC123', callerHome: '/home/dev' },
+        isolated: true,
+      },
+      {
+        label: 'Windows sibling prefix is outside the sandbox',
+        pathApi: path.win32,
+        paths: { cacheDir: 'C:\\Users\\dev\\AppData\\Local\\Temp\\npm-home-AbC123-sibling\\.npm', sandboxHome: 'C:\\Users\\dev\\AppData\\Local\\Temp\\npm-home-AbC123', callerHome: 'C:\\Users\\dev' },
+        isolated: false,
+      },
+      {
+        label: 'Windows ..cache is a child name, not a parent escape',
+        pathApi: path.win32,
+        paths: { cacheDir: 'C:\\Users\\dev\\AppData\\Local\\Temp\\npm-home-AbC123\\..cache', sandboxHome: 'C:\\Users\\dev\\AppData\\Local\\Temp\\npm-home-AbC123', callerHome: 'C:\\Users\\dev' },
+        isolated: true,
+      },
+      {
+        label: 'Windows exact parent is outside the sandbox',
+        pathApi: path.win32,
+        paths: { cacheDir: 'C:\\Users\\dev\\AppData\\Local\\Temp', sandboxHome: 'C:\\Users\\dev\\AppData\\Local\\Temp\\npm-home-AbC123', callerHome: 'C:\\Users\\dev' },
+        isolated: false,
+      },
+      {
+        label: 'Windows parent escape to another directory is outside',
+        pathApi: path.win32,
+        paths: { cacheDir: 'C:\\Users\\dev\\AppData\\Local\\Temp\\outside\\.npm', sandboxHome: 'C:\\Users\\dev\\AppData\\Local\\Temp\\npm-home-AbC123', callerHome: 'C:\\Users\\dev' },
+        isolated: false,
+      },
+      {
+        label: 'Windows cache equal to the isolated sandbox is allowed',
+        pathApi: path.win32,
+        paths: { cacheDir: 'C:\\Users\\dev\\AppData\\Local\\Temp\\npm-home-AbC123', sandboxHome: 'C:\\Users\\dev\\AppData\\Local\\Temp\\npm-home-AbC123', callerHome: 'C:\\Users\\dev' },
+        isolated: true,
+      },
+      {
+        label: 'Windows cache on another drive is outside the sandbox',
+        pathApi: path.win32,
+        paths: { cacheDir: 'D:\\npm-cache', sandboxHome: 'C:\\Users\\dev\\AppData\\Local\\Temp\\npm-home-AbC123', callerHome: 'C:\\Users\\dev' },
+        isolated: false,
+      },
+      {
+        label: 'Windows containment ignores path casing',
+        pathApi: path.win32,
+        paths: { cacheDir: 'c:\\users\\dev\\appdata\\local\\temp\\npm-home-abc123\\.NPM', sandboxHome: 'C:\\Users\\dev\\AppData\\Local\\Temp\\npm-home-AbC123', callerHome: 'C:\\USERS\\DEV' },
+        isolated: true,
+      },
+      {
+        label: 'Windows caller HOME equality ignores path casing',
+        pathApi: path.win32,
+        paths: { cacheDir: 'c:\\users\\dev\\.npm', sandboxHome: 'c:\\users\\dev', callerHome: 'C:\\USERS\\DEV' },
+        isolated: false,
+      },
+    ];
+    for (const { label, pathApi, paths, isolated } of cases) {
+      await t.test(label, () => {
+        assert.equal(isIsolatedNpmCache(paths, pathApi), isolated, label);
+      });
+    }
   });
 });
   });

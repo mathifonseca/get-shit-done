@@ -101,7 +101,18 @@ const LOCK_RETRY_BACKOFF_MS = 25;
  * same path (different inode) is never deleted. dev/ino are null when the post-create stat could not be
  * taken (best-effort) — then release falls back to the token check alone.
  */
-interface LockHandle { path: string; token: string; dev: number | null; ino: number | null; }
+// dev/ino are bigint: an NTFS file id is 64 bits and a JS number keeps 53 (never serialized).
+interface LockHandle { path: string; token: string; dev: bigint | null; ino: bigint | null; }
+
+/** The exact (dev, ino) of `p`, or nulls when it cannot be statted. */
+function statIdentity(p: string): { dev: bigint | null; ino: bigint | null } {
+  try {
+    const st = fs.statSync(p, { bigint: true });
+    return { dev: typeof st.dev === 'bigint' ? st.dev : null, ino: typeof st.ino === 'bigint' ? st.ino : null };
+  } catch {
+    return { dev: null, ino: null };
+  }
+}
 
 /**
  * Parsed view of a lockfile body. `hostname` is null for a legacy lock (no hostname recorded) — treated
@@ -112,7 +123,7 @@ interface LockHandle { path: string; token: string; dev: number | null; ino: num
 interface ParsedLock { pid: number | null; hostname: string | null; startTime: string | null; ts: number | null; }
 
 /** Per-body IDENTITY used to confirm the lock being stolen is still the same instance just before steal. */
-interface LockIdentity { dev: number | null; ino: number | null; ts: number | null; }
+interface LockIdentity { dev: bigint | null; ino: bigint | null; ts: number | null; }
 
 // ---------------------------------------------------------------------------
 // Tokens + backoff
@@ -214,7 +225,8 @@ function isSameHost(parsed: ParsedLock): boolean {
  * equality comparison (never parsed as a date). The pair (pid, startTime) uniquely identifies a
  * process instance: even if a crashed holder's pid is REUSED, the new process's start-time differs.
  * Returns null on ANY error / unobtainable value (liveness cannot be VERIFIED → steal-eligible past
- * the deadman). The shell-outs only run on the rare STEAL-decision path, never the happy path.
+ * the deadman). Probing ANOTHER pid only happens on the rare STEAL-decision path; this process's own
+ * start-time is probed on its first lock acquire (see selfStartTime) — never at module load (#5327).
  */
 function getProcessStartTime(pid: number): string | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
@@ -246,12 +258,39 @@ function getProcessStartTime(pid: number): string | null {
   }
 }
 
-/** THIS process's start-time, captured ONCE at module load so we never re-shell on every lock write. */
-const _selfStartTime: string | null = getProcessStartTime(process.pid);
+/**
+ * THIS process's start-time, probed on the first lock acquire and cached so later acquires never re-shell.
+ * Not probed at module load: every config read loads this module, and most never take a lock (#5327).
+ * Only a successful probe is cached. A failed one (a PowerShell launch past its 5 s timeout on a loaded
+ * Windows host) is retried on the next acquire, up to SELF_PROBE_ATTEMPTS probes in all, so a host whose
+ * probe never succeeds pays a bounded cost instead of one launch per acquire.
+ * Probed per acquire ATTEMPT, before the O_EXCL create, so a process whose first acquire meets a live
+ * holder still pays it: probing after a successful create instead would widen the empty-body window
+ * that the steal path's `LOCK_STALE_MS` floor relies on.
+ */
+const SELF_PROBE_ATTEMPTS = 2;
+let _selfStartTime: string | null = null;
+let _selfProbeAttempts = 0;
+function selfStartTime(): string | null {
+  if (_selfStartTime === null && _selfProbeAttempts < SELF_PROBE_ATTEMPTS) {
+    _selfProbeAttempts++;
+    // Through the same injectable probe the steal path uses, so the value acquireLock records and the
+    // value a test pins are one source (a hard-wired live probe made the recorded value depend on
+    // PowerShell's cold start, which turned `next` red on a Windows runner).
+    _selfStartTime = _lockProbes.getProcessStartTime(process.pid);
+  }
+  return _selfStartTime;
+}
 
-/** Serialize the lockfile body: JSON carrying the owner token, pid, hostname, cached start-time, ts. */
-function lockFileBody(token: string): string {
-  return JSON.stringify({ token, pid: process.pid, hostname: os.hostname(), startTime: _selfStartTime, ts: Date.now() });
+/** Forget the cached self start-time and its attempt count (the probe it came from was just replaced). */
+function resetSelfStartTime(): void {
+  _selfStartTime = null;
+  _selfProbeAttempts = 0;
+}
+
+/** Serialize the lockfile body: JSON carrying the owner token, pid, hostname, start-time, ts. */
+function lockFileBody(token: string, startTime: string | null): string {
+  return JSON.stringify({ token, pid: process.pid, hostname: os.hostname(), startTime, ts: Date.now() });
 }
 
 // ---------------------------------------------------------------------------
@@ -324,15 +363,8 @@ function readParsedLockBounded(lockPath: string): ParsedLock {
  * "changed" and retries rather than stealing. Never throws.
  */
 function lockIdentity(lockPath: string): LockIdentity {
-  let dev: number | null = null;
-  let ino: number | null = null;
-  try {
-    const st = fs.statSync(lockPath);
-    dev = typeof st.dev === 'number' ? st.dev : null;
-    ino = typeof st.ino === 'number' ? st.ino : null;
-  } catch {
-    return { dev: null, ino: null, ts: null }; // vanished/unstatable — treat as changed.
-  }
+  const { dev, ino } = statIdentity(lockPath);
+  if (dev === null || ino === null) return { dev: null, ino: null, ts: null }; // vanished/unstatable — treat as changed.
   const ts = readParsedLockBounded(lockPath).ts;
   return { dev, ino, ts };
 }
@@ -405,6 +437,9 @@ function acquireLock(lockPath: string, opts?: { maxAttempts?: number; waitForFre
     ? (opts.maxAttempts as number)
     : LOCK_MAX_ATTEMPTS;
   const waitForFresh = !!(opts && opts.waitForFresh);
+  // Probe BEFORE the O_EXCL create: the first probe can be a PowerShell launch, and between the create
+  // and the body write a racing acquirer sees an empty lockfile. That window must stay sub-ms (#5327).
+  const startTime = selfStartTime();
   // A held lock that is NOT steal-eligible: fail-fast (return null) by default, or BACK OFF + RETRY
   // (continue) when waitForFresh and a retry budget remains — so a contended consent writer serializes.
   const blocked = (attempt: number): LockHandle | null | 'retry' => {
@@ -421,7 +456,7 @@ function acquireLock(lockPath: string, opts?: { maxAttempts?: number; waitForFre
       // write/close error, best-effort unlink the file we just created and bail. fs.writeFileSync(fd, …)
       // flushes the WHOLE buffer (no short-write) unlike a bare fs.writeSync.
       try {
-        fs.writeFileSync(fd, lockFileBody(token));
+        fs.writeFileSync(fd, lockFileBody(token, startTime));
       } catch (writeErr) {
         try { fs.closeSync(fd); } catch { /* best-effort */ }
         try { fs.unlinkSync(lockPath); } catch { /* best-effort — no orphan */ }
@@ -435,13 +470,7 @@ function acquireLock(lockPath: string, opts?: { maxAttempts?: number; waitForFre
       }
       // Capture the lock inode's (dev, ino) so releaseLock can confirm, immediately before rmSync, that
       // the path still holds OUR inode. Best-effort: a null dev/ino just falls back to the token check.
-      let dev: number | null = null;
-      let ino: number | null = null;
-      try {
-        const lst = fs.statSync(lockPath);
-        dev = typeof lst.dev === 'number' ? lst.dev : null;
-        ino = typeof lst.ino === 'number' ? lst.ino : null;
-      } catch { /* best-effort — release falls back to the token check alone */ }
+      const { dev, ino } = statIdentity(lockPath); // best-effort — null falls back to the token check alone
       return { path: lockPath, token, dev, ino };
     } catch (err) {
       // EEXIST → held (fall through to the steal decision). Any other error here is the create failing
@@ -449,9 +478,9 @@ function acquireLock(lockPath: string, opts?: { maxAttempts?: number; waitForFre
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return null;
     }
     // Held — decide whether to steal.
-    let st: fs.Stats;
+    let st: fs.BigIntStats;
     try {
-      st = fs.statSync(lockPath);
+      st = fs.statSync(lockPath, { bigint: true });
     } catch {
       continue; // lock vanished between open and stat — retry the create immediately.
     }
@@ -461,7 +490,7 @@ function acquireLock(lockPath: string, opts?: { maxAttempts?: number; waitForFre
     // even if the file `mtime` is stale-old. A legacy/garbage/no-`ts` body — and a FUTURE/implausible
     // `ts` — falls back to the file `mtime` age so a planted/clock-skewed future ts can never deadlock.
     const parsed = readParsedLockBounded(lockPath);
-    const age = lockAgeMs(parsed.ts, st.mtimeMs);
+    const age = lockAgeMs(parsed.ts, Number(st.mtimeMs));
     if (age <= LOCK_STALE_MS) { // genuinely held (fresh) — blocked.
       const b = blocked(attempt);
       if (b === 'retry') continue;
@@ -469,8 +498,8 @@ function acquireLock(lockPath: string, opts?: { maxAttempts?: number; waitForFre
     }
 
     const decisionIdentity: LockIdentity = {
-      dev: typeof st.dev === 'number' ? st.dev : null,
-      ino: typeof st.ino === 'number' ? st.ino : null,
+      dev: typeof st.dev === 'bigint' ? st.dev : null,
+      ino: typeof st.ino === 'bigint' ? st.ino : null,
       ts: parsed.ts,
     };
 
@@ -535,12 +564,8 @@ function releaseLock(handle: LockHandle | null): void {
     // plain-token body (whole body === token) is also honored.
     if (lockBodyToken(body) !== handle.token && body !== handle.token) return; // not our token (PRIMARY).
     if (handle.dev !== null && handle.ino !== null) {
-      let cur: fs.Stats;
-      try {
-        cur = fs.statSync(handle.path);
-      } catch {
-        return; // vanished/unstatable between read and rmSync → nothing of ours to release.
-      }
+      const cur = statIdentity(handle.path);
+      if (cur.dev === null || cur.ino === null) return; // vanished/unstatable between read and rmSync → nothing of ours to release.
       if (cur.dev !== handle.dev || cur.ino !== handle.ino) return; // successor inode — not ours.
     }
     fs.rmSync(handle.path, { force: true });
@@ -562,10 +587,14 @@ export = {
   // isPidAlive / getProcessStartTime so the start-time liveness branches are exercised without real pids.
   _setLockProbes(probes: Partial<{ isPidAlive: (pid: number) => boolean; getProcessStartTime: (pid: number) => string | null }>): void {
     if (typeof probes.isPidAlive === 'function') _lockProbes.isPidAlive = probes.isPidAlive;
-    if (typeof probes.getProcessStartTime === 'function') _lockProbes.getProcessStartTime = probes.getProcessStartTime;
+    if (typeof probes.getProcessStartTime === 'function') {
+      _lockProbes.getProcessStartTime = probes.getProcessStartTime;
+      resetSelfStartTime();
+    }
   },
   _resetLockProbes(): void {
     _lockProbes.isPidAlive = _realIsPidAlive;
     _lockProbes.getProcessStartTime = getProcessStartTime;
+    resetSelfStartTime();
   },
 };

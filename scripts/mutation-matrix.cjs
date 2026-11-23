@@ -480,7 +480,9 @@ const COVERED = {
   // dependency of something else under test.
   'adr-parser': {
     cjs: 'gsd-core/bin/lib/adr-parser.cjs',
-    minScore: 68,
+    // CI (2026-10-13, #5227 PR): measured 73.24% after the list-entry splitter tests. Floor =
+    // floor(73.24) - 1 = 72.
+    minScore: 72,
   },
   'config-schema': {
     cjs: 'gsd-core/bin/lib/config-schema.cjs',
@@ -655,7 +657,44 @@ const COVERED = {
   'state-contract': {
     cjs: 'gsd-core/bin/lib/state-contract.cjs',
     excludeTests: ['state-contract.test.cjs'],
-    minScore: 65,
+    // #5764: CI run 40800623930, job 123207881000, `Stryker (state-contract)`: measured 70.43%
+    // once the checklist fallback ran through the phase-entry grammar; floor(70.43)-1.
+    minScore: 69,
+  },
+  // #4998 review (trek-e 5563202317 Nit 6, 5608265301 Minor 4): the STATE.md and
+  // planning-document field readers and writers #4998 grew.
+  // state-document: CI run 39742269013 (job 119702274448) measured 50.47% in a 94-minute
+  // job. floor(50.47) - 1 = 49 is below the range minimum, so minScore stays at 50.
+  // 140 is about 1.5x the measured job time.
+  'state-document': {
+    cjs: 'gsd-core/bin/lib/state-document.cjs',
+    minScore: 50,
+    timeoutMinutes: 140,
+  },
+  // planning-document.test.cjs requires the module through a MODULE_PATH constant, which
+  // the require derivation cannot follow; frontmatter-fence.test.cjs requires it directly
+  // but sits outside the naming rule. Both run in-process, with no subprocess.
+  'planning-document': {
+    cjs: 'gsd-core/bin/lib/planning-document.cjs',
+    extraTests: ['frontmatter-fence.test.cjs', 'planning-document.test.cjs'],
+    // CI run 39736529871, job 119683571231 (#5234, head 43f1bfa93): 75.14%, Stryker in
+    // about 3 minutes. Floor = floor(75.14) - 1 = 74.
+    minScore: 74,
+  },
+  // dispatch-isolation: net-new module from #4904 (ADR-4630 Phase 2), the owner of the
+  // dispatch-isolation vocabulary; without this entry the gate reports has_work: "false".
+  // No test file both requires the module's artifact and matches the "dispatch-isolation*"
+  // naming rule, so the parity file that holds its guards' rows and fast-check properties
+  // is declared via extraTests (a global trigger; it changed in 2 commits on next since
+  // 2026-07-01). Floor: CI run 40947108766, job 123705480087 (PR #5126),
+  // 87.18% (34 killed, 0 timeout, 5 survived, all equivalent here: the three __esModule
+  // interop mutants, as no consumer uses a default or namespace import, and
+  // `typeof value === 'string' &&` -> `true &&` in both guards, whose Sets hold only the
+  // string tuples). Floor = floor(87.18) - 1 = 86.
+  'dispatch-isolation': {
+    cjs: 'gsd-core/bin/lib/dispatch-isolation.cjs',
+    extraTests: ['host-integration-validator-parity.test.cjs'],
+    minScore: 86,
   },
 };
 

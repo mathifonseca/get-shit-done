@@ -14,6 +14,8 @@
 // Thresholds:
 //   WARNING  (remaining <= 35%): Agent should wrap up current task
 //   CRITICAL (remaining <= 25%): Agent should stop immediately and save state
+// "remaining" is of the auto-compact threshold — the statusline puts the
+// bridge on that scale (#4985), so both fire before Claude Code compacts.
 // Both fire-points are overridable per project via .planning/config.json
 // (hooks.context_warning_threshold / hooks.context_critical_threshold, #4285);
 // the values above are the defaults used when the keys are absent or unusable.
@@ -26,6 +28,7 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { HOOK_ON_CRASH, allow, crash } = require('./lib/hook-exit.js');
+const { readConfigFileBounded } = require('./lib/config-read.js');
 
 // This hook only injects an advisory context-usage warning; it never blocks
 // the tool call it rides in on. A crash here (e.g. a malformed bridge file)
@@ -246,6 +249,14 @@ const handleStdinEnd = () => {
       allow(undefined);
     }
 
+    // #6360: a subagent's input carries the PARENT's session_id plus agent_id,
+    // and every path below is keyed on session_id alone, so exit before any of
+    // them is read or written, on every event. Only a non-empty string counts;
+    // the why and the agent_type-only case: docs/context-monitor.md, "Safety".
+    if (typeof data.agent_id === 'string' && data.agent_id !== '') {
+      allow(undefined);
+    }
+
     const tmpDir = os.tmpdir();
     const warnPath = path.join(tmpDir, `claude-ctx-${sessionId}-warned.json`);
     const metricsPath = path.join(tmpDir, `claude-ctx-${sessionId}.json`);
@@ -332,7 +343,7 @@ const handleStdinEnd = () => {
     let thresholds = { warning: WARNING_THRESHOLD, critical: CRITICAL_THRESHOLD };
     try {
       const configPath = path.join(cwd, '.planning', 'config.json');
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      const config = JSON.parse(readConfigFileBounded(configPath, { required: true }));
       if (config.hooks?.context_warnings === false) {
         allow(undefined);
       }
@@ -346,7 +357,7 @@ const handleStdinEnd = () => {
       // enabled, thresholds at the constants above, which `thresholds` already holds)
     }
 
-    // If no metrics file, this is a subagent or fresh session -- exit silently.
+    // If no metrics file, this is a fresh session -- exit silently.
     // Collapsed existsSync+readFileSync: ENOENT → exit 0 (identical to old !existsSync branch),
     // other errors rethrow to the outer catch (swallowed → exit 0, as before).
     //
@@ -500,23 +511,30 @@ const handleStdinEnd = () => {
     }
 
     // Build advisory warning message (never use imperative commands that
-    // override user preferences — see #884)
+    // override user preferences — see #884). The percentages are of the
+    // auto-compact threshold (#4985); the token counts, when the bridge has
+    // them, are the ones /context shows (#2451).
+    const kTokens = n => `${Math.round(n / 1000)}k`;
+    const tokenDetail = Number.isFinite(metrics.used_tokens) && Number.isFinite(metrics.threshold_tokens)
+      ? ` (${kTokens(metrics.used_tokens)} of ${kTokens(metrics.threshold_tokens)} usable tokens)`
+      : '';
+    const usage = `Usage at ${usedPct}%${tokenDetail}. Remaining: ${remaining}%. `;
     let message;
     if (isCritical) {
       message = isGsdActive
-        ? `CONTEXT CRITICAL: Usage at ${usedPct}%. Remaining: ${remaining}%. ` +
+        ? `CONTEXT CRITICAL: ${usage}` +
           'Context is nearly exhausted. Do NOT start new complex work or write handoff files — ' +
           'GSD state is already tracked in STATE.md. Inform the user so they can run ' +
           '/gsd:pause-work at the next natural stopping point.'
-        : `CONTEXT CRITICAL: Usage at ${usedPct}%. Remaining: ${remaining}%. ` +
+        : `CONTEXT CRITICAL: ${usage}` +
           'Context is nearly exhausted. Inform the user that context is low and ask how they ' +
           'want to proceed. Do NOT autonomously save state or write handoff files unless the user asks.';
     } else {
       message = isGsdActive
-        ? `CONTEXT WARNING: Usage at ${usedPct}%. Remaining: ${remaining}%. ` +
+        ? `CONTEXT WARNING: ${usage}` +
           'Context is getting limited. Avoid starting new complex work. If not between ' +
           'defined plan steps, inform the user so they can prepare to pause.'
-        : `CONTEXT WARNING: Usage at ${usedPct}%. Remaining: ${remaining}%. ` +
+        : `CONTEXT WARNING: ${usage}` +
           'Be aware that context is getting limited. Avoid unnecessary exploration or ' +
           'starting new complex work.';
     }

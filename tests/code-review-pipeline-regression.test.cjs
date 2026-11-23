@@ -1669,7 +1669,7 @@ describe('#3829 review round — frontmatter scoping, section anchoring, ledger 
   test('docs-parity: section headings are anchored whole and the prior source cell is captured', () => {
     const src = fs.readFileSync(DISPOSITION_STEP_PATH, 'utf8');
     assert.ok(
-      src.includes('/^##\\s+Fixed Issues\\s*\\$/') && src.includes('/^##\\s+Skipped Issues\\s*\\$/'),
+      src.includes('/^##\\s+Fixed(\\s+Issues)?\\s*\\$/') && src.includes('/^##\\s+Skipped(\\s+Issues)?\\s*\\$/'),
       'fix-report section headings must be matched whole, never by prefix'
     );
     // Eighth src.includes() converted -- it pinned the exact source-cell CAPTURE, and that
@@ -3588,8 +3588,8 @@ describe('#3861 round 12 — block 2 does not compute a shortfall from a self-co
 
 const REVIEWER_AGENT_PATH = path.join(ROOT, 'agents', 'gsd-code-reviewer.md');
 
-// The alternations the shipped script uses to recognise a finding id. There are three —
-// the heading matcher, the ledger row re-parser, and the frontmatter `- id:` matcher —
+// The alternations the shipped script uses to recognise a finding id. There are four —
+// the heading matcher, the prefixed-heading matcher, the ledger row re-parser, and the frontmatter `- id:` matcher —
 // and adding a prefix to only some of them is silent. The severity map below is a fourth
 // copy of the same set; it is not an alternation, so it is extracted separately.
 // This scan is by PATTERN, never a fixed list of sites, which is why round 5's new
@@ -3676,6 +3676,51 @@ describe('#3861 round 1 — stale fix reports are stated, not silently ignored',
     const out = runShippedDisposition({ reviewText: review, fixText: recased });
     assert.strictEqual(ledgerRows(out.ledger)[0].disposition, 'open');
     assert.match(out.stdout, /titles its finding differently/);
+  });
+
+  test('#6126: the short section titles Fixed and Skipped reconcile, as whole lines only', () => {
+    const review = ['---', 'status: issues_found', '---', '', '### WR-01: one', '', '### WR-02: two', '', '### IN-01: three'].join('\n');
+    const fixText = ['## Fixed', '', '### WR-01: one', '', '## Skipped', '', '### WR-02: two', '', '## Fixed Notes', '', '### IN-01: three'].join('\n');
+    const out = runShippedDisposition({ reviewText: review, fixText });
+    const by = Object.fromEntries(ledgerRows(out.ledger).map((r) => [r.id, r.disposition]));
+    assert.deepStrictEqual(by, { 'WR-01': 'fixed', 'WR-02': 'skipped', 'IN-01': 'open' });
+    assert.match(out.stdout, /1 fix-report finding heading\(s\) sit under no recognised section/, 'the lookalike section is named, not swallowed');
+    assert.match(out.stdout, /IN-01 in 01-REVIEW-FIX\.md/, 'by id and report file');
+  });
+
+  test('#6126: finding headings under an unrecognised section are named on the verdict line, notes are not', () => {
+    const review = ['---', 'status: issues_found', '---', '', '### WR-01: one', '', '### WR-04: found and fixed in this run'].join('\n');
+    const fixText = ['## Resolved', '', '### WR-01: one', '', '### WR-04: found and fixed in this run', '', '## Notes', '', 'plain prose, no finding heading'].join('\n');
+    const out = runShippedDisposition({ reviewText: review, fixText });
+    assert.match(out.stdout, /2 fix-report finding heading\(s\) sit under no recognised section/);
+    assert.match(out.stdout, /WR-01 in 01-REVIEW-FIX\.md, WR-04 in 01-REVIEW-FIX\.md/, 'every id and the report file');
+    const clean = runShippedDisposition({ reviewText: review, fixText: ['## Fixed Issues', '', '### WR-01: one', '', '## Notes', '', 'prose only'].join('\n') });
+    assert.doesNotMatch(clean.stdout, /no recognised section/, 'a template-titled report and a notes section produce no note');
+  });
+
+  test('#6126: the note is repeated on the unchanged run, and an id orphaned in a report and its iteration backup is named once per file', () => {
+    const review = ['---', 'status: issues_found', '---', '', '### WR-01: one'].join('\n');
+    const fixText = ['## Resolved', '', '### WR-01: one'].join('\n');
+    const first = runShippedDisposition({ reviewText: review, fixText, iterFixText: { 1: fixText } });
+    assert.match(first.stdout, /2 fix-report finding heading\(s\) sit under no recognised section .*not reconciled: WR-01 in 01-REVIEW-FIX\.md, WR-01 in 01-REVIEW-FIX\.iter1\.md/);
+    const again = runShippedDisposition({ reviewText: review, fixText, iterFixText: { 1: fixText }, priorText: first.ledger });
+    assert.strictEqual(again.wroteNothing, true, 'the ledger itself is unchanged');
+    assert.match(again.stdout, /disposition unchanged.*no recognised section/, 'and the unchanged verdict line still names what was ignored');
+  });
+
+  test('#6126: a clean review with no ledger still names a fix-report finding under an unrecognised section', () => {
+    const review = ['---', 'status: clean', '---', ''].join('\n');
+    const fixText = ['## Resolved', '', '### WR-09: acted on, absent from the review'].join('\n');
+    const out = runShippedDisposition({ reviewText: review, fixText });
+    assert.match(out.stdout, /WR-09 in 01-REVIEW-FIX\.md/, 'not lost on the early-return path');
+  });
+
+  test('#6126: an id reconciled under a recognised section is not also reported as orphaned', () => {
+    const review = ['---', 'status: issues_found', '---', '', '### WR-01: one'].join('\n');
+    const fixText = ['## Fixed Issues', '', '### WR-01: one', '', '## Verification', '', '### WR-01: one'].join('\n');
+    const out = runShippedDisposition({ reviewText: review, fixText });
+    assert.strictEqual(ledgerRows(out.ledger)[0].disposition, 'fixed');
+    assert.doesNotMatch(out.stdout, /no recognised section/);
   });
 
   test('a matching fix report reports no mismatch', () => {
@@ -4068,6 +4113,171 @@ describe('#3861 round 1 — the tests must run what BASH would run', () => {
     assert.doesNotMatch(out.ledger, /^superseded:/m, 'and no preservation block is written');
   });
 
+  // ── #5802 — a recorded decision must not leave the ledger without the console saying so, on any path ──
+
+  const REVIEW_HEAD = ['---', 'status: issues_found', '---', ''];
+  const deferredCr01 = () => runShippedDisposition({
+    reviewText: [...REVIEW_HEAD, '### CR-01: the original finding'].join('\n'),
+    priorText: '| CR-01 | critical | deferred | waiting on the vendor |\n',
+  }).ledger;
+
+  test('[regression #5802] a reused id decided by a fix report still reports the displaced decision', () => {
+    const out = runShippedDisposition({
+      reviewText: [...REVIEW_HEAD, '### CR-01: a brand new finding'].join('\n'),
+      priorText: deferredCr01(),
+      fixText: ['## Fixed Issues', '', '### CR-01: a brand new finding'].join('\n'),
+    });
+    assert.strictEqual(ledgerRows(out.ledger).find((r) => r.id === 'CR-01').disposition, 'fixed');
+    assert.match(out.stdout, /decision\(s\) DROPPED/, 'the applied branch must report the displaced decision');
+    assert.match(out.stdout, /CR-01=deferred/);
+  });
+
+  test('[regression #5802] a reused id carried only by a fix report still reports the displaced decision', () => {
+    const out = runShippedDisposition({
+      reviewText: [...REVIEW_HEAD, '### IN-07: unrelated'].join('\n'),
+      priorText: deferredCr01(),
+      iterFixText: { 2: ['## Fixed Issues', '', '### CR-01: an older, different finding'].join('\n') },
+    });
+    assert.match(out.stdout, /CR-01=deferred/, 'the carried-by-report path must name the displaced decision');
+  });
+
+  test('[regression #5802] a same-finding fix outcome over a recorded decision is an update, not a drop', () => {
+    const out = runShippedDisposition({
+      reviewText: [...REVIEW_HEAD, '### CR-01: the original finding'].join('\n'),
+      priorText: deferredCr01(),
+      fixText: ['## Fixed Issues', '', '### CR-01: the original finding'].join('\n'),
+    });
+    assert.strictEqual(ledgerRows(out.ledger).find((r) => r.id === 'CR-01').disposition, 'fixed');
+    assert.doesNotMatch(out.stdout, /DROPPED/);
+  });
+
+  test('[regression #5802] a review whose headings carry a review-scoped prefix says it recorded nothing, and why', () => {
+    const out = runShippedDisposition({
+      reviewText: [...REVIEW_HEAD, '### W6-CR-01: first', '### W6-WR-02: second'].join('\n'),
+    });
+    assert.match(out.stdout, /2 finding\(s\) recorded NOWHERE/);
+    assert.match(out.stdout, /carry a prefix before the id \(W6-CR-01, W6-WR-02\)/);
+    assert.match(out.ledger, /^unparsed: 2$/m);
+  });
+
+  test('[regression #5802] a prefixed heading inside a fence is an illustration and is not reported', () => {
+    const out = runShippedDisposition({
+      reviewText: [...REVIEW_HEAD, '### CR-01: real', '', '```', '### W6-CR-01: example', '```'].join('\n'),
+    });
+    assert.doesNotMatch(out.stdout, /carry a prefix/);
+  });
+
+  test('[regression #5802] a ledger row outside the id grammar is named and kept verbatim, and the run is a fixed point', () => {
+    const row = '| R1-WR-01 | warning | deferred | keep me |';
+    const first = runShippedDisposition({
+      reviewText: [...REVIEW_HEAD, '### CR-01: x'].join('\n'),
+      priorText: row + '\n',
+    });
+    assert.ok(first.ledger.split('\n').includes(row), 'the unparseable row must survive the rewrite verbatim');
+    assert.match(first.stdout, /not in the id \| severity \| disposition \| source shape: R1-WR-01; kept verbatim/);
+    const second = runShippedDisposition({
+      reviewText: [...REVIEW_HEAD, '### CR-01: x'].join('\n'),
+      priorText: first.ledger,
+    });
+    assert.ok(second.wroteNothing, 'the kept row re-reads as the same row, so the next run changes nothing');
+    assert.ok(second.ledger.split('\n').includes(row));
+  });
+
+  test('[regression #5802] a hand-set disposition in another case is a decision, not an unparseable row', () => {
+    const out = runShippedDisposition({
+      reviewText: [...REVIEW_HEAD, '### CR-01: x'].join('\n'),
+      priorText: '| CR-01 | critical | Deferred | vendor |\n',
+    });
+    const cr = ledgerRows(out.ledger).find((r) => r.id === 'CR-01');
+    assert.strictEqual(cr.disposition, 'deferred');
+    assert.strictEqual(cr.source, 'vendor');
+    assert.doesNotMatch(out.stdout, /not in the id/);
+  });
+
+  test('[regression #5802] a row with an invalid disposition whose id a regenerated row takes is reset to open and NAMED with what it held', () => {
+    const out = runShippedDisposition({
+      reviewText: [...REVIEW_HEAD, '### CR-01: x'].join('\n'),
+      priorText: '| CR-01 | critical | wontfix | the reason |\n',
+    });
+    assert.strictEqual(ledgerRows(out.ledger).find((r) => r.id === 'CR-01').disposition, 'open');
+    assert.match(out.stdout, /1 ledger row\(s\) not in the id \| severity \| disposition \| source shape were reset to open/);
+    assert.match(out.stdout, /CR-01 was wontfix \/ the reason/, 'the console keeps what the row held');
+  });
+
+  test('[regression #5802] two rows for one id are named, not collapsed silently', () => {
+    const out = runShippedDisposition({
+      reviewText: [...REVIEW_HEAD, '### CR-01: x'].join('\n'),
+      priorText: '| CR-01 | critical | deferred | a |\n| CR-01 | critical | skipped | b |\n',
+    });
+    assert.match(out.stdout, /1 finding id\(s\) have more than one ledger row, and the last row of each was used: CR-01/);
+    assert.strictEqual(ledgerRows(out.ledger).find((r) => r.id === 'CR-01').disposition, 'skipped');
+  });
+
+  test('[regression #5802] an indented ledger row is named and kept, not deleted', () => {
+    const row = '  | CR-02 | critical | deferred | indented |';
+    const out = runShippedDisposition({ reviewText: [...REVIEW_HEAD, '### CR-01: x'].join('\n'), priorText: row + '\n' });
+    assert.ok(out.ledger.split('\n').includes(row));
+    assert.match(out.stdout, /not in the id \| severity \| disposition \| source shape: CR-02; kept verbatim, not counted/);
+  });
+
+  test('[security #5802] ledger text on the console is masked for control characters and capped', () => {
+    const rows = ['| \u001b[31mred | w | x |', '| ' + 'L'.repeat(100) + ' | w | x |', '| r3 | w | x |', '| r4 | w | x |'];
+    const out = runShippedDisposition({ reviewText: [...REVIEW_HEAD, '### CR-01: x'].join('\n'), priorText: rows.join('\n') + '\n' });
+    assert.ok(!out.stdout.includes('\u001b'), 'no escape character reaches the console');
+    assert.match(out.stdout, /\?\[31mred/);
+    assert.ok(!out.stdout.includes('L'.repeat(41)), 'a cell is capped at 40 characters');
+    assert.match(out.stdout, /, \.\.\./, 'the list is capped at three names');
+  });
+
+  test('[regression #5802] a fix-report heading with a prefixed id is named, not ignored', () => {
+    const out = runShippedDisposition({
+      reviewText: [...REVIEW_HEAD, '### CR-01: x'].join('\n'),
+      fixText: ['## Fixed Issues', '', '### W6-CR-01: x'].join('\n'),
+    });
+    assert.match(out.stdout, /1 fix-report heading\(s\) carry a prefix before the id \(W6-CR-01\) and were not reconciled/);
+  });
+
+  test('[regression #5802] a multi-segment prefix is recognised on a heading', () => {
+    const out = runShippedDisposition({ reviewText: [...REVIEW_HEAD, '### W6-R2-CR-01: y'].join('\n') });
+    assert.match(out.stdout, /carry a prefix before the id \(W6-R2-CR-01\)/);
+  });
+
+  test('[regression #5802] a frontmatter id outside the grammar does not hand its title to the previous finding', () => {
+    const prior = [
+      '---', 'phase: 01', 'review: 01-REVIEW.md', 'titles: json', 'findings:',
+      '  - id: CR-01', '    severity: critical', '    disposition: deferred', '    title: "orig"',
+      '  - id: R1-CR-01', '    severity: critical', '    disposition: open', '    title: "other"',
+      'open: 0', 'total: 2', 'recorded: x', '---', '',
+      '| CR-01 | critical | deferred | why |',
+    ].join('\n');
+    const out = runShippedDisposition({ reviewText: [...REVIEW_HEAD, '### CR-01: orig'].join('\n'), priorText: prior });
+    assert.strictEqual(ledgerRows(out.ledger).find((r) => r.id === 'CR-01').disposition, 'deferred',
+      'CR-01 still names the same finding, so its decision is inherited');
+    assert.doesNotMatch(out.stdout, /DROPPED/);
+    assert.match(out.ledger, /title: "orig"/);
+    assert.doesNotMatch(out.ledger, /title: "other"/);
+  });
+
+  test('[property #5802] a row or heading with any review-scoped prefix survives or is named', () => {
+    const fc = require('./helpers/fast-check-setup.cjs');
+    fc.assert(fc.property(
+      fc.stringMatching(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,6}$/),
+      fc.constantFrom('open', 'fixed', 'skipped', 'deferred'),
+      (prefix, disposition) => {
+        const id = prefix + '-WR-01';
+        const row = '| ' + id + ' | warning | ' + disposition + ' | reason |';
+        const rowRun = runShippedDisposition({
+          reviewText: [...REVIEW_HEAD, '### CR-01: x'].join('\n'),
+          priorText: row + '\n',
+        });
+        assert.ok(rowRun.ledger.split('\n').includes(row), id + ' must survive verbatim');
+        assert.ok(rowRun.stdout.includes(id), id + ' must be named on the console');
+        const headingRun = runShippedDisposition({ reviewText: [...REVIEW_HEAD, '### ' + id + ': t'].join('\n') });
+        assert.match(headingRun.stdout, /carry a prefix before the id/, id + ' heading must be refused loudly');
+      },
+    ), { numRuns: 12 });
+  });
+
   test('a prior decision is NOT inherited when the id now names a different finding', () => {
     const first = runShippedDisposition({
       reviewText: ['---', 'status: issues_found', '---', '', '### CR-01: the original finding'].join('\n'),
@@ -4344,7 +4554,6 @@ describe('#3861 round 1 — fence closers and one-letter prefixes', () => {
 // normalizer rather than asserting it.
 // ---------------------------------------------------------------------------
 describe('#3829 — the step\'s REVIEW.md lookup resolves a letter-suffixed phase without a shell re-pad', () => {
-  const { execFileSync } = require('node:child_process');
   const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
   const { normalizePhaseName } = require('../gsd-core/bin/lib/phase-id.cjs');
 
@@ -4366,18 +4575,19 @@ describe('#3829 — the step\'s REVIEW.md lookup resolves a letter-suffixed phas
 
   /** Run `script` in bash with `env` merged in; never throws — returns { status, stdout, stderr }. */
   function runBash(script, env) {
-    try {
-      const stdout = execFileSync('bash', [], {
-        input: script,
-        encoding: 'utf8',
-        timeout: PROBE_TIMEOUT_MS,
-        env: { ...process.env, ...env },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      return { status: 0, stdout: stdout.trim(), stderr: '' };
-    } catch (e) {
-      return { status: e.status, stdout: String(e.stdout || '').trim(), stderr: String(e.stderr || '').trim() };
+    // `bash -s` reads the script from stdin, matching the former argv-less `bash` + input.
+    const r = runHook('-s', [], {
+      interpreter: 'bash',
+      input: script,
+      env: { ...process.env, ...env },
+      timeoutMs: PROBE_TIMEOUT_MS,
+    });
+    // A timeout, kill or spawn failure has no status; reject it rather than return a null status.
+    assert.strictEqual(r.outcome, OUTCOME.EXITED, r.summary);
+    if (r.exitCode === 0) {
+      return { status: 0, stdout: r.stdout.trim(), stderr: '' };
     }
+    return { status: r.exitCode, stdout: r.stdout.trim(), stderr: r.stderr.trim() };
   }
 
   const stepLines = splitLines(fs.readFileSync(DISPOSITION_STEP_PATH, 'utf8'));
@@ -4509,5 +4719,261 @@ describe('#3829 — the step\'s REVIEW.md lookup resolves a letter-suffixed phas
         assert.equal(r.stdout, normalizePhaseName(id), `padding drifted from the canonical normalizer on ${id}`);
       }
     }), { numRuns: 25 });
+  });
+});
+
+// #5213: gsd-code-fixer's Tier-2 TypeScript check passed the edited file to tsc
+// positionally, which makes tsc ignore tsconfig.json (no jsx / paths / lib), so
+// every .tsx or alias-importing file failed in the very file just edited.
+describe('gsd-code-fixer TypeScript Tier-2 check is project-aware (#5213)', () => {
+  const AGENTS_DIR = path.join(__dirname, '..', 'agents');
+  const VARIANTS = {
+    full: fs.readFileSync(path.join(AGENTS_DIR, 'gsd-code-fixer.md'), 'utf-8'),
+    compact: fs.readFileSync(path.join(AGENTS_DIR, 'gsd-code-fixer.compact.md'), 'utf-8'),
+  };
+  const typescriptRow = (text) => text.split(/\r?\n/).find((l) => l.startsWith('| TypeScript |')) || '';
+
+  for (const [name, text] of Object.entries(VARIANTS)) {
+    test(`${name}: the edited file is never passed to tsc positionally`, () => {
+      assert.ok(!/tsc\s+--noEmit\s+\{file\}/.test(text), 'a positional "tsc --noEmit {file}" check remains');
+      assert.ok(!/tsc\s+--noEmit\s+\S*\.tsx?\b/.test(text), 'a positional tsc file argument remains');
+    });
+
+    test(`${name}: the TypeScript row prefers the project typecheck and a config that includes the file`, () => {
+      const row = typescriptRow(text);
+      assert.notEqual(row, '', 'no TypeScript row in the Tier-2 table');
+      assert.match(row, /typecheck/i, 'the project typecheck script is not preferred');
+      assert.match(row, /--listFilesOnly/, 'config inclusion is not verified with --listFilesOnly');
+      assert.match(row, /Tier 1/i, 'no fallback to Tier 1 when no config includes the file');
+    });
+
+    test(`${name}: a solution-style root config is not treated as passing`, () => {
+      assert.match(text, /solution-style/i);
+      assert.match(text, /"files": \[\]|files: \[\]/);
+    });
+
+    test(`${name}: the other Tier-2 rows are unchanged`, () => {
+      assert.ok(text.includes('| JavaScript | `node -c {file}` (syntax check) |'));
+      assert.ok(text.includes('| Python | `python -c "import ast; ast.parse(open(\'{file}\').read())"` |'));
+      assert.ok(text.includes('| Other | Skip to Tier 1 only |'));
+    });
+
+    test(`${name}: the procedure says how to find the config, filter the output and avoid build artifacts`, () => {
+      assert.match(text, /walk up/i, 'no instruction to walk up to the nearest tsconfig');
+      assert.match(text, /-p <config>/, 'the check is not run with -p <config>');
+      assert.match(text, /never `-b`/, 'tsc -b (which writes build artifacts) is not ruled out for the config path');
+      assert.match(text, /only (?:output )?lines (?:that start with|for) `\{file\}`/i, 'the output is not filtered to the edited file');
+    });
+  }
+
+  test('the compact variant carries the identical TypeScript check row', () => {
+    assert.equal(typescriptRow(VARIANTS.compact), typescriptRow(VARIANTS.full));
+  });
+
+  test('the full agent\'s scoping rule and fallback list use the project-aware form', () => {
+    assert.ok(!/If `npx tsc --noEmit \{file\}`/.test(VARIANTS.full), 'the scoping rule still names the positional form');
+    assert.ok(!/syntax check \(node -c, tsc --noEmit,/.test(VARIANTS.full), 'the fallback list still names bare tsc --noEmit');
+  });
+});
+
+// ─── #5640: helper modules resolve from the installed runtime, not the cwd ───────────────────────────────
+//
+// code-review.md (flags, depth, fallow normalizer), review.md (plan-coverage pattern helper) and
+// code-review/steps/structural-pre-pass.md (fallow binary) loaded their helpers with a cwd-relative
+// require('./gsd-core/bin/lib/X.cjs'). In a global install no ./gsd-core exists in the project, so --fix,
+// --all, --auto, --depth and --files were dropped silently, the depth step halted, and plan-coverage JSON
+// came out empty. Each such step now carries a resolver block between '# gsd-resolve-lib begin <module>' and
+// '# gsd-resolve-lib end'; these tests run those blocks, as shipped, in sandboxed installs.
+
+const RESOLVER_SITES = [
+  { file: WORKFLOW_PATH, module: 'code-review-flags.cjs', fatal: true },
+  { file: WORKFLOW_PATH, module: 'code-review-depth.cjs', fatal: true },
+  { file: WORKFLOW_PATH, module: 'fallow-runner.cjs', fatal: false },
+  { file: path.join(ROOT, 'gsd-core', 'workflows', 'review.md'), module: 'pattern.cjs', fatal: true },
+  { file: PRE_PASS_STEP_PATH, module: 'fallow-runner.cjs', fatal: true, shim: false },
+];
+const RESOLVER_BEGIN = '# gsd-resolve-lib begin ';
+const RESOLVER_END = '# gsd-resolve-lib end';
+
+/** Every resolver block in one workflow file, in file order: { module, text }. */
+function resolverBlocks(file) {
+  const src = fs.readFileSync(file, 'utf8');
+  const blocks = [];
+  let from = src.indexOf(RESOLVER_BEGIN);
+  while (from !== -1) {
+    const lineEnd = src.indexOf('\n', from);
+    const header = src.slice(from + RESOLVER_BEGIN.length, lineEnd);
+    const module = header.split(' ')[0];
+    const end = src.indexOf(RESOLVER_END, lineEnd);
+    blocks.push({ module, text: src.slice(from, end + RESOLVER_END.length) });
+    from = src.indexOf(RESOLVER_BEGIN, end);
+  }
+  return blocks;
+}
+
+/** The block a site names, with the file's blocks matched in the order RESOLVER_SITES lists them. */
+function resolverFor(site) {
+  const siblings = RESOLVER_SITES.filter((s) => s.file === site.file);
+  const blocks = resolverBlocks(site.file);
+  return blocks[siblings.indexOf(site)];
+}
+
+describe('#5640 helper modules resolve from the installed runtime', { skip: !HAS_BASH }, () => {
+  let sandbox;
+  let installHome;
+  let emptyHome;
+  let projectDir;
+  let minimalPath;
+
+  function before_(t) {
+    sandbox = createTempDir('gsd-5640-');
+    t.after(() => cleanup(sandbox));
+    installHome = path.join(sandbox, 'home');
+    const lib = path.join(installHome, '.claude', 'gsd-core', 'bin', 'lib');
+    fs.mkdirSync(path.dirname(lib), { recursive: true });
+    fs.cpSync(path.join(ROOT, 'gsd-core', 'bin', 'lib'), lib, { recursive: true });
+    fs.copyFileSync(path.join(ROOT, 'gsd-core', 'bin', 'gsd_run'), path.join(installHome, '.claude', 'gsd-core', 'bin', 'gsd_run'));
+    emptyHome = path.join(sandbox, 'empty-home');
+    // node comes through a private bin dir: the directory holding the real node may also hold a global gsd_run.
+    const toolBin = path.join(sandbox, 'tool-bin');
+    fs.mkdirSync(toolBin, { recursive: true });
+    fs.symlinkSync(process.execPath, path.join(toolBin, 'node'));
+    minimalPath = [toolBin, '/usr/bin', '/bin'].join(path.delimiter);
+    fs.mkdirSync(emptyHome, { recursive: true });
+    projectDir = path.join(sandbox, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+  }
+
+  /** Run a resolver block (then print the directory it exported) in the sandboxed project. */
+  function runBlock(block, env, extra = '', prefix = '') {
+    const script = prefix + block.text + '\nprintf "%s" "$GSD_LIB_DIR"\n' + extra;
+    const result = runHook('-c', [script], {
+      interpreter: 'bash',
+      cwd: projectDir,
+      env: { PATH: minimalPath, HOME: emptyHome, ...env },
+      timeoutMs: HOOK_FANOUT_TIMEOUT_MS,
+    });
+    return toLegacyResult(result);
+  }
+
+  const installedLib = () => path.join(installHome, '.claude', 'gsd-core', 'bin', 'lib');
+
+  test('every helper-loading step resolves its module through the resolver (#5640)', () => {
+    for (const site of RESOLVER_SITES) {
+      const blocks = resolverBlocks(site.file).map((b) => b.module);
+      assert.ok(blocks.includes(site.module), path.basename(site.file) + ' must carry a resolver block for ' + site.module);
+      const src = fs.readFileSync(site.file, 'utf8');
+      assert.equal(src.includes("require('./gsd-core/bin/lib"), false, path.basename(site.file) + ' still requires a helper relative to the cwd');
+      assert.equal(src.includes('require("./gsd-core/bin/lib'), false, path.basename(site.file) + ' still requires a helper relative to the cwd');
+    }
+  });
+
+  test('a global install resolves from the default home, for every site (#5640)', (t) => {
+    before_(t);
+    {
+      for (const site of RESOLVER_SITES) {
+        const r = runBlock(resolverFor(site), { HOME: installHome });
+        assert.equal(r.status, 0, site.module + ': ' + r.stderr);
+        assert.equal(r.stdout, installedLib(), site.module);
+      }
+    }
+  });
+
+  test('/gsd-code-review N --fix parses from a global install (#5640)', (t) => {
+    before_(t);
+    {
+      const site = RESOLVER_SITES[0];
+      const read = "\nnode -e \"const { parseCodeReviewFlags } = require(require('path').join(process.env.GSD_LIB_DIR, 'code-review-flags.cjs')); process.stdout.write(JSON.stringify(parseCodeReviewFlags(process.argv.slice(1))));\" -- 03 --fix";
+      const r = runBlock(resolverFor(site), { HOME: installHome }, '\necho\n' + read.trimStart());
+      assert.equal(r.status, 0, r.stderr);
+      const flags = JSON.parse(r.stdout.slice(r.stdout.indexOf('\n') + 1));
+      assert.equal(flags.fix, true, 'the --fix flag reaches the review');
+    }
+  });
+
+  test('the gsd_run shim on PATH locates the install, through a symlink too (#5640)', (t) => {
+    before_(t);
+    {
+      const binDir = path.join(installHome, '.claude', 'gsd-core', 'bin');
+      const linkDir = path.join(sandbox, 'links');
+      fs.mkdirSync(linkDir, { recursive: true });
+      fs.symlinkSync(path.join(binDir, 'gsd_run'), path.join(linkDir, 'gsd_run'));
+      for (const onPath of [binDir, linkDir]) {
+        const r = runBlock(resolverFor(RESOLVER_SITES[1]), { PATH: onPath + path.delimiter + minimalPath });
+        assert.equal(r.status, 0, r.stderr);
+        assert.equal(fs.realpathSync(r.stdout), fs.realpathSync(installedLib()), 'resolved through ' + onPath);
+      }
+    }
+  });
+
+  test('a local install resolves from RUNTIME_DIR (#5640)', (t) => {
+    before_(t);
+    {
+      const r = runBlock(resolverFor(RESOLVER_SITES[1]), { RUNTIME_DIR: path.join(installHome, '.claude') });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, installedLib());
+    }
+  });
+
+  test('GSD_TOOLS set in the block is the first candidate (#5640)', (t) => {
+    before_(t);
+    {
+      const tools = path.join(installHome, '.claude', 'gsd-core', 'bin', 'gsd-tools.cjs');
+      const r = runBlock(resolverFor(RESOLVER_SITES[0]), { GSD_TOOLS: tools });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, installedLib());
+    }
+  });
+
+  test('a missing runtime names the searched locations (#5640)', (t) => {
+    before_(t);
+    {
+      for (const site of RESOLVER_SITES) {
+        const r = runBlock(resolverFor(site), {});
+        const home = path.join(emptyHome, '.claude', 'gsd-core', 'bin', 'lib');
+        assert.equal(r.stderr.includes(home), true, site.module + ': the error names ' + home + ', got ' + r.stderr);
+        assert.equal(r.stderr.includes(site.module), true, 'the error names the missing module');
+        assert.equal(r.stdout, '', 'nothing is exported for a miss');
+        if (site.fatal) assert.notEqual(r.status, 0, site.module + ': a miss stops the step');
+        else assert.equal(r.status, 0, site.module + ': the fallow normalizer warns and keeps its raw-report fallback');
+      }
+    }
+  });
+
+  test('a local install under .claude or .codex resolves from the project root (#5640)', (t) => {
+    before_(t);
+    for (const dir of ['.claude', '.codex']) {
+      const root = path.join(sandbox, 'local-' + dir.slice(1));
+      fs.mkdirSync(path.join(root, dir, 'gsd-core', 'bin'), { recursive: true });
+      fs.symlinkSync(installedLib(), path.join(root, dir, 'gsd-core', 'bin', 'lib'));
+      const r = runBlock(resolverFor(RESOLVER_SITES[1]), { RUNTIME_DIR: root });
+      assert.equal(r.status, 0, dir + ': ' + r.stderr);
+      assert.equal(r.stdout, path.join(root, dir, 'gsd-core', 'bin', 'lib'), dir);
+    }
+  });
+
+  test('a gsd_run shell function is not read as a path (#5640)', (t) => {
+    before_(t);
+    // command -v prints a function's bare name; its dirname is ".", which would make ./lib a candidate.
+    fs.mkdirSync(path.join(projectDir, 'lib'));
+    fs.writeFileSync(path.join(projectDir, 'lib', 'code-review-depth.cjs'), '');
+    const r = runBlock(resolverFor(RESOLVER_SITES[1]), {}, '', 'gsd_run() { :; }\n');
+    assert.notEqual(r.status, 0, 'a lone ./lib must not satisfy the resolver');
+    assert.equal(r.stdout, '');
+  });
+
+  test('every site carries the same resolver (#5640)', () => {
+    // A site without the gsd_run candidate (its file's launcher line comes after this block) compares with the
+    // shim lines and the shim candidate removed from every site.
+    const shape = (site) => resolverFor(site).text
+      .split(site.module).join('<module>')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => !line.startsWith('if [ -z "$GSD_LIB_DIR" ]'))
+      .filter((line) => !/^(_gsd_gr=|case "\$_gsd_gr"|\[ -n "\$_gsd_gr" \])/.test(line))
+      .map((line) => line.split(' "$_gsd_gr"').join(''))
+      .join('\n');
+    const shapes = RESOLVER_SITES.map(shape);
+    for (const s of shapes) assert.equal(s, shapes[0], 'a site drifted from the shared resolver');
   });
 });

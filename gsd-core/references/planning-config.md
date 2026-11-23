@@ -2,6 +2,15 @@
 
 Configuration options for `.planning/` directory behavior.
 
+A present non-object section is an inheritance barrier. `workflow: null` removes
+every `workflow.*` default, including research, plan-checker, verifier, Nyquist validation,
+TDD, subagent timeout and security settings (`security_enforcement`, `security_asvs_level`,
+`security_block_on`); init payloads report absent gate flags as `false`. `review: null` removes the default prompt budget, so
+lanes run without default prompt trimming. `planner: null` is the documented exception:
+the assembled watchdog projection remains `true` while its raw key is absent.
+
+An explicit `planning: null` removes planning defaults, including `commit_docs`, so planning commits are skipped unless a flat `commit_docs: true` in the effective config (the root file merged with the active workstream file) explicitly enables them. An explicit `git: null` removes inherited/default branching strategy, base branch and branch templates. Explicit flat keys in that effective config retain precedence over their blocked nested aliases, including a flat `max_prompt_tokens` under `review: null`.
+
 <config_schema>
 ```json
 "planning": {
@@ -35,6 +44,7 @@ Configuration options for `.planning/` directory behavior.
 | `git.base_branch` | `null` (auto-detect) | Target branch for PRs and merges (e.g. `"master"`, `"develop"`). When `null`, auto-detects from `git symbolic-ref refs/remotes/origin/HEAD`, falling back to `"main"`. |
 | `git.protected_branches` | (none) | Optional array of non-empty strings naming additional shared branches that should trigger protected-branch warnings |
 | `git.create_tag` | `true` | Create git tags on milestone completion |
+| `git.repo_tagging` | `"single"` | Milestone tagging mode: `"single"` (existing behavior) or `"per_repo"` (record one release per configured repository; each tag is pushed only after a per-repository confirmation) |
 | `git.phase_branch_template` | `"gsd/phase-{phase}-{slug}"` | Branch template for phase strategy |
 | `git.milestone_branch_template` | `"gsd/{milestone}-{slug}"` | Branch template for milestone strategy |
 | `git.quick_branch_template` | `null` | Optional branch template for quick-task runs |
@@ -87,10 +97,12 @@ still apply.
 
 ```bash
 # Commit with automatic commit_docs + gitignore checks:
-gsd_run query commit "docs: update state" --files .planning/STATE.md
+PLANNING_ROOT=$(gsd_run query planning.inspect ${GSD_WS:+--ws=${GSD_WS##* }} --pick generated_from.planning_root)
+: "${PLANNING_ROOT:?}"
+gsd_run query commit "docs: update state" --files "${PLANNING_ROOT}/STATE.md"
 
 # Load config via state load (returns JSON):
-INIT=$(gsd_run query state.load)
+INIT=$(gsd_run query state.load ${GSD_WS:+--ws=${GSD_WS##* }})
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 # commit_docs is available in the JSON output
 
@@ -107,7 +119,9 @@ if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 **Commit via CLI (handles checks automatically):**
 
 ```bash
-gsd_run query commit "docs: update state" --files .planning/STATE.md
+PLANNING_ROOT=$(gsd_run query planning.inspect ${GSD_WS:+--ws=${GSD_WS##* }} --pick generated_from.planning_root)
+: "${PLANNING_ROOT:?}"
+gsd_run query commit "docs: update state" --files "${PLANNING_ROOT}/STATE.md"
 ```
 
 The CLI checks `commit_docs` config and gitignore status internally — no manual conditionals needed.
@@ -202,7 +216,7 @@ if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 
 Or use `state load` for the config values:
 ```bash
-INIT=$(gsd_run query state.load)
+INIT=$(gsd_run query state.load ${GSD_WS:+--ws=${GSD_WS##* }})
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 # Parse branching_strategy, phase_branch_template, milestone_branch_template from JSON
 ```
@@ -265,7 +279,7 @@ Generated from `CONFIG_DEFAULTS` (configuration.cjs) and `VALID_CONFIG_KEYS` (co
 | `project_code` | string\|null | `null` | Any short string | Prefix for phase dirs (e.g., `"CK"` produces `CK-01-foundation`) |
 | `response_language` | string\|null | `null` | Any language name | Language for user-facing prompts (e.g., `"Portuguese"`, `"Japanese"`) |
 | `context_window` | number | `200000` | `200000`, `1000000` | Context window size; set `1000000` for 1M-context models |
-| `resolve_model_ids` | boolean\|string | `false` | `false`, `true`, `"omit"` | Map model aliases to full Claude IDs; `"omit"` returns empty string |
+| `resolve_model_ids` | boolean\|string | `false` | `false`, `true`, `"omit"` | Map model aliases to full Claude IDs; `"omit"` returns the tier alias on Claude Code, the runtime tier map where one applies, otherwise an empty string |
 | `context` | string\|null | `null` | `"dev"`, `"research"`, `"review"` | Execution context profile that adjusts agent behavior: `"dev"` for development tasks, `"research"` for investigation/exploration, `"review"` for code review workflows |
 | `review.models.<cli>` | string\|null | `null` | Any model ID string | Per-CLI model override for /gsd:review (e.g., `review.models.codex`). Falls back to CLI default when null. |
 | `review.max_prompt_tokens` | number\|null | `null` | Any positive integer, or `null` | Central, cross-lane default cap (in estimated tokens) on the assembled review prompt; `null` means no trim. A per-lane `review.max_prompt_tokens_per_reviewer.<slug>` value overrides it for that lane: `-1` means unset (inherits this global default), `0` means "do not trim that lane" (not unset — it is an explicit, standing opt-out). _Alias:_ `max_prompt_tokens` is the flat-key form used in `CONFIG_DEFAULTS`; `review.max_prompt_tokens` is the canonical namespaced form. |
@@ -340,6 +354,7 @@ Set via `git.*` namespace (e.g., `"git": { "branching_strategy": "phase" }`).
 | `git.base_branch` | string\|null | `null` (auto-detect) | Any branch name | Target branch for PRs and merges; auto-detects from `origin/HEAD` when `null` |
 | `git.protected_branches` | array of non-empty strings | (none) | Non-empty branch names | Optional protected names added to the resolved base branch for execute-phase and ship warnings |
 | `git.create_tag` | boolean | `true` | `true`, `false` | Create git tags on milestone completion |
+| `git.repo_tagging` | string | `"single"` | `"single"`, `"per_repo"` | Milestone tagging mode; `"per_repo"` opts a multi-repo project into per-repository release records |
 | `git.phase_branch_template` | string | `"gsd/phase-{phase}-{slug}"` | Template with `{phase}`, `{slug}` | Branch naming template for `phase` strategy |
 | `git.milestone_branch_template` | string | `"gsd/{milestone}-{slug}"` | Template with `{milestone}`, `{slug}` | Branch naming template for `milestone` strategy |
 | `git.quick_branch_template` | string\|null | `null` | Template with `{slug}` | Optional branch template for quick-task runs |

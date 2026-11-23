@@ -146,6 +146,11 @@ const TOOL_NAME_MAP = {
   websearch: "WebSearch",
   task: "Task",
   subagent: "Task",
+  // >>> gsd:opencode-v2
+  // OpenCode 2.x tool ids (ADR-5331 E4): `shell` replaces `bash`, `patch` replaces `apply_patch`.
+  shell: "Bash",
+  patch: "MultiEdit",
+  // <<< gsd:opencode-v2
 };
 
 function mapToolName(tool) {
@@ -239,6 +244,18 @@ function gitProbingGuardTimeoutMs() {
   return GIT_PROBING_GUARD_FALLBACK_TIMEOUT_MS;
 }
 
+// Hooks are Node scripts. `process.execPath` is only a JS runtime when the host is Node or Bun
+// itself; inside OpenCode's single-file binary (1.x and 2.x) spawning it with a .js path boots
+// OpenCode instead and exits 0, silently disabling every guard (#4849). So: an explicit
+// GSD_HOOK_RUNTIME wins, then a Node/Bun host's own executable, else `node` from PATH.
+let warnedMissingRuntime = false;
+function hookRuntime() {
+  const fromEnv = process.env.GSD_HOOK_RUNTIME;
+  if (typeof fromEnv === "string" && fromEnv.length > 0) return fromEnv;
+  const base = path.basename(process.execPath).toLowerCase().replace(/\.exe$/, "");
+  return base === "node" || base === "bun" ? process.execPath : "node";
+}
+
 function runHook(hookFile, payload, opts = {}) {
   const hookPath = path.join(HOOKS_DIR, hookFile);
   if (!fs.existsSync(hookPath)) {
@@ -261,7 +278,7 @@ function runHook(hookFile, payload, opts = {}) {
     (GIT_PROBING_GUARDS.has(hookFile) ? gitProbingGuardTimeoutMs() : 8000);
   let result;
   try {
-    result = spawnSync(process.execPath, [hookPath], {
+    result = spawnSync(hookRuntime(), [hookPath], {
       input: JSON.stringify(payload),
       encoding: "utf8",
       timeout,
@@ -273,6 +290,15 @@ function runHook(hookFile, payload, opts = {}) {
     return { stdout: "", exitCode: 0, timedOut: false };
   }
 
+  if (result.error && !warnedMissingRuntime) {
+    // The runtime could not be started: the guard did not run. Fail open (adapter contract) but
+    // never silently (#4849).
+    warnedMissingRuntime = true;
+    console.error(
+      `[gsd-core] cannot start hook runtime '${hookRuntime()}' (${result.error.code || result.error.message}) — ` +
+        "GSD hooks are NOT enforced. Install Node.js or set GSD_HOOK_RUNTIME to a node/bun executable.",
+    );
+  }
   const stdout = (result.stdout || "").trim();
   const exitCode = result.status == null ? 0 : result.status;
   return { stdout, exitCode, timedOut: result.signal === "SIGTERM" };
@@ -296,11 +322,42 @@ function runHook(hookFile, payload, opts = {}) {
 function contextWarningsDisabled(cwd) {
   try {
     const configPath = path.join(cwd, '.planning', 'config.json');
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const config = JSON.parse(readConfigBounded(configPath, { required: true }));
     return config.hooks?.context_warnings === false;
   } catch {
     // Missing or unparseable config → proceed with defaults (context warnings enabled).
     return false;
+  }
+}
+
+/**
+ * UTF-8 text of a project config.json, read as a bounded regular file (#5759): a FIFO or device
+ * planted at the path would block a plain readFileSync, and this runs inside the editor process.
+ * Throws for an absent, non-regular or oversized (> 1 MiB) file. Mirrors hooks/lib/config-read.js;
+ * inlined because the plugin is copied on its own and cannot rely on hooks/lib being beside it.
+ */
+function readConfigBounded(file, options) {
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOCTTY || 0));
+  } catch (err) {
+    if (err && err.code === "ENOENT" && !(options && options.required)) return null;
+    throw err;
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw Object.assign(new Error(file + " is not a regular file"), { code: st.isDirectory() ? "EISDIR" : "ENXIO" });
+    if (st.size > 1024 * 1024) throw Object.assign(new Error(file + " exceeds 1048576 bytes"), { code: "EFBIG" });
+    const buf = Buffer.alloc(st.size);
+    let off = 0;
+    while (off < st.size) {
+      const n = fs.readSync(fd, buf, off, st.size - off, off);
+      if (n <= 0) break;
+      off += n;
+    }
+    return buf.toString("utf8", 0, off);
+  } finally {
+    try { fs.closeSync(fd); } catch { /* already closed */ }
   }
 }
 
@@ -339,7 +396,7 @@ function handleHookResult(hookResult, output) {
     throw new Error(reason);
   }
 
-  // Advisory: inject additionalContext into metadata + log
+  // Advisory: inject additionalContext into metadata
   const advisory =
     parsed &&
     parsed.hookSpecificOutput &&
@@ -356,10 +413,81 @@ function handleHookResult(hookResult, output) {
       }
       output.metadata._gsdAdvisory.push(advisory);
     }
-    // Best-effort visibility when metadata isn't surfaced to the model
-    console.error(advisory);
+    // Not written to stderr: the OpenCode TUI draws a plugin's stderr over the prompt input (#5648).
+    // >>> gsd:opencode-parity
+    deliverAdvisory(advisory, output);
+    // <<< gsd:opencode-parity
   }
 }
+// >>> gsd:opencode-parity (ADR-5331 Phase 3; OpenCode-only — the Kilo mirror omits this block)
+// The four opt-in community hooks are bash scripts. Their gates (hooks.community, graphify.*) are
+// re-checked here in-process so a project that has not opted in never pays a bash spawn per tool call.
+function readProjectConfig(cwd) {
+  try {
+    return JSON.parse(readConfigBounded(path.join(cwd, ".planning", "config.json"), { required: true }));
+  } catch {
+    return null;
+  }
+}
+
+function communityHooksEnabled(cwd) {
+  const config = readProjectConfig(cwd);
+  return !!config && config.hooks && config.hooks.community === true;
+}
+
+function graphifyAutoUpdateEnabled(cwd) {
+  const config = readProjectConfig(cwd);
+  return !!config && !process.env.CI && !!config.graphify &&
+    config.graphify.enabled === true && config.graphify.auto_update === true;
+}
+
+/**
+ * Run a GSD `.sh` hook under bash with the hook payload on stdin. Fails open: a missing script or no
+ * bash on PATH (a Windows host without Git Bash) is the same as the hook not being installed.
+ */
+function runShellHook(hookFile, payload, opts = {}) {
+  const hookPath = path.join(HOOKS_DIR, hookFile);
+  if (!fs.existsSync(hookPath)) return { stdout: "", exitCode: 0, timedOut: false };
+  let result;
+  try {
+    result = spawnSync(process.env.GSD_HOOK_SHELL || "bash", [hookPath], {
+      input: JSON.stringify(payload),
+      encoding: "utf8",
+      timeout: opts.timeout ?? 15000,
+      cwd: opts.cwd || currentCwd,
+      windowsHide: true,
+    });
+  } catch {
+    return { stdout: "", exitCode: 0, timedOut: false };
+  }
+  if (result.error) return { stdout: "", exitCode: 0, timedOut: false };
+  return {
+    stdout: (result.stdout || "").trim(),
+    exitCode: result.status == null ? 0 : result.status,
+    timedOut: result.signal === "SIGTERM",
+  };
+}
+
+// The SessionStart orientation text, produced once per session and handed to the model with its next request.
+let pendingSessionContext = null;
+
+// Advisories (read-before-edit, injection findings, phase-boundary, context warnings) were logged to stderr
+// only — OpenCode does not show a plugin's stderr or metadata to the model. They are appended to the tool's
+// own output instead, which is the one channel the model reads on both generations. An advisory raised before
+// the tool runs waits here for that tool's result.
+const pendingAdvisories = [];
+function deliverAdvisory(text, output) {
+  if (output && typeof output.output === "string") {
+    output.output += "\n\n[GSD advisory] " + text;
+    return;
+  }
+  if (!pendingAdvisories.includes(text) && pendingAdvisories.length < 5) pendingAdvisories.push(text);
+}
+function flushPendingAdvisories(output) {
+  if (!output || typeof output.output !== "string") return;
+  while (pendingAdvisories.length > 0) output.output += "\n\n[GSD advisory] " + pendingAdvisories.shift();
+}
+// <<< gsd:opencode-parity
 
 // ---------------------------------------------------------------------------
 // Frontmatter helpers (for config registration)
@@ -667,6 +795,13 @@ const GsdCorePlugin = async ({ directory } = {}) => {
         const r = runHook("gsd-secret-read-guard.js", prePayload());
         handleHookResult(r, output);
       }
+      // >>> gsd:opencode-parity
+      // 7. gsd-validate-commit.sh — Conventional Commits gate (opt-in: hooks.community)
+      if (claudeTool === "Bash" && communityHooksEnabled(cwd)) {
+        const r = runShellHook("gsd-validate-commit.sh", prePayload());
+        handleHookResult(r, output);
+      }
+      // <<< gsd:opencode-parity
     },
 
     // ── tool.execute.after — PostToolUse hooks ─────────────────────────
@@ -690,6 +825,25 @@ const GsdCorePlugin = async ({ directory } = {}) => {
             : String(output.output);
         output.output = rewriteContent(content);
       }
+      // >>> gsd:opencode-parity
+      flushPendingAdvisories(output);
+      // gsd-phase-boundary.sh — reminder when .planning/ files change outside the workflow (opt-in)
+      // gsd-graphify-update.sh — rebuild the knowledge graph after a HEAD-advancing git op (opt-in)
+      {
+        const postPayload = {
+          hook_event_name: "PostToolUse",
+          tool_name: claudeTool,
+          tool_input: toolInput,
+          cwd,
+        };
+        if ((claudeTool === "Write" || claudeTool === "Edit") && communityHooksEnabled(cwd)) {
+          handleHookResult(runShellHook("gsd-phase-boundary.sh", postPayload), output);
+        }
+        if (claudeTool === "Bash" && graphifyAutoUpdateEnabled(cwd)) {
+          handleHookResult(runShellHook("gsd-graphify-update.sh", postPayload, { timeout: 8000 }), output);
+        }
+      }
+      // <<< gsd:opencode-parity
 
       // gsd-read-injection-scanner.js — scan Read/WebFetch/WebSearch results
       if (
@@ -727,6 +881,16 @@ const GsdCorePlugin = async ({ directory } = {}) => {
         handleHookResult(r, output);
       }
     },
+    // >>> gsd:opencode-parity
+    // ── experimental.chat.system.transform — SessionStart orientation (gsd-session-state.sh) ──
+    "experimental.chat.system.transform": async (_input, output) => {
+      if (!pendingSessionContext) return;
+      const text = pendingSessionContext;
+      pendingSessionContext = null;
+      output.system = output.system || [];
+      output.system.push(text);
+    },
+    // <<< gsd:opencode-parity
 
     // ── experimental.session.compacting — PreCompact ───────────────────
     "experimental.session.compacting": async (_input, output) => {
@@ -770,6 +934,23 @@ const GsdCorePlugin = async ({ directory } = {}) => {
           session_id: currentSessionId,
           cwd: currentCwd,
         });
+        // >>> gsd:opencode-parity
+        // gsd-session-state.sh — project state orientation for the session (opt-in: hooks.community)
+        if (communityHooksEnabled(currentCwd)) {
+          const r = runShellHook("gsd-session-state.sh", {
+            hook_event_name: "SessionStart",
+            session_id: currentSessionId,
+            cwd: currentCwd,
+          });
+          try {
+            const parsed = JSON.parse(r.stdout);
+            const text = parsed && parsed.hookSpecificOutput && parsed.hookSpecificOutput.additionalContext;
+            pendingSessionContext = typeof text === "string" && text ? text : null;
+          } catch {
+            pendingSessionContext = null;
+          }
+        }
+        // <<< gsd:opencode-parity
         return;
       }
 
@@ -864,7 +1045,106 @@ GsdCorePlugin._internals = {
   GsdCorePlugin,
 };
 
+// >>> gsd:opencode-v2 (ADR-5331 D2; OpenCode 2.x entrypoint — the Kilo mirror omits this block)
+// OpenCode 2.x calls `setup(ctx)` with a `ctx` exposing `ctx.tool.hook(...)`; 1.x loads `server`
+// and never calls `setup` with such a ctx. `setup` therefore returns at once unless it is
+// handed a 2.x ctx. The 1.x hook handlers are reused through thin adapters so both generations
+// run the same guards.
+function v2ResultText(result) {
+  const first = result && Array.isArray(result.content) ? result.content[0] : null;
+  return first && typeof first.text === "string" ? first.text : null;
+}
+
+async function setupV2(ctx) {
+  if (!(ctx && ctx.tool && typeof ctx.tool.hook === "function")) return undefined;
+  const hooks = await GsdCorePlugin({ directory: ctx.directory });
+  // A thrown error in a 2.x before-hook blocks the tool (verified on 2.0.27), as in 1.x.
+  await ctx.tool.hook("execute.before", async (e) => {
+    await hooks["tool.execute.before"]({ tool: e.tool }, { args: e.input || {} });
+  });
+  await ctx.tool.hook("execute.after", async (e) => {
+    if (e.status !== "completed") return;
+    const text = v2ResultText(e.result);
+    const out = { output: text, metadata: {} };
+    await hooks["tool.execute.after"]({ tool: e.tool, args: e.input || {} }, out);
+    if (text !== null && typeof out.output === "string" && out.output !== text) {
+      e.result.content[0].text = out.output;
+    }
+    // 2.x emits no file.edited event (observed on 2.0.27), so derive it from the edit tools: the
+    // only consumer is the .planning/config.json reload hook.
+    const claudeTool = mapToolName(e.tool);
+    if (claudeTool === "Write" || claudeTool === "Edit" || claudeTool === "MultiEdit") {
+      const edited = mapToolInput(e.input || {}).file_path;
+      if (typeof edited === "string" && edited.endsWith("config.json")) {
+        await hooks.event({
+          event: { type: "file.edited", properties: { file: edited, cwd: path.dirname(path.dirname(edited)) } },
+        });
+      }
+    }
+  });
+  if (ctx.session && typeof ctx.session.hook === "function") {
+    // 2.x compaction event: { sessionID, system: [{ type: "text", text }], messages, … }; items added
+    // to `system` reach the summarizer (observed on 2.0.27).
+    // gsd:opencode-parity: SessionStart orientation reaches the model through the 2.x context hook.
+    await ctx.session.hook("context", async (e) => {
+      if (!e || !Array.isArray(e.system)) return;
+      const out = { system: [] };
+      await hooks["experimental.chat.system.transform"]({}, out);
+      for (const line of out.system) e.system.push({ type: "text", text: String(line) });
+    });
+    await ctx.session.hook("compaction", async (e) => {
+      if (!e || !Array.isArray(e.system)) return;
+      const out = { context: [] };
+      await hooks["experimental.session.compacting"]({}, out);
+      for (const line of out.context) e.system.push({ type: "text", text: String(line) });
+    });
+  }
+  if (ctx.shell && typeof ctx.shell.hook === "function") {
+    await ctx.shell.hook("create.before", async (e) => {
+      if (e && e.env && typeof e.env === "object") e.env.GSD_DIR = GSD_CORE;
+    });
+  }
+  let stop = null;
+  const seenSessions = new Set();
+  if (ctx.event && typeof ctx.event.subscribe === "function") {
+    const ac = new AbortController();
+    stop = () => ac.abort();
+    (async () => {
+      for await (const ev of ctx.event.subscribe({ signal: ac.signal })) {
+        // 2.0.27 shape (observed): { type, location: { directory }, data: { sessionID, … } }.
+        const d = (ev && ev.data) || {};
+        const dir = (ev && ev.location && ev.location.directory) || (d.location && d.location.directory);
+        try {
+          // A 2.x `run` never emits `session.created` (observed on 2.0.27: the first event of a session is
+          // `session.inbox.enqueued`). The first event that names a session is its SessionStart.
+          if (ev.type !== "session.created" && typeof d.sessionID === "string" && !seenSessions.has(d.sessionID)) {
+            seenSessions.add(d.sessionID);
+            await hooks.event({
+              event: { type: "session.created", properties: { info: { id: d.sessionID, directory: dir } }, sessionID: d.sessionID },
+            });
+          } else if (ev.type === "session.created" && typeof d.sessionID === "string") {
+            seenSessions.add(d.sessionID);
+          }
+          await hooks.event({
+            event: {
+              type: ev.type,
+              properties: { info: { id: d.sessionID, directory: dir }, file: d.file, cwd: dir },
+              sessionID: d.sessionID,
+            },
+          });
+        } catch {
+          // one bad event must not end the subscription
+        }
+      }
+    })().catch(() => {});
+  }
+  return stop || undefined;
+}
+// <<< gsd:opencode-v2
 const gsdCorePluginExport = { server: GsdCorePlugin };
+// >>> gsd:opencode-v2
+Object.defineProperty(gsdCorePluginExport, "setup", { value: setupV2, enumerable: false });
+// <<< gsd:opencode-v2
 Object.defineProperty(gsdCorePluginExport, "id", {
   value: "gsd-core",
   enumerable: false,

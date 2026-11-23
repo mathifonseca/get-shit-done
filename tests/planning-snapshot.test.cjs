@@ -1096,6 +1096,66 @@ describe('stateStatus field (Phase 11, #3309)', () => {
   });
 });
 
+describe('stateLineCount field (#5830)', () => {
+  const { countLines } = planningSnapshotLib;
+  // A line is any text without a line terminator; CR alone is excluded so
+  // the generator never fabricates a CRLF split across two lines.
+  const lineArb = fc.string({ maxLength: 20 }).filter((s) => !/[\r\n]/.test(s));
+  const eolArb = fc.constantFrom('\n', '\r\n');
+
+  test('property: a terminated file has one line per terminator, LF/CRLF mixed freely', () => {
+    fc.assert(
+      fc.property(fc.array(fc.tuple(lineArb, eolArb), { minLength: 1, maxLength: 40 }), (pairs) => {
+        const content = pairs.map(([line, eol]) => line + eol).join('');
+        assert.strictEqual(countLines(content), pairs.length);
+      }),
+      { seed: 20261104 },
+    );
+  });
+
+  test('property: dropping the final terminator does not change the count when the last line is non-empty', () => {
+    fc.assert(
+      fc.property(
+        fc.array(lineArb, { minLength: 0, maxLength: 40 }),
+        lineArb.filter((s) => s.length > 0),
+        eolArb,
+        (init, last, eol) => {
+          const lines = [...init, last];
+          assert.strictEqual(countLines(lines.join(eol)), lines.length);
+          assert.strictEqual(countLines(lines.join(eol) + eol), lines.length);
+        },
+      ),
+      { seed: 20261105 },
+    );
+  });
+
+  test('boundary: an empty STATE.md is 0 lines, scope COMPLETE', (t) => {
+    const cwd = createTempDir('gsd-5830-lc1-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+    fs.writeFileSync(path.join(planningDirOf(cwd), 'STATE.md'), '');
+
+    assert.deepStrictEqual(buildPlanningSnapshot(cwd).stateLineCount, { value: 0, scope: SCOPE.COMPLETE });
+  });
+
+  test('boundary: a STATE.md without a final line terminator counts its last line', (t) => {
+    const cwd = createTempDir('gsd-5830-lc2-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+    fs.writeFileSync(path.join(planningDirOf(cwd), 'STATE.md'), '# Project State\n\nPhase: 1 of 2');
+
+    assert.deepStrictEqual(buildPlanningSnapshot(cwd).stateLineCount, { value: 3, scope: SCOPE.COMPLETE });
+  });
+
+  test('unreadable: STATE.md as a directory yields a non-answer', (t) => {
+    const cwd = createTempDir('gsd-5830-lc3-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(path.join(planningDirOf(cwd), 'STATE.md'), { recursive: true });
+
+    assert.deepStrictEqual(buildPlanningSnapshot(cwd).stateLineCount, { value: null, scope: SCOPE.UNREADABLE });
+  });
+});
+
 describe('roadmapDeclaredPhases field (Phase 11, #3309)', () => {
   test('happy: every declared phase id paired with the milestone section it was found under', (t) => {
     const cwd = createTempDir('gsd-3309-rdp1-');
@@ -1972,5 +2032,44 @@ describe('planningTracked field (#3586, matrix rows A1-A12)', () => {
       scope: SCOPE.COMPLETE,
       reason: 'ok_truncated',
     });
+  });
+});
+
+describe('#5676: planning snapshot roadmap readers under milestone-prefixed', () => {
+  function buildFixture(t) {
+    const cwd = createTempDir('gsd-5676-snap-');
+    t.after(() => cleanup(cwd));
+    writeFile(cwd, '.planning/config.json', JSON.stringify({ phase_id_convention: 'milestone-prefixed' }));
+    writeState(cwd, { milestone: 'v1.0' });
+    writeRoadmap(cwd, [
+      '---',
+      'phase_id_convention: milestone-prefixed',
+      '---',
+      '',
+      '# Roadmap',
+      '',
+      '## [GSD] v1.0 — Core',
+      '',
+      '- [x] **Phase 3-01: Alpha**',
+      '- [ ] **Phase 3-02: Beta**',
+      '',
+      '### Phase 3-01: Alpha',
+      '**Goal:** A',
+      '',
+      '### Phase 3-02: Beta',
+      '**Goal:** B',
+      '',
+    ].join('\n'));
+    return cwd;
+  }
+
+  test('#5676: roadmapPhaseCheckboxes keys each M-NN checklist row', (t) => {
+    const snap = buildPlanningSnapshot(buildFixture(t));
+    assert.deepStrictEqual(snap.roadmapPhaseCheckboxes.value, { '3-01': true, '3-02': false });
+  });
+
+  test('#5676: currentMilestoneRoadmapPhaseIds lists each M-NN heading', (t) => {
+    const snap = buildPlanningSnapshot(buildFixture(t));
+    assert.deepStrictEqual(snap.currentMilestoneRoadmapPhaseIds.value, ['3-01', '3-02']);
   });
 });

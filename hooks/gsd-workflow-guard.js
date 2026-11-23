@@ -30,7 +30,8 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { tokenize, skipToSubcommand } = require('./lib/git-cmd.js');
 const { HOOK_ON_CRASH, allow, deny, crash } = require('./lib/hook-exit.js');
-const { reportIfUndetermined, BLOCKING_GUARD_PROBE_TIMEOUT_MS } = require('./lib/git-probe.js');
+const { readConfigFileBounded } = require('./lib/config-read.js');
+const { reportIfUndetermined, gitEnv, BLOCKING_GUARD_PROBE_TIMEOUT_MS } = require('./lib/git-probe.js');
 
 // This guard is almost entirely advisory (fail open — a broken advisory must
 // never wedge every tool call), with ONE hard block (#3504 force-add-on-
@@ -89,8 +90,9 @@ function forceGitAddCwds(command, defaultCwd) {
 }
 
 function currentBranch(cwd) {
-  const result = spawnSync('git', ['branch', '--show-current'], {
+  const result = spawnSync('git', ['branch', '--show-current'], { // allow-index-refresh: reads HEAD only, never opens the index
     cwd,
+    env: gitEnv(),
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
     windowsHide: true,
@@ -186,7 +188,7 @@ function readHooksConfig(cwd) {
   const configPath = path.join(cwd, '.planning', 'config.json');
   if (!fs.existsSync(configPath)) return {};
   try {
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const config = JSON.parse(readConfigFileBounded(configPath, { required: true }));
     return config.hooks || {};
   } catch (e) {
     return {};

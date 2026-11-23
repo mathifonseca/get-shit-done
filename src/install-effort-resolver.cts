@@ -31,11 +31,17 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
+import { resolveGsdHome } from './runtime-homes.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- #6030 CJS interop import, as in the sibling config modules
+import configLoader = require('./config-loader.cjs');
+const { _deepMergeConfig, globalDefaultsPath } = configLoader;
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- config-file-read.cjs is an export= CommonJS module
+import configFileReadMod = require('./config-file-read.cjs');
+const { unboundedConfigFileReason, printablePath, readConfigFileBounded } = configFileReadMod;
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- install-fs-adapter.cjs is an export= CommonJS module
 import installFsAdapter = require('./install-fs-adapter.cjs');
-const { installFs } = installFsAdapter;
+const { installFs, isRealInstallFs } = installFsAdapter;
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- model-resolver.cjs is an export= CommonJS module
 import modelResolver = require('./model-resolver.cjs');
@@ -59,17 +65,32 @@ interface EffortConfig {
  */
 function _readGsdConfigFile(absPath: string, label: string): Record<string, unknown> | null {
   if (!installFs().existsSync(absPath)) return null;
+  // #5759: refuse a FIFO/device/socket or an oversized file BEFORE the adapter's blocking read
+  // (shared guard; a path that is not on the real fs is left to the adapter).
   let raw: string;
   try {
-    raw = installFs().readFileSync(absPath, 'utf-8');
+    if (isRealInstallFs()) {
+      // The real fs: the descriptor-bound reader (non-blocking open, fstat, cap).
+      const text = readConfigFileBounded(absPath);
+      if (text === null) return null;
+      raw = text;
+    } else {
+      // An injected adapter cannot give a descriptor: stat the real path first (best effort).
+      const unbounded = unboundedConfigFileReason(absPath);
+      if (unbounded !== null) {
+        process.stderr.write(`gsd: warning — could not read ${label} (${printablePath(absPath)}): ${unbounded}\n`);
+        return null;
+      }
+      raw = installFs().readFileSync(absPath, 'utf-8');
+    }
   } catch (err) {
-    process.stderr.write(`gsd: warning — could not read ${label} (${absPath}): ${(err as Error).message}\n`);
+    process.stderr.write(`gsd: warning — could not read ${label} (${printablePath(absPath)}): ${printablePath((err as Error).message)}\n`);
     return null;
   }
   try {
     return JSON.parse(raw) as Record<string, unknown>;
   } catch (err) {
-    process.stderr.write(`gsd: warning — invalid JSON in ${label} (${absPath}): ${(err as Error).message}\n`);
+    process.stderr.write(`gsd: warning — invalid JSON in ${label} (${printablePath(absPath)}): ${printablePath((err as Error).message)}\n`);
     return null;
   }
 }
@@ -186,7 +207,7 @@ function _findAncestorGsdConfigPath(targetDir: string): string | null {
  */
 function readGsdEffectiveEffortConfig(targetDir: string | null = null): EffortConfig | null {
   const homeDefaults = _readGsdConfigFile(
-    path.join(os.homedir(), '.gsd', 'defaults.json'),
+    globalDefaultsPath(resolveGsdHome()),
     '~/.gsd/defaults.json',
   );
 
@@ -213,20 +234,16 @@ function readGsdEffectiveEffortConfig(targetDir: string | null = null): EffortCo
   // home block's `light`/`standard` entries (the top-level spread would
   // otherwise replace the whole block, the same defect class as the
   // manifest-replacement this change fixes).
-  return {
-    ...(homeEffort || {}),
-    ...(projectEffort || {}),
-    // Deep-merge agent_overrides (project wins per-key)
-    agent_overrides: {
-      ...((homeEffort && homeEffort.agent_overrides) || {}),
-      ...((projectEffort && projectEffort.agent_overrides) || {}),
-    },
-    // Deep-merge routing_tier_defaults (project wins per-tier)
-    routing_tier_defaults: {
-      ...((homeEffort && homeEffort.routing_tier_defaults) || {}),
-      ...((projectEffort && projectEffort.routing_tier_defaults) || {}),
-    },
-  };
+  // One merge owner (#6030): the loader's deep merge, with both blocks normalized first so a
+  // non-object `agent_overrides` or `routing_tier_defaults` is treated as absent here.
+  const block = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const asBlocks = (effort: EffortConfig | null): Record<string, unknown> => ({
+    ...(effort || {}),
+    agent_overrides: block(effort && effort.agent_overrides),
+    routing_tier_defaults: block(effort && effort.routing_tier_defaults),
+  });
+  return _deepMergeConfig(asBlocks(homeEffort), asBlocks(projectEffort)) as EffortConfig;
 }
 
 /**

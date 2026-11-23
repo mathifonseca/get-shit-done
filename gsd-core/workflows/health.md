@@ -128,7 +128,7 @@ if [ "$INSPECTED_ISOLATION" = "none" ] && [ -n "$USE_WORKTREES" ] && [ "$USE_WOR
 fi
 ```
 
-If the check prints, append it to the Warnings section of the report as `[W025]` with the printed fix, include it in the displayed warning count, and report `Status: DEGRADED` if `validate.health` returned `healthy` (a config the execution workflows fail closed on is not a healthy planning state). It is not auto-repairable: an explicit `true` may be intentional for a worktree-capable install sharing the same `.planning/config.json`, so the remedy is the user's call (#2486).
+If the check prints, append it to the Warnings section of the report as `[W025]` with the printed fix, include it in the displayed warning count, and report `Status: DEGRADED` if `validate.health` returned `healthy` (a config the execution workflows fail closed on is not a healthy planning state). It is not auto-repairable: an explicit `true` may be intentional for a worktree-capable install sharing the same `{planning_root}/config.json` (`{planning_root}`: the active scope's root, from `planning.inspect`), so the remedy is the user's call (#2486).
 </step>
 
 <step name="format_output">
@@ -249,7 +249,9 @@ Report final status.
 | W027 | warning | Stale git worktree (not modified in a long time) | No |
 | W028 | warning | A GSD-owned install scope shadows another on this machine | No |
 | W029 | warning | .planning/ matches a gitignore rule but is still tracked by git (gitignore has no effect on already-tracked files) | No |
-| W030 | warning | Phase verification report status is outside the closed set | No |
+| W030 | warning | Phase verification report status is outside the closed set | Yes (known legacy statuses only) |
+| W031 | warning | STATE.md is more than 3x its 100-line target | No |
+| W032 | warning | The gsd-core Claude Code plugin is enabled but no statusline feeds the context monitor, so context warnings are inactive | No |
 | I001 | info | Plan without SUMMARY (may be in progress) | No |
 | I010 | info | Resolved CWD reported alongside the E010 home-directory guard | No |
 
@@ -266,6 +268,7 @@ Note: this table is **generated** — do not hand-edit it. It is produced by `no
 | addNyquistKey | Add workflow.nyquist_validation: true to config.json | None — matches existing default |
 | addAiIntegrationPhaseKey | Add workflow.ai_integration_phase: true to config.json | None — matches existing default |
 | backfillMilestones | Synthesize missing MILESTONES.md entries from `.planning/milestones/vX.Y-ROADMAP.md` snapshots | None — additive only; triggered by `--backfill` flag |
+| repairVerificationStatus | Rewrite a known legacy verification `status` (`pass_with_caveats`) to `passed`, keeping the original as `legacy_status` | None — only the `status` line changes; unknown statuses are never touched |
 
 **Not repairable (too risky):**
 - PROJECT.md, ROADMAP.md content

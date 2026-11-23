@@ -32,7 +32,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import type { PhaseDirectoryContext } from './phase-id.cjs';
 import { collectSection } from './markdown-sectionizer.cjs';
+import { readOnlyGitEnv } from './read-only-git-env.cjs';
+import { formatGsdSlash, resolveRuntime, runtimeCommand } from './runtime-slash.cjs';
 // #3696: the calendar-validity predicate moved to the STATE.md document module
 // so `state validate` can assert the same `last_activity` invariant this reader
 // already enforces (ADR-227). Two copies would let the two surfaces disagree
@@ -42,7 +45,7 @@ import ioMod = require('./io.cjs');
 const { output } = ioMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
-const { planningPaths } = planningWorkspace;
+const { planningPaths, resolvePhaseIdConvention } = planningWorkspace;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatter = require('./frontmatter.cjs');
 const { extractFrontmatter, frontmatterBlock } = frontmatter;
@@ -50,14 +53,20 @@ const { extractFrontmatter, frontmatterBlock } = frontmatter;
 import phaseLifecycle = require('./phase-lifecycle.cjs');
 const { deriveProgressFromRoadmap } = phaseLifecycle;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+import roadmapParser = require('./roadmap-parser.cjs');
+const { extractCurrentMilestone, scanMilestonePhaseIds } = roadmapParser;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 import stateDocument = require('./state-document.cjs');
 const { stateFieldValue } = stateDocument;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseId = require('./phase-id.cjs');
-const { comparePhaseNum, extractPhaseToken, matchPhaseDirs, normalizePhaseName, parsePhaseFromProse, stripProjectCodePrefix } = phaseId;
+const { comparePhaseNum, extractPhaseToken, customPhaseQuery, customDirectoryOwner, parsePhaseFromProse, stripProjectCodePrefix } = phaseId;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import stateMod = require('./state.cjs');
 const { readStateHeadFreshness } = stateMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseLocatorMod = require('./phase-locator.cjs');
+const { phaseDirectoryOptions, resolvePhaseDirectoryLookup, matchPhaseDirsForLookup } = phaseLocatorMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import unusableInput = require('./unusable-input.cjs');
 const { warnUnusableInput, UNUSABLE_REASON } = unusableInput;
@@ -115,6 +124,14 @@ export interface SmartEntrySignals {
    */
   roadmap_total_phases: number | null;
   roadmap_completed_phases: number | null;
+  /**
+   * The current milestone's phase ids from ROADMAP.md, in phase order (#5228).
+   * A milestone that continues an earlier milestone's numbering (phases 9-17)
+   * is positioned by this list, not by the raw phase number. Empty when
+   * ROADMAP.md is absent, unreadable, or lists no phases — callers then fall
+   * back to the STATE.md figures.
+   */
+  milestone_phases: string[];
   /**
    * Commits between STATE.md's recorded `state_head` and HEAD (#2573). Null
    * when unknown — no stamp, no git, or an unresolvable commit.
@@ -179,8 +196,8 @@ function parseIntOrNull(s: string | null): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function phaseTokenFromDirName(name: string): string | null {
-  const token = extractPhaseToken(name);
+function phaseTokenFromDirName(name: string, convention?: string): string | null {
+  const token = extractPhaseToken(name, convention);
   // #2528: the shape probe runs on the PROJECT-CODE-STRIPPED token. A prefixed
   // directory tokenizes to `MEM-05-80-20`, which does not start with a digit,
   // so the unstripped probe rejected it and the entry was dropped before any
@@ -291,6 +308,18 @@ function readGitSignals(cwd: string): GitSignals {
         windowsHide: true,
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 10_000,
+        // #5048: readGitSignals runs `git status`, which by default refreshes
+        // the index and takes an *optional* `.git/index.lock` to write the
+        // refreshed copy back. That lock is the one a real `git add` / `git
+        // commit` needs, so a routine "which phase am I in" probe can fail
+        // someone else's commit with `Unable to create '.git/index.lock': File
+        // exists`. GIT_OPTIONAL_LOCKS=0 turns off exactly that optional write.
+        // The `rev-parse` / `log` calls sharing this helper never open the
+        // index, so the variable is inert for them. The block itself is owned by
+        // src/read-only-git-env.cts and shared with every other read-only seam;
+        // parity across every read-only surface is asserted in
+        // tests/git-optional-locks-parity.test.cjs.
+        env: readOnlyGitEnv(),
       });
     } catch {
       return '';
@@ -308,9 +337,9 @@ function readGitSignals(cwd: string): GitSignals {
   return { has_git: true, dirty, unpushed };
 }
 
-/** Leading numeric phase token from a STATE.md scalar or body `Phase:` value. */
-function phaseTokenFromState(raw: string | null): string | null {
-  return parsePhaseFromProse(raw).phase;
+/** Phase identity from a STATE.md scalar or body `Phase:` value, honoring custom naming when a context is supplied. */
+function phaseTokenFromState(raw: string | null, context?: PhaseDirectoryContext): string | null {
+  return parsePhaseFromProse(raw, undefined, context).phase;
 }
 
 /**
@@ -321,22 +350,30 @@ function phaseTokenFromState(raw: string | null): string | null {
  */
 function detectVerifyFailed(cwd: string, currentPhaseRaw: string | null): boolean {
   const phasesDir = path.join(planningPaths(cwd).phases);
+  // #4304: both the directory admission scan and the later selector must read
+  // the same current-checkout grammar. Bracket is the only opt-in widening.
+  const convention = resolvePhaseIdConvention(cwd) === 'bracket' ? 'bracket' : undefined;
+  const directoryContext = phaseDirectoryOptions(cwd);
   let entries: string[] = [];
   try {
     entries = fs.readdirSync(phasesDir)
-      .map((name) => ({ name, phaseToken: phaseTokenFromDirName(name) }))
+      .map((name) => {
+        const custom = customPhaseQuery(name, directoryContext);
+        const parts = custom && customDirectoryOwner(name, custom);
+        return { name, phaseToken: parts ? parts.id : phaseTokenFromDirName(name, convention) };
+      })
       .filter((entry): entry is { name: string; phaseToken: string } => entry.phaseToken !== null)
-      .sort((a, b) => comparePhaseNum(a.phaseToken, b.phaseToken) || a.name.localeCompare(b.name))
+      .sort((a, b) => comparePhaseNum(a.phaseToken, b.phaseToken, directoryContext) || a.name.localeCompare(b.name))
       .map((entry) => entry.name);
   } catch {
     return false;
   }
   if (entries.length === 0) return false;
 
-  const phaseToken = phaseTokenFromState(currentPhaseRaw);
+  const phaseToken = phaseTokenFromState(currentPhaseRaw, directoryContext);
   let targetDir: string | undefined;
   if (phaseToken) {
-    const normalized = normalizePhaseName(phaseToken);
+    const lookup = resolvePhaseDirectoryLookup(cwd, phaseToken, undefined, directoryContext);
     // #2528: the fourth directory-resolution site, and the one where a miss is
     // silent — a phase whose directory cannot be found reports "not failed",
     // which reads identically to a healthy phase. It must therefore apply the
@@ -345,7 +382,7 @@ function detectVerifyFailed(cwd: string, currentPhaseRaw: string | null): boolea
     // surfaces its own failed verification. `entries` is already sorted, and
     // `matchPhaseDirs` filters without reordering, so taking the first match
     // preserves the previous `.find()` selection exactly.
-    const { matches } = matchPhaseDirs(entries, normalized);
+    const { matches } = matchPhaseDirsForLookup(entries, lookup, undefined, directoryContext);
     targetDir = matches[0];
     if (!targetDir) return false;
   } else {
@@ -408,6 +445,10 @@ export function detectSignals(cwd: string, now: () => number = Date.now): SmartE
   const hasPlanning = fs.existsSync(paths.planning);
   const hasRoadmap = fs.existsSync(paths.roadmap);
   const git = readGitSignals(cwd);
+  // #6431: `/gsd-pause-work` never writes `paused_at`; what it always writes is the ROOT `.planning/HANDOFF.json` (whatever scope
+  // the human-readable `.continue-here.md` lands in, and under a workstream too), and `/gsd-resume-work` consumes it. That file
+  // IS the recorded pause, so it classifies as paused alongside the STATE.md field, and a resume routes forward again.
+  const handoffPresent = hasPlanning && fs.existsSync(path.join(cwd, '.planning', 'HANDOFF.json'));
 
   const empty: SmartEntrySignals = {
     current_phase: null,
@@ -418,13 +459,14 @@ export function detectSignals(cwd: string, now: () => number = Date.now): SmartE
     has_roadmap: hasRoadmap,
     git_dirty: git.dirty,
     git_unpushed: git.unpushed,
-    paused: false,
+    paused: handoffPresent,
     blockers: [],
     has_git: git.has_git,
     verify_failed: false,
     stale_activity: false,
     roadmap_total_phases: null,
     roadmap_completed_phases: null,
+    milestone_phases: [],
     // No STATE.md (or unreadable) → no stamp to compare. Unknown, not fresh.
     state_commits_behind: null,
     state_commit_stale: null,
@@ -478,7 +520,7 @@ export function detectSignals(cwd: string, now: () => number = Date.now): SmartE
     for (const item of items) blockers.push(item.replace(/^-\s+/, '').trim());
   }
 
-  const paused = Boolean(pausedAtRaw && pausedAtRaw.trim());
+  const paused = Boolean(pausedAtRaw && pausedAtRaw.trim()) || handoffPresent;
 
   // Stale = no recorded activity for IDLE_STALE_MS. Used only by idle-stranded.
   // Computed here (with the clock seam) so the pure classify() stays a function
@@ -508,12 +550,18 @@ export function detectSignals(cwd: string, now: () => number = Date.now): SmartE
   // Progress table — isComplete falls back to the legacy comparison in that case.
   let roadmapTotalPhases: number | null = null;
   let roadmapCompletedPhases: number | null = null;
+  let milestonePhases: string[] = [];
   if (hasRoadmap) {
     try {
       const roadmapContent = fs.readFileSync(paths.roadmap, 'utf8');
       const derived = deriveProgressFromRoadmap(roadmapContent);
       roadmapTotalPhases = derived.totalPhases;
       roadmapCompletedPhases = derived.completedPhases;
+      // #5228: the ordered phase list of the current milestone, from the same
+      // scan the milestone-scoped commands use.
+      milestonePhases = [
+        ...scanMilestonePhaseIds(extractCurrentMilestone(roadmapContent, cwd), resolvePhaseIdConvention(cwd)),
+      ].sort(comparePhaseNum);
     } catch {
       /* ROADMAP.md unreadable — leave null; isComplete falls back to legacy. */
     }
@@ -541,6 +589,7 @@ export function detectSignals(cwd: string, now: () => number = Date.now): SmartE
     stale_activity: staleActivity,
     roadmap_total_phases: roadmapTotalPhases,
     roadmap_completed_phases: roadmapCompletedPhases,
+    milestone_phases: milestonePhases,
     state_commits_behind: freshness.commits_behind,
     state_commit_stale: freshness.commit_stale,
   };
@@ -571,8 +620,16 @@ function isComplete(s: SmartEntrySignals): boolean {
     // Legacy path: STATE.md comparison. It only fires when ROADMAP.md is
     // absent or has no Progress table, and uses canonical phase-id ordering
     // so dotted phase ids are never coerced to JavaScript numbers.
-    if (s.total_phases === null || s.current_phase === null) return false;
-    if (comparePhaseNum(s.current_phase, s.total_phases) < 0) return false;
+    if (s.current_phase === null) return false;
+    if (s.milestone_phases.length > 0) {
+      // #5228: compare against the milestone's LAST phase. The phase count is
+      // not a phase number once numbering continues from an earlier milestone.
+      const last = s.milestone_phases[s.milestone_phases.length - 1];
+      if (comparePhaseNum(s.current_phase, last) < 0) return false;
+    } else {
+      if (s.total_phases === null) return false;
+      if (comparePhaseNum(s.current_phase, s.total_phases) < 0) return false;
+    }
   }
   // Status regex: require milestone-level completion language. The pre-fix
   // regex matched any "shipped" / "done" substring (per-phase language).
@@ -638,52 +695,54 @@ function rec(id: string, label: string, command: string): SmartEntryAction {
 }
 
 /** Per-situation ordered action list; recommended action first. */
-export function actionsFor(situation: Situation, s: SmartEntrySignals): SmartEntryAction[] {
+export function actionsFor(situation: Situation, s: SmartEntrySignals, runtime = 'claude'): SmartEntryAction[] {
+  // #4859: commands are printed verbatim, so name them the way this runtime registers them.
+  const cmd = (name: string): string => formatGsdSlash(name, runtime) as string;
   const phaseN = s.current_phase ?? '';
   const execLabel = phaseN === '' ? 'Continue executing' : `Continue executing phase ${phaseN}`;
   switch (situation) {
     case 'no-project':
       return [
-        rec('new-project', 'Start a new project', '/gsd:new-project'),
-        action('map-codebase', 'Map an existing codebase', '/gsd:map-codebase'),
-        action('quick', 'Quick task', '/gsd:quick'),
-        action('help', 'Show help', '/gsd:help'),
+        rec('new-project', 'Start a new project', cmd('new-project')),
+        action('map-codebase', 'Map an existing codebase', cmd('map-codebase')),
+        action('quick', 'Quick task', cmd('quick')),
+        action('help', 'Show help', cmd('help')),
       ];
     case 'paused':
       return [
-        rec('resume-work', 'Resume work', '/gsd:resume-work'),
-        action('progress', 'Show progress', '/gsd:progress'),
-        action('quick', 'Quick task', '/gsd:quick'),
-        action('help', 'Show help', '/gsd:help'),
+        rec('resume-work', 'Resume work', cmd('resume-work')),
+        action('progress', 'Show progress', cmd('progress')),
+        action('quick', 'Quick task', cmd('quick')),
+        action('help', 'Show help', cmd('help')),
       ];
     case 'blocked':
       return [
-        rec('debug', 'Debug the blocker', '/gsd:debug'),
-        action('verify-work', 'Verify current work', '/gsd:verify-work'),
-        action('capture', 'Capture a note', '/gsd:capture'),
-        action('progress', 'Show progress', '/gsd:progress'),
+        rec('debug', 'Debug the blocker', cmd('debug')),
+        action('verify-work', 'Verify current work', cmd('verify-work')),
+        action('capture', 'Capture a note', cmd('capture')),
+        action('progress', 'Show progress', cmd('progress')),
       ];
     case 'verify-failed':
       return [
-        rec('verify-work', 'Re-verify work', '/gsd:verify-work'),
-        action('debug', 'Debug the failure', '/gsd:debug'),
-        action('code-review', 'Review recent work', '/gsd:code-review'),
-        action('progress', 'Show progress', '/gsd:progress'),
+        rec('verify-work', 'Re-verify work', cmd('verify-work')),
+        action('debug', 'Debug the failure', cmd('debug')),
+        action('code-review', 'Review recent work', cmd('code-review')),
+        action('progress', 'Show progress', cmd('progress')),
       ];
     case 'needs-first-phase':
       return [
-        rec('discuss-phase', 'Discuss the first phase', '/gsd:discuss-phase'),
-        action('plan-phase', 'Plan phase 1', '/gsd:plan-phase'),
-        action('quick', 'Quick task', '/gsd:quick'),
-        action('progress', 'Show progress', '/gsd:progress'),
+        rec('discuss-phase', 'Discuss the first phase', cmd('discuss-phase')),
+        action('plan-phase', 'Plan phase 1', cmd('plan-phase')),
+        action('quick', 'Quick task', cmd('quick')),
+        action('progress', 'Show progress', cmd('progress')),
       ];
     case 'planning':
       // Forward motion → delegate to the single gated engine (see 'executing').
       return [
-        rec('progress-next', `Advance to the next step (plan phase ${phaseN || 1})`, '/gsd:progress --next'),
-        action('plan-phase', `Plan phase ${phaseN || 1}`, '/gsd:plan-phase'),
-        action('discuss-phase', 'Discuss before planning', '/gsd:discuss-phase'),
-        action('progress', 'Show progress', '/gsd:progress'),
+        rec('progress-next', `Advance to the next step (plan phase ${phaseN || 1})`, cmd('progress --next')),
+        action('plan-phase', `Plan phase ${phaseN || 1}`, cmd('plan-phase')),
+        action('discuss-phase', 'Discuss before planning', cmd('discuss-phase')),
+        action('progress', 'Show progress', cmd('progress')),
       ];
     case 'executing':
       // In-project forward motion delegates to the single gated engine
@@ -692,45 +751,67 @@ export function actionsFor(situation: Situation, s: SmartEntrySignals): SmartEnt
       // /gsd:execute-phase here — that divergence is why the old flat /gsd-next
       // was removed (#3054). Direct execute stays as an explicit secondary choice.
       return [
-        rec('progress-next', 'Advance to the next step', '/gsd:progress --next'),
-        action('execute-phase', execLabel, '/gsd:execute-phase'),
-        action('quick', 'Quick task', '/gsd:quick'),
-        action('code-review', 'Review recent work', '/gsd:code-review'),
+        rec('progress-next', 'Advance to the next step', cmd('progress --next')),
+        action('execute-phase', execLabel, cmd('execute-phase')),
+        action('quick', 'Quick task', cmd('quick')),
+        action('code-review', 'Review recent work', cmd('code-review')),
       ];
     case 'verify-pending':
       // Forward motion → delegate to the single gated engine (see 'executing').
       return [
-        rec('progress-next', 'Advance to the next step (verify)', '/gsd:progress --next'),
-        action('verify-work', 'Verify work', '/gsd:verify-work'),
-        action('code-review', 'Review recent work', '/gsd:code-review'),
-        action('ship', 'Ship completed work', '/gsd:ship'),
+        rec('progress-next', 'Advance to the next step (verify)', cmd('progress --next')),
+        action('verify-work', 'Verify work', cmd('verify-work')),
+        action('code-review', 'Review recent work', cmd('code-review')),
+        action('ship', 'Ship completed work', cmd('ship')),
       ];
     case 'idle-stranded':
       return [
-        rec('ship', 'Ship committed work', '/gsd:ship'),
-        action('complete-milestone', 'Complete the milestone', '/gsd:complete-milestone'),
-        action('progress', 'Show progress', '/gsd:progress'),
-        action('capture', 'Capture a note', '/gsd:capture'),
+        rec('ship', 'Ship committed work', cmd('ship')),
+        action('complete-milestone', 'Complete the milestone', cmd('complete-milestone')),
+        action('progress', 'Show progress', cmd('progress')),
+        action('capture', 'Capture a note', cmd('capture')),
       ];
     case 'complete':
       return [
-        rec('new-milestone', 'Start a new milestone', '/gsd:new-milestone'),
-        action('extract-learnings', 'Extract learnings', '/gsd:extract-learnings'),
-        action('quick', 'Quick task', '/gsd:quick'),
-        action('progress', 'Show progress', '/gsd:progress'),
+        rec('new-milestone', 'Start a new milestone', cmd('new-milestone')),
+        action('extract-learnings', 'Extract learnings', cmd('extract-learnings')),
+        action('quick', 'Quick task', cmd('quick')),
+        action('progress', 'Show progress', cmd('progress')),
       ];
     case 'unknown':
     default:
       return [
-        rec('progress', 'Show progress', '/gsd:progress'),
-        action('progress-next', 'Advance to the next step', '/gsd:progress --next'),
-        action('quick', 'Quick task', '/gsd:quick'),
-        action('help', 'Show help', '/gsd:help'),
+        rec('progress', 'Show progress', cmd('progress')),
+        action('progress-next', 'Advance to the next step', cmd('progress --next')),
+        action('quick', 'Quick task', cmd('quick')),
+        action('help', 'Show help', cmd('help')),
       ];
   }
 }
 
 // ─── Summary line ─────────────────────────────────────────────────────────────
+
+function phaseSummary(s: SmartEntrySignals): string {
+  const phase = s.current_phase;
+  // Preserve the milestone ordinal introduced by #5228 when it is known.
+  const at = phase === null ? -1 : s.milestone_phases.findIndex((id) => comparePhaseNum(id, phase) === 0);
+  if (at >= 0) return `Phase ${at + 1} of ${s.milestone_phases.length}`;
+  const total = s.total_phases;
+  const legacy = `Phase ${phase ?? '?'} of ${total ?? '?'}`;
+  const roadmapTotal = s.roadmap_total_phases;
+  // Keep the recorded pair when roadmap counts are unavailable, or when the
+  // pair can describe a single milestone without changing its existing text.
+  if (phase === null || total === null || roadmapTotal === null || roadmapTotal <= 0
+    || (total === roadmapTotal && comparePhaseNum(phase, total) <= 0)) {
+    return legacy;
+  }
+  // When the recorded pair cannot safely describe this roadmap, label its
+  // counts separately rather than printing a mixed-scope ratio.
+  const roadmapDone = s.roadmap_completed_phases;
+  return roadmapDone === null
+    ? `Phase ${phase} (${roadmapTotal} roadmap phases)`
+    : `Phase ${phase} (${roadmapDone} of ${roadmapTotal} roadmap phases complete)`;
+}
 
 function buildSummary(situation: Situation, s: SmartEntrySignals): string {
   switch (situation) {
@@ -745,7 +826,7 @@ function buildSummary(situation: Situation, s: SmartEntrySignals): string {
     case 'needs-first-phase':
       return 'Project initialized — plan your first phase';
     case 'planning':
-      return `Phase ${s.current_phase ?? '?'} of ${s.total_phases ?? '?'} — needs a plan`;
+      return `${phaseSummary(s)} — needs a plan`;
     case 'executing':
       return progressLine('executing', s);
     case 'verify-pending':
@@ -763,7 +844,7 @@ function buildSummary(situation: Situation, s: SmartEntrySignals): string {
 function progressLine(tail: string, s: SmartEntrySignals): string {
   const parts: string[] = [];
   if (s.current_phase !== null && s.total_phases !== null) {
-    parts.push(`Phase ${s.current_phase} of ${s.total_phases}`);
+    parts.push(phaseSummary(s));
   } else if (s.current_phase !== null) {
     parts.push(`Phase ${s.current_phase}`);
   }
@@ -782,7 +863,7 @@ function progressLine(tail: string, s: SmartEntrySignals): string {
 export function classifyProject(cwd: string, now: () => number = Date.now): SmartEntryResult {
   const signals = detectSignals(cwd, now);
   const situation = classify(signals);
-  const actions = actionsFor(situation, signals);
+  const actions = actionsFor(situation, signals, resolveRuntime(cwd));
   const recommended = actions.find((a) => a.recommended)?.id ?? 'progress';
   const summary = buildSummary(situation, signals);
   return { situation, recommended, summary, signals, actions };
@@ -803,7 +884,7 @@ export function runSmartEntry(cwd: string, args: string[], raw: boolean): void {
   }
   // Human mode: a compact one-liner plus the recommended action.
   const human = `${result.summary}\nRecommended: ${result.recommended} → ${
-    result.actions.find((a) => a.id === result.recommended)?.command ?? '/gsd:progress'
+    result.actions.find((a) => a.id === result.recommended)?.command ?? runtimeCommand(cwd, 'progress')
   }`;
   output(null, true, human);
 }

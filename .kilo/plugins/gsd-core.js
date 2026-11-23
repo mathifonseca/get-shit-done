@@ -239,6 +239,18 @@ function gitProbingGuardTimeoutMs() {
   return GIT_PROBING_GUARD_FALLBACK_TIMEOUT_MS;
 }
 
+// Hooks are Node scripts. `process.execPath` is only a JS runtime when the host is Node or Bun
+// itself; inside OpenCode's single-file binary (1.x and 2.x) spawning it with a .js path boots
+// OpenCode instead and exits 0, silently disabling every guard (#4849). So: an explicit
+// GSD_HOOK_RUNTIME wins, then a Node/Bun host's own executable, else `node` from PATH.
+let warnedMissingRuntime = false;
+function hookRuntime() {
+  const fromEnv = process.env.GSD_HOOK_RUNTIME;
+  if (typeof fromEnv === "string" && fromEnv.length > 0) return fromEnv;
+  const base = path.basename(process.execPath).toLowerCase().replace(/\.exe$/, "");
+  return base === "node" || base === "bun" ? process.execPath : "node";
+}
+
 function runHook(hookFile, payload, opts = {}) {
   const hookPath = path.join(HOOKS_DIR, hookFile);
   if (!fs.existsSync(hookPath)) {
@@ -261,7 +273,7 @@ function runHook(hookFile, payload, opts = {}) {
     (GIT_PROBING_GUARDS.has(hookFile) ? gitProbingGuardTimeoutMs() : 8000);
   let result;
   try {
-    result = spawnSync(process.execPath, [hookPath], {
+    result = spawnSync(hookRuntime(), [hookPath], {
       input: JSON.stringify(payload),
       encoding: "utf8",
       timeout,
@@ -273,6 +285,15 @@ function runHook(hookFile, payload, opts = {}) {
     return { stdout: "", exitCode: 0, timedOut: false };
   }
 
+  if (result.error && !warnedMissingRuntime) {
+    // The runtime could not be started: the guard did not run. Fail open (adapter contract) but
+    // never silently (#4849).
+    warnedMissingRuntime = true;
+    console.error(
+      `[gsd-core] cannot start hook runtime '${hookRuntime()}' (${result.error.code || result.error.message}) — ` +
+        "GSD hooks are NOT enforced. Install Node.js or set GSD_HOOK_RUNTIME to a node/bun executable.",
+    );
+  }
   const stdout = (result.stdout || "").trim();
   const exitCode = result.status == null ? 0 : result.status;
   return { stdout, exitCode, timedOut: result.signal === "SIGTERM" };
@@ -296,11 +317,42 @@ function runHook(hookFile, payload, opts = {}) {
 function contextWarningsDisabled(cwd) {
   try {
     const configPath = path.join(cwd, '.planning', 'config.json');
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const config = JSON.parse(readConfigBounded(configPath, { required: true }));
     return config.hooks?.context_warnings === false;
   } catch {
     // Missing or unparseable config → proceed with defaults (context warnings enabled).
     return false;
+  }
+}
+
+/**
+ * UTF-8 text of a project config.json, read as a bounded regular file (#5759): a FIFO or device
+ * planted at the path would block a plain readFileSync, and this runs inside the editor process.
+ * Throws for an absent, non-regular or oversized (> 1 MiB) file. Mirrors hooks/lib/config-read.js;
+ * inlined because the plugin is copied on its own and cannot rely on hooks/lib being beside it.
+ */
+function readConfigBounded(file, options) {
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOCTTY || 0));
+  } catch (err) {
+    if (err && err.code === "ENOENT" && !(options && options.required)) return null;
+    throw err;
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw Object.assign(new Error(file + " is not a regular file"), { code: st.isDirectory() ? "EISDIR" : "ENXIO" });
+    if (st.size > 1024 * 1024) throw Object.assign(new Error(file + " exceeds 1048576 bytes"), { code: "EFBIG" });
+    const buf = Buffer.alloc(st.size);
+    let off = 0;
+    while (off < st.size) {
+      const n = fs.readSync(fd, buf, off, st.size - off, off);
+      if (n <= 0) break;
+      off += n;
+    }
+    return buf.toString("utf8", 0, off);
+  } finally {
+    try { fs.closeSync(fd); } catch { /* already closed */ }
   }
 }
 
@@ -339,7 +391,7 @@ function handleHookResult(hookResult, output) {
     throw new Error(reason);
   }
 
-  // Advisory: inject additionalContext into metadata + log
+  // Advisory: inject additionalContext into metadata
   const advisory =
     parsed &&
     parsed.hookSpecificOutput &&
@@ -356,8 +408,7 @@ function handleHookResult(hookResult, output) {
       }
       output.metadata._gsdAdvisory.push(advisory);
     }
-    // Best-effort visibility when metadata isn't surfaced to the model
-    console.error(advisory);
+    // Not written to stderr: the OpenCode TUI draws a plugin's stderr over the prompt input (#5648).
   }
 }
 

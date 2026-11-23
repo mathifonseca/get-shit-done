@@ -1,5 +1,12 @@
 // docs-guard-exempt: docs/installer-migrations.md is cited only in a comment; never read.
 const test = require('node:test');
+
+// #5017: pinned GSD_HOME (next to HOME) is put back after each test so it never leaks into the next one.
+const __ORIG_GSD_HOME = process.env.GSD_HOME;
+require('node:test').afterEach(() => {
+  if (__ORIG_GSD_HOME === undefined) delete process.env.GSD_HOME;
+  else process.env.GSD_HOME = __ORIG_GSD_HOME;
+});
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -1702,6 +1709,11 @@ test('shipped installer-migration checksums are locked to a committed baseline (
     // converges upgraded installs. Global scope only — local .agents is live.
     '2026-08-26-antigravity-retire-confighome-artifacts':
       'sha256:52764c43418accdc26c89482b1a46bf9ebcde1c1d9a80e302971a7b068a3be3c',
+    // Migration 011 (NEW, added here per this test's own sanctioned "adding a new
+    // migration" case): add --no-prompts to the GSD-written OpenCode mcp.gsd command
+    // so OpenCode 2.x does not list the GSD prompts a second time (#5338).
+    '2026-10-12-opencode-mcp-no-prompts':
+      'sha256:220bb8606df910bec58b1351dd6db75536b7563449f32f2b6180b109a79a449e',
   };
 
   const { DEFAULT_MIGRATIONS_DIR, migrationChecksum: computeChecksum } = require('../gsd-core/bin/lib/installer-migrations.cjs');
@@ -2117,6 +2129,7 @@ function withCodexHome(codexHome, fn) {
   const previousUserProfile = process.env.USERPROFILE;
   process.env.CODEX_HOME = codexHome;
   process.env.HOME = codexHome;
+  process.env.GSD_HOME = codexHome; // #5017: the defaults store root follows HOME
   process.env.USERPROFILE = codexHome;
   try {
     return fn();

@@ -74,7 +74,7 @@ function mkTmp(prefix) {
  * installer resolves through exactly those variables.
  */
 function runInstall(root, runtime, extraArgs = []) {
-  const env = { ...process.env, HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: root };
+  const env = { ...process.env, HOME: root, USERPROFILE: root, GSD_HOME: root, CLAUDE_CONFIG_DIR: root };
   delete env.GSD_TEST_MODE;
   const result = runNode(
     [INSTALL_SCRIPT, `--${runtime}`, '--global', '--config-dir', root, ...extraArgs],
@@ -484,6 +484,8 @@ describe('#2544 regression: install must not clobber the config-root package.jso
     const pluginsDir = path.join(root, 'plugins');
     fs.unlinkSync(path.join(pluginsDir, 'gsd-core.js'));
     fs.unlinkSync(path.join(pluginsDir, 'package.json'));
+    // OpenCode also stages its 2.x terminal-client plugin in a subdirectory (ADR-5331 Phase 3).
+    cleanup(path.join(pluginsDir, 'gsd-statusline'));
     assert.deepEqual(fs.readdirSync(pluginsDir), [], 'precondition: the dir is empty');
 
     runInstall(root, 'opencode', ['--uninstall']);

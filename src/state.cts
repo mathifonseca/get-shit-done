@@ -6,15 +6,19 @@
  * from the prior hand-written .cjs; only strict types are added.
  */
 
+import type { PhaseDirectoryContext } from './phase-id.cjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { escapeRegex } from './pattern.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import ioMod = require('./io.cjs');
-const { output, error, declineNoOp, formatDiagnosticToken } = ioMod;
+const { output, error, declineNoOp, formatDiagnosticToken, ERROR_REASON } = ioMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import cliExitModule = require('./cli-exit.cjs');
 const { ExitError } = cliExitModule;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import capabilityLedgerMod = require('./capability-ledger.cjs');
+const { readSmallRegularFile } = capabilityLedgerMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import stateContract = require('./state-contract.cjs');
 const { publishStateContract } = stateContract;
@@ -25,8 +29,7 @@ const { loadConfig } = configLoaderMod;
 import phaseIdMod = require('./phase-id.cjs');
 const {
   parsePhaseFromProse,
-  PHASE_NUMBER_TOKEN_SOURCE,
-  matchPhaseDirs,
+  phaseNumberTokenSource,
   phaseKeyFromToken,
   phaseKeyFromDir,
   phaseHeadingPrefixSrcFor,
@@ -37,10 +40,15 @@ const {
   bracketMilestoneIntroSrcFor,
 } = phaseIdMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseIdDisplayMod = require('./phase-id-display.cjs');
+// #4304: phaseDisplayFor below renders through this adapter
+// instead of re-deriving the bracket numeric grammar locally.
+const { renderBracketPhaseDisplay } = phaseIdDisplayMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 import roadmapParserMod = require('./roadmap-parser.cjs');
 // #3642: hasMilestoneSectioning no longer consumed here — its >=2 semantics answered sibling conflation, but this branch asks asserted-vs-section (>=1). It stays exported from roadmap-parser.cjs for its unit pins.
-const { getMilestoneInfo, extractCurrentMilestone, isMilestoneBoundedInRoadmap, hasAnyMilestoneSection, classifyMilestoneScalar } = roadmapParserMod;
-import { platformWriteSync, platformReadSync, platformEnsureDir, retryRenameSync, toPosixPath, execGit } from './shell-command-projection.cjs';
+const { getMilestoneInfo, extractCurrentMilestone, isMilestoneBoundedInRoadmap, hasAnyMilestoneSection, classifyMilestoneScalar, describeUnscopedMilestone } = roadmapParserMod;
+import { platformWriteSync, platformReadSync, platformEnsureDir, retryRenameSync, toPosixPath, execGit, normalizeContent, platformRestoreFileSync, platformReadBytesSync, type FileIdentity } from './shell-command-projection.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
 const { planningDir, planningPaths, resolvePhaseIdConvention } = planningWorkspace;
@@ -59,6 +67,33 @@ const { extractFrontmatter, reconstructFrontmatter, stripFrontmatter, propagateC
  */
 function isUnparseableFrontmatter(existingFm: Record<string, unknown>): boolean {
   return (existingFm as unknown as Record<symbol, unknown>)[FRONTMATTER_UNPARSEABLE] === true;
+}
+
+/**
+ * Human-facing phase label for STATE.md descriptions. Identity-bearing fields
+ * such as Current Phase and the Current Position Phase row stay bare so their
+ * established readers remain byte-compatible; only descriptive text uses this
+ * renderer.
+ */
+function phaseDisplayFor(cwd: string, phaseNumber: string | number): string {
+  if (resolvePhaseIdConvention(cwd) !== 'bracket') return `Phase ${phaseNumber}`;
+
+  const config = loadConfig(cwd);
+  const project = typeof config['project_code'] === 'string' ? config['project_code'].trim() : '';
+  if (!project) {
+    error('phase_id_convention is "bracket" but project_code is missing in .planning/config.json');
+  }
+
+  const info = getMilestoneInfo(cwd);
+  const version = info.value?.version ?? '';
+  const display = renderBracketPhaseDisplay(version, phaseNumber, project);
+  if (display === null) {
+    error(
+      `phase_id_convention is "bracket" but phase ${phaseNumber} cannot be rendered ` +
+        `(the active milestone ${JSON.stringify(version)} cannot be resolved, or the phase number is invalid)`,
+    );
+  }
+  return display!;
 }
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import scanPhasePlans = require('./plan-scan.cjs');
@@ -82,7 +117,7 @@ const { SCOPE } = planningScopeMod;
 type Scope = planningScopeMod.Scope;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseLocatorMod = require('./phase-locator.cjs');
-const { listMilestonePhaseDirs } = phaseLocatorMod;
+const { phaseDirectoryOptions, listMilestonePhaseDirs, resolvePhaseDirectoryLookup, matchPhaseDirsForLookup } = phaseLocatorMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import stateTransitionMod = require('./state-transition.cjs');
 // #3873 (ADR-3473 §8.8): FRONTMATTER_KEY_TO_BODY_LABEL below is now a
@@ -98,7 +133,59 @@ import { findProjectRoot } from './project-root.cjs';
 // it introduces no cycle on this path.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import milestoneLockMod = require('./milestone-lock.cjs');
-const { transitionCore, applyStatePreservation, sliceCurrentPositionSection, stateReplaceProgressPercent, formatProgressMachineSegment } = stateTransitionMod;
+const { transitionCore, StatePlansNoLineError, applyStatePreservation, sliceCurrentPositionSection, stateReplaceProgressPercent, formatProgressMachineSegment } = stateTransitionMod;
+
+function replaceStateBodyField(
+  content: string,
+  statePath: string,
+  field: string,
+  value: string,
+): string {
+  const { body, reassemble } = stateTransitionMod.beginFrontmatterReassembly(content, statePath);
+  const replaced = stateReplaceField(body, field, value);
+  return replaced === null ? content : reassemble(replaced);
+}
+
+/**
+ * Rewrite a handler-authored field inside Current Position only when it still
+ * carries the exact value the transition just emitted. The equality guard
+ * preserves executor-authored prose under the transition module's Knuth rule.
+ */
+function replaceCurrentPositionFieldValue(
+  content: string,
+  statePath: string,
+  field: string,
+  expected: string,
+  value: string,
+): string {
+  const { body, reassemble } = stateTransitionMod.beginFrontmatterReassembly(content, statePath);
+  const headings = tokenizeHeadings(body);
+  const index = headings.findIndex((heading) =>
+    heading.level === 2 && /^current\s+position$/i.test(heading.text),
+  );
+  if (index === -1) return content;
+
+  const heading = headings[index];
+  const lines = body.split('\n');
+  const headingLine = lines[heading.line - 1] ?? '';
+  const start = heading.offset + headingLine.length + 1;
+  let end = body.length;
+  for (let next = index + 1; next < headings.length; next++) {
+    if (headings[next].level < 2) continue;
+    end = headings[next].offset;
+    if (end > 0 && body[end - 1] === '\n') end -= 1;
+    if (end > 0 && body[end - 1] === '\r') end -= 1;
+    end = Math.max(start, end);
+    break;
+  }
+
+  const section = body.slice(start, end);
+  if (stateExtractField(section, field) !== expected) return content;
+  const replaced = stateReplaceField(section, field, value);
+  if (replaced === null) return content;
+  return reassemble(body.slice(0, start) + replaced + body.slice(end));
+}
+
 // #3699: the frontmatter-key <-> body-field routing behind `state update`'s
 // failure explanation, and the classification table it falls back to.
 const { getFieldClassification, getFrontmatterBodySource, frontmatterKeyForBodyField } = stateTransitionMod;
@@ -128,12 +215,22 @@ import {
   isUnfilledFieldValue,
   leadingCalendarDate,
   stateFieldContinuation,
+  editedLineContinuation,
+  insertMissingSessionFields,
+  readableEditedBoldLabel,
+  FIELD_LINE_BREAK_RE,
+  markdownFencedBlocks,
+  maskFencedLines,
+  writeOutsideFences,
+  readableBoldLabels,
   stateReplaceField,
   KNOWN_TEMPLATE_DEFAULTS,
   stateReplaceFieldIfTemplate,
   stateCurrentPositionSlice,
+  isSessionHeading,
+  isSessionContinuityHeading,
 } from './state-document.cjs';
-import { tokenizeHeadings, collectSection, replaceSection, stripFencedCode } from './markdown-sectionizer.cjs';
+import { tokenizeHeadings, collectSection, collectSections, replaceSection, stripFencedCode } from './markdown-sectionizer.cjs';
 import type { HeadingToken } from './markdown-sectionizer.cjs';
 import { parseMarkdownTable, updateTableCell, deleteTableRow, insertTableRow, splitTableRow, isDelimiterRow } from './markdown-table.cjs';
 import { textEncodingError } from './validate.cjs';
@@ -232,6 +329,21 @@ interface ReadModifyWriteOptions {
    * make every already-persisted key look newly ADDED per §8.7's diff).
    */
   preWriteState?: StatePreWriteSnapshot;
+  /**
+   * #5831: called, while the STATE.md lock is still held, when syncing or
+   * writing STATE.md throws after `transformFn` returned. Lets a transform
+   * that already wrote a sidecar file (prune's STATE-ARCHIVE.md) roll it back
+   * under the same lock. The original error is rethrown afterwards unless the
+   * callback throws a replacement.
+   */
+  onWriteFailure?: (err: unknown) => void;
+  /**
+   * #5831: write STATE.md with the seam's atomic mode (temp file + rename, no
+   * truncating direct-write fallback), so a failed write leaves STATE.md's
+   * previous bytes in place. Set by prune, whose entries may otherwise exist
+   * in no file; other callers keep the default write.
+   */
+  atomicWrite?: boolean;
 }
 
 /**
@@ -247,7 +359,7 @@ interface ReadModifyWriteOptions {
  * value) deliberately: converting it ripples into every caller's control
  * flow for no behavior change.
  */
-type StatePreservationOptions = Omit<ReadModifyWriteOptions, 'resync'> & { resync: boolean };
+type StatePreservationOptions = Omit<ReadModifyWriteOptions, 'resync' | 'onWriteFailure' | 'atomicWrite'> & { resync: boolean };
 
 interface StateRecordMetricOptions {
   phase: string;
@@ -306,6 +418,21 @@ interface StateSyncOptions {
   verify?: boolean;
 }
 
+/** What `cmdStatePrune` returns (and emits, apart from `pruned` on the not-found error). */
+interface StatePruneResult {
+  pruned: boolean;
+  error?: string;
+  reason?: string;
+  dry_run?: boolean;
+  cutoff_phase?: number;
+  keep_recent?: number;
+  sections?: Array<{ section: string; entries_archived?: number; entries_would_archive?: number }>;
+  total_would_archive?: number;
+  total_archived?: number;
+  note?: string;
+  archive_file?: string | null;
+}
+
 interface PrunedSection {
   section: string;
   count: number;
@@ -345,6 +472,12 @@ const _diskScanCache = new Map<string, {
   totalPlans: number | null;
   completedPlans: number | null;
   milestoneBounded: boolean;
+  // #6279: false only when the milestone-scoped walk found no phase dir AND
+  // `.planning/milestones/<asserted milestone>-phases/` exists (the shape
+  // `milestone complete` leaves: an empty `.planning/phases/`). The plans
+  // were moved, not measured, so the caller keeps stored total_plans /
+  // completed_plans when it has them, as an absent phases directory does.
+  plansMeasured: boolean;
   // #3217 (ADR-3180 §7.6 rule 4, finding 1): the real `listMilestonePhaseDirs`
   // scope for `allMatchingDirs` below, threaded through the cache so the
   // percent computation at the bottom of buildStateFrontmatter can gate on it
@@ -352,6 +485,12 @@ const _diskScanCache = new Map<string, {
   // (a heading-existence guard, #1761) — this one is disk-readability.
   phaseDirScope: Scope;
 }>();
+
+// #6332: the cache is per invocation. The binary gets that for free from its
+// one-call process; an in-process caller gets it from this reset.
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- invocation-scope.cjs is an export= CommonJS module
+import invocationScopeMod = require('./invocation-scope.cjs');
+invocationScopeMod.registerInvocationReset('state.diskScanCache', () => { _diskScanCache.clear(); });
 
 // Track all lock files held by this process so they can be removed on exit.
 // process.on('exit') fires even on process.exit(1), unlike try/finally which is
@@ -615,19 +754,52 @@ function cmdStateGet(cwd: string, section: string | undefined, raw: boolean): vo
   }
 }
 
-function readTextArgOrFile(cwd: string, value: string | undefined, filePath: string | undefined, label: string): string | undefined {
+/**
+ * #4926: cap on a `--<flag>-file` text input. Twice the 128 KiB one argv string
+ * can carry on Linux, so the file form never takes less than the inline form,
+ * and the entry echoed back on stdout stays small.
+ */
+const TEXT_FILE_MAX_BYTES = 256 * 1024;
+
+/**
+ * Resolve a text argument that may instead be supplied as a file (`--<flag>`
+ * or `--<flag>-file`).
+ *
+ * #4926: the file is a read-once INPUT — its contents are copied into
+ * STATE.md and the path itself is never written, recorded, or resolved
+ * again — so it is not a project-write resource and is not confined to the
+ * project root. A scratch file from an agent's temp directory is accepted.
+ * A relative path still resolves against the project root.
+ *
+ * A file that cannot be read is a caller error and goes through the fault
+ * path — stderr, non-zero exit (USAGE), `--json-errors` envelope — rather than
+ * an `{ added: false }` payload at exit 0 that a shell caller gating on `$?`
+ * reads as success while nothing was written.
+ *
+ * An unconfined path is hostile input, so the read goes through
+ * `readSmallRegularFile`: a FIFO, a device (`/dev/zero`, a piped `/dev/stdin`)
+ * or a directory is refused without blocking, and a file over
+ * TEXT_FILE_MAX_BYTES is refused without being read.
+ */
+function readTextArgOrFile(cwd: string, value: string | undefined, filePath: string | undefined, flag: string): string | undefined {
   if (!filePath) return value;
 
-  // Path traversal guard: ensure file resolves within project directory
-  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/unbound-method
-  const { assertWithinRoot, PathAcceptance } = require('./security.cjs') as { assertWithinRoot(filePath: unknown, baseDir: unknown, label?: string | null, policy?: 'relative-only' | 'absolute-inside-root'): string; PathAcceptance: { RelativeOnly: 'relative-only'; AbsoluteInsideRoot: 'absolute-inside-root' } };
-  const contained = assertWithinRoot(filePath, cwd, `${label} path`, PathAcceptance.AbsoluteInsideRoot);
+  const refuse = (why: string | undefined): never => error(
+    `--${flag}-file could not be read: ${formatDiagnosticToken(filePath)}${why ? ` (${why})` : ''}`,
+    ERROR_REASON.USAGE,
+  );
 
+  let content: string | null;
   try {
-    return fs.readFileSync(contained, 'utf-8').trimEnd();
-  } catch {
-    throw new Error(`${label} file not found: ${filePath}`);
+    content = readSmallRegularFile(path.resolve(cwd, filePath), TEXT_FILE_MAX_BYTES);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EFBIG') return refuse(`larger than ${TEXT_FILE_MAX_BYTES} bytes`);
+    if (code === 'EISDIR' || code === 'ENXIO') return refuse('not a regular file');
+    return refuse(code);
   }
+  if (content === null) return refuse('ENOENT');
+  return content.trimEnd();
 }
 
 function cmdStatePatch(cwd: string, patches: Record<string, string>, raw: boolean): void {
@@ -638,6 +810,11 @@ function cmdStatePatch(cwd: string, patches: Record<string, string>, raw: boolea
     const fieldCheck = validateFieldName(field);
     if (!fieldCheck.valid) {
       error(`state patch: ${fieldCheck.error as string}`);
+    }
+    // #4998: as for `state update` — refused up front rather than listed
+    // under `failed` with no reason.
+    if (FIELD_LINE_BREAK_RE.test(`${patches[field]}`)) {
+      error(`state patch: the value for "${field}" must be a single line (no CR, LF, U+2028 or U+2029)`);
     }
   }
 
@@ -676,13 +853,29 @@ function cmdStatePatch(cwd: string, patches: Record<string, string>, raw: boolea
     // `applyStatePreservation` restored that this patch never named at all
     // (#3345's direction), a case the pre-#3471 version of this command never
     // covered.
-    const updated = reconcileReportedFields(statePath, preWriteState, precomputed.updated, divergedFields);
+    const reconciled = reconcileReportedFields(statePath, preWriteState, precomputed.updated, divergedFields, NO_SECTION_TARGETS, true);
+    // #4488, as in cmdStateUpdate: a field patchCore matched that already held
+    // the requested value changes no byte, so the reconcile above (which asks
+    // "what changed") drops it — alone (no snapshot at all) or beside a field
+    // that did change. It is updated when the persisted value is the requested
+    // one; a value the write pipeline discarded still differs and stays failed
+    // (trek-e review 5593733001, Minor 3).
+    const persisted = platformReadSync(statePath) || '';
+    const persistedFm = extractFrontmatter(persisted, statePath) as Record<string, unknown>;
+    const persistedBody = stripFrontmatter(persisted);
+    const alreadyHeld = precomputed.updated.filter((field) => !reconciled.includes(field)
+      && !STATE_UPDATED_PROVENANCE_EXCLUSION.includes(field)
+      && readStateTarget(persistedFm, persistedBody, field, NO_SECTION_TARGETS, true)?.trim() === String(patches[field]).trim());
+    const updated = [...reconciled, ...alreadyHeld];
     const updatedSet = new Set(updated);
     const failed = Object.keys(patches).filter((field) => !updatedSet.has(field));
     const results = { updated, failed };
 
     output(results, raw, results.updated.length > 0 ? 'true' : 'false');
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      error(`state patch: ${err instanceof Error ? err.message : String(err)}`);
+    }
     error('STATE.md not found');
   }
 }
@@ -747,6 +940,11 @@ function cmdStateUpdate(cwd: string, field: string | undefined, value: string | 
   if (!fieldCheck.valid) {
     error(`state update: ${fieldCheck.error as string}`);
   }
+  // #4998: the field writers are single-line and refuse a line break, which
+  // the transition would otherwise report as "field not found".
+  if (FIELD_LINE_BREAK_RE.test(value as string)) {
+    error(`state update: the value for "${field as string}" must be a single line (no CR, LF, U+2028 or U+2029)`);
+  }
 
   const statePath = planningPaths(cwd).state;
   try {
@@ -804,7 +1002,7 @@ function cmdStateUpdate(cwd: string, field: string | undefined, value: string | 
     // restored during this write that this command never touched at all
     // (#3345's direction) — reported separately from `updated` because this
     // command's contract is a single-field boolean, not a per-field array.
-    const reconciled = reconcileReportedFields(statePath, preWriteState, updated ? [field as string] : [], divergedFields);
+    const reconciled = reconcileReportedFields(statePath, preWriteState, updated ? [field as string] : [], divergedFields, NO_SECTION_TARGETS, true);
     // #4488: `updateCore` itself already told us whether it matched the field
     // (`updated`, captured above `readModifyWriteStateMd` runs it) — that is a
     // real signal, not a guess. `reconcileReportedFields` answers a DIFFERENT
@@ -859,7 +1057,10 @@ function cmdStateUpdate(cwd: string, field: string | undefined, value: string | 
     } else {
       output({ updated: false, reason: explainUpdateFailure(field as string), preserved }, false, undefined);
     }
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      error(`state update: ${err instanceof Error ? err.message : String(err)}`);
+    }
     output({ updated: false, reason: 'STATE.md not found' }, false, undefined);
   }
 }
@@ -997,15 +1198,17 @@ function unsummarizedPlansForPositionPhase(
   // as a real answer. This is a lookup of ONE phase token STATE.md names, not
   // a milestone enumeration, so the unscoped retry is in-contract.
   const convention = resolvePhaseIdConvention(cwd);
+  const lookup = resolvePhaseDirectoryLookup(cwd, positionPhase);
   const windowed = listMilestonePhaseDirs(phasesDir, { cwd, phaseIdConvention: convention });
   const candidateDirs = windowed.scope === SCOPE.COMPLETE ? windowed.value : [];
   // Canonical phase-token → directory matching (phase-id owner, #2562): both
   // sides of the comparison derived by the same function, never a local regex.
-  const { matches } = matchPhaseDirs(candidateDirs, positionPhase, convention);
+  const directoryContext = phaseDirectoryOptions(cwd);
+  const { matches } = matchPhaseDirsForLookup(candidateDirs, lookup, undefined, directoryContext);
   if (matches.length > 0) return scanOutstanding(phasesDir, matches[0]);
   const unscoped = listMilestonePhaseDirs(phasesDir);
   if (unscoped.scope !== SCOPE.COMPLETE) return null;
-  const retry = matchPhaseDirs(unscoped.value, positionPhase, convention);
+  const retry = matchPhaseDirsForLookup(unscoped.value, lookup, undefined, directoryContext);
   if (retry.matches.length === 0) return null;
   return scanOutstanding(phasesDir, retry.matches[0]);
 }
@@ -1053,7 +1256,7 @@ function cmdStateAdvancePlan(cwd: string, raw: boolean): void {
     // silently absorbed.
     const body = stripFrontmatter(content);
     const positionScope = matchCurrentPositionSection(body) ?? body;
-    const positionPhase = parseProsePhaseField(stateExtractField(positionScope, 'Phase')).phase;
+    const positionPhase = parseProsePhaseField(stateExtractField(positionScope, 'Phase'), resolvePhaseIdConvention(cwd), phaseDirectoryOptions(cwd)).phase;
     // #4093: a Current Position section with ZERO labeled fields has no
     // `Phase:` line either; frontmatter `current_phase` is the documented
     // survivor of body drift (the reporter's document still carried it, and
@@ -1510,11 +1713,17 @@ function cmdStateUpdateProgress(cwd: string, raw: boolean): void {
     // (stateReplaceFieldWithFallback above) for a comparable silent no-op —
     // now routed through the shared `declineNoOp` helper (#3957) so the
     // pairing is structural rather than hand-written per arm.
+    // #6271: UNSCOPED is the one non-COMPLETE scope an operator can fix by hand, and the bare message named neither
+    // cause nor fix, so every call declined and the counters drifted for the life of the project. The
+    // classification itself (ADR-3180 rows 4/5) is unchanged: it keeps a destructive consumer from acting on a
+    // window it could not find. One describer owns the wording (roadmap-parser.cts), shared with `state sync`.
+    const unscopedHint = phaseScope === SCOPE.UNSCOPED && cwd ? describeUnscopedMilestone(cwd) : '';
     declineNoOp(
       raw,
       'updated',
       `phase scope is ${phaseScope}, not complete`,
-      `state update-progress skipped — phase scope is ${phaseScope}, not complete. STATE.md's Progress field was left unchanged.`,
+      `state update-progress skipped — phase scope is ${phaseScope}, not complete. STATE.md's Progress field was left unchanged.${unscopedHint ? ` ${unscopedHint}` : ''}`,
+      unscopedHint ? { hint: unscopedHint } : {},
     );
     return;
   }
@@ -1581,21 +1790,19 @@ function cmdStateUpdateProgress(cwd: string, raw: boolean): void {
 
 function cmdStateAddDecision(cwd: string, options: StateAddDecisionOptions, raw: boolean): void {
   const statePath = planningPaths(cwd).state;
-  if (!fs.existsSync(statePath)) { output({ error: 'STATE.md not found' }, raw, undefined); return; }
+  // #4926: every refusal from this verb goes through the fault path (non-zero
+  // exit), so a caller gating on `$?` never reads success while nothing was written.
+  if (!fs.existsSync(statePath)) return error('STATE.md not found', ERROR_REASON.USAGE);
 
   const { phase, summary, summary_file, rationale, rationale_file } = options;
-  let summaryText: string | undefined = undefined;
-  let rationaleText = '';
+  const summaryText = readTextArgOrFile(cwd, summary, summary_file, 'summary');
+  // The rationale is optional: blank, inline or file, means "no rationale".
+  const rationaleInput = readTextArgOrFile(cwd, rationale || '', rationale_file, 'rationale') || '';
+  const rationaleText = rationaleInput.trim() ? rationaleInput : '';
 
-  try {
-    summaryText = readTextArgOrFile(cwd, summary, summary_file, 'summary');
-    rationaleText = readTextArgOrFile(cwd, rationale || '', rationale_file, 'rationale') || '';
-  } catch (err) {
-    output({ added: false, reason: (err as Error).message }, raw, 'false');
-    return;
-  }
-
-  if (!summaryText) { output({ error: 'summary required' }, raw, undefined); return; }
+  // A blank inline value is refused the same as a blank file (the file form is
+  // trimEnd()ed by readTextArgOrFile, the inline form is not).
+  if (!summaryText || !summaryText.trim()) return error('summary required — pass a non-blank --summary or --summary-file', ERROR_REASON.USAGE);
 
   // #3231/#3481: `--phase` omitted → resolve from the STATE.md being written, via
   // the canonical ladder `state prune` uses. A decision entry is a permanent
@@ -1608,7 +1815,7 @@ function cmdStateAddDecision(cwd: string, options: StateAddDecisionOptions, raw:
   if (!phaseId) {
     const rawState = fs.readFileSync(statePath, 'utf-8');
     const fm = extractFrontmatter(rawState, statePath) as Record<string, unknown>;
-    phaseId = resolveCurrentPhaseId(fm, stripFrontmatter(rawState)) ?? undefined;
+    phaseId = resolveCurrentPhaseId(fm, stripFrontmatter(rawState), resolvePhaseIdConvention(cwd), phaseDirectoryOptions(cwd)) ?? undefined;
   }
 
   const entry = `- [Phase ${phaseId || '?'}]: ${summaryText}${rationaleText ? ` — ${rationaleText}` : ''}`;
@@ -1666,18 +1873,13 @@ function cmdStateAddDecision(cwd: string, options: StateAddDecisionOptions, raw:
 
 function cmdStateAddBlocker(cwd: string, text: string | StateAddBlockerOptions, raw: boolean): void {
   const statePath = planningPaths(cwd).state;
-  if (!fs.existsSync(statePath)) { output({ error: 'STATE.md not found' }, raw, undefined); return; }
+  // #4926: every refusal from this verb goes through the fault path (non-zero
+  // exit), so a caller gating on `$?` never reads success while nothing was written.
+  if (!fs.existsSync(statePath)) return error('STATE.md not found', ERROR_REASON.USAGE);
   const blockerOptions: StateAddBlockerOptions = typeof text === 'object' && text !== null ? text : { text: text };
-  let blockerText: string | undefined = undefined;
+  const blockerText = readTextArgOrFile(cwd, blockerOptions.text, blockerOptions.text_file, 'text');
 
-  try {
-    blockerText = readTextArgOrFile(cwd, blockerOptions.text, blockerOptions.text_file, 'blocker');
-  } catch (err) {
-    output({ added: false, reason: (err as Error).message }, raw, 'false');
-    return;
-  }
-
-  if (!blockerText) { output({ error: 'text required' }, raw, undefined); return; }
+  if (!blockerText || !blockerText.trim()) return error('text required — pass a non-blank --text or --text-file', ERROR_REASON.USAGE);
 
   const entry = `- ${blockerText}`;
   let _added = false;
@@ -1732,24 +1934,26 @@ function cmdStateAddBlocker(cwd: string, text: string | StateAddBlockerOptions, 
 
 function cmdStateAddRoadmapEvolution(cwd: string, options: StateAddRoadmapEvolutionOptions, raw: boolean): void {
   const statePath = planningPaths(cwd).state;
-  if (!fs.existsSync(statePath)) { output({ error: 'STATE.md not found' }, raw, undefined); return; }
+  // #4926: every refusal from this verb goes through the fault path (non-zero
+  // exit), so a caller gating on `$?` never reads success while nothing was written.
+  if (!fs.existsSync(statePath)) return error('STATE.md not found', ERROR_REASON.USAGE);
 
   const { phase, action, after, note, note_file, urgent } = options;
-  let noteText: string | undefined = undefined;
-  try {
-    noteText = readTextArgOrFile(cwd, note, note_file, 'note');
-  } catch (err) {
-    output({ added: false, reason: (err as Error).message }, raw, 'false');
-    return;
-  }
+  const noteText = readTextArgOrFile(cwd, note, note_file, 'note');
   // Reject missing / empty / whitespace-only notes — an evolution entry with no
   // narrative is meaningless and would corrupt the section with a dangling bullet.
-  if (!noteText || !noteText.trim()) { output({ error: 'note required' }, raw, undefined); return; }
+  if (!noteText || !noteText.trim()) return error('note required — pass a non-blank --note or --note-file', ERROR_REASON.USAGE);
   // Flatten line breaks so the entry is always a single Markdown bullet. The
   // dedupe + rendering contract is line-oriented; a multiline --note-file would
   // otherwise spill continuation lines outside the bullet and defeat dedupe.
-  // Internal spacing (e.g. dollar columns) is preserved.
-  const flatNote = noteText.replace(/\s*[\r\n]+\s*/g, ' ').trim();
+  // Internal spacing (e.g. dollar columns) is preserved. #4998: every
+  // FIELD_LINE_BREAK_RE character, so a U+2028/U+2029 cannot survive into the
+  // bullet and start a forged `**Field:**` line for the `m`-flag readers.
+  // Split and trimmed rather than one `\s*<break>+\s*` replace, which
+  // backtracks quadratically over a long whitespace run with no break in it
+  // (trek-e review 5608265301, Nit 5); the result is the same.
+  const flatNote = noteText.split(new RegExp(`${FIELD_LINE_BREAK_RE.source}+`))
+    .map((piece) => piece.trim()).filter(Boolean).join(' ');
 
   const actionText = (action && action.trim()) || 'changed';
   const afterText = after && after.trim() ? ` after Phase ${after.trim()}` : '';
@@ -1765,7 +1969,7 @@ function cmdStateAddRoadmapEvolution(cwd: string, options: StateAddRoadmapEvolut
   if (!phaseId) {
     const rawState = fs.readFileSync(statePath, 'utf-8');
     const fm = extractFrontmatter(rawState, statePath) as Record<string, unknown>;
-    phaseId = resolveCurrentPhaseId(fm, stripFrontmatter(rawState)) ?? undefined;
+    phaseId = resolveCurrentPhaseId(fm, stripFrontmatter(rawState), resolvePhaseIdConvention(cwd), phaseDirectoryOptions(cwd)) ?? undefined;
   }
 
   const entry = `- Phase ${phaseId || '?'} ${actionText}${afterText}: ${flatNote}${urgentText}`;
@@ -1941,6 +2145,20 @@ function cmdStateResolveBlocker(cwd: string, text: string, raw: boolean): void {
   }
 }
 
+/**
+ * #4998 review (trek-e 5608265301, Minor 2): at most this many characters of a
+ * wrapped value's continuation are echoed back — it is STATE.md text, and its
+ * length is whatever the file holds.
+ */
+const SKIPPED_CONTINUATION_MAX_CHARS = 200;
+
+function boundedContinuation(text: string): string {
+  if (text.length <= SKIPPED_CONTINUATION_MAX_CHARS) return text;
+  // Never end on half a surrogate pair.
+  const end = /[\uD800-\uDBFF]/.test(text[SKIPPED_CONTINUATION_MAX_CHARS - 1]) ? SKIPPED_CONTINUATION_MAX_CHARS - 1 : SKIPPED_CONTINUATION_MAX_CHARS;
+  return `${text.slice(0, end)}…`;
+}
+
 function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, raw: boolean): void {
   // #4186: a bare invocation is a usage error, not a heartbeat write. The
   // pre-#4186 handler accepted zero arguments and still refreshed
@@ -1953,6 +2171,12 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
   // value the handler must persist.
   if (!options.stopped_at && (options.resume_file === undefined || options.resume_file === null)) {
     error('stopped-at or resume-file required for state record-session');
+  }
+  // #4998: every field this writes is single-line; a line break in a value
+  // would forge sibling lines (U+2028/U+2029 included — the readers' `m`-flag
+  // anchors match there too), so it is refused before anything is touched.
+  for (const [flag, value] of [['--stopped-at', options.stopped_at], ['--resume-file', options.resume_file]] as const) {
+    if (typeof value === 'string' && FIELD_LINE_BREAK_RE.test(value)) error(`state record-session: ${flag} must be a single line`);
   }
   const statePath = planningPaths(cwd).state;
   if (!fs.existsSync(statePath)) { output({ error: 'STATE.md not found' }, raw, undefined); return; }
@@ -1969,29 +2193,91 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
   // ADR-3473 §8.7 (#3872): caller-allocated out-param, filled with the
   // transaction's own pre-write snapshot + body by `applyPostSyncPreservation`.
   const preWriteState: StatePreWriteSnapshot = {};
+  // #4998: fields left untouched because their existing value wraps onto the
+  // next line. The writers are single-line, so replacing such a field rewrote
+  // only its first line and orphaned the rest. Which lines continue a value and
+  // which are a separate note directly below it cannot be told apart, so the
+  // write leaves the field whole and says so rather than deleting either.
+  // Also (`line_separator`): a carried value the appended section leaves out.
+  const skippedFields: { field: string; reason: 'wrapped_value' | 'line_separator' | 'unclosed_fence'; continuation?: string }[] = [];
+  const skipWrapped = (field: string, before: string, after: string): boolean => {
+    const continuation = editedLineContinuation(before, after);
+    if (continuation === null) return false;
+    skippedFields.push({ field, reason: 'wrapped_value', continuation: boundedContinuation(continuation) });
+    return true;
+  };
 
   readModifyWriteStateMd(statePath, (content) => {
+    // #4998 review (trek-e 5608265301, Major 1): every field written here is read
+    // from the session section when there is one (`## Session`, else `## Session
+    // Continuity` — matchSessionSection, state-snapshot, the frontmatter sync), so
+    // it is written there too. A line outside that section is not the field: a
+    // write that landed on it reported success while the synced value stayed
+    // stale. With no session section only `Stopped At` is read from the whole
+    // body (sessionFieldScope); `state-snapshot` reads Last session and Resume
+    // file from a session section alone, so with none they are not written in
+    // place but in the section appended below, as `state update`/`patch` refuse
+    // them (#4998 review, Minor 3). Located on the masked text (same offsets).
+    const readBodyWide = (fieldName: string): boolean => fieldName.toLowerCase() === 'stopped at';
+    const sessionSection = () => {
+      const masked = maskFencedLines(content, { document: true });
+      return collectSection(masked, isSessionHeading, { levelBounded: true })
+        ?? collectSection(masked, isSessionContinuityHeading, { levelBounded: true });
+    };
+    const inSessionScope = (fieldName: string, write: (visible: string) => string | null): string | null => {
+      const section = sessionSection();
+      if (!section) return readBodyWide(fieldName) ? writeOutsideFences(content, write, { document: true }) : null;
+      const body = writeOutsideFences(content.slice(section.bodyStart, section.bodyEnd), write);
+      return body === null ? null : replaceSection(content, section, body);
+    };
+    const sessionScopeText = (fieldName: string): string => {
+      const masked = maskFencedLines(content, { document: true });
+      const section = sessionSection();
+      if (!section && !readBodyWide(fieldName)) return '';
+      return readableBoldLabels(section ? masked.slice(section.bodyStart, section.bodyEnd) : masked);
+    };
     // #4763 (1): read the pre-write session record. The capture mirrors the
-    // WRITER, not the snapshot reader: stateReplaceField replaces the FIRST
-    // case-insensitive label match anywhere in the document, so the capture is
-    // document-wide too — scoping it to ## Session would miss an archive-section
-    // line the writer actually displaced. Continuation lines join via
+    // WRITER: the first case-insensitive label match in the scope above, so a
+    // line the writer did not displace is not reported as displaced. Continuation lines join via
     // stateFieldContinuation (the sanctioned joiner — stateExtractField alone is
     // first-line-only), so a wrapped multi-line handoff is surfaced whole.
+    // #4998: a line inside a fenced block is an example, not a field — the
+    // writers below skip fences (`writeOutsideFences`), so the capture reads
+    // the same unfenced text they write.
+    // A `**Label**:` line the writer can replace is read too (readableBoldLabels).
     const capturePrior = (fieldName: string): string | undefined => {
-      const first = stateExtractField(content, fieldName);
+      const visible = sessionScopeText(fieldName);
+      const first = stateExtractField(visible, fieldName);
       if (first === null) return undefined;
-      const cont = stateFieldContinuation(content, fieldName);
+      const cont = stateFieldContinuation(visible, fieldName);
       return cont ? `${first}\n${cont}` : first;
     };
-    priorRecord.stoppedAt = capturePrior('Stopped At');
+    // #4998: with no body line, the frontmatter `stopped_at` is the only copy of
+    // the record, and the sync re-derives it from the line inserted below — a
+    // displacement like any other, so it is the prior record too.
+    const fmStoppedAt = extractFrontmatter(content)['stopped_at'];
+    priorRecord.stoppedAt = capturePrior('Stopped At')
+      ?? (typeof fmStoppedAt === 'string' && fmStoppedAt.trim() ? fmStoppedAt.trim() : undefined);
     priorRecord.resumeFile = capturePrior('Resume File');
 
+    // #4998: every in-place write skips fenced blocks, as the insertion
+    // below does — a fenced example line is never the occurrence replaced.
+    const replaceField = (fieldName: string, value: string): string | null =>
+      inSessionScope(fieldName, (visible) => stateReplaceField(visible, fieldName, value));
+    // The template check reads the field the way the writer finds it: an
+    // authored `**Resume file**: plan.md` read as absent and was reset to None.
+    const replaceFieldIfTemplate = (fieldName: string, defaults: string[], value: string): string => {
+      const current = stateExtractField(sessionScopeText(fieldName), fieldName);
+      if (current !== null && current.trim() !== ''
+          && !defaults.some((d) => d.toLowerCase() === current.trim().toLowerCase())) return content;
+      return inSessionScope(fieldName, (visible) => stateReplaceFieldIfTemplate(visible, fieldName, defaults, value)) ?? content;
+    };
+
     // Update Last session / Last Date
-    let result = stateReplaceField(content, 'Last session', now);
-    if (result) { content = result; updated.push('Last session'); }
-    result = stateReplaceField(content, 'Last Date', now);
-    if (result) { content = result; updated.push('Last Date'); }
+    let result = replaceField('Last session', now);
+    if (result && !skipWrapped('Last session', content, result)) { content = result; updated.push('Last session'); }
+    result = replaceField('Last Date', now);
+    if (result && !skipWrapped('Last Date', content, result)) { content = result; updated.push('Last Date'); }
 
     // Update Stopped at
     // #3374 Variant B: stateReplaceField returns the replaced string on any
@@ -2004,11 +2290,11 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
     // section rewrite would reset an executor-authored resume file to None).
     let stoppedAtMatched = false;
     if (options.stopped_at) {
-      result = stateReplaceField(content, 'Stopped At', options.stopped_at);
-      if (!result) result = stateReplaceField(content, 'Stopped at', options.stopped_at);
+      result = replaceField('Stopped At', options.stopped_at);
+      if (!result) result = replaceField('Stopped at', options.stopped_at);
       if (result) {
         stoppedAtMatched = true;
-        if (result !== content) { content = result; updated.push('Stopped At'); }
+        if (result !== content && !skipWrapped('Stopped At', content, result)) { content = readableEditedBoldLabel(content, result); updated.push('Stopped At'); }
       }
     }
 
@@ -2019,23 +2305,18 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
     const resumeFileDefaults = KNOWN_TEMPLATE_DEFAULTS['Resume File'];
     if (options.resume_file !== undefined && options.resume_file !== null) {
       // Caller explicitly passed a value — always honour it.
-      result = stateReplaceField(content, 'Resume File', options.resume_file);
-      if (!result) result = stateReplaceField(content, 'Resume file', options.resume_file);
-      if (result) { content = result; updated.push('Resume File'); }
+      result = replaceField('Resume File', options.resume_file);
+      if (!result) result = replaceField('Resume file', options.resume_file);
+      if (result && !skipWrapped('Resume File', content, result)) { content = readableEditedBoldLabel(content, result); updated.push('Resume File'); }
     } else {
       // No explicit value — only set 'None' when existing value is also a known default
       // (i.e. not executor-authored).
-      const newRf = stateReplaceFieldIfTemplate(content, 'Resume File', resumeFileDefaults, 'None');
-      if (newRf !== content) {
+      let newRf = replaceFieldIfTemplate('Resume File', resumeFileDefaults, 'None');
+      // Try alternate capitalisation
+      if (newRf === content) newRf = replaceFieldIfTemplate('Resume file', resumeFileDefaults, 'None');
+      if (newRf !== content && !skipWrapped('Resume File', content, newRf)) {
         content = newRf;
         updated.push('Resume File');
-      } else {
-        // Try alternate capitalisation
-        const newRfAlt = stateReplaceFieldIfTemplate(content, 'Resume file', resumeFileDefaults, 'None');
-        if (newRfAlt !== content) {
-          content = newRfAlt;
-          updated.push('Resume File');
-        }
       }
     }
 
@@ -2064,8 +2345,12 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
     // identical value is already persisted on disk and must not trigger the
     // insertion rewrite below.
     const needsStoppedAt = options.stopped_at && !stoppedAtMatched;
-    const needsResumeFile = options.resume_file !== undefined && options.resume_file !== null && !updated.includes('Resume File');
-    const needsLastSession = !updated.includes('Last session') && !updated.includes('Last Date');
+    // #4998: a field skipped as wrapped is present, not missing.
+    const skipped = (field: string): boolean => skippedFields.some((s) => s.field === field);
+    const needsResumeFile = options.resume_file !== undefined && options.resume_file !== null
+      && !updated.includes('Resume File') && !skipped('Resume File');
+    const needsLastSession = !updated.includes('Last session') && !updated.includes('Last Date')
+      && !skipped('Last session') && !skipped('Last Date');
 
     if (callerSuppliedValues && (needsStoppedAt || needsResumeFile || needsLastSession)) {
       const resumeValue = (options.resume_file !== undefined && options.resume_file !== null)
@@ -2078,95 +2363,135 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
       // (workstream.cts, gsd2-import.cts, templates/state.md) instead emit
       // `## Session Continuity`. Treat each separately so we never append a
       // duplicate section alongside an existing one.
-      const existingCanonicalSession = /^## Session[ \t]*$/im.test(content);
-      const existingSessionContinuity = /^## Session Continuity[ \t]*$/im.test(content);
+      // #4998: a heading inside a fenced example is not a section. Detected
+      // with the locator the writers below and the readers use (#4998 review).
+      const headingScan = maskFencedLines(content, { document: true });
+      const existingCanonicalSession = collectSection(headingScan, isSessionHeading, { levelBounded: true }) !== null;
+      const existingSessionContinuity = collectSection(headingScan, isSessionContinuityHeading, { levelBounded: true }) !== null;
 
       // Track whether the chosen branch's rewrite actually matched. The detector
-      // regexes (existingCanonicalSession/existingSessionContinuity) are CRLF-
-      // tolerant ($ under /m treats \r as a line terminator); the writer regexes
-      // below must be too. If a writer regex silently fails to match (line-ending
+      // and the writer share one locator (CRLF-tolerant: the tokenizer strips
+      // a trailing \r). If the writer still fails to match (line-ending
       // mismatch, unexpected heading shape, ...), do NOT report success — the
       // caller would believe fields were persisted that were silently dropped
       // (#2450). The append branch always sets rewriteMatched=true (it always
       // mutates content).
       let rewriteMatched = false;
+      // `created` means a session section was added, as in record-metric and
+      // add-decision — not a field inserted into an existing one (#4998 review).
+      let sectionAppended = false;
+
+      // #4998: insert each missing field into `region`,
+      // in the section's own spelling and in template order (Last session →
+      // Stopped at → Resume file), beside the sibling it follows — a bold
+      // `**Stopped at:**` above plain `Last session:` lines is a line the
+      // template does not define. With no sibling present it goes right after
+      // the heading in bold, the pre-#4998 shape. Every existing line is kept.
+      // A heading at EOF with no line terminator gets one first, so its body
+      // exists to insert into rather than a field being glued onto it.
+      // The section is located on the masked text (same offsets): a fenced
+      // `## Session` example is not the section, and a ``` in a frontmatter
+      // block scalar does not hide the real one (Codex review round 2).
+      const insertIntoSection = (isTarget: (h: HeadingToken) => boolean): void => {
+        let section = collectSection(maskFencedLines(content, { document: true }), isTarget, { levelBounded: true });
+        if (section && content[section.bodyStart - 1] !== '\n' && section.bodyStart >= content.length) {
+          content += content.includes('\r\n') ? '\r\n' : '\n';
+          section = collectSection(maskFencedLines(content, { document: true }), isTarget, { levelBounded: true });
+        }
+        if (!section || content[section.bodyStart - 1] !== '\n') return;
+        const body = insertMissingSessionFields(content.slice(section.bodyStart, section.bodyEnd), [
+          { label: 'Last session', needed: needsLastSession, value: now },
+          { label: 'Stopped at', needed: !!needsStoppedAt, value: stoppedAtValue },
+          { label: 'Resume file', needed: needsResumeFile, value: resumeValue },
+        ]);
+        content = replaceSection(content, section, body);
+        rewriteMatched = true;
+      };
 
       if (existingCanonicalSession) {
-        // Normalize in place: replace the ENTIRE BODY of the existing ## Session
-        // section (heading + all content up to the next ## heading or EOF) with
-        // canonical bold-label lines. The negative-lookahead per-line pattern
-        // `(?!^## )[\s\S]` consumes every line that doesn't start with "## ",
-        // which correctly stops at the next section boundary without consuming it.
-        // A trailing blank line is added so the next ## heading keeps its spacing.
-        //
-        // CRLF-tolerant (`\r?\n` after `[ \t]*`): the prior literal `\n` could not
-        // match a CRLF STATE.md (`---\r\n`), silently no-op'ing the replace while
-        // updated.push(...) reported success — #2450. The detector regex on the
-        // line above (`/^## Session[ \t]*$/im`) was already CRLF-tolerant, so the
-        // asymmetry armed the bug.
-        const canonicalReplacement = [
-          '## Session',
-          '',
-          `**Last session:** ${now}`,
-          `**Stopped at:** ${stoppedAtValue}`,
-          `**Resume file:** ${resumeValue}`,
-          '',
-          '',
-        ].join('\n');
-        content = content.replace(
-          /^(## Session[ \t]*\r?\n(?:(?!^## )[\s\S])*)/m,
-          () => {
-            rewriteMatched = true;
-            return canonicalReplacement;
-          },
-        );
+        // #4998: insert the missing fields in place. This used to replace the
+        // whole section with three canonical lines, which deleted any wrapped
+        // value or note in it — and reset an authored Resume file to None.
+        insertIntoSection(isSessionHeading);
       } else if (existingSessionContinuity) {
         // #1101: a `## Session Continuity` section already exists (bootstrap
         // shape). Previously this fell through to the append branch and created
         // a SECOND `## Session` block — a duplicate. Instead, insert only the
-        // canonical fields that are still missing, right after the heading,
+        // canonical fields that are still missing (#4998: beside their siblings),
         // preserving the `## Session Continuity` heading and ALL existing lines
         // (e.g. prose like "Next recommended action"). Fields already updated in
         // place above (needs* false) are not re-inserted. A function replacement
         // is used so `$`-bearing caller values are inserted literally (#3454).
         //
-        // CRLF-tolerant (`\r?\n`): same #2450 fix as the canonical branch above.
-        const linesToInsert: string[] = [];
-        if (needsLastSession) linesToInsert.push(`**Last session:** ${now}`);
-        if (needsStoppedAt) linesToInsert.push(`**Stopped at:** ${stoppedAtValue}`);
-        if (needsResumeFile) linesToInsert.push(`**Resume file:** ${resumeValue}`);
-        if (linesToInsert.length > 0) {
-          // Case-insensitive to match the `existingSessionContinuity` detection
-          // above (#1101 review F3) — otherwise a lowercase heading would detect
-          // but no-op the insert while still reporting the fields as updated.
-          content = content.replace(
-            /^(## Session Continuity[ \t]*\r?\n)/im,
-            (_m, heading: string) => {
-              rewriteMatched = true;
-              return heading + linesToInsert.join('\n') + '\n';
-            },
-          );
-        }
-        // No `else` branch: if linesToInsert.length === 0 the outer guard at
-        // :1144 (callerSuppliedValues && (needsStoppedAt || needsResumeFile
-        // || needsLastSession)) could not have fired, so this whole block is
-        // unreachable. Leaving `rewriteMatched = false` here is the fail-loud
-        // posture — a future change to the outer guard or needs* computation
-        // that makes this branch reachable will surface as a missing
-        // updated[] entry (silent recorded:false) rather than re-arming #2450.
+        // Heading match is case-insensitive and CRLF-tolerant like the
+        // `existingSessionContinuity` detection above (#1101 review F3, #2450):
+        // a detected heading the writer then misses would report fields as
+        // updated that were never written (`rewriteMatched` stays false).
+        insertIntoSection(isSessionContinuityHeading);
       } else {
         // No session heading exists at all — append a new canonical section.
-        const scaffold = [
-          '',
-          '## Session',
-          '',
-          `**Last session:** ${now}`,
-          `**Stopped at:** ${stoppedAtValue}`,
-          `**Resume file:** ${resumeValue}`,
-          '',
-        ].join('\n');
-        content = content.trimEnd() + '\n' + scaffold;
-        rewriteMatched = true;
+        // #4998: the appended section becomes the one the sync reads, so a
+        // field this call is not setting carries the value the sync reads
+        // today (a body line, a wrapped field's first line, a table row)
+        // rather than None or nothing — which dropped the frontmatter
+        // `stopped_at` and reset an authored Resume file. Later writes then
+        // land on these bold lines first. A field skipped above as wrapped
+        // carries its existing value too — Last session included — so a
+        // skipped field never comes back carrying the new value.
+        // Read from the body, as the sync does — never from frontmatter, and
+        // never from a fenced example.
+        const syncBody = readableBoldLabels(maskFencedLines(stripFrontmatter(content)));
+        const carried = (fields: readonly string[], fallback: string): string => {
+          for (const field of fields) {
+            const value = stateExtractField(syncBody, field);
+            if (value !== null) return value;
+          }
+          return fallback;
+        };
+        const lastSessionValue = skipped('Last session') || skipped('Last Date')
+          ? carried(['Last session', 'Last Date'], now)
+          : now;
+        const scaffoldFields: [string, string][] = [
+          ['Last session', lastSessionValue],
+          ['Stopped at', needsStoppedAt ? stoppedAtValue : carried(['Stopped At'], stoppedAtValue)],
+          ['Resume file', needsResumeFile ? resumeValue : carried(['Resume File'], resumeValue)],
+        ];
+        // A document that ends inside an unclosed fence would swallow the
+        // appended section — nothing reads it there. Write nothing, and say so.
+        // The whole document is scanned on purpose: whether its tail is fenced
+        // depends on every delimiter before it (frontmatter excluded: YAML, not
+        // Markdown), and `scanFencedBlocks` reports
+        // an unclosed block only as its LAST record (the fence runs to EOF), so
+        // `closeLineIdx === -1` here means exactly "the tail is inside a fence".
+        if (markdownFencedBlocks(content.split('\n'), { document: true }).some((b) => b.closeLineIdx === -1)) {
+          // Named only for a field this call writes (Last session always, the
+          // others when passed) and not already written in place or skipped
+          // for another reason (Codex review; trek-e review 5608265301, Minor 3).
+          const fieldKey = (f: string): string => (f === 'Last Date' ? 'last session' : f.toLowerCase());
+          const requested = new Set(['last session']);
+          if (options.stopped_at) requested.add('stopped at');
+          if (options.resume_file !== undefined && options.resume_file !== null) requested.add('resume file');
+          const settled = new Set([...updated, ...skippedFields.map((s) => s.field)].map(fieldKey));
+          // A Stopped at already holding the value needs no write (Codex review).
+          if (stoppedAtMatched) settled.add('stopped at');
+          for (const [label] of scaffoldFields) {
+            const key = fieldKey(label);
+            if (requested.has(key) && !settled.has(key)) skippedFields.push({ field: label, reason: 'unclosed_fence' });
+          }
+        } else {
+          // A carried value holding a line separator (a hand-written table cell
+          // can) would forge a line once written as a bold field: leave that
+          // field out, and say so.
+          const scaffoldLines: string[] = [];
+          for (const [label, value] of scaffoldFields) {
+            if (FIELD_LINE_BREAK_RE.test(value)) skippedFields.push({ field: label, reason: 'line_separator' });
+            else scaffoldLines.push(`**${label}:** ${value}`);
+          }
+          const scaffold = ['', '## Session', '', ...scaffoldLines, ''].join('\n');
+          content = content.trimEnd() + '\n' + scaffold;
+          rewriteMatched = true;
+          sectionAppended = true;
+        }
       }
 
       // #2450 defensive invariant: only report sessionCreated/updated when the
@@ -2183,7 +2508,7 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
       // same-line replace (CRLF-agnostic seam), so unconditional push is
       // correct. The class-defect防御 here is for the INSERT path only.
       if (rewriteMatched) {
-        sessionCreated = true;
+        sessionCreated = sectionAppended;
         if (needsLastSession) updated.push('Last session');
         if (needsStoppedAt) updated.push('Stopped At');
         if (needsResumeFile) updated.push('Resume File');
@@ -2197,23 +2522,48 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
   // bytes actually persisted (fix(#3351) generalized) and fold in any field
   // preservation restored that this transform never touched (#3345's
   // direction).
-  const reconciledUpdated = reconcileReportedFields(statePath, preWriteState, updated, divergedFields);
+  // #4998 review: read back where the fields were written — the session section.
+  const reconciledUpdated = reconcileReportedFields(statePath, preWriteState, updated, divergedFields, NO_SECTION_TARGETS, true);
+
+  // #4998: name every field left whole because its value wraps, and how to fix it.
+  const skippedRows = skippedFields;
+  const skippedDisclosure = skippedRows.map(({ field, reason, continuation }) => (reason === 'wrapped_value'
+    ? `state record-session left ${field} unchanged — its value continues onto the next line ` +
+      `(${formatDiagnosticToken(continuation ?? '')}), and a single-line write would leave that line behind. ` +
+      'Fold the value onto one line, or put a blank line before that line if it is a separate note, then re-run.'
+    : reason === 'line_separator'
+      ? `state record-session left ${field} out of the new ## Session section — its existing value holds a ` +
+        'line separator (U+2028/U+2029), which would split the line it is written on. Remove the separator, then re-run.'
+      : `state record-session did not write ${field} — STATE.md has no session section and ends inside an unclosed ` +
+        'code fence, which would swallow a new ## Session section. Close the fence, then re-run.'));
 
   if (reconciledUpdated.length > 0) {
     const result: Record<string, unknown> = { recorded: true, updated: reconciledUpdated };
     if (sessionCreated) result['created'] = true;
+    if (skippedRows.length > 0) {
+      result['skipped'] = skippedRows;
+      for (const line of skippedDisclosure) process.stderr.write(`[gsd-tools] WARNING: ${line}\n`);
+    }
     // #4763 (1): surface any non-empty prior record the write displaced. Gated
     // on reconciledUpdated (the fields that actually persisted, post-#3957
     // reconcile) rather than the pre-reconciliation updated[]. Only fields with
     // real prior content differing from the caller's value count — same-value
-    // rewrites, the insert path (no prior label), and the #944 template-default
-    // DWIM (defaults match case-insensitively, so a case-variant 'none' →
-    // 'None' rewrite is normalization, not displacement) are excluded.
-    const isResumeTemplateDefault = priorRecord.resumeFile !== undefined
-      && KNOWN_TEMPLATE_DEFAULTS['Resume File'].some(
-        (d) => d.toLowerCase() === priorRecord.resumeFile?.toLowerCase());
+    // rewrites, the insert path with no prior record (no body label and, #4998,
+    // no frontmatter `stopped_at`), and the #944 template-default DWIM
+    // (defaults match case-insensitively, so a case-variant 'none' → 'None'
+    // rewrite is normalization, not displacement) are excluded.
+    // #4998: `None` is the same placeholder for Stopped At (the bootstrap
+    // writes it there too, body or frontmatter) — no record was displaced. Nor
+    // is the shipped template's whole-value `[...]` placeholder
+    // (`[Description of last completed action]`; #4998 review, Nit 7).
+    const isPlaceholder = (value: string | undefined): boolean => value !== undefined
+      && (KNOWN_TEMPLATE_DEFAULTS['Resume File'].some((d) => d.toLowerCase() === value.toLowerCase())
+        || /^\[[^\]\n]*\]$/u.test(value.trim()));
+    const isResumeTemplateDefault = isPlaceholder(priorRecord.resumeFile);
+    const isStoppedAtPlaceholder = isPlaceholder(priorRecord.stoppedAt);
     const replacedRecord: Record<string, string> = {};
     if (reconciledUpdated.includes('Stopped At') && priorRecord.stoppedAt
+        && !isStoppedAtPlaceholder
         && priorRecord.stoppedAt !== options.stopped_at) {
       replacedRecord['Stopped At'] = priorRecord.stoppedAt;
     }
@@ -2224,6 +2574,15 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
     }
     if (Object.keys(replacedRecord).length > 0) result['replacedRecord'] = replacedRecord;
     output(result, raw, 'true');
+  } else if (skippedRows.length > 0) {
+    // #4998: every field the call would have changed wraps — nothing written.
+    declineNoOp(
+      raw,
+      'recorded',
+      'every session field to update was left unchanged — see skipped',
+      skippedDisclosure.join('\n[gsd-tools] WARNING: '),
+      { skipped: skippedRows },
+    );
   } else if (updated.length === 0) {
     // Nothing was ever attempted — no --stopped-at/--resume-file supplied
     // and no existing Last session/Last Date/Stopped At/Resume File labels
@@ -2267,11 +2626,21 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
  * Returns the section body, or null.
  */
 function matchSessionSection(body: string): string | null {
-  const isSession = (h: HeadingToken): boolean => h.level === 2 && h.text.trim().toLowerCase() === 'session';
-  const isSessionContinuity = (h: HeadingToken): boolean => h.level === 2 && h.text.trim().toLowerCase() === 'session continuity';
-  const section = collectSection(body, isSession, { levelBounded: true })
-    ?? collectSection(body, isSessionContinuity, { levelBounded: true });
+  const section = collectSection(body, isSessionHeading, { levelBounded: true })
+    ?? collectSection(body, isSessionContinuityHeading, { levelBounded: true });
   return section ? section.body : null;
+}
+
+
+/**
+ * #4998: where the session fields (Stopped At, Paused At) are read from — the
+ * session section, else the whole body — with fenced blocks blanked, because
+ * `state record-session` writes them outside fences (`writeOutsideFences`).
+ * A reader that still took a fenced example would sync it into frontmatter
+ * over the field the writer just wrote.
+ */
+function sessionFieldScope(body: string): string {
+  return maskFencedLines(matchSessionSection(body) ?? body);
 }
 
 /**
@@ -2341,17 +2710,22 @@ function preferNewerLastActivity(
   }
 }
 
-function parseProsePhaseField(value: string | null): { phase: string | null; name: string | null } {
+function parseProsePhaseField(
+  value: string | null,
+  convention?: string | null,
+  directoryContext?: PhaseDirectoryContext,
+): { phase: string | null; name: string | null } {
   // #2121 Phase 2 (#2125): delegate to the canonical anchored parser so this
   // module holds no independent prose phase-id regex. Drives #2111 — the
   // anchored parser returns { phase: null } for a "Milestone vX.Y complete"
   // body line (the old unanchored regex mined the minor-version digit, e.g.
   // v0.5 -> "5"), so syncStateFrontmatter's #905 guard preserves the real
   // current_phase instead of clobbering it.
-  return parsePhaseFromProse(value);
+  // #5626: under `milestone-prefixed` the id is the whole `M-NN`; the convention comes from its owner.
+  return parsePhaseFromProse(value, convention, directoryContext);
 }
 
-function resolveStatePhase(fm: Record<string, unknown>, body: string): {
+function resolveStatePhase(fm: Record<string, unknown>, body: string, convention?: string | null, directoryContext?: PhaseDirectoryContext): {
   phase: string | null;
   name: string | null;
   sources: {
@@ -2365,11 +2739,11 @@ function resolveStatePhase(fm: Record<string, unknown>, body: string): {
   const legacyRaw = stateFieldValue(fm, currentPositionScope, null, 'Current Phase').value;
   const currentPositionRaw = stateFieldValue(fm, currentPositionScope, null, 'Phase').value;
   const sources = {
-    frontmatter: parseProsePhaseField(frontmatterRaw).phase,
-    legacy_current_phase: parseProsePhaseField(legacyRaw).phase,
-    current_position_phase: parseProsePhaseField(currentPositionRaw).phase,
+    frontmatter: parseProsePhaseField(frontmatterRaw, convention, directoryContext).phase,
+    legacy_current_phase: parseProsePhaseField(legacyRaw, convention, directoryContext).phase,
+    current_position_phase: parseProsePhaseField(currentPositionRaw, convention, directoryContext).phase,
   };
-  const prosePhase = parseProsePhaseField(currentPositionRaw);
+  const prosePhase = parseProsePhaseField(currentPositionRaw, convention, directoryContext);
   return {
     phase: sources.frontmatter ?? sources.legacy_current_phase ?? sources.current_position_phase,
     name: stateFieldValue(fm, body, 'current_phase_name', null).value
@@ -2425,10 +2799,10 @@ function resolveStatePhase(fm: Record<string, unknown>, body: string): {
  * Reconcile the two only by giving `resolveStatePhase` an explicit scope
  * parameter — never by pointing this at it and dropping the difference.
  */
-function resolveCurrentPhaseId(fm: Record<string, unknown>, body: string): string | null {
+function resolveCurrentPhaseId(fm: Record<string, unknown>, body: string, convention?: string | null, directoryContext?: PhaseDirectoryContext): string | null {
   const positionSection = sliceCurrentPositionSection(body);
   const prosePhase =
-    positionSection !== null ? parseProsePhaseField(stateFieldValue(fm, positionSection, null, 'Phase').value).phase : null;
+    positionSection !== null ? parseProsePhaseField(stateFieldValue(fm, positionSection, null, 'Phase').value, convention, directoryContext).phase : null;
   return stateFieldValue(fm, body, 'current_phase', 'Current Phase').value ?? prosePhase;
 }
 
@@ -2471,7 +2845,8 @@ function cmdStateSnapshot(cwd: string, raw: boolean): void {
   // so it is scopeable exactly like Stopped At under ## Session. Fall back to
   // full-body search only when no ## Current Position section exists, so files
   // with no section heading keep their current behaviour.
-  const resolvedPhase = resolveStatePhase(fm, body);
+  const directoryContext = phaseDirectoryOptions(cwd);
+  const resolvedPhase = resolveStatePhase(fm, body, resolvePhaseIdConvention(cwd), directoryContext);
   const currentPhase = resolvedPhase.phase;
   const currentPhaseName = resolvedPhase.name;
   const totalPhasesRaw = stateFieldValue(fm, body, 'total_phases', 'Total Phases').value;
@@ -2487,7 +2862,7 @@ function cmdStateSnapshot(cwd: string, raw: boolean): void {
   // preferNewerLastActivity and the write seam in buildStateFrontmatter). The
   // write seam already scopes it to ## Session; this read seam must agree, so a
   // stale "Paused At:" in a Session Continuity Archive cannot win here either.
-  const sessionScope = matchSessionSection(body) ?? body;
+  const sessionScope = sessionFieldScope(body);
   const pausedAt = stateFieldValue(fm, sessionScope, 'paused_at', 'Paused At').value;
 
   // Parse numeric fields
@@ -2535,7 +2910,8 @@ function cmdStateSnapshot(cwd: string, raw: boolean): void {
   // `## Session Continuity` heading. See matchSessionSection for the anchoring.
   const sessionMatch = matchSessionSection(body);
   if (sessionMatch !== null) {
-    const sessionSection = sessionMatch;
+    // #4998: fenced example lines are not fields (as for sessionFieldScope).
+    const sessionSection = maskFencedLines(sessionMatch);
     // Accept both `**Last Date:**` (canonical template form) and `**Last session:**`
     // (the form written by the DWIM auto-create / normalize path added for #944).
     const lastDateMatch = sessionSection.match(/\*\*Last Date:\*\*\s*(.+)/i)
@@ -2649,7 +3025,7 @@ function isMilestoneBounded(roadmapRaw: string, milestone: string, convention?: 
  * decimal, and project-code IDs are detected alike. Returns canonical keys
  * (see phaseKeyFromToken).
  */
-function extractRetiredPhaseNumbers(scope: string, convention?: string | null): Set<string> {
+function extractRetiredPhaseNumbers(scope: string, convention?: string | null, directoryContext?: PhaseDirectoryContext): Set<string> {
   const retired = new Set<string>();
   const isChecklistOrHeading = /^\s*(?:[-*+]\s*\[[ xX]\]|#{1,6}\s)/;
   // #612: the retirement filter has to widen with the counter it protects. The
@@ -2674,7 +3050,7 @@ function extractRetiredPhaseNumbers(scope: string, convention?: string | null): 
     while ((s = strikeSpan.exec(line)) !== null) {
       const phaseRef = phaseRefRe.exec(s[1]);
       // Require a digit so struck prose like ~~Phase Overview~~ is ignored.
-      if (phaseRef && /\d/.test(phaseRef[1])) retired.add(phaseKeyFromToken(phaseRef[1]));
+      if (phaseRef && (directoryContext?.phaseNaming === 'custom' || /\d/.test(phaseRef[1]))) retired.add(phaseKeyFromToken(phaseRef[1], directoryContext));
     }
   }
   return retired;
@@ -2724,6 +3100,7 @@ function countRoadmapPhaseHeadings(
   convention: string | null | undefined,
   retiredPhaseNums: Set<string>,
   applyConventionTokenSentinelRules: boolean,
+  directoryContext?: PhaseDirectoryContext,
 ): number {
   let count = 0;
   if (convention === 'bracket') {
@@ -2749,20 +3126,26 @@ function countRoadmapPhaseHeadings(
       if (applyConventionTokenSentinelRules && /^999\b/.test(token)) continue;
       // #1514: retired/folded phases are struck through in the ROADMAP;
       // exclude them from the denominator (they can never be completed).
-      if (retiredPhaseNums.has(phaseKeyFromToken(token))) continue;
+      if (retiredPhaseNums.has(phaseKeyFromToken(token, directoryContext))) continue;
       count++;
     }
     return count;
   }
-  // LEGACY stays on the pre-round-4 raw exec loop. #3185 owns the read-path
-  // sentinel predicate; sync deliberately preserves its prior behavior.
-  const phaseHeadingPattern = new RegExp(`#{2,4}\\s*${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY, convention, true)}([\\w][\\w.-]*)(?:\\s*\\([^)\\n]{0,200}\\))?\\s*:`, 'gi');
-  let m: RegExpExecArray | null;
-  while ((m = phaseHeadingPattern.exec(scope)) !== null) {
+  // LEGACY keeps its own sentinel rules (#3185 owns the read-path sentinel
+  // predicate; sync deliberately preserves its prior behavior). #5880: the
+  // headings themselves come from the one tokenizer the bracket branch uses, so
+  // only real ATX headings (levels 2-4, outside fences, at line start) count.
+  // A raw scan over the scope text also counted a heading quoted in a code span,
+  // a blockquote, a sentence, or the tail of a `#####` line.
+  const phaseHeadingPattern = new RegExp(`^${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY, convention, true)}([\\w][\\w.-]*)(?:\\s*\\([^)\\n]{0,200}\\))?\\s*:`, 'i');
+  for (const h of tokenizeHeadings(scope)) {
+    if (h.level < 2 || h.level > 4) continue;
+    const m = phaseHeadingPattern.exec(h.text);
+    if (!m) continue;
     const token = m[1];
     if (!/\d/.test(token)) continue;
     if (applyConventionTokenSentinelRules && isSentinelPhaseId(token)) continue;
-    if (retiredPhaseNums.has(phaseKeyFromToken(token))) continue;
+    if (retiredPhaseNums.has(phaseKeyFromToken(token, directoryContext))) continue;
     count++;
   }
   return count;
@@ -2793,6 +3176,7 @@ function scanStatePhaseDirs(
   roadmapScope: string | null;
   roadmapRaw: string | null;
   retiredPhaseNums: Set<string>;
+  directoryContext: PhaseDirectoryContext;
 } {
   // Read the current-milestone ROADMAP scope once: it feeds both the
   // heading-based phase count and the retired/folded-phase
@@ -2801,12 +3185,14 @@ function scanStatePhaseDirs(
   let roadmapScope: string | null = null;
   let roadmapRaw: string | null = null;
   let retiredPhaseNums = new Set<string>();
+  let directoryContext = phaseDirectoryOptions(cwd, undefined, '');
   try {
     const roadmapPath = path.join(planningDir(cwd), 'ROADMAP.md');
     roadmapRaw = platformReadSync(roadmapPath);
     if (roadmapRaw !== null) {
       roadmapScope = extractCurrentMilestone(roadmapRaw, cwd);
-      retiredPhaseNums = extractRetiredPhaseNumbers(roadmapScope, phaseConvention);
+      directoryContext = {...directoryContext, roadmap: roadmapRaw};
+      retiredPhaseNums = extractRetiredPhaseNumbers(roadmapScope, phaseConvention, directoryContext);
     }
   } catch { /* fall through: no roadmap scope → no retired exclusion */ }
 
@@ -2834,7 +3220,7 @@ function scanStatePhaseDirs(
     // artifact; drop it from the disk phase set so it counts toward
     // neither the denominator nor the numerator (mirrors the heading
     // exclusion below). Project-code-aware via phaseKeyFromDir.
-    if (retiredPhaseNums.size > 0 && retiredPhaseNums.has(phaseKeyFromDir(dir, phaseConvention))) continue;
+    if (retiredPhaseNums.size > 0 && retiredPhaseNums.has(phaseKeyFromDir(dir, phaseConvention, directoryContext))) continue;
     // #3185: dedup grouping routed through the canonical phaseKeyFromDir
     // (src/phase-id.cts) instead of a local leading-digits regex that
     // diverged from extractPhaseToken/phaseKeyFromDir on
@@ -2842,7 +3228,7 @@ function scanStatePhaseDirs(
     // so a `PROJ-05`/`PROJ-05-slug` pair never deduped) and on
     // multi-segment milestone dirs. Same key surface used two lines
     // above for the retiredPhaseNums exclusion, so both filters agree.
-    const key = phaseKeyFromDir(dir, phaseConvention);
+    const key = phaseKeyFromDir(dir, phaseConvention, directoryContext);
     if (!seenPhaseNums.has(key)) {
       seenPhaseNums.set(key, dir);
     } else {
@@ -2873,6 +3259,7 @@ function scanStatePhaseDirs(
     roadmapScope,
     roadmapRaw,
     retiredPhaseNums,
+    directoryContext,
   };
 }
 
@@ -2916,7 +3303,11 @@ function buildStateFrontmatter(
   // section overwrites current_phase here, and the next read surfaces it. Fall
   // back to full-body search when no ## Current Position section exists.
   const currentPositionScope = matchCurrentPositionSection(bodyContent) ?? bodyContent;
-  const prosePhase = parseProsePhaseField(stateExtractField(currentPositionScope, 'Phase'));
+  const prosePhase = parseProsePhaseField(
+    stateExtractField(currentPositionScope, 'Phase'),
+    cwd ? resolvePhaseIdConvention(cwd) : null,
+    cwd ? phaseDirectoryOptions(cwd) : undefined,
+  );
   const currentPhase = stateExtractField(bodyContent, 'Current Phase') ?? prosePhase.phase;
   const currentPhaseName = stateExtractField(bodyContent, 'Current Phase Name') ?? prosePhase.name;
   const currentPlan = stateExtractField(bodyContent, 'Current Plan');
@@ -2934,8 +3325,7 @@ function buildStateFrontmatter(
   // Fall back to full-body search only when no ## Session section exists.
   // #1101: prefer the canonical `## Session` block, falling back to the bootstrap
   // `## Session Continuity` heading. See matchSessionSection for the anchoring.
-  const sessionSectionMatch = matchSessionSection(bodyContent);
-  const sessionBodyScope = sessionSectionMatch ?? bodyContent;
+  const sessionBodyScope = sessionFieldScope(bodyContent);
   const stoppedAt = stateExtractField(sessionBodyScope, 'Stopped At') || stateExtractField(sessionBodyScope, 'Stopped at');
   // #2567: Paused At is a session field — scope it to ## Session too so a
   // stale "Paused At:" line in an archive section cannot overwrite the value.
@@ -3025,6 +3415,7 @@ function buildStateFrontmatter(
             roadmapScope,
             roadmapRaw,
             retiredPhaseNums,
+            directoryContext,
           } = scanStatePhaseDirs(cwd, phasesDir, phaseConvention, milestoneExplicitlyNull ? null : storedMilestone);
 
           let diskTotalPlans = 0;
@@ -3063,7 +3454,7 @@ function buildStateFrontmatter(
           // fence-aware bracket strategy with #3185's canonical legacy
           // sentinel predicate for this read-path call.
           const roadmapPhaseCount = roadmapScope !== null
-            ? countRoadmapPhaseHeadings(roadmapScope, phaseConvention, retiredPhaseNums, true)
+            ? countRoadmapPhaseHeadings(roadmapScope, phaseConvention, retiredPhaseNums, true, directoryContext)
             : 0;
 
           cached = (() => {
@@ -3199,12 +3590,28 @@ function buildStateFrontmatter(
             // — no second ROADMAP parser here. A ROADMAP without a canonical
             // `## Progress` table resolves no table → floor inert (disk count
             // stands), the owner's own answer to "what is countable".
+            // #5165: the milestone-grouped `## Progress` table keeps every
+            // milestone's rows and sits OUTSIDE any narrower roadmapScope, so the
+            // floor names the milestone STATE asserts (assertedMilestoneVersion —
+            // present on every resync path, unlike the optional storedMilestone
+            // parameter) and the owner counts only that milestone's rows. No row
+            // for it => nulls => the floor is inert and the disk count stands.
             const roadmapCompletedPhases = roadmapScope !== null && safeToUseRoadmapCount && !diskCountsWithheld
-              ? deriveProgressFromRoadmap(roadmapScope).completedPhases
+              ? deriveProgressFromRoadmap(roadmapScope, assertedMilestoneVersion ?? storedMilestone).completedPhases
               : null;
             const flooredCompletedPhases = roadmapCompletedPhases !== null
               ? Math.max(diskCompletedPhases, roadmapCompletedPhases)
               : diskCompletedPhases;
+            // #6279: the walk found no phase dir AND the asserted milestone's
+            // phases sit in its `milestone complete` archive, so its plans
+            // were moved, not deleted. Gated on that archive so a milestone
+            // that has no archive (a later one, or never closed) still takes
+            // the disk count, zero included.
+            const archiveVersion = String(assertedMilestoneVersion ?? (milestoneExplicitlyNull ? '' : storedMilestone ?? '')).trim();
+            const archivedPhasesExist = phaseDirs.length === 0
+              && archiveVersion !== ''
+              && path.basename(archiveVersion) === archiveVersion
+              && fs.existsSync(path.join(planningPaths(cwd).planning, 'milestones', `${archiveVersion}-phases`));
             return {
               // The two WITHHOLD shapes (#3354 milestoned-but-unbounded, #3573
               // roadmap-absent-with-asserted-milestone) must be evaluated BEFORE
@@ -3218,6 +3625,7 @@ function buildStateFrontmatter(
               completedPhases: diskCountsWithheld ? null : flooredCompletedPhases,
               totalPlans: diskCountsWithheld ? null : diskTotalPlans,
               completedPlans: diskCountsWithheld ? null : diskTotalSummaries,
+              plansMeasured: phaseDirs.length > 0 || !archivedPhasesExist,
               phaseDirScope,
             };
           })();
@@ -3246,14 +3654,20 @@ function buildStateFrontmatter(
         } else if (storedCompletedPhases !== null && storedCompletedPhases !== undefined) {
           completedPhases = storedCompletedPhases;
         }
-        if (cached.totalPlans !== null) {
+        // #6279: when the asserted milestone's phases were archived and the
+        // walk found none (plansMeasured false), a stored plan counter wins
+        // over the disk 0. Without a stored value the disk 0 stands.
+        // total_phases is unaffected: it comes from the ROADMAP headings.
+        const hasStoredTotalPlans = storedTotalPlans !== null && storedTotalPlans !== undefined;
+        const hasStoredCompletedPlans = storedCompletedPlans !== null && storedCompletedPlans !== undefined;
+        if (cached.totalPlans !== null && (cached.plansMeasured || !hasStoredTotalPlans)) {
           totalPlans = cached.totalPlans;
-        } else if (storedTotalPlans !== null && storedTotalPlans !== undefined) {
+        } else if (hasStoredTotalPlans) {
           totalPlans = storedTotalPlans;
         }
-        if (cached.completedPlans !== null) {
+        if (cached.completedPlans !== null && (cached.plansMeasured || !hasStoredCompletedPlans)) {
           completedPlans = cached.completedPlans;
-        } else if (storedCompletedPlans !== null && storedCompletedPlans !== undefined) {
+        } else if (hasStoredCompletedPlans) {
           completedPlans = storedCompletedPlans;
         }
         milestoneUnbounded = cached.milestoneBounded === false;
@@ -3634,6 +4048,7 @@ function applyAuthoritativeProgressSubkeys(
   let completedMoved = false;
   for (const [subkey, value] of Object.entries(intent)) {
     if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    if (subkey === 'percent') continue; // composed below, never applied raw (#5165)
     if (!getFieldClassification(`progress.${subkey}`)) continue;
     const isCompletedCounter = subkey === 'completed_phases' || subkey === 'completed_plans';
     if (isCompletedCounter && opts.completedOnlyRaise) {
@@ -3648,10 +4063,24 @@ function applyAuthoritativeProgressSubkeys(
   }
   // percent: applied only when a completed counter moved (coherent with the
   // counters that just landed) or when no percent exists to contradict.
+  // #5165 / ADR-4629 §8.5: `computeProgressPercent` is the one composition
+  // owner (min(plan fraction, phase fraction)) that every resyncing write uses.
+  // When the block carries the counters it needs, the percent is composed by
+  // that owner over the counters just landed, so a later resyncing write
+  // cannot move what this transition wrote. The intent's own percent (a
+  // phase-only fraction) is only the fallback for a block without plan counts.
   const intentPercent = intent['percent'];
   if (typeof intentPercent === 'number' && Number.isFinite(intentPercent) && (completedMoved || toFiniteNumber(base['percent']) === null)) {
-    if (!Object.is(base['percent'], intentPercent)) {
-      base['percent'] = intentPercent;
+    const composed = computeProgressPercent(
+      toFiniteNumber(base['completed_plans']),
+      toFiniteNumber(base['total_plans']),
+      toFiniteNumber(base['completed_phases']),
+      toFiniteNumber(base['total_phases']),
+      SCOPE.COMPLETE,
+    );
+    const nextPercent = composed !== null ? composed : intentPercent;
+    if (!Object.is(base['percent'], nextPercent)) {
+      base['percent'] = nextPercent;
       changed = true;
     }
   }
@@ -4040,8 +4469,9 @@ function acquireStateLock(statePath: string, clock?: StateLockClock): string {
       // in the decision→steal gap never has its replacement deleted (window b). Mirrors
       // capability-lock.cts:455-499.
       try {
-        const stat = fs.statSync(lockPath);
-        const ageMs = clock.now() - stat.mtimeMs;
+        // Exact 64-bit (dev, ino): an NTFS file id does not fit a JS number (never serialized).
+        const stat = fs.statSync(lockPath, { bigint: true });
+        const ageMs = clock.now() - Number(stat.mtimeMs);
         const bodyStatus = _stateLockBodyStatus(lockPath);
         const bodyPid = bodyStatus.kind === 'pid' ? bodyStatus.pid : null;
         const holderLive = bodyPid !== null && _stateLockIsPidAlive(bodyPid);
@@ -4060,14 +4490,14 @@ function acquireStateLock(statePath: string, clock?: StateLockClock): string {
           // Identity re-confirm immediately before the steal: a racer that stole +
           // recreated a fresh lock in the decision→steal gap changes (dev, ino) and/or
           // the body pid → do NOT delete the replacement; re-evaluate from scratch.
-          let confirmStat: fs.Stats;
+          let confirmStat: fs.BigIntStats;
           try {
-            confirmStat = fs.statSync(lockPath);
+            confirmStat = fs.statSync(lockPath, { bigint: true });
           } catch {
             continue; // lock vanished between decision and steal — retry the create.
           }
           const sameInstance =
-            typeof stat.dev === 'number' && typeof stat.ino === 'number' &&
+            typeof stat.dev === 'bigint' && typeof stat.ino === 'bigint' &&
             confirmStat.dev === stat.dev && confirmStat.ino === stat.ino &&
             _stateLockBodyPid(lockPath) === bodyPid;
           if (!sameInstance) {
@@ -4245,6 +4675,10 @@ function applyPostSyncPreservation(
   syncedContent: string,
   statePath: string,
   options: StatePreservationOptions,
+  // #5626: the project's phase-id convention, resolved by the caller from its cwd (null: unset). Trailing and
+  // optional so `options` stays the fifth parameter the options guard and its callers rely on.
+  phaseIdConvention: string | null = null,
+  directoryContext?: PhaseDirectoryContext,
 ): string {
   assertStatePreservationOptions(options, 'applyPostSyncPreservation');
   const { resync, authoritativeFm, deriveProgressKeys, divergedFields, explicitProgressField, preWriteState } = options;
@@ -4284,8 +4718,7 @@ function applyPostSyncPreservation(
   // mirroring buildStateFrontmatter's sessionBodyScope logic.
   // A stale "Stopped at:" in a non-Session section (e.g. Session Continuity
   // Archive prose) must not interfere with the delta comparison.
-  const preSessionMatch = matchSessionSection(preBody);
-  const preSessionScope = preSessionMatch ?? preBody;
+  const preSessionScope = sessionFieldScope(preBody);
   const preBodyStoppedAt = stateExtractField(preSessionScope, 'Stopped At') || stateExtractField(preSessionScope, 'Stopped at');
 
   // ADR-1769 Phase 6 / #1743 / #1695: snapshot the body source for the curated
@@ -4307,7 +4740,7 @@ function applyPostSyncPreservation(
   const preCurrentPositionScope = matchCurrentPositionSection(preBody) ?? preBody;
   const preBodyCurrentPlan = stateExtractField(preBody, 'Current Plan');
   const preBodyCurrentPhase = stateExtractField(preBody, 'Current Phase')
-    ?? parseProsePhaseField(stateExtractField(preCurrentPositionScope, 'Phase')).phase;
+    ?? parseProsePhaseField(stateExtractField(preCurrentPositionScope, 'Phase'), phaseIdConvention, directoryContext).phase;
   const preBodyPausedAt = stateExtractField(preSessionScope, 'Paused At');
   const preBodyLastActivityRaw = stateExtractField(preBody, 'Last Activity')
     ?? stateExtractField(preBody, 'Last activity');
@@ -4323,8 +4756,7 @@ function applyPostSyncPreservation(
   const postBodyStatus = stateExtractField(postBody, 'Status');
   // Bug #1230 / Change B: scope stopped_at delta to the ## Session section,
   // consistent with the pre-transform snapshot above and buildStateFrontmatter.
-  const postSessionMatch = matchSessionSection(postBody);
-  const postSessionScope = postSessionMatch ?? postBody;
+  const postSessionScope = sessionFieldScope(postBody);
   const postBodyStoppedAt = stateExtractField(postSessionScope, 'Stopped At') || stateExtractField(postSessionScope, 'Stopped at');
   // ADR-1769 Phase 6 / #1695: post-transform body Phase source for the
   // current_phase_name delta comparison.
@@ -4334,7 +4766,7 @@ function applyPostSyncPreservation(
   const postCurrentPositionScope = matchCurrentPositionSection(postBody) ?? postBody;
   const postBodyCurrentPlan = stateExtractField(postBody, 'Current Plan');
   const postBodyCurrentPhase = stateExtractField(postBody, 'Current Phase')
-    ?? parseProsePhaseField(stateExtractField(postCurrentPositionScope, 'Phase')).phase;
+    ?? parseProsePhaseField(stateExtractField(postCurrentPositionScope, 'Phase'), phaseIdConvention, directoryContext).phase;
   const postBodyPausedAt = stateExtractField(postSessionScope, 'Paused At');
   const postBodyLastActivityRaw = stateExtractField(postBody, 'Last Activity')
     ?? stateExtractField(postBody, 'Last activity');
@@ -4562,6 +4994,8 @@ function syncAndPreserveStateMd(
     synced,
     statePath,
     options,
+    cwd ? resolvePhaseIdConvention(cwd) : null,
+    cwd ? phaseDirectoryOptions(cwd) : undefined,
   );
 }
 
@@ -4589,7 +5023,9 @@ function readModifyWriteStateMd(statePath: string, transformFn: (content: string
   const resync = !options || options.resync !== false;
   const lockPath = acquireStateLock(statePath, clock);
   try {
-    const content = platformReadSync(statePath) || '';
+    // Read through the non-blocking seam (O_NONBLOCK + fstat): a FIFO or device swapped in at
+    // STATE.md fails with ENXIO instead of blocking while the lock is held.
+    const content = platformReadBytesSync(statePath)?.toString('utf-8') ?? '';
 
     const modified = transformFn(content);
 
@@ -4604,31 +5040,38 @@ function readModifyWriteStateMd(statePath: string, transformFn: (content: string
       return false;
     }
 
-    // #3469 (ADR-3408 §8.3): sync + post-sync preservation is the single
-    // owned composition (`syncAndPreserveStateMd`), not assembled here — this
-    // call site and `cmdPhaseComplete`'s atomic-commit adapter both route
-    // through the same function so the composition cannot diverge between
-    // the two.
-    const synced = syncAndPreserveStateMd(
-      content,
-      modified,
-      statePath,
-      cwd,
-      {
-        resync,
-        authoritativeFm: options?.authoritativeFm,
-        deriveProgressKeys: options?.deriveProgressKeys === true,
-        divergedFields: options?.divergedFields,
-        explicitProgressField: options?.explicitProgressField === true,
-        // ADR-3473 §8.7 (#3872): forwarded so `applyPostSyncPreservation` can
-        // fill it — an unenumerated option here is silently dropped
-        // (Phase 1's commit message; #3871), which is exactly how a prior cut
-        // of this option would have gone missing.
-        preWriteState: options?.preWriteState,
-      },
-    );
+    // #5831: everything after the transform may be rolled back by the caller
+    // (onWriteFailure), still under the lock.
+    try {
+      // #3469 (ADR-3408 §8.3): sync + post-sync preservation is the single
+      // owned composition (`syncAndPreserveStateMd`), not assembled here — this
+      // call site and `cmdPhaseComplete`'s atomic-commit adapter both route
+      // through the same function so the composition cannot diverge between
+      // the two.
+      const synced = syncAndPreserveStateMd(
+        content,
+        modified,
+        statePath,
+        cwd,
+        {
+          resync,
+          authoritativeFm: options?.authoritativeFm,
+          deriveProgressKeys: options?.deriveProgressKeys === true,
+          divergedFields: options?.divergedFields,
+          explicitProgressField: options?.explicitProgressField === true,
+          // ADR-3473 §8.7 (#3872): forwarded so `applyPostSyncPreservation` can
+          // fill it — an unenumerated option here is silently dropped
+          // (Phase 1's commit message; #3871), which is exactly how a prior cut
+          // of this option would have gone missing.
+          preWriteState: options?.preWriteState,
+        },
+      );
 
-    platformWriteSync(statePath, synced);
+      platformWriteSync(statePath, synced, { atomic: options?.atomicWrite === true });
+    } catch (err) {
+      if (options?.onWriteFailure) options.onWriteFailure(err);
+      throw err;
+    }
     return true;
   } finally {
     releaseStateLock(lockPath);
@@ -4972,11 +5415,123 @@ function computeChangedFrontmatterFields(
  *   (#3818's own direction), which is why keeping it as the candidate
  *   source was rejected (design doc, Rejected #1).
  */
+/**
+ * ADR-4629 §8.2 (epic #4629, C2): the value a reported/asserted target
+ * resolves to in one document side. Lifted verbatim out of
+ * `reconcileReportedFields` (it was the private `valueOf` closure) so the C2
+ * verifying executor reads a target through the SAME resolution chain the
+ * measured-delta reporter uses — ADR-4629 Decision 4: extend the reporter,
+ * never build a second one.
+ *
+ * #3471 review (unchanged): body-FIRST, frontmatter-key-FLAT-fallback,
+ * dotted-PATH-fallback last. Body-first mirrors the actual write precedence
+ * `patchCore`/`updateCore` apply (#1162's fix — a lowercase body label that
+ * happens to case-exact-match a frontmatter key must still resolve against
+ * the body). `field` a literal flat key (even one containing a `.`) is tried
+ * before it is split and walked as a dotted path (test matrix row 26) —
+ * `resolveFrontmatterPath` pins that same order for the frontmatter side.
+ *
+ * `Current Position` is special-cased: it names the WHOLE `## Current
+ * Position` section, not a single `Label: value` line, so `stateExtractField`
+ * can never resolve it (the root cause of the "Current Position undercount" —
+ * a transform could correctly push `'Current Position'` into its own
+ * `updated` list and it was still silently dropped, because both sides
+ * resolved to `null` and `null === null` failed the old `intended !== null`
+ * guard). `sliceCurrentPositionSection` is the existing fence-aware section
+ * locator (state-transition.cts) — reused rather than re-derived.
+ *
+ * C2 generalizes that special case: a name in `sectionTargets` (a declared
+ * `target: 'section'` assertion) resolves to its whole section body through
+ * the markdown-sectionizer seam (ADR-1372), never a hand-rolled regex.
+ * Existing callers pass no `sectionTargets` and resolve exactly as before.
+ */
+function readStateTarget(
+  fm: Record<string, unknown>,
+  body: string,
+  field: string,
+  sectionTargets: ReadonlySet<string>,
+  sessionScope = false,
+): string | null {
+  if (field === 'Current Position') {
+    const section = stateTransitionMod.sliceCurrentPositionSection(body);
+    return section !== null ? section.trim() : null;
+  }
+  if (sectionTargets.has(field)) {
+    const section = collectSection(body, (h: HeadingToken) => h.text === field);
+    return section !== null ? section.body.trim() : null;
+  }
+  // #4998 review: no session writer changes a fenced example line, so a session
+  // field is read with fences blanked — an unchanged example above the live
+  // line hid the write and reported it missing. With `sessionScope` (`state
+  // update`, `state patch` and `state record-session`, which write inside the
+  // session section) it is read there; otherwise from the whole document.
+  const bodyValue = stateTransitionMod.isSessionScopedBodyField(field)
+    ? stateExtractField(readableBoldLabels(sessionScope ? sessionFieldScope(body) : maskFencedLines(body)), field)
+    : stateExtractField(body, field);
+  if (bodyValue !== null) return bodyValue;
+  if (Object.prototype.hasOwnProperty.call(fm, field)) return String(fm[field]);
+  if (field.includes('.')) {
+    const resolved = resolveFrontmatterPath(fm, field);
+    if (resolved !== STATE_FIELD_ABSENT) {
+      return stateScalarString(resolved);
+    }
+  }
+  return null;
+}
+
+const NO_SECTION_TARGETS: ReadonlySet<string> = new Set<string>();
+
+/**
+ * ADR-4629 §8.2 (C2): did this target measurably change between the two
+ * document sides? Lifted verbatim out of `reconcileReportedFields` (the private
+ * `changed` closure) for the same one-rule reason as `readStateTarget`.
+ *
+ * A target can itself be a declared derived leaf (e.g. `plannedPhaseCore`
+ * pushing `'progress.total_plans'` — state-transition.cts). `readStateTarget`'s
+ * null-vs-string convention cannot tell "absent from the frontmatter" apart
+ * from "resolved to the literal string 'null'/''", so it cannot carry the same
+ * materialization rule `computeChangedFrontmatterFields` applies. Those targets
+ * route through the SAME primitives (`resolveFrontmatterPath` + the
+ * `STATE_FIELD_ABSENT` sentinel + `stateFieldValuesDiffer`) instead of a
+ * second, parallel absence convention — one rule, reused, not duplicated.
+ */
+function stateTargetChanged(
+  snapshotFm: Record<string, unknown>,
+  snapshotBody: string,
+  persistedFm: Record<string, unknown>,
+  persistedBody: string,
+  field: string,
+  sectionTargets: ReadonlySet<string>,
+  sessionScope = false,
+): boolean {
+  const isDeclaredDerivedLeaf = field.includes('.') && Object.prototype.hasOwnProperty.call(FIELD_CLASSIFICATION, field);
+  if (isDeclaredDerivedLeaf && !sectionTargets.has(field)) {
+    const before = resolveFrontmatterPath(snapshotFm, field);
+    const after = resolveFrontmatterPath(persistedFm, field);
+    // Same generalized provenance rule as computeChangedFrontmatterFields:
+    // absent-in-snapshot-materializing-in-persisted is the disk scan
+    // catching a never-synced document up, not this write's own action.
+    if (before === STATE_FIELD_ABSENT && after !== STATE_FIELD_ABSENT) return false;
+    return stateFieldValuesDiffer(before, after);
+  }
+  const before = readStateTarget(snapshotFm, snapshotBody, field, sectionTargets, sessionScope);
+  const after = readStateTarget(persistedFm, persistedBody, field, sectionTargets, sessionScope);
+  if (before === null && after === null) return false;
+  if (before === null || after === null) return true;
+  return before.trim() !== after.trim();
+}
+
 function reconcileReportedFields(
   statePath: string,
   preWriteState: StatePreWriteSnapshot,
   reported: string[],
   divergedFields: string[],
+  // ADR-4629 §8.2 / Decision 4 (C2): names in `reported` that are declared
+  // `target: 'section'` assertions, measured as whole-section deltas. Omitted
+  // by every pre-C2 caller, whose output is unchanged.
+  sectionTargets: ReadonlySet<string> = NO_SECTION_TARGETS,
+  // #4998 review: the caller writes session fields inside the session section.
+  sessionScope = false,
 ): string[] {
   void divergedFields; // ADR-3473 §8.7 D18: out-param only, not a candidate source here.
   if (preWriteState.fm === undefined || preWriteState.body === undefined) return [];
@@ -4987,69 +5542,8 @@ function reconcileReportedFields(
   const snapshotFm = preWriteState.fm;
   const snapshotBody = preWriteState.body;
 
-  // #3471 review (unchanged by this rewrite): body-FIRST, frontmatter-key-
-  // FLAT-fallback, dotted-PATH-fallback last. Body-first mirrors the actual
-  // write precedence `patchCore`/`updateCore` apply (#1162's fix — a
-  // lowercase body label that happens to case-exact-match a frontmatter key
-  // must still resolve against the body). `field` a literal flat key (even
-  // one containing a `.`) is tried before it is split and walked as a
-  // dotted path (test matrix row 26) — `resolveFrontmatterPath` pins that
-  // same order for the frontmatter side alone.
-  //
-  // `Current Position` is special-cased: it names the WHOLE `## Current
-  // Position` section, not a single `Label: value` line, so
-  // `stateExtractField` can never resolve it (this is the root cause of the
-  // "Current Position undercount" — a transform can correctly push
-  // `'Current Position'` into its own `updated` list, and this function
-  // still silently dropped it, because `valueOf` returned `null` for BOTH
-  // sides and `null === null` failed the old `intended !== null` guard).
-  // `sliceCurrentPositionSection` is the existing fence-aware section
-  // locator (state-transition.cts) — reused rather than re-derived.
-  const valueOf = (fm: Record<string, unknown>, body: string, field: string): string | null => {
-    if (field === 'Current Position') {
-      const section = stateTransitionMod.sliceCurrentPositionSection(body);
-      return section !== null ? section.trim() : null;
-    }
-    const bodyValue = stateExtractField(body, field);
-    if (bodyValue !== null) return bodyValue;
-    if (Object.prototype.hasOwnProperty.call(fm, field)) return String(fm[field]);
-    if (field.includes('.')) {
-      const resolved = resolveFrontmatterPath(fm, field);
-      if (resolved !== STATE_FIELD_ABSENT) {
-        return stateScalarString(resolved);
-      }
-    }
-    return null;
-  };
-
-  // A field in `reported` can itself be a declared derived leaf (e.g.
-  // `plannedPhaseCore` pushing `'progress.total_plans'` — state-
-  // transition.cts:1752). `valueOf`'s null-vs-string convention cannot tell
-  // "absent from the frontmatter" apart from "resolved to the literal string
-  // 'null'/''", so it cannot carry the same materialization rule
-  // `computeChangedFrontmatterFields` applies below. Route these fields
-  // through the SAME primitives (`resolveFrontmatterPath` + the
-  // `STATE_FIELD_ABSENT` sentinel + `stateFieldValuesDiffer`) instead of a
-  // second, parallel absence convention — one rule, reused, not duplicated.
-  const isDeclaredDerivedLeaf = (candidate: string): boolean =>
-    candidate.includes('.') && Object.prototype.hasOwnProperty.call(FIELD_CLASSIFICATION, candidate);
-
-  const changed = (field: string): boolean => {
-    if (isDeclaredDerivedLeaf(field)) {
-      const before = resolveFrontmatterPath(snapshotFm, field);
-      const after = resolveFrontmatterPath(persistedFm, field);
-      // Same generalized provenance rule as computeChangedFrontmatterFields:
-      // absent-in-snapshot-materializing-in-persisted is the disk scan
-      // catching a never-synced document up, not this write's own action.
-      if (before === STATE_FIELD_ABSENT && after !== STATE_FIELD_ABSENT) return false;
-      return stateFieldValuesDiffer(before, after);
-    }
-    const before = valueOf(snapshotFm, snapshotBody, field);
-    const after = valueOf(persistedFm, persistedBody, field);
-    if (before === null && after === null) return false;
-    if (before === null || after === null) return true;
-    return before.trim() !== after.trim();
-  };
+  const changed = (field: string): boolean =>
+    stateTargetChanged(snapshotFm, snapshotBody, persistedFm, persistedBody, field, sectionTargets, sessionScope);
 
   // Candidate set = `reported` ∪ every frontmatter key (dotted-leaf
   // granularity) whose persisted value differs from the snapshot, minus the
@@ -5076,6 +5570,436 @@ function reconcileReportedFields(
     reconciled.push(field);
   }
   return reconciled;
+}
+
+// ----------------------------------------------------------------------------
+// The verifying executor — ADR-4629 §8.2 + §8.3 (epic #4629, child C2, #4866)
+// ----------------------------------------------------------------------------
+//
+// C1 gave a write a declared `StateWriteIntent` (the assertions it must land
+// and the mutation scope it may touch) but nothing ENFORCED it. C2 adds the
+// executor that does, riding the existing seam (`syncAndPreserveStateMd`,
+// ADR-3408 §8.3) rather than beside it, and the pure verifier it is built on.
+//
+// NO BEHAVIOR CHANGE: no production caller constructs a `StateWriteIntent` yet
+// (that is C3+, ADR-4629 migration step 3). Every existing state verb still
+// travels `readModifyWriteStateMd` byte-for-byte as before.
+
+type StateWriteIntent = stateTransitionMod.StateWriteIntent;
+
+/** Why a verified write failed. A closed set, frozen like `ERROR_REASON`. */
+const STATE_WRITE_INTENT_FAILURE = Object.freeze({
+  /** §8.3: the delta reached a region outside the declared scope. */
+  OUT_OF_SCOPE: 'out_of_scope',
+  /** §8.2: a `required` assertion did not land. */
+  REQUIRED_ASSERTION_MISSED: 'required_assertion_missed',
+  /** §8.2: the re-read file is not the content that was verified and written. */
+  REREAD_MISMATCH: 'reread_mismatch',
+});
+
+type StateWriteIntentFailure = typeof STATE_WRITE_INTENT_FAILURE[keyof typeof STATE_WRITE_INTENT_FAILURE];
+
+/**
+ * One changed region outside the declared scope. Structured, not a prefixed
+ * string, so callers (C3+) match on fields rather than on a string grammar.
+ * `order` means the body's sections were reordered (`name` is empty).
+ */
+interface StateOutOfScopeRegion {
+  readonly region: 'frontmatter' | 'section' | 'preamble' | 'order';
+  readonly name: string;
+}
+
+interface StateWriteIntentVerification {
+  readonly ok: boolean;
+  readonly reasons: ReadonlyArray<StateWriteIntentFailure>;
+  /** §8.3: each changed region outside the declared scope. */
+  readonly outOfScope: ReadonlyArray<StateOutOfScopeRegion>;
+  /** §8.2: each `required` assertion's `field` that did not land. */
+  readonly missedRequired: ReadonlyArray<string>;
+}
+
+interface StateBodyUnit {
+  readonly text: string;
+  /** Heading level (1-6); 0 for the preamble. */
+  readonly level: number;
+  readonly region: StateOutOfScopeRegion;
+}
+
+/**
+ * Split a STATE.md body into leaf units for the §8.3 diff: the preamble before
+ * the first heading, then one unit per heading running to the NEXT heading of
+ * any level, in document order. Leaf granularity means a declared
+ * `## Accumulated Context` scope reaches its `### Decisions` child by heading
+ * level (`stateSectionScopeUnits`), while an undeclared sibling section stays a separate unit. Built on
+ * the markdown-sectionizer seam (ADR-1372), which is fence-aware, so a `#` line
+ * inside a code fence is not a heading. A repeated heading gets an occurrence
+ * suffix so neither shadows the other.
+ */
+function collectStateBodyUnits(body: string): Map<string, StateBodyUnit> {
+  const units = new Map<string, StateBodyUnit>();
+  const sections = collectSections(body, () => true);
+  const preambleEnd = sections.length > 0 ? sections[0].heading.offset : body.length;
+  units.set('(preamble)', { text: body.slice(0, preambleEnd).trim(), level: 0, region: { region: 'preamble', name: '' } });
+  const occurrences = new Map<string, number>();
+  for (const section of sections) {
+    const { heading } = section;
+    const base = `${'#'.repeat(heading.level)} ${heading.text}`;
+    const n = (occurrences.get(base) ?? 0) + 1;
+    occurrences.set(base, n);
+    units.set(n === 1 ? base : `${base} (#${n})`, {
+      text: section.body.trim(),
+      level: heading.level,
+      region: { region: 'section', name: heading.text },
+    });
+  }
+  return units;
+}
+
+/** The raw frontmatter region (everything before the body), for the unparseable-block case. */
+function stateFrontmatterRegion(content: string): string {
+  return content.slice(0, content.length - stripFrontmatter(content).length);
+}
+
+/**
+ * The unit a declared field lives in: the first unit, in document order, where
+ * `stateExtractField` resolves it. That mirrors `stateExtractField`'s own
+ * first-match reading of the whole body, so a declared `Status` covers the one
+ * line the seam treats as `Status`, and not a second `Status:` line elsewhere.
+ */
+function stateFieldOwnerUnit(units: Map<string, StateBodyUnit>, field: string): string | null {
+  for (const [key, unit] of units) {
+    if (stateExtractField(unit.text, field) !== null) return key;
+  }
+  return null;
+}
+
+/**
+ * The units a declared section covers: the FIRST unit, in document order, whose
+ * heading text is the declared name (the occurrence `readStateTarget` reads,
+ * through `collectSection`'s first match), plus every following unit nested
+ * under it by heading level. The section analogue of `stateFieldOwnerUnit`: a
+ * repeated heading of the same name, and that occurrence's children, are not
+ * covered, even though they sit under a heading with the same text.
+ */
+function stateSectionScopeUnits(units: Map<string, StateBodyUnit>, sectionTargets: ReadonlySet<string>): Set<string> {
+  const covered = new Set<string>();
+  const entries = [...units];
+  for (const name of sectionTargets) {
+    const start = entries.findIndex(([, u]) => u.region.region === 'section' && u.region.name === name);
+    if (start < 0) continue;
+    const ownerLevel = entries[start][1].level;
+    covered.add(entries[start][0]);
+    for (let i = start + 1; i < entries.length && entries[i][1].level > ownerLevel; i++) covered.add(entries[i][0]);
+  }
+  return covered;
+}
+
+/**
+ * ADR-4629 §8.2 + §8.3: verify one write against its declared intent. PURE —
+ * it compares two document sides and never touches disk.
+ *
+ * Both sides are first passed through `normalizeContent`, the OS projection
+ * seam's own normalization (CRLF strip, blank-line-run collapse, one trailing
+ * newline). `platformWriteSync` applies it to every STATE.md write, on this
+ * path and the legacy one alike, so it is the seam's behavior, not the
+ * intent's delta. Without it, a CRLF file would read as every section changed.
+ *
+ * §8.2 (verified post-state): every `required` assertion must land. With a
+ * declared `value`, "landed" means the target reads that value afterwards (an
+ * idempotent write that re-asserts the current value passes). Without one,
+ * "landed" means the target is still present AND measurably changed
+ * (`stateTargetChanged`, the measured-delta test `updated[]` uses); a deleted
+ * target has not landed. Best-effort assertions are NOT judged: their report
+ * bucket is ADR-4629 §8.4, an open question for Phase 3, so this result
+ * deliberately carries no best-effort field for a later phase to be bound by.
+ *
+ * §8.3 (bounded mutation): the delta must stay inside the declared scope.
+ *  - Body: diffed per leaf unit (`collectStateBodyUnits`). A changed unit is in
+ *    scope when it is the first occurrence of a section a declared
+ *    `target: 'section'` assertion names, or nested under that occurrence
+ *    (`stateSectionScopeUnits`). Otherwise it is in scope only when replaying the
+ *    post-values of the declared fields THAT UNIT OWNS (`stateFieldOwnerUnit`)
+ *    onto its pre text reproduces its post text, so any other edit in the same
+ *    section, or the same label in another section, is caught. A change in
+ *    section ORDER is its own out-of-scope region.
+ *  - Frontmatter: keys with a body source (`getFrontmatterBodySource`) are
+ *    judged through that source, because `syncStateFrontmatter` re-derives them
+ *    from the body on every write. When the seam's `bodyDeltas` show the source
+ *    moved, the body check above already bounded that move. A mirrored key that
+ *    changed with no body move, or with no `bodyDeltas` to show one, must be
+ *    declared. Every other key goes through `computeChangedFrontmatterFields`
+ *    (the reporter's rule: `last_updated` provenance exclusion, declared-leaf
+ *    materialization). A schema-declared key (a `FIELD_CLASSIFICATION` row)
+ *    that is absent before and present after is the seam catching a document
+ *    up, not the caller's action, the same provenance rule the reporter
+ *    applies. A key already present that the seam re-derives to a new value
+ *    (for example `progress.*` under `resync`) IS counted: §8.3 bounds what the
+ *    write changed, whoever computed it.
+ *  - A frontmatter key is declared when an assertion names it exactly, or when
+ *    it is one of the schema-declared leaves (`declaredLeavesOf`) of a key an
+ *    assertion names. Declaring `progress` therefore covers the closed set of
+ *    `progress.*` rows `FIELD_CLASSIFICATION` lists, the frontmatter analogue of
+ *    a `target: 'section'` assertion covering its child sections. Nothing else
+ *    widens: a declared leaf (`progress.percent`) never covers a sibling leaf,
+ *    and a dotted key outside the schema's leaf set is never covered by its
+ *    prefix.
+ *  - `scope: 'broad'` puts the WHOLE frontmatter in scope. That is ADR-4629
+ *    §8.3's own worked case (`milestoneSwitch` declares a whole-frontmatter
+ *    scope). The body stays bounded: broad is audited, not exempted.
+ *  - `kind: 'rebuild'` (`cmdStateSync`, `REGENERATE_STATE`) is unbounded by
+ *    contract (ADR-3408 §8.3; ADR-4629 §8.3 names those two and no more), so
+ *    §8.3 is skipped for it. §8.2 still applies.
+ *
+ * `Current Position` is always read as a whole section, in §8.2 and §8.3 alike,
+ * matching `readStateTarget`'s long-standing special case.
+ */
+function verifyStateWriteIntent(
+  intent: StateWriteIntent,
+  preContent: string,
+  postContent: string,
+  statePath: string,
+  bodyDeltas?: Record<string, { pre: string | null; post: string | null }>,
+): StateWriteIntentVerification {
+  // #5165: the write lands scoped to what it changed (platformWriteSync reads the file it replaces).
+  const pre = normalizeContent(statePath, preContent, { prior: preContent }).content;
+  const post = normalizeContent(statePath, postContent, { prior: preContent }).content;
+  const preFm = extractFrontmatter(pre, statePath) as Record<string, unknown>;
+  const postFm = extractFrontmatter(post, statePath) as Record<string, unknown>;
+  const preBody = stripFrontmatter(pre);
+  const postBody = stripFrontmatter(post);
+
+  const isSection = (a: { field: string; target?: string }): boolean =>
+    a.target === 'section' || a.field === 'Current Position';
+  const sectionTargets = new Set<string>();
+  const fieldTargets = new Set<string>();
+  for (const a of intent.assertions) {
+    if (isSection(a)) sectionTargets.add(a.field);
+    else fieldTargets.add(a.field);
+  }
+
+  // §8.2 — required assertions.
+  const missedRequired: string[] = [];
+  for (const a of intent.assertions) {
+    if (a.requirement !== 'required') continue;
+    const targets = isSection(a) ? new Set([a.field]) : NO_SECTION_TARGETS;
+    const actual = readStateTarget(postFm, postBody, a.field, targets);
+    const landed = a.value !== undefined
+      ? actual !== null && actual.trim() === a.value.trim()
+      : actual !== null && stateTargetChanged(preFm, preBody, postFm, postBody, a.field, targets);
+    if (!landed) missedRequired.push(a.field);
+  }
+
+  // §8.3 — bounded mutation.
+  const outOfScope: StateOutOfScopeRegion[] = [];
+  if (intent.kind !== 'rebuild') {
+    if (intent.scope !== 'broad') {
+      const declared = (key: string): boolean => {
+        if (fieldTargets.has(key)) return true;
+        const dot = key.indexOf('.');
+        if (dot <= 0) return false;
+        const parent = key.slice(0, dot);
+        return fieldTargets.has(parent) && declaredLeavesOf(parent).includes(key);
+      };
+      if (isUnparseableFrontmatter(preFm) || isUnparseableFrontmatter(postFm)) {
+        // An unparseable block has no keys to diff; judge the raw region.
+        if (stateFrontmatterRegion(pre) !== stateFrontmatterRegion(post)) {
+          outOfScope.push({ region: 'frontmatter', name: '(unparseable block)' });
+        }
+      } else {
+        const schemaMaterialized = (key: string): boolean =>
+          Object.prototype.hasOwnProperty.call(FIELD_CLASSIFICATION, key)
+          && resolveFrontmatterPath(preFm, key) === STATE_FIELD_ABSENT
+          && resolveFrontmatterPath(postFm, key) !== STATE_FIELD_ABSENT;
+        // Non-body-sourced keys: `computeChangedFrontmatterFields` skips body-sourced
+        // keys entirely when handed no `bodyDeltas`; those are judged just below.
+        for (const key of computeChangedFrontmatterFields(preFm, postFm, undefined)) {
+          if (!declared(key) && !schemaMaterialized(key)) outOfScope.push({ region: 'frontmatter', name: key });
+        }
+        const topKeys = new Set([...Object.keys(preFm), ...Object.keys(postFm)]);
+        for (const key of topKeys) {
+          if (stateTransitionMod.getFrontmatterBodySource(key) === null) continue;
+          const before = resolveFrontmatterPath(preFm, key);
+          const after = resolveFrontmatterPath(postFm, key);
+          if (!stateFieldValuesDiffer(before, after)) continue;
+          if (before === STATE_FIELD_ABSENT) continue; // back-fill (the #1264 case), not the caller's action
+          const delta = bodyDeltas ? bodyDeltas[key] : undefined;
+          const bodyMoved = delta !== undefined
+            && stateFieldValuesDiffer(delta.pre ?? STATE_FIELD_ABSENT, delta.post ?? STATE_FIELD_ABSENT);
+          if (bodyMoved || declared(key)) continue;
+          outOfScope.push({ region: 'frontmatter', name: key });
+        }
+      }
+    }
+
+    const preUnits = collectStateBodyUnits(preBody);
+    const postUnits = collectStateBodyUnits(postBody);
+    const owners = new Map<string, string[]>();
+    for (const field of fieldTargets) {
+      const owner = stateFieldOwnerUnit(postUnits, field) ?? stateFieldOwnerUnit(preUnits, field);
+      if (owner !== null) owners.set(owner, [...(owners.get(owner) ?? []), field]);
+    }
+    const sectionScope = new Set([
+      ...stateSectionScopeUnits(preUnits, sectionTargets),
+      ...stateSectionScopeUnits(postUnits, sectionTargets),
+    ]);
+    for (const key of new Set([...preUnits.keys(), ...postUnits.keys()])) {
+      const before = preUnits.get(key);
+      const after = postUnits.get(key);
+      if (before !== undefined && after !== undefined && before.text === after.text) continue;
+      const unit = (after ?? before) as StateBodyUnit;
+      if (sectionScope.has(key)) continue;
+      if (before !== undefined && after !== undefined) {
+        let replayed = before.text;
+        for (const field of owners.get(key) ?? []) {
+          const next = stateExtractField(after.text, field);
+          if (next === null) continue;
+          const applied = stateReplaceField(replayed, field, next);
+          if (applied !== null) replayed = applied;
+        }
+        if (replayed.trim() === after.text) continue;
+      }
+      outOfScope.push(unit.region);
+    }
+    const preOrder = [...preUnits.keys()].filter((k) => postUnits.has(k));
+    const postOrder = [...postUnits.keys()].filter((k) => preUnits.has(k));
+    if (preOrder.join('\n') !== postOrder.join('\n')) outOfScope.push({ region: 'order', name: '' });
+  }
+
+  const reasons: StateWriteIntentFailure[] = [];
+  if (outOfScope.length > 0) reasons.push(STATE_WRITE_INTENT_FAILURE.OUT_OF_SCOPE);
+  if (missedRequired.length > 0) reasons.push(STATE_WRITE_INTENT_FAILURE.REQUIRED_ASSERTION_MISSED);
+  return Object.freeze({
+    ok: reasons.length === 0,
+    reasons: Object.freeze(reasons),
+    outOfScope: Object.freeze(outOfScope.map((r) => Object.freeze({ ...r }))),
+    missedRequired: Object.freeze(missedRequired),
+  });
+}
+
+const NO_UPDATED_FIELDS: ReadonlyArray<string> = Object.freeze([]);
+
+interface StateWriteIntentResult extends StateWriteIntentVerification {
+  /**
+   * True when content reached disk. A §8.2/§8.3 verification failure is found
+   * before the write and leaves the file untouched (`false`); the one
+   * `ok: false` arm with `true` is `reread_mismatch`.
+   */
+  readonly written: boolean;
+  /** Measured disk delta (`reconcileReportedFields`, extended to sections). Empty unless verified and written. */
+  readonly updated: ReadonlyArray<string>;
+}
+
+/**
+ * ADR-4629 §8.2 + §8.3: apply a declared `StateWriteIntent` through the one
+ * write seam and fail loud instead of reporting success.
+ *
+ * Under ONE lock (the same `acquireStateLock` `readModifyWriteStateMd` holds):
+ *   read -> transform -> `syncAndPreserveStateMd` (the owned composition,
+ *   driven by the intent's own `resync` / `deriveProgressKeys` /
+ *   `explicitProgressField`) -> verify the would-be content -> write only if
+ *   it verified -> re-read -> confirm the re-read file is exactly the verified
+ *   content (§8.2 verifies against the re-read file) -> report `updated[]`
+ *   from the measured disk delta.
+ * A §8.2/§8.3 violation is refused BEFORE the write, so the file is left
+ * untouched. The re-read check is the one failure found AFTER the write: if
+ * the re-read does not match what was verified, the result is
+ * `reasons: ['reread_mismatch']` with `written: true`. The file is NOT restored
+ * on that arm: the write reached disk but is not verified, and the result says
+ * so rather than attempting a restore through a write path that would itself
+ * normalize the bytes. Its `outOfScope` / `missedRequired` are empty, because
+ * the candidate content itself verified; what failed is the disk round-trip.
+ *
+ * "Loud" means the result, not an exception: a verification failure is a
+ * frozen `ok: false` value naming each reason, never a success payload.
+ * Turning that into a non-zero exit is the CLI caller's job, which lands with
+ * the first migrated caller (C3+). Construction errors (no intent, a rebuild
+ * intent) throw, like `createStateTransaction`'s.
+ *
+ * A transform whose output is byte-identical to its input is the #948 no-op:
+ * nothing is written, but the intent is still verified, so a `required`
+ * assertion that expected a change reports as missed rather than passing.
+ *
+ * Scope fence (C2): open-kind intents only. The two `rebuild` writers stay on
+ * `writeStateMd`, the sanctioned exception path (ADR-3408 §8.3). The intent's
+ * `snapshot` is not compared against the file read under the lock;
+ * optimistic concurrency on the prior value is outside ADR-4629 §8 as written.
+ */
+function applyStateWriteIntent(
+  statePath: string,
+  intent: StateWriteIntent,
+  transformFn: (content: string) => string,
+  cwd: string,
+  options: { authoritativeFm?: Record<string, unknown> } = {},
+  clock?: StateLockClock,
+): StateWriteIntentResult {
+  // Checked on an `unknown` view: `Array.isArray` on the typed ReadonlyArray would narrow it to `any[]`.
+  if (intent === null || typeof intent !== 'object' || !Array.isArray((intent as { assertions?: unknown }).assertions)) {
+    const err = new Error(
+      'applyStateWriteIntent: a StateWriteIntent is required (build it with createStateWriteIntent). ' +
+      'Per ADR-4629 §8.1, an absent intent is a construction failure, not an unverified write.',
+    ) as Error & { code: string };
+    err.code = 'STATE_WRITE_INTENT_REQUIRED';
+    throw err;
+  }
+  if (intent.kind === 'rebuild') {
+    const err = new Error(
+      'applyStateWriteIntent: a rebuild intent cannot travel the preservation seam. The two rebuild ' +
+      'writers (cmdStateSync, REGENERATE_STATE) stay on writeStateMd per ADR-3408 §8.3; ADR-4629 §8.3 ' +
+      'treats them as unbounded by contract.',
+    ) as Error & { code: string };
+    err.code = 'STATE_TRANSACTION_KIND_INVALID';
+    throw err;
+  }
+
+  const lockPath = acquireStateLock(statePath, clock);
+  try {
+    const pre = platformReadSync(statePath) || '';
+    const transformed = transformFn(pre);
+    const unwritten = (verification: StateWriteIntentVerification): StateWriteIntentResult =>
+      Object.freeze({ ...verification, written: false, updated: NO_UPDATED_FIELDS });
+
+    if (transformed === pre) {
+      return unwritten(verifyStateWriteIntent(intent, pre, pre, statePath));
+    }
+
+    const preWriteState: StatePreWriteSnapshot = {};
+    const candidate = syncAndPreserveStateMd(pre, transformed, statePath, cwd, {
+      resync: intent.resync,
+      deriveProgressKeys: intent.deriveProgressKeys,
+      explicitProgressField: intent.explicitProgressField,
+      authoritativeFm: options.authoritativeFm,
+      preWriteState,
+    });
+    const verification = verifyStateWriteIntent(intent, pre, candidate, statePath, preWriteState.bodyDeltas);
+    if (!verification.ok) return unwritten(verification);
+
+    platformWriteSync(statePath, candidate);
+    const reread = platformReadSync(statePath) || '';
+    if (reread !== normalizeContent(statePath, candidate, { prior: pre }).content) {
+      return Object.freeze({
+        ok: false,
+        reasons: Object.freeze([STATE_WRITE_INTENT_FAILURE.REREAD_MISMATCH]),
+        outOfScope: verification.outOfScope,
+        missedRequired: verification.missedRequired,
+        written: true,
+        updated: NO_UPDATED_FIELDS,
+      });
+    }
+
+    const sectionTargets = new Set(
+      intent.assertions.filter((a) => a.target === 'section' || a.field === 'Current Position').map((a) => a.field),
+    );
+    const updated = reconcileReportedFields(
+      statePath,
+      preWriteState,
+      intent.assertions.map((a) => a.field),
+      [],
+      sectionTargets,
+    );
+    return Object.freeze({ ...verification, written: true, updated: Object.freeze(updated) });
+  } finally {
+    releaseStateLock(lockPath);
+  }
 }
 
 function cmdStateJson(cwd: string, raw: boolean): void {
@@ -5123,13 +6047,13 @@ function cmdStateJson(cwd: string, raw: boolean): void {
   // change untouched — and `milestone`/`milestone_name`
   // (preserve-if-placeholder) are out of D3's scope entirely.
   if (existingFm) {
-    const sessionScope = matchSessionSection(body) ?? body;
+    const sessionScope = sessionFieldScope(body);
     const positionScope = matchCurrentPositionSection(body) ?? body;
     const bodyStoppedAt = stateExtractField(sessionScope, 'Stopped At') || stateExtractField(sessionScope, 'Stopped at');
     const bodyPausedAt = stateExtractField(sessionScope, 'Paused At');
     const bodyPhaseSource = stateExtractField(body, 'Phase');
     const bodyCurrentPhase = stateExtractField(body, 'Current Phase')
-      ?? parseProsePhaseField(stateExtractField(positionScope, 'Phase')).phase;
+      ?? parseProsePhaseField(stateExtractField(positionScope, 'Phase'), resolvePhaseIdConvention(cwd), phaseDirectoryOptions(cwd)).phase;
     const bodyCurrentPlan = stateExtractField(body, 'Current Plan');
     const bodyStatus = stateExtractField(body, 'Status');
     // #3836: mirrors applyPostSyncPreservation's own derivation (state.cts
@@ -5186,6 +6110,22 @@ function cmdStateJson(cwd: string, raw: boolean): void {
 }
 
 /**
+ * 1-based position of the first plan with no summary, when SOME of the phase's plans already have
+ * one (a gap-closure re-entry: plans 1..17 are done and 18 and 19 are the gap plans, #4945).
+ * `null` when no plan is summarized yet, when every plan is, or when the phase directory cannot be
+ * found: the phase then starts at plan 1, exactly as before. Plans and summaries are paired by the
+ * phase locator's own rule, so this agrees with `init` and `phase-plan-index`.
+ */
+function firstPlanToRun(cwd: string, phaseNumber: string | number): number | null {
+  const located = phaseLocatorMod.findPhaseInternal(cwd, String(phaseNumber), undefined, phaseDirectoryOptions(cwd));
+  if (!located || !located.found) return null;
+  const { plans, incomplete_plans: incomplete } = located;
+  if (incomplete.length === 0 || incomplete.length === plans.length) return null;
+  const index = plans.indexOf(incomplete[0]);
+  return index === -1 ? null : index + 1;
+}
+
+/**
  * Update STATE.md when a new phase begins execution.
  * Updates body text fields (Current focus, Status, Last Activity, Current Position)
  * and synchronizes frontmatter via writeStateMd.
@@ -5212,6 +6152,10 @@ function cmdStateBeginPhase(cwd: string, phaseNumber: string | number | null | u
   if (phaseNumber == null || String(phaseNumber).trim() === '') {
     error('phase required (--phase <N>)');
   }
+  if (resolvePhaseIdConvention(cwd) === 'bracket'
+    && (String(phaseNumber).startsWith('[') || String(phaseNumber).includes('-'))) {
+    error('state begin-phase --phase requires a bare phase number such as 02; qualified ids are not accepted.', ERROR_REASON.USAGE);
+  }
   const statePath = planningPaths(cwd).state;
   if (!fs.existsSync(statePath)) {
     output({ error: 'STATE.md not found' }, raw, undefined);
@@ -5233,10 +6177,20 @@ function cmdStateBeginPhase(cwd: string, phaseNumber: string | number | null | u
     phaseNumber: phaseNumber as string | number,
     phaseName: phaseName ?? null,
     planCount: planCount ?? null,
+    // #4945: a gap-closure re-entry starts at the first plan still to run, not at plan 1.
+    startPlan: firstPlanToRun(cwd, phaseNumber as string | number),
   };
   const deps: StateTransitionDeps = {
     clock: realClock,
     sourcePath: statePath,
+  };
+
+  // #6399: `--plans N` with nowhere in STATE.md to record the count refuses before any write, with the typed reason
+  // `plans_no_line`. The core runs first inside the lock, ahead of the milestone claim, so a refusal leaves no claim
+  // file behind and the file is only ever read under the lock, through the same bounded reader as every other write.
+  const refusePlansNoLine = (err: unknown): never => {
+    if (err instanceof StatePlansNoLineError) error(err.message, ERROR_REASON.STATE_PLANS_NO_LINE);
+    throw err;
   };
 
   // #2736: the transition holds the exact display name; without this the
@@ -5262,11 +6216,16 @@ function cmdStateBeginPhase(cwd: string, phaseNumber: string | number | null | u
   // calls cannot both read "no claim" and both write.
   let milestoneConflict: milestoneLockMod.MilestoneConflict | null = null;
   const wrote = readModifyWriteStateMd(statePath, (content) => {
+    let result: ReturnType<typeof transitionCore>;
+    try {
+      result = transitionCore(content, intent, deps);
+    } catch (err) {
+      return refusePlansNoLine(err);
+    }
     milestoneConflict = milestoneLockMod.claimMilestonePhase(cwd, String(phaseNumber));
     if (milestoneConflict) {
       milestoneLockMod.warnMilestoneConflict(milestoneConflict, `state.begin-phase ${phaseNumber}`);
     }
-    const result = transitionCore(content, intent, deps);
     precomputedUpdated = result.updated;
     // #3127 resume: the core preserved the mid-flight Current Phase Name, so
     // the intent-first override must not fire — it would drift frontmatter
@@ -5275,7 +6234,38 @@ function cmdStateBeginPhase(cwd: string, phaseNumber: string | number | null | u
     if (result.data?.['resumed']) {
       delete rmwOptions.authoritativeFm;
     }
-    return result.content;
+    let transitioned = result.content;
+    if (resolvePhaseIdConvention(cwd) === 'bracket') {
+      const display = phaseDisplayFor(cwd, phaseNumber as string | number);
+      if (result.updated.includes('Last Activity Description')) {
+        transitioned = replaceStateBodyField(
+          transitioned,
+          statePath,
+          'Last Activity Description',
+          `${display} execution started`,
+        );
+      }
+      if (result.updated.includes('Current focus')) {
+        transitioned = replaceStateBodyField(
+          transitioned,
+          statePath,
+          'Current focus',
+          intent.phaseName ? `${display} — ${intent.phaseName}` : display,
+        );
+      }
+      const today = realClock.localToday();
+      const activitySuffix = result.data?.['resumed']
+        ? 'execution resumed (wave continue)'
+        : 'execution started';
+      transitioned = replaceCurrentPositionFieldValue(
+        transitioned,
+        statePath,
+        'Last Activity',
+        `${today} — Phase ${phaseNumber} ${activitySuffix}`,
+        `${today} — ${display} ${activitySuffix}`,
+      );
+    }
+    return transitioned;
   }, cwd, rmwOptions);
 
   // ADR-3408 §8.4 (D4): reconcile `beginPhaseCore`'s own success list against
@@ -5601,12 +6591,34 @@ function cmdStatePlannedPhase(cwd: string, phaseNumber: string | number | null |
     if (!intent.phaseName) {
       const preFm = extractFrontmatter(content, statePath) as Record<string, unknown>;
       const curatedName = preFm['current_phase_name'];
-      if (typeof curatedName === 'string' && curatedName.trim().length > 0) {
+      // #5369: a status fragment a pre-fix write left as the name is not curated; do not reassert it.
+      if (typeof curatedName === 'string' && curatedName.trim().length > 0 && !phaseIdMod.isPlannedPhaseStatusPhrase(curatedName)) {
         rmwOptions.authoritativeFm = { current_phase_name: curatedName };
       }
     }
     const result = transitionCore(content, intent, deps);
     precomputedUpdated = result.updated;
+    if (resolvePhaseIdConvention(cwd) === 'bracket') {
+      const display = phaseDisplayFor(cwd, phaseNumber as string | number);
+      let transitioned = result.content;
+      if (result.updated.includes('Last Activity Description')) {
+        transitioned = replaceStateBodyField(
+          transitioned,
+          statePath,
+          'Last Activity Description',
+          `${display} planning complete — ${planCount || '?'} plans ready`,
+        );
+      }
+      const today = realClock.localToday();
+      transitioned = replaceCurrentPositionFieldValue(
+        transitioned,
+        statePath,
+        'Last Activity',
+        `${today} — Phase ${phaseNumber} planning complete`,
+        `${today} — ${display} planning complete`,
+      );
+      return transitioned;
+    }
     return result.content;
   }, cwd, rmwOptions);
 
@@ -5841,7 +6853,8 @@ function cmdStateValidate(cwd: string, raw: boolean, opts: { strict?: boolean } 
   const scope: planningScopeMod.Scope = initialScope;
 
   const status = stateFieldValue(fm, body, 'status', 'Status').value || '';
-  const resolvedPhase = resolveStatePhase(fm, body);
+  const directoryContext = phaseDirectoryOptions(cwd);
+  const resolvedPhase = resolveStatePhase(fm, body, resolvePhaseIdConvention(cwd), directoryContext);
   const currentPhase = resolvedPhase.phase;
   const totalPlansRaw = stateFieldValue(fm, body, 'total_plans_in_phase', 'Total Plans in Phase').value;
   const totalPlansInPhase = totalPlansRaw ? parseInt(totalPlansRaw, 10) : null;
@@ -5858,8 +6871,8 @@ function cmdStateValidate(cwd: string, raw: boolean, opts: { strict?: boolean } 
     emit({ valid: false, warnings, scope });
     return;
   }
-  const selectedPhaseKey = phaseKeyFromToken(currentPhase);
-  if (Object.values(resolvedPhase.sources).some(source => source !== null && phaseKeyFromToken(source) !== selectedPhaseKey)) {
+  const selectedPhaseKey = phaseKeyFromToken(currentPhase, directoryContext);
+  if (Object.values(resolvedPhase.sources).some(source => source !== null && phaseKeyFromToken(source, directoryContext) !== selectedPhaseKey)) {
     warnings.push(stateDiagnostic(
       'S003',
       SEVERITY.WARNING,
@@ -5898,7 +6911,7 @@ function cmdStateValidate(cwd: string, raw: boolean, opts: { strict?: boolean } 
   let phaseDirPath: string;
   try {
     const entries = fs.readdirSync(phasesDir, { withFileTypes: true });
-    const phaseDir = entries.find(entry => entry.isDirectory() && phaseKeyFromDir(entry.name, validateConvention) === selectedPhaseKey);
+    const phaseDir = entries.find(entry => entry.isDirectory() && phaseKeyFromDir(entry.name, validateConvention, directoryContext) === selectedPhaseKey);
     if (!phaseDir) {
       warnings.push(stateDiagnostic(
         'S004',
@@ -6104,6 +7117,7 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
   // write branch can surface it identically.
   const existingSyncFm = extractFrontmatter(content, statePath) as Record<string, unknown>;
   const syncFrontmatterWasUnparseable = isUnparseableFrontmatter(existingSyncFm);
+  let directoryContext = phaseDirectoryOptions(cwd, undefined, '');
   const changes: string[] = [];
   let modified = content;
 
@@ -6126,8 +7140,9 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
     const roadmapRaw = platformReadSync(path.join(planningDir(cwd), 'ROADMAP.md'));
     if (roadmapRaw !== null) {
       syncRoadmapRaw = roadmapRaw;
+      directoryContext = {...directoryContext, roadmap: roadmapRaw};
       syncRoadmapScope = extractCurrentMilestone(roadmapRaw, cwd);
-      syncRetiredPhaseNums = extractRetiredPhaseNumbers(syncRoadmapScope, syncConvention);
+      syncRetiredPhaseNums = extractRetiredPhaseNumbers(syncRoadmapScope, syncConvention, directoryContext);
     }
   } catch { /* fall through: no roadmap scope → no retired exclusion */ }
 
@@ -6165,7 +7180,7 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
     entries = fs.readdirSync(phasesDir, { withFileTypes: true })
       .filter(e => e.isDirectory())
       .map(e => e.name)
-      .filter(name => !(syncRetiredPhaseNums.size > 0 && syncRetiredPhaseNums.has(phaseKeyFromDir(name, syncConvention))))
+      .filter(name => !(syncRetiredPhaseNums.size > 0 && syncRetiredPhaseNums.has(phaseKeyFromDir(name, syncConvention, directoryContext))))
       .filter(name => syncMilestonePhaseDirs === null || syncMilestonePhaseDirs.has(name))
       .sort();
   } catch {
@@ -6204,7 +7219,7 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
     if (completion.value.complete) diskCompletedPhases++;
 
     // Track the highest phase with incomplete plans (or any plans)
-    const phaseMatch = dir.match(new RegExp(`^(${PHASE_NUMBER_TOKEN_SOURCE})`, 'i'));
+    const phaseMatch = dir.match(new RegExp(`^(${phaseNumberTokenSource(syncConvention)})`, 'i'));
     if (phaseMatch && plans > 0) {
       if (summaries < plans) {
         // Incomplete phase — this is likely the current one
@@ -6233,7 +7248,7 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
   // pre-existing legacy sync behavior while #3185 remains the read-path owner.
   let syncTotalPhases: number | null = null;
   const roadmapPhaseCount = syncRoadmapScope !== null
-    ? countRoadmapPhaseHeadings(syncRoadmapScope, syncConvention, syncRetiredPhaseNums, syncConvention === 'bracket')
+    ? countRoadmapPhaseHeadings(syncRoadmapScope, syncConvention, syncRetiredPhaseNums, syncConvention === 'bracket', directoryContext)
     : 0;
   if (roadmapPhaseCount > 0) {
     syncTotalPhases = Math.max(entries.length, roadmapPhaseCount);
@@ -6294,7 +7309,9 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
     // consume `.value`.
     const syncScope: Scope = listMilestonePhaseDirs(phasesDir, { cwd, versionOverride: versionStr }).scope;
     if (syncScope !== SCOPE.COMPLETE) {
-      changes.push(`Progress: skipped — milestone phase scope is "${syncScope}", not COMPLETE (#3217)`);
+      // #6271: the same cause-and-fix as `update-progress`, from the one describer.
+      const syncHint = syncScope === SCOPE.UNSCOPED ? describeUnscopedMilestone(cwd) : '';
+      changes.push(`Progress: skipped — milestone phase scope is "${syncScope}", not COMPLETE (#3217)${syncHint ? `. ${syncHint}` : ''}`);
     } else {
       const p = computeProgressPercent(totalDiskSummaries, totalDiskPlans, diskCompletedPhases, syncTotalPhases, syncScope);
       percent = p !== null ? p : 0;
@@ -6342,6 +7359,384 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
   output({ synced: true, changes, dry_run: false }, raw, undefined);
 }
 
+const STATE_ARCHIVE_HEADER = '# STATE Archive\n\nPruned entries from STATE.md. Recoverable but no longer loaded into agent context.\n\n';
+
+/** One `### <name>` section of a STATE-ARCHIVE.md block: its entry lines in order. */
+type ArchiveSection = { section: string; lines: string[] };
+
+/** The archive's most recent `## Pruned ` block: its heading cutoff (null when unparsable) and its sections. */
+interface ParsedArchiveBlock {
+  cutoff: number | null;
+  sections: ArchiveSection[];
+}
+
+/**
+ * Pure (#5831): the archive's most recent `## Pruned <date> (phases 1-<N>, ...)`
+ * block, or null when the archive has no `## Pruned ` heading. `cutoff` is N, or
+ * null when the heading has no parsable `(phases 1-<N>, ` part. `sections` are
+ * the block's entries: the text after the last line starting `## Pruned ` up to
+ * the next `## ` heading; a `### <name>` line starts a section and every other
+ * non-blank line is an entry of the current section (trailing `\r` stripped).
+ * Lines before the first `###` are ignored.
+ */
+function parseLastArchiveBlock(archiveText: string): ParsedArchiveBlock | null {
+  const all = archiveText.split(/\r?\n/);
+  let start = -1;
+  for (let i = all.length - 1; i >= 0; i--) {
+    if (all[i].startsWith('## Pruned ')) { start = i; break; }
+  }
+  if (start === -1) return null;
+  const heading = /\(phases 1-(\d+), /.exec(all[start]);
+  const parsed = heading === null ? NaN : Number(heading[1]);
+  const sections: ArchiveSection[] = [];
+  let current: ArchiveSection | null = null;
+  for (let i = start + 1; i < all.length; i++) {
+    const line = all[i].replace(/\r$/, '');
+    if (line.startsWith('## ')) break;
+    if (line.startsWith('### ')) {
+      current = { section: line.slice(4).trimEnd(), lines: [] };
+      sections.push(current);
+    } else if (current !== null && line.trim().length > 0) {
+      current.lines.push(line);
+    }
+  }
+  return { cutoff: Number.isSafeInteger(parsed) ? parsed : null, sections };
+}
+
+function countLines(lines: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const l of lines) {
+    const k = l.replace(/\r$/, '');
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Pure (#5831): does the archive's last block (`block`, from
+ * `parseLastArchiveBlock`) already hold part of this prune? It does when the
+ * block has at least one entry and, for every section it names, its lines are a
+ * sub-multiset of the same-named pruned section's lines (trailing `\r`
+ * ignored). `remainder` is then the pruned sections minus the block's lines
+ * (one occurrence removed per block occurrence, original strings and order
+ * kept, empty sections dropped, `count` recomputed); otherwise it is `sections`.
+ */
+function subtractPendingBlock(
+  block: ArchiveSection[] | null,
+  sections: PrunedSection[],
+): { pending: boolean; remainder: PrunedSection[] } {
+  if (block === null || !block.some(b => b.lines.length > 0)) return { pending: false, remainder: sections };
+  const prunedBySection = new Map<string, Map<string, number>>();
+  for (const s of sections) {
+    const into = prunedBySection.get(s.section) ?? new Map<string, number>();
+    for (const [k, n] of countLines(s.lines)) into.set(k, (into.get(k) ?? 0) + n);
+    prunedBySection.set(s.section, into);
+  }
+  const consumedBySection = new Map<string, Map<string, number>>();
+  for (const b of block) {
+    const prunedCounts = prunedBySection.get(b.section);
+    if (prunedCounts === undefined) {
+      if (b.lines.length === 0) continue;
+      return { pending: false, remainder: sections };
+    }
+    const blockCounts = countLines(b.lines);
+    const consumed = consumedBySection.get(b.section) ?? new Map<string, number>();
+    for (const [k, n] of blockCounts) {
+      if ((prunedCounts.get(k) ?? 0) - (consumed.get(k) ?? 0) < n) return { pending: false, remainder: sections };
+    }
+    for (const [k, n] of blockCounts) consumed.set(k, (consumed.get(k) ?? 0) + n);
+    consumedBySection.set(b.section, consumed);
+  }
+  const remainder: PrunedSection[] = [];
+  for (const s of sections) {
+    const consumed = consumedBySection.get(s.section);
+    const kept: string[] = [];
+    for (const l of s.lines) {
+      const k = l.replace(/\r$/, '');
+      const left = consumed?.get(k) ?? 0;
+      if (left > 0) consumed!.set(k, left - 1);
+      else kept.push(l);
+    }
+    if (kept.length > 0) remainder.push({ section: s.section, count: kept.length, lines: kept });
+  }
+  return { pending: true, remainder };
+}
+
+/**
+ * Structured form of one prune's STATE-ARCHIVE.md append (#5831): what the
+ * archive is built on (`base`: the existing archive text, or the header when
+ * the archive is absent), the separator inserted before the new block, and the
+ * block itself — its heading fields and every pruned entry
+ * per section, in order and with every occurrence kept.
+ * `renderStateArchiveAppend` turns it into the text `publishPrunedToArchive`
+ * writes.
+ */
+interface StateArchiveAppendPlan {
+  base: string;
+  /** '' when `base` is empty or ends with a newline; '\n\n' so the heading starts on its own line otherwise. */
+  boundary: '' | '\n\n';
+  block: {
+    date: string;
+    cutoff: number;
+    keepRecent: number;
+    sections: ArchiveSection[];
+  };
+}
+
+/** Pure: plan the archive append for one prune run. `existing` is null when the archive is absent. */
+function planStateArchiveAppend(
+  existing: string | null,
+  sections: PrunedSection[],
+  meta: { date: string; cutoff: number; keepRecent: number },
+): StateArchiveAppendPlan {
+  const base = existing ?? STATE_ARCHIVE_HEADER;
+  return {
+    base,
+    boundary: base.length > 0 && !base.endsWith('\n') ? '\n\n' : '',
+    block: {
+      date: meta.date,
+      cutoff: meta.cutoff,
+      keepRecent: meta.keepRecent,
+      sections: sections.map(s => ({ section: s.section, lines: [...s.lines] })),
+    },
+  };
+}
+
+/**
+ * Pure: render a plan to the archive text, in the `## Pruned ...` block format
+ * the archive has always had.
+ */
+function renderStateArchiveAppend(plan: StateArchiveAppendPlan): string {
+  const { block } = plan;
+  let out = plan.base + plan.boundary +
+    `## Pruned ${block.date} (phases 1-${block.cutoff}, kept recent ${block.keepRecent})\n\n`;
+  for (const section of block.sections) {
+    out += `### ${section.section}\n\n${section.lines.join('\n')}\n\n`;
+  }
+  return out;
+}
+
+/** Undo handle for one archive publication (#5831). */
+interface ArchiveRollback {
+  /** Restore the archive after `stateErr` failed the STATE.md write; throws on failure. */
+  restore(stateErr: unknown): void;
+}
+
+function errMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** One error carrying both the failure being handled and the one that hit while handling it. */
+function combineFailure(primary: unknown, secondary: unknown, message: string): AggregateError {
+  return new AggregateError([primary, secondary], message);
+}
+
+/** The outcome of one pure prune of STATE.md content. */
+interface PruneRun {
+  newContent: string;
+  archivedSections: PrunedSection[];
+}
+
+/**
+ * Decide which prune this invocation runs (#5831). The archive's last block
+ * names a cutoff N in its heading. When N is larger than this run's cutoff and
+ * does not exceed the current phase, and the prune at N EQUALS the block exactly
+ * (per section, with multiplicity, `\r` ignored: the prune at N minus the block
+ * is empty), the block is an interrupted run's, and this invocation completes it
+ * by pruning at N. In every other case — no block, an unparsable or smaller N, an
+ * N past the current phase, or a prune at N that holds entries the block does not
+ * (added since the interruption) — this run's own cutoff stays in force.
+ */
+function chooseCutoffRun(
+  block: ParsedArchiveBlock | null,
+  first: PruneRun,
+  cutoff: number,
+  currentPhase: number,
+  runPrune: (cutoff: number) => PruneRun,
+): { run: PruneRun; cutoff: number } {
+  if (block !== null && block.cutoff !== null && block.cutoff > cutoff && block.cutoff <= currentPhase) {
+    const wider = runPrune(block.cutoff);
+    const { pending, remainder } = subtractPendingBlock(block.sections, wider.archivedSections);
+    if (pending && remainder.length === 0) return { run: wider, cutoff: block.cutoff };
+  }
+  return { run: first, cutoff };
+}
+
+/**
+ * The archive's current bytes for a prune that may append to it (#5831). A
+ * symlinked or special archive is refused before it is read or snapshotted:
+ * reading through a link would snapshot another file's bytes, and the rollback
+ * would then replace the link itself. O_NOFOLLOW closes the window between the
+ * lstat and the open: a link planted in between fails with ELOOP. Null when the
+ * archive is absent.
+ */
+function readArchiveSnapshot(archivePath: string): Buffer | null {
+  try {
+    const archiveStat = fs.lstatSync(archivePath);
+    if (!archiveStat.isFile()) {
+      throw new Error(
+        `state prune: ${archivePath} is ${archiveStat.isSymbolicLink() ? 'a symlink' : 'not a regular file'}; ` +
+        'refusing to archive into it. STATE.md was not changed.',
+      );
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  return platformReadBytesSync(archivePath, { noFollow: true });
+}
+
+/**
+ * Append one `## Pruned <date> ...` block to STATE-ARCHIVE.md and return the
+ * prune it archived, the cutoff it ran at, and a handle that puts the archive
+ * back exactly as it was (#5831).
+ *
+ * Callers must hold the STATE.md lock (cmdStatePrune calls this from inside
+ * its `readModifyWriteStateMd` transform). The write is atomic — temp file +
+ * rename with no direct-write fallback (`platformWriteSync` `atomic`) — and
+ * throws on failure, so the caller's STATE.md rewrite never happens without
+ * it and a failed write leaves the archive's previous bytes in place. Should
+ * the archive still differ from its snapshot after a failed write, it is
+ * restored before the error propagates.
+ *
+ * Retry detection is by content, not by a hidden marker: when the archive's
+ * most recent block is contained, per section and with multiplicity, in what
+ * this run prunes (`subtractPendingBlock`), an earlier run published that block
+ * but never rewrote STATE.md (killed between the two writes, or a failed
+ * STATE.md write whose archive restore also failed). Only the entries not
+ * already in that block are appended, and nothing is written (`rollback` is
+ * null) when none are left, so the retry just rewrites STATE.md. A last block
+ * that is not contained in this prune is a different run, and the whole prune
+ * is appended. Identical text already in the last block is treated as
+ * archived: nothing is lost, and it is not archived a second time.
+ *
+ * The interrupted run is completed, not duplicated, when this run's cutoff is
+ * smaller: if the block's heading names a larger cutoff N (no greater than the
+ * current phase) and the prune at N equals the block exactly, this invocation
+ * prunes at N instead (see `chooseCutoffRun`; the block's entries leave
+ * STATE.md and nothing is archived twice). Otherwise this run's own cutoff stays
+ * in force and the whole prune is appended (duplicated, never lost), so entries
+ * added since the interruption are never pruned early.
+ */
+function publishPrunedToArchive(
+  statePath: string,
+  archivePath: string,
+  first: PruneRun,
+  runPrune: (cutoff: number) => PruneRun,
+  cutoff: number,
+  currentPhase: number,
+  keepRecent: number,
+): { run: PruneRun; cutoff: number; rollback: ArchiveRollback | null } {
+  const stateBytes = platformReadBytesSync(statePath);
+  if (stateBytes === null) throw new Error(`state prune: ${statePath} disappeared while its lock was held`);
+  // STATE.md's permission bits, so a restore from the snapshot puts them back too. Only a regular
+  // file has bits worth keeping: a symlink's own mode (0o777) is never applied to the restored file.
+  const stateStat = fs.lstatSync(statePath);
+  const stateMode = stateStat.isFile() ? stateStat.mode & 0o777 : undefined;
+  const archiveBytes = readArchiveSnapshot(archivePath);
+  const existing = archiveBytes === null ? null : archiveBytes.toString('utf-8');
+  const lastBlock = existing === null ? null : parseLastArchiveBlock(existing);
+  const chosen = chooseCutoffRun(lastBlock, first, cutoff, currentPhase, runPrune);
+  const run = chosen.run;
+  const effectiveCutoff = chosen.cutoff;
+  const { pending, remainder } = subtractPendingBlock(lastBlock === null ? null : lastBlock.sections, run.archivedSections);
+  if (pending && remainder.length === 0) return { run, cutoff: effectiveCutoff, rollback: null };
+
+  const plan = planStateArchiveAppend(existing, remainder, { date: realClock.localToday(), cutoff: effectiveCutoff, keepRecent });
+  // The file this run created, by the identity the write reports once it is published: a
+  // rollback to "absent" removes only that file, never one another process put at the path.
+  let created: FileIdentity | undefined;
+  try {
+    platformWriteSync(archivePath, renderStateArchiveAppend(plan), {
+      atomic: true,
+      onCreated: (id) => { created = id; },
+    });
+  } catch (writeErr) {
+    restoreArchiveAfterFailedWrite(archivePath, archiveBytes, writeErr);
+    throw writeErr;
+  }
+
+  const rollback: ArchiveRollback = {
+    restore(stateErr: unknown): void {
+      // Roll back only once STATE.md provably holds the entries again (its
+      // bytes are exactly the pre-write snapshot). If the failed write changed
+      // or removed it, put the snapshot back first; if that fails too, the
+      // archive copy may be the only one left — keep it.
+      let stateNow: Buffer | null;
+      try {
+        stateNow = platformReadBytesSync(statePath);
+      } catch (readErr) {
+        throw combineFailure(
+          stateErr,
+          readErr,
+          `state prune: writing STATE.md failed (${errMessage(stateErr)}) and STATE.md could not be re-read to verify ` +
+          `its condition (${errMessage(readErr)}). STATE-ARCHIVE.md was left as written and holds the pruned entries; ` +
+          'check STATE.md before pruning again.',
+        );
+      }
+      if (stateNow === null || !stateNow.equals(stateBytes)) {
+        try {
+          platformRestoreFileSync(statePath, stateBytes, { mode: stateMode });
+        } catch (stateRestoreErr) {
+          throw combineFailure(
+            stateErr,
+            stateRestoreErr,
+            `state prune: writing STATE.md failed (${errMessage(stateErr)}) and left it changed, and putting its ` +
+            `previous content back also failed (${errMessage(stateRestoreErr)}). STATE-ARCHIVE.md was left as written ` +
+            'and holds the pruned entries; check STATE.md before pruning again.',
+          );
+        }
+      }
+      try {
+        if (archiveBytes !== null) platformRestoreFileSync(archivePath, archiveBytes);
+        else if (created !== undefined) platformRestoreFileSync(archivePath, null, { unlinkOnlyIf: created });
+      } catch (restoreErr) {
+        throw combineFailure(
+          stateErr,
+          restoreErr,
+          `state prune: writing STATE.md failed (${errMessage(stateErr)}) and restoring STATE-ARCHIVE.md also failed ` +
+          `(${errMessage(restoreErr)}). The pruned entries are in both files for now; pruning again with the same ` +
+          'options only removes them from STATE.md (the archived block is recognised by its content).',
+        );
+      }
+    },
+  };
+  return { run, cutoff: effectiveCutoff, rollback };
+}
+
+/**
+ * #5831: after the archive write itself threw, put the archive back to its
+ * snapshot if it no longer matches it. The atomic write leaves the destination
+ * untouched on failure, so this normally finds nothing to do; it guards the
+ * earlier entries against any write path that damages the file and then
+ * throws. A failed check or restore is reported alongside the write error.
+ */
+function restoreArchiveAfterFailedWrite(
+  archivePath: string,
+  archiveBytes: Buffer | null,
+  writeErr: unknown,
+): void {
+  try {
+    const now = platformReadBytesSync(archivePath);
+    if (archiveBytes === null && now !== null) {
+      // No archive existed and one does now, though the write failed: it is not this run's, so it is never deleted.
+      throw Object.assign(
+        new Error(`ESTALE: ${archivePath} appeared during the failed write and was not created by this run — left in place`),
+        { code: 'ESTALE' },
+      );
+    }
+    const unchanged = now === null ? archiveBytes === null : archiveBytes !== null && now.equals(archiveBytes);
+    if (!unchanged) platformRestoreFileSync(archivePath, archiveBytes);
+  } catch (restoreErr) {
+    throw combineFailure(
+      writeErr,
+      restoreErr,
+      `state prune: writing STATE-ARCHIVE.md failed (${errMessage(writeErr)}) and putting it back to its previous ` +
+      `content also failed (${errMessage(restoreErr)}). STATE.md was not changed and still holds every entry; ` +
+      'check STATE-ARCHIVE.md for earlier archived entries.',
+    );
+  }
+}
+
 /**
  * Prune old entries from STATE.md sections that grow unboundedly (#1970).
  * Moves decisions, recently-completed summaries, and resolved blockers
@@ -6350,12 +7745,18 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
  * Options:
  *   keepRecent: number of recent phases to retain (default: 3)
  *   dryRun: if true, return what would be pruned without modifying STATE.md
+ *
+ * Returns the result object it emits (also when `silent`), so callers can tell
+ * whether anything was actually pruned.
  */
-function cmdStatePrune(cwd: string, options: StatePruneOptions, raw: boolean): void {
+function cmdStatePrune(cwd: string, options: StatePruneOptions, raw: boolean): StatePruneResult {
   const silent = !!options.silent;
   const emit = silent ? () => {} : (result: Record<string, unknown>, r: boolean, v?: string) => output(result, r, v);
+  const finish = (result: StatePruneResult, v?: string): StatePruneResult => {
+    emit({ ...result }, raw, v);
+    return result;
+  };
   const statePath = planningPaths(cwd).state;
-  if (!fs.existsSync(statePath)) { emit({ error: 'STATE.md not found' }, raw); return; }
 
   const keepRecent = parseInt(String(options.keepRecent), 10) || 3;
   const dryRun = !!options.dryRun;
@@ -6365,17 +7766,23 @@ function cmdStatePrune(cwd: string, options: StatePruneOptions, raw: boolean): v
   // engages on a template-conformant STATE.md instead of bailing "Only 0
   // phases" (#1760). #3231/#3481 routed the phase-labeled write commands
   // through the same helper rather than leaving a second copy of the ladder here.
-  const rawState = fs.readFileSync(statePath, 'utf-8');
+  // Read through the non-blocking seam: a FIFO or device at STATE.md fails with ENXIO and a
+  // directory with EISDIR instead of blocking this process.
+  const stateBytesBefore = platformReadBytesSync(statePath);
+  if (stateBytesBefore === null) {
+    emit({ error: 'STATE.md not found' }, raw);
+    return { pruned: false, error: 'STATE.md not found' };
+  }
+  const rawState = stateBytesBefore.toString('utf-8');
   const fm = extractFrontmatter(rawState, statePath) as Record<string, unknown>;
   const body = stripFrontmatter(rawState);
   // Prune needs an integer cutoff, so it parses the resolved id itself; a
   // non-numeric or absent id lands on 0 and prune bails, as before.
-  const currentPhase = parseInt(String(resolveCurrentPhaseId(fm, body)), 10) || 0;
+  const currentPhase = parseInt(String(resolveCurrentPhaseId(fm, body, resolvePhaseIdConvention(cwd), phaseDirectoryOptions(cwd))), 10) || 0;
   const cutoff = currentPhase - keepRecent;
 
   if (cutoff <= 0) {
-    emit({ pruned: false, reason: `Only ${currentPhase} phases — nothing to prune with --keep-recent ${keepRecent}` }, raw, 'false');
-    return;
+    return finish({ pruned: false, reason: `Only ${currentPhase} phases — nothing to prune with --keep-recent ${keepRecent}` }, 'false');
   }
 
   const archivePath = path.join(path.dirname(statePath), 'STATE-ARCHIVE.md');
@@ -6385,8 +7792,8 @@ function cmdStatePrune(cwd: string, options: StatePruneOptions, raw: boolean): v
   // src/state-transition.cts (byte-identical tokenizeHeadings section splicing).
   // This adapter owns currentPhase derivation (#1760 `Phase`/`Current Phase`
   // fallback above), dry-run, and STATE-ARCHIVE.md writes.
-  const runPruneCore = (content: string): { newContent: string; archivedSections: PrunedSection[] } => {
-    const result = transitionCore(content, { kind: 'prune', cutoff }, { clock: realClock });
+  const runPruneCore = (content: string, atCutoff: number = cutoff): PruneRun => {
+    const result = transitionCore(content, { kind: 'prune', cutoff: atCutoff }, { clock: realClock });
     return {
       newContent: result.content,
       archivedSections: ((result.data as { archivedSections?: PrunedSection[] } | undefined)?.archivedSections) ?? [],
@@ -6395,50 +7802,97 @@ function cmdStatePrune(cwd: string, options: StatePruneOptions, raw: boolean): v
 
   if (dryRun) {
     // Dry-run: compute what would be pruned without writing anything
-    const content = fs.readFileSync(statePath, 'utf-8');
-    const result = runPruneCore(content);
-    const totalPruned = result.archivedSections.reduce((sum, s) => sum + s.count, 0);
-    emit({
+    const dryBytes = platformReadBytesSync(statePath);
+    if (dryBytes === null) {
+      emit({ error: 'STATE.md not found' }, raw);
+      return { pruned: false, error: 'STATE.md not found' };
+    }
+    const dryContent = dryBytes.toString('utf-8');
+    let result = runPruneCore(dryContent);
+    let dryCutoff = cutoff;
+    if (result.archivedSections.length > 0) {
+      // The same decision the real run makes, with the archive read-only: an interrupted run's
+      // block is completed at its cutoff. Like the real run, the preview lists every entry the
+      // effective prune removes from STATE.md, those already in that block included.
+      const archiveBytes = readArchiveSnapshot(archivePath);
+      const block = archiveBytes === null ? null : parseLastArchiveBlock(archiveBytes.toString('utf-8'));
+      const chosen = chooseCutoffRun(block, result, cutoff, currentPhase, (atCutoff) => runPruneCore(dryContent, atCutoff));
+      result = chosen.run;
+      dryCutoff = chosen.cutoff;
+    }
+    const wouldArchive = result.archivedSections;
+    const totalPruned = wouldArchive.reduce((sum, s) => sum + s.count, 0);
+    return finish({
       pruned: false,
       dry_run: true,
-      cutoff_phase: cutoff,
+      cutoff_phase: dryCutoff,
       keep_recent: keepRecent,
-      sections: result.archivedSections.map(s => ({ section: s.section, entries_would_archive: s.count })),
+      sections: wouldArchive.map(s => ({ section: s.section, entries_would_archive: s.count })),
       total_would_archive: totalPruned,
       note: totalPruned > 0 ? 'Run without --dry-run to actually prune' : 'Nothing to prune',
-    }, raw, totalPruned > 0 ? 'true' : 'false');
-    return;
+    }, totalPruned > 0 ? 'true' : 'false');
   }
 
+  // #5831: archive first, then STATE.md, with rollback. Everything runs
+  // inside readModifyWriteStateMd, i.e. under the STATE.md lock, which also
+  // serializes archive writers (this is the only one):
+  //   1. compute the prune and snapshot the archive's exact bytes (or absence);
+  //   2. publish the archive atomically (old content + one `## Pruned ...`
+  //      block), appending only the entries the archive's latest block does
+  //      not already hold, or skipping it when that block holds them all
+  //      (content match, see publishPrunedToArchive);
+  //   3. write STATE.md. If that throws, `onWriteFailure` restores the archive
+  //      to its snapshot (or deletes it if it was absent) and the error is
+  //      rethrown, so both files are as they were before the prune.
+  // Both writes are atomic (temp file + rename, no truncating fallback). A
+  // failed archive write (step 2) leaves the archive's previous bytes and
+  // throws out of the transform before STATE.md is touched; a failed STATE.md
+  // write leaves it as it was (or is put back from the snapshot) before the
+  // archive is restored. When a restore itself fails, the archive is kept, so
+  // the pruned entries are in at least one file (only a STATE.md write that
+  // damaged STATE.md and whose restore also failed can cost unpruned content,
+  // and that error says so). A process killed between steps 2
+  // and 3 (or a failed archive restore) leaves the entries in both files;
+  // re-running the prune then finds the archive's latest block contained in
+  // what it prunes and appends only what that block lacks (nothing, for the
+  // same options), so each entry is archived once even when the cutoff grew or
+  // other state commands rewrote STATE.md in between. A re-run at a SMALLER
+  // cutoff completes the interrupted run: when the block's heading names a
+  // larger cutoff N, N is no greater than the current phase, and the prune at N
+  // equals the archived block exactly, this invocation prunes at N (reported as
+  // `cutoff_phase`). Otherwise (entries added, edited or removed since the
+  // interruption, or an N past the current phase) this run's own cutoff stays in
+  // force and the whole prune is appended (duplicated, never lost).
+  let rollback: ArchiveRollback | null = null;
+  let effectiveCutoff = cutoff;
   readModifyWriteStateMd(statePath, (content) => {
-    const result = runPruneCore(content);
+    let result = runPruneCore(content);
+    if (result.archivedSections.length > 0) {
+      const published = publishPrunedToArchive(
+        statePath, archivePath, result, (atCutoff) => runPruneCore(content, atCutoff), cutoff, currentPhase, keepRecent,
+      );
+      result = published.run;
+      effectiveCutoff = published.cutoff;
+      rollback = published.rollback;
+    }
     archived.push(...result.archivedSections);
     return result.newContent;
-  }, cwd);
-
-  // Write archived entries to STATE-ARCHIVE.md
-  if (archived.length > 0) {
-    const timestamp = realClock.localToday();
-    let archiveContent = platformReadSync(archivePath);
-    if (archiveContent === null) {
-      archiveContent = '# STATE Archive\n\nPruned entries from STATE.md. Recoverable but no longer loaded into agent context.\n\n';
-    }
-    archiveContent += `## Pruned ${timestamp} (phases 1-${cutoff}, kept recent ${keepRecent})\n\n`;
-    for (const section of archived) {
-      archiveContent += `### ${section.section}\n\n${section.lines.join('\n')}\n\n`;
-    }
-    platformWriteSync(archivePath, archiveContent);
-  }
+  }, cwd, {
+    atomicWrite: true,
+    onWriteFailure: (stateErr) => {
+      if (rollback !== null) rollback.restore(stateErr);
+    },
+  });
 
   const totalPruned = archived.reduce((sum, s) => sum + s.count, 0);
-  emit({
+  return finish({
     pruned: totalPruned > 0,
-    cutoff_phase: cutoff,
+    cutoff_phase: effectiveCutoff,
     keep_recent: keepRecent,
     sections: archived.map(s => ({ section: s.section, entries_archived: s.count })),
     total_archived: totalPruned,
     archive_file: totalPruned > 0 ? 'STATE-ARCHIVE.md' : null,
-  }, raw, totalPruned > 0 ? 'true' : 'false');
+  }, totalPruned > 0 ? 'true' : 'false');
 }
 
 /**
@@ -6611,7 +8065,7 @@ function cmdStateRebuild(cwd: string, options: StateRebuildOptions, raw: boolean
  * that the phase execution is finished and the project is ready for the next phase.
  * Implements the `gsd state complete-phase` subcommand (issue #2735).
  */
-function resolvePhaseIdForCompletePhase(fm: Record<string, unknown>, body: string, overridePhase: string | undefined): string | null {
+function resolvePhaseIdForCompletePhase(fm: Record<string, unknown>, body: string, overridePhase: string | undefined, directoryContext: PhaseDirectoryContext): string | null {
   // #3187: route through the single #1760 fallback-chain owner (fm scalar
   // then body field) instead of two raw stateExtractField calls on
   // frontmatter-blind content — a STATE.md whose phase lives only in
@@ -6630,7 +8084,7 @@ function resolvePhaseIdForCompletePhase(fm: Record<string, unknown>, body: strin
   // "Phase 0.5 complete". A canonical token at the start of the value
   // (3, 03, 3A, 3.3, 10.2, "3 of 5", "1 — Setup") is preserved; a milestone
   // closure line yields null, so the caller's "unable to resolve" guard fires.
-  return parsePhaseFromProse(candidate).phase;
+  return parsePhaseFromProse(candidate, undefined, directoryContext).phase;
 }
 
 /**
@@ -6685,7 +8139,8 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
     return;
   }
 
-  const resolvedPhase = resolvePhaseIdForCompletePhase(fm, body, overridePhase);
+  const directoryContext = phaseDirectoryOptions(cwd);
+  const resolvedPhase = resolvePhaseIdForCompletePhase(fm, body, overridePhase, directoryContext);
   if (!resolvedPhase || /^phase$/i.test(resolvedPhase)) {
     output({ error: 'Unable to resolve current phase. Pass an explicit phase: state complete-phase --phase <N>' }, raw, undefined);
     return;
@@ -6703,7 +8158,7 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
   const existingCurrentPhaseRaw = stateFieldValue(fm, body, 'current_phase', 'Current Phase').value || '';
   // #2125: same canonical parser as resolvePhaseIdForCompletePhase so the two
   // sites cannot diverge on the token they extract.
-  const existingCurrentPhase = parsePhaseFromProse(existingCurrentPhaseRaw).phase;
+  const existingCurrentPhase = parsePhaseFromProse(existingCurrentPhaseRaw, undefined, directoryContext).phase;
   if (existingCurrentPhase && existingCurrentPhase !== resolvedPhase) {
     output(
       { updated: [], phase: resolvedPhase, idempotent: true, note: 'phase already superseded; no-op' },
@@ -6742,6 +8197,7 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
 
   const wrote = readModifyWriteStateMd(statePath, (content) => {
     const currentPhase = resolvedPhase;
+    const currentPhaseDisplay = phaseDisplayFor(cwd, currentPhase);
 
     // Bug #1255: operate on body only so the YAML frontmatter `status:` key
     // cannot shadow the body Status field (pipe-table or inline).
@@ -6770,7 +8226,7 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
     if (result) { body = result; updated.push({ kind: 'field', name: 'Last Activity' }); }
 
     // Update Last Activity Description
-    const activityDesc = `Phase ${currentPhase} marked complete`;
+    const activityDesc = `${currentPhaseDisplay} marked complete`;
     result = stateReplaceField(body, 'Last Activity Description', activityDesc);
     if (result) { body = result; updated.push({ kind: 'field', name: 'Last Activity Description' }); }
 
@@ -6813,13 +8269,13 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
         }
 
         // Update Last activity line if present
-        const newActivity = `Last activity: ${today} — Phase ${currentPhase} marked complete`;
+        const newActivity = `Last activity: ${today} — ${currentPhaseDisplay} marked complete`;
         if (/^Last activity:/im.test(posBody)) {
           posBody = posBody.replace(/^Last activity:.*$/im, newActivity);
         } else {
           // Pipe-table format in Current Position (#1255)
           // Value must match the inline branch (date + narrative), not bare date.
-          const activityValue = `${today} — Phase ${currentPhase} marked complete`;
+          const activityValue = `${today} — ${currentPhaseDisplay} marked complete`;
           const replaced = stateReplaceField(posBody, 'Last Activity', activityValue)
             ?? stateReplaceField(posBody, 'Last activity', activityValue);
           if (replaced !== null) posBody = replaced;
@@ -6936,9 +8392,20 @@ export = {
   cmdStateBeginPhase,
   cmdStatePlannedPhase,
   cmdStateCompletePhase,
+  // #4304: the canonical write-path current-phase ladder, read by the bracket
+  // `phase remove` refusal before it deletes or renumbers that phase.
+  resolveCurrentPhaseId,
   cmdStateValidate,
   cmdStateSync,
   cmdStatePrune,
+  // #5831: the archive append's structured plan and its renderer — the IR
+  // prune's archive write is built from, exposed so tests assert on it.
+  planStateArchiveAppend,
+  renderStateArchiveAppend,
+  // #5831: retry detection by content — the archive's last block and its
+  // subtraction from a prune's sections.
+  parseLastArchiveBlock,
+  subtractPendingBlock,
   cmdStateRebuild,
   cmdStateMilestoneSwitch,
   cmdSignalWaiting,
@@ -6967,6 +8434,12 @@ export = {
   // pinning the table it reads (`_FRONTMATTER_KEY_TO_BODY_LABEL`) against
   // itself.
   _bodyLabelFor: bodyLabelFor,
+  // ADR-4629 §8.2/§8.3 (epic #4629, C2 #4866): the verifying executor and its
+  // pure verifier. No production caller constructs a StateWriteIntent yet (C3+),
+  // so these are reached only by their positive-control tests.
+  applyStateWriteIntent,
+  _verifyStateWriteIntent: verifyStateWriteIntent,
+  STATE_WRITE_INTENT_FAILURE,
   // Test seam (audit M1): inject a deterministic isPidAlive so the liveness-gated
   // steal decision is exercised without real pids. Mirrors capability-lock.cts.
   _setLockProbes(probes: Partial<{ isPidAlive: (pid: number) => boolean }>): void {

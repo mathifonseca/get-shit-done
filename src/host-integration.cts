@@ -13,6 +13,12 @@
  * Per-CLI sourced axis VALUES (with citations) live in docs/reference/host-integration-capability-matrix.md — every value is documented or explicitly 'undocumented'.
  */
 
+// #4561: the dispatch-isolation vocabulary has ONE owner, src/dispatch-isolation.cts.
+// The `isolation` axis below is that tuple, not a restatement of it, and the
+// `DispatchIsolation` type is derived from the same tuple.
+import { DISPATCH_ISOLATION_MODES } from './dispatch-isolation.cjs';
+import type { DispatchIsolation } from './dispatch-isolation.cjs';
+
 // ---------------------------------------------------------------------------
 // Protocol version
 // ---------------------------------------------------------------------------
@@ -67,9 +73,9 @@ const HOST_INTEGRATION_AXES = Object.freeze({
   // `undocumented` is NOT a member here; it is the corpus-wide sentinel above.
   // Mechanism-specific ("worktree"), not abstract — same "name only what a
   // host actually has" rule that kept effortSurface from guessing a
-  // config-file member above. A future non-worktree isolation mechanism adds a
-  // `*-container` member then, evidence-backed.
-  isolation:       Object.freeze(['harness-worktree', 'orchestrator-worktree', 'none'] as const),
+  // config-file member above. A future non-worktree mechanism adds a `*-container`
+  // member then, evidence-backed, to src/dispatch-isolation.cts (#4561).
+  isolation:       DISPATCH_ISOLATION_MODES,
 });
 
 const INTERFACE_POINTS = Object.freeze(['command', 'dispatch', 'model', 'hooks', 'state', 'artifact'] as const);
@@ -87,7 +93,8 @@ type Transport        = 'mcp' | 'native-extension';
 type HostRuntime      = 'node' | 'bun' | 'sandboxed-web' | 'python' | 'go' | 'rust' | 'electron' | 'other';
 type SubagentToolkit  = 'full' | 'read-only';
 type EffortSurface    = 'argv' | 'none';
-type DispatchIsolation = 'harness-worktree' | 'orchestrator-worktree' | 'none';
+// `DispatchIsolation` is imported from src/dispatch-isolation.cts (#4561) — derived
+// from the same tuple `HOST_INTEGRATION_AXES.isolation` is, never restated here.
 type DegradationLevel = 'full' | 'degraded' | 'absent';
 type InterfacePoint   = 'command' | 'dispatch' | 'model' | 'hooks' | 'state' | 'artifact';
 
@@ -769,7 +776,7 @@ function hookEventSurfaceFor(hookEvents: unknown): readonly string[] | null {
 // event subset (imperative hosts' extension API). They are not the same thing.
 //
 // Values are documentation-sourced (ADR-1239 §research): OpenCode ~25 plugin
-// events (session/tool/file/permission); pi ~30 fine-grained extension events;
+// events (session/tool/file/permission); pi 41 fine-grained extension events (pi 1.3.0);
 // 'none' = the host exposes no extension surface and the engine owns the bus
 // (VS Code). Declarative hosts (no plugin API) do not set `extensionEvents`.
 // OpenCode's plugin event surface (ADR-1239 §research; ~25 documented events,
@@ -805,11 +812,13 @@ const EXTENSION_EVENT_SURFACES: Readonly<Record<string, readonly string[]>> = Ob
     'pre_gateway_dispatch', 'pre_approval_request',
     'transform_tool_result',
   ]),
-  // #2102 Stage 2 — pi's real ExtensionAPI event vocabulary (~30 fine-grained
-  // extension events; documentation-sourced, ADR-1239 §research). Replaces the
-  // placeholder single-event ['tool_call'] surface — the Stage 1 value only
-  // covered the one event pi/gsd.cjs happened to bind at the time, not the
-  // full declared surface.
+  // pi's real ExtensionAPI event vocabulary: the 41 `on(event: "...")` overloads
+  // declared by pi 1.3.0 (@earendil-works/pi-coding-agent
+  // dist/core/extensions/types.d.ts, sourceCommit 71023aec15, #5557). #2102
+  // Stage 2 declared the first 30 from pi.dev prose; the last 11 on the final
+  // row group were added when the host's own declarations were read. The
+  // pi.dev extensions page lists a lossy subset (it omits session_before_compact,
+  // which pi/gsd.cjs binds), so the type declarations are the source of truth.
   pi: Object.freeze([
     'session_start', 'project_trust', 'resources_discover', 'input',
     'before_agent_start', 'agent_start', 'message_start', 'message_update',
@@ -819,6 +828,11 @@ const EXTENSION_EVENT_SURFACES: Readonly<Record<string, readonly string[]>> = Ob
     'session_before_switch', 'session_shutdown', 'session_before_fork',
     'session_info_changed', 'session_before_compact', 'session_compact',
     'session_before_tree', 'session_tree', 'thinking_level_select', 'model_select',
+    // Added in pi 1.3.0 (#5557):
+    'agent_before_settle', 'agent_settled', 'before_provider_headers',
+    'cache_warming_decision', 'context_with_system', 'mcp_servers_change',
+    'provider_stream_event', 'session_compact_failed', 'ui_prompt_end',
+    'ui_prompt_start', 'user_bash',
   ]),
   none: Object.freeze([]),
 });

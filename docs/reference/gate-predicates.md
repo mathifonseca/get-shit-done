@@ -103,8 +103,8 @@ model".
 | Command outcome | `block` | `message` |
 |---|---|---|
 | exit 0 | `false` | `command exited 0` |
-| exit N (non-zero) | `true` | `command exited N: <stderr/stdout tail, ≤2000 chars>` |
-| timeout (SIGTERM) | `true` | `command timed out after <s>s: <tail>` |
+| exit N (non-zero) | `true` | `command exited N: <stderr/stdout tail>` (whole message, prefix included, ≤2000 chars) |
+| timeout (SIGTERM) | `true` | `command timed out after <s>s: <stderr tail>` (empty or whitespace-only stderr: the command's head) |
 | `sh` missing (ENOENT, exit 127) | `true` | `command exited 127: sh: not found` |
 
 **Validation errors (throw → check-command failure → Step-1 / `onError`).**
@@ -117,6 +117,8 @@ model".
 ### `artifact-frontmatter-equals`
 
 Reads a Markdown file with YAML frontmatter from the current phase directory (or falls back to the project root for project-level artifacts) and compares a field's value to the declared expectation. The value is matched using loosely typed string comparison or exact matching, where numeric expectations will safely match stringified numeric frontmatter values.
+
+`artifact` matches `<name>`, `.planning/<name>`, and every `*-<name>` in the directory. Exactly one match is read (a symlink that resolves to the same file counts once); more than one fails closed (`block: true`) naming every candidate, never the first the OS listed (#5313).
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
@@ -132,6 +134,7 @@ Reads a Markdown file with YAML frontmatter from the current phase directory (or
 | Value matches `equals` | `false` | `Frontmatter field "<field>" matches expected value (<expected>)` |
 | Value mismatch | `true` | `Frontmatter field "<field>" in <artifact> is <actual>, expected <expected>` |
 | Artifact file not found | `true` | `Artifact matching <artifact> not found in <targetDir>` |
+| More than one file matches | `true` | `Multiple artifacts match <artifact> in <targetDir>: <names sorted by path>; remove or rename all but one` (`details.ambiguous`, `details.candidates`) |
 
 **Validation errors (throw → check-command failure → Step-1 / `onError`).**
 
@@ -139,6 +142,7 @@ Reads a Markdown file with YAML frontmatter from the current phase directory (or
 - Missing or empty `field` string.
 - Missing `equals` value.
 - File read or YAML parsing failure (I/O errors).
+- Phase directory exists but cannot be listed (also when the artifact sits directly in it).
 
 ## Extensibility
 

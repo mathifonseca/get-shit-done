@@ -86,7 +86,7 @@ claude plugin install gsd-core
 
 **Command namespace**
 
-Plugin commands are namespaced as `/gsd-core:<command>` — for example, `/gsd-core:plan-phase`. This is distinct from the classic npm/file-copy installer, which exposes commands as `/gsd:<command>`. Use whichever namespace corresponds to your install method.
+Plugin workflows are skills, namespaced as `/gsd-core:gsd-<command>` — for example, `/gsd-core:gsd-plan-phase`. Each workflow is registered once, so `claude plugin details gsd-core` lists 72 skills with no duplicates (#4860). This is distinct from the classic npm/file-copy installer, which exposes commands as `/gsd:<command>`. Use whichever namespace corresponds to your install method. If you used the earlier `/gsd-core:<command>` spelling (for example `/gsd-core:plan-phase`), switch to `/gsd-core:gsd-<command>`.
 
 **Lifecycle**
 
@@ -100,13 +100,15 @@ claude plugin update gsd-core
 
 The plugin wires gsd-core's always-on guard and update hooks automatically via `hooks/hooks.json`. No manual hook registration is required.
 
+The plugin does **not** provide context warnings: it registers the context monitor hook but not the statusline that feeds it, so the 35% and 25% remaining-context warnings need the npm install (`npx @opengsd/gsd-core@latest --global`, with `--force-statusline` to replace a statusLine that is already set), which registers `gsd-statusline`. The opt-in hooks (`hooks.workflow_guard`, `hooks.community`, `graphify.auto_update`) are likewise registered only by the npm installer, so their config switches do nothing on a plugin-only install. `/gsd-health` reports this as `W032` when the plugin is enabled and no statusline is wired.
+
 **Prerequisites**
 
 The `gsd-tools` binary (installed as part of the `@opengsd/gsd-core` npm package) must be available on your `PATH` for gsd commands to execute their backing logic. The plugin delivers the command, agent, and hook surface; the npm package delivers the runtime CLI.
 
 Node.js (`node`) must also be available on your `PATH`. The plugin's always-on guard hooks (wired in `hooks/hooks.json`) are invoked as `node "${CLAUDE_PLUGIN_ROOT}/hooks/<script>"`. Some Claude Code distributions ship as a standalone binary and do not expose a `node` executable on `PATH`; in those environments the plugin's hooks will not run. Verify with `node --version` before relying on the plugin hooks.
 
-**Runtime build (self-healing).** The runtime CLI's compiled modules under `gsd-core/bin/lib/*.cjs` are build artifacts (ADR-457): they are compiled from `src/*.cts` by `npm run build:lib` and shipped prebuilt in the npm tarball. A plugin-marketplace or git-clone install materializes the repository tree directly and never runs that build step, so those files are initially absent. The CLI heals this automatically: the first `gsd-tools` invocation detects the missing output and compiles it once (using the bundled `typescript` devDependency), then proceeds normally. You may see a one-time `gsd: runtime library not built — compiling once…` notice on stderr; subsequent commands are unaffected. If auto-build cannot run (for example `node_modules` was pruned to production-only and `typescript` is unavailable), the CLI prints an actionable message telling you to run `npm install && npm run build:lib` in the plugin directory.
+**Runtime build (self-healing).** The runtime CLI's compiled modules under `gsd-core/bin/lib/*.cjs` are build artifacts (ADR-457): they are compiled from `src/*.cts` by `npm run build:lib` and shipped prebuilt in the npm tarball. The plugin marketplace entry points at a prebuilt `plugin` branch that the stable release workflow (`release.yml` `finalize`) force-updates with the repository tree plus the compiled `gsd-core/bin/lib/**/*.cjs`, so `claude plugin install` and `claude plugin update` materialize a tree whose runtime library is already built and no build step is needed. A plugin cache populated before this change keeps its unbuilt tree until the next release changes the plugin version, because `claude plugin update` replaces the cache only when the version changes; until then the self-heal below covers it. A raw git-clone of `next` or a release tag still materializes the repository tree directly and never runs that build step, so those files are initially absent there. The CLI heals this automatically: the first `gsd-tools` invocation detects the missing output and compiles it once (using the bundled `typescript` devDependency), then proceeds normally. You may see a one-time `gsd: runtime library not built — compiling once…` notice on stderr; subsequent commands are unaffected. If auto-build cannot run (for example `node_modules` was pruned to production-only and `typescript` is unavailable), the CLI prints an actionable message telling you to run `npm install && npm run build:lib` in the plugin directory.
 
 #### Claude plugin marketplace discovery (ZCODE and compatible runtimes)
 
@@ -115,7 +117,7 @@ GSD Core also ships a `.claude-plugin/marketplace.json` marketplace manifest (si
 1. In your runtime's plugin UI, add a custom marketplace source pointing at `open-gsd/gsd-core` (GitHub `owner/repo` form).
 2. GSD Core appears in the catalog and can be installed directly from the UI.
 
-This path is **additive** and changes nothing about the Claude Code plugin install above (`.claude-plugin/plugin.json` is unchanged). The marketplace entry's `source` is `./`, so it reuses `plugin.json`'s `commands` / `skills` / `hooks` mapping. The catalog version tracks `package.json` (it lives at `plugins[0].version` and is stamped by the release version-sync), so the version you see in the marketplace matches the npm release.
+This path is **additive** and uses the same `.claude-plugin/marketplace.json` entry as the Claude Code plugin install above (`.claude-plugin/plugin.json` is unchanged). The marketplace entry's `source` is `{ "source": "github", "repo": "open-gsd/gsd-core", "ref": "plugin" }` (the prebuilt `plugin` branch, whose tree carries the same `.claude-plugin/plugin.json`), so it reuses `plugin.json`'s `commands` / `skills` / `hooks` mapping. The catalog version tracks `package.json` (it lives at `plugins[0].version` and is stamped by the release version-sync), so the version you see in the marketplace matches the npm release.
 
 ---
 
@@ -178,6 +180,8 @@ GSD registers the following Codex hook event automatically on install (requires 
 | `SessionStart` | `gsd-check-update.js` | Update check at session open; Windows installs also emit a `commandWindows` field pointing to the `.cmd` shim so Codex picks the correct executor on Windows without requiring per-OS config regeneration |
 
 **Context warnings are not supported on Codex (#2586).** Earlier revisions of GSD also registered `SubagentStart`/`Stop`/`PostToolUse` (plus, briefly, six more events) against `gsd-context-monitor.js` for context-headroom tracking. That hook only produces a warning by reading a remaining-context-percentage bridge file that `gsd-statusline.js` — Claude Code's own statusline mechanism — writes; Codex never installs a statusline writer, so every one of those registrations fired as a guaranteed silent no-op, every invocation, with no exceptions. GSD no longer copies or registers `gsd-context-monitor.js` on a fresh Codex install; a reinstall over an older GSD install removes the stale registrations and the now-unreferenced script automatically. Agent-facing context warnings and GSD phase/lifecycle display remain unsupported capabilities on Codex (see `capabilities/codex/capability.json`) until a real metrics producer exists for this runtime — native Codex `/statusline` configuration is a separate, not-yet-implemented surface.
+
+**Codex on Windows finds Node when the hook runs (#4838).** The `.cmd` shim does not depend on the install-time `node.exe` path alone: a Node upgrade that removes that versioned directory (WinGet does) no longer breaks the hook until you re-run the installer. The shim uses the first of these that exists: `GSD_NODE_PATH` (set it to an absolute `node.exe` to override), the path the installer found, then `node.exe` on `PATH`. The `PATH` lookup never searches the current directory. If none exists the hook fails as it did before.
 
 All registered hooks are managed by GSD and are removed cleanly on `--uninstall`.
 
@@ -492,13 +496,20 @@ PI_CODING_AGENT_DIR=~/.pi-alt/agent npx @opengsd/gsd-core@latest --pi --global
 
 `PI_CODING_AGENT_DIR` is pi's own upstream override (`getAgentDir()` in pi's `config.ts`) for its global agent directory (`~/.pi/agent` by default) — GSD honors it so the install always lands where pi actually reads ([#3023](https://github.com/open-gsd/gsd-core/issues/3023)). pi also supports a `piConfig.configDir` field (`config.ts`'s `CONFIG_DIR_NAME`) that renames the `.pi` segment, but that field is read from pi's own installed `package.json`, not your project's — it is a white-label/rebranding hook for redistributed pi forks (it sits beside `piConfig.name`, which renames the app itself), not something an end user sets for their own project. GSD's pi descriptor does not target rebranded forks, so `PI_CODING_AGENT_DIR` remains the correct override for a stock pi install.
 
-[pi](https://pi.dev) is a bun-runtime programmatic CLI whose extensions implement pi's own `ExtensionAPI` (`registerCommand`/`registerTool`/`registerProvider`/`pi.on`) rather than a settings-file or slash-markdown surface. GSD ships a single native-extension file:
+[pi](https://pi.dev) is a Node-runtime programmatic CLI (managed pi 1.3.0 install) whose extensions implement pi's own `ExtensionAPI` (`registerCommand`/`registerTool`/`registerProvider`/`pi.on`) rather than a settings-file or slash-markdown surface. GSD ships a native extension plus one Agent Skill per GSD command:
 
 - **Extension** → `~/.pi/agent/extensions/gsd.js` (global) or `.pi/extensions/gsd.js` (local)
+- **Skills** → `~/.pi/agent/skills/gsd-<command>/SKILL.md` (global) or `.pi/skills/gsd-<command>/SKILL.md` (local), invoked in pi as `/skill:gsd-<command>`
+
+You can also install GSD through Pi's package manager with `pi install npm:@opengsd/gsd-core`; it provides the same commands and extension without writing to the directories above. See [Install GSD as a Pi package](install-gsd-as-a-pi-package.md) ([#5558](https://github.com/open-gsd/gsd-core/issues/5558)).
 
 The `.js` suffix is load-bearing: pi auto-discovers extensions by scanning that directory and keeping only names ending in `.ts` or `.js`, and it skips anything else **silently** — no error, no log line. GSD shipped the file as `gsd.cjs` through 1.7.0, which pi therefore never loaded, so `/gsd` never appeared ([#2470](https://github.com/open-gsd/gsd-core/issues/2470)). Upgrading removes the stale `gsd.cjs`; if you had added a manual `extensions` entry in `~/.pi/agent/settings.json` as a workaround, you can drop it.
 
-The extension registers a `/gsd` command and a `gsd_invoke` tool that dispatch GSD commands via a bounded subprocess call to `gsd-core/bin/gsd-tools.cjs` (no fully-populated in-process command-routing hub exists — see the matrix's Stage 2 note). This is a **plugin-only install**: pi has no shared-settings hook surface (`hooksSurface: none`) and, unlike Claude/OpenCode/Kilo, no host-read markdown surface at all — pi's `/gsd` command is registered programmatically by the extension, not discovered from files, so GSD installs the extension plus its universal `gsd-core/` engine payload and the shared `gsd-hooks/`/`gsd-hooks/lib/` bundle (spawned by the extension itself, not by any config-file hook bus), and does **not** write any `commands/`, `agents/`, or `skills/` directory for pi. The bundle lands under `gsd-hooks/` rather than the `hooks/` name every other runtime uses because pi reserves `hooks/` for its own deprecated extension directory and warns on startup whenever that directory merely exists ([#3023](https://github.com/open-gsd/gsd-core/issues/3023)). The extension bridges GSD's `session_start`/`before_agent_start`/`session_before_compact`/`tool_call` lifecycle events to those staged `gsd-hooks/` scripts as bounded, fail-open subprocesses, and steers pi's active model (`modelMode: active`) to a tier-resolved bare anthropic id via `pi.on('before_provider_request', ...)`. See the [`## pi`](../reference/host-integration-capability-matrix.md#pi) section of the host-integration capability matrix for the negotiated axes and citations.
+The extension registers a `/gsd` command and a `gsd_invoke` tool that dispatch GSD data commands via a bounded subprocess call to `gsd-core/bin/gsd-tools.cjs` (no fully-populated in-process command-routing hub exists — see the matrix's Stage 2 note). Start a workflow with `/skill:gsd-new-project`, or type `/gsd new-project` (see [Start a GSD workflow from Pi](start-a-gsd-workflow-from-pi.md)): for any command that has an installed skill, `/gsd <command> [args]` hands off to `/skill:gsd-<command> [args]` so the agent follows the workflow instead of printing data ([#5547](https://github.com/open-gsd/gsd-core/issues/5547)). The scripted data families — the top-level families `gsd-tools.cjs` documents (`init`, `state`, `phase`, `progress`, `config-get`, `verify`, …, the list `/gsd` autocompletes) — keep their data behavior; every other command name that has an installed skill (for example `help`, `settings`, `health`, `stats`, `update`) now starts its workflow instead of printing data, and `gsd_invoke` is the way to reach data from a script. So `/gsd init new-project` still returns the init JSON — now with a line naming the workflow to run next — and `gsd_invoke` output is unchanged.
+
+**Agent steps stop on pi.** pi has no subagent dispatch API (`namedDispatch: false`). Every installed pi skill opens with a fail-closed contract: when a workflow reaches a step that needs a named `gsd-*` agent role, the run stops and names the role and the limitation, and never performs the role's work inline as a substitute. Dispatch for pi is tracked in [#5559](https://github.com/open-gsd/gsd-core/issues/5559). Workflows whose steps need no agent role run end to end.
+
+pi has no shared-settings hook surface (`hooksSurface: none`) and GSD writes no `commands/` or `agents/` directory for pi. The installer also stages the universal `gsd-core/` engine payload and the shared `gsd-hooks/`/`gsd-hooks/lib/` bundle (spawned by the extension itself, not by any config-file hook bus). The bundle lands under `gsd-hooks/` rather than the `hooks/` name every other runtime uses because pi reserves `hooks/` for its own deprecated extension directory and warns on startup whenever that directory merely exists ([#3023](https://github.com/open-gsd/gsd-core/issues/3023)). The extension bridges GSD's `session_start`/`before_agent_start`/`session_before_compact`/`tool_call` lifecycle events to those staged `gsd-hooks/` scripts as bounded, fail-open subprocesses, and steers pi's active model (`modelMode: active`) to a tier-resolved bare anthropic id via `pi.on('before_provider_request', ...)`. See the [`## pi`](../reference/host-integration-capability-matrix.md#pi) section of the host-integration capability matrix for the negotiated axes and citations.
 
 ---
 
@@ -546,6 +557,16 @@ fallback chain. The install-time path is always tried first, so GUI launches wit
 minimal `PATH` keep working, and a bare `node` lookup is never depended on. Re-running
 install or update from any of the environments converges stale runner paths — no mixed
 state where some hooks work in one environment and the rest in another.
+
+On Windows, Claude's managed JavaScript hooks are always PowerShell commands (carrying an
+explicit `shell: "powershell"`), portable installs included, so they work with or without Git
+Bash (#5850). The command tries the install-time node path first, then `node` on `PATH`, and
+portable installs spell the script path `$HOME`-relative. The statusline is written as
+`powershell -NoProfile -Command "…"`, which Git Bash and PowerShell both run, because a statusline
+has no `shell` key. The bash resolver is used on POSIX hosts and for non-Claude runtimes. A config
+root shared between Windows and WSL holds the form of whichever environment ran the last install:
+re-running install or update on Linux rewrites the PowerShell entries (and drops their `shell` key)
+back to the bash form.
 
 To pin down which node a given environment picks, run the resolver directly with
 `GSD_NODE_RUNNER_NO_FALLBACKS=1` (first-argument-only resolution) — it prints a stderr

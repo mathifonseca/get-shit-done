@@ -19,6 +19,10 @@ Read all files referenced by the invoking prompt's execution_context before star
 Parse arguments and load project state:
 
 ```bash
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
 _GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { set -- "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}" "$HOME/.gemini/antigravity-ide" "$HOME/.gemini/antigravity-cli" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}" "${CLINE_CONFIG_DIR:-$HOME/.cline}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}" "${CODEX_HOME:-$HOME/.codex}" "${COPILOT_CONFIG_DIR:-${COPILOT_HOME:-$HOME/.copilot}}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}" "${HERMES_HOME:-$HOME/.hermes}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}" "${KIMI_CONFIG_DIR:-$HOME/.config/agents}" "$HOME/.agents" "${KIMI_CODE_HOME:-$HOME/.kimi-code}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}" "${TRAE_CONFIG_DIR:-$HOME/.trae}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}" "${ZCODE_CONFIG_DIR:-$HOME/.zcode}" "${GROK_AGENTS_HOME:-$HOME/.agents}"; for _h; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
 PHASE_ARG="${1}"
 
@@ -28,8 +32,20 @@ PHASE_ARG="${1}"
 # logic (e.g., --all and --auto imply --fix). Resolved BEFORE the init call below so
 # the section-manifest gate forwards the RESOLVED (post-implication) fix decision, not
 # just a literal --fix token check.
+# gsd-resolve-lib begin code-review-flags.cjs (#5640): load helpers from the installed runtime, not the cwd
+_gsd_lib_probe="code-review-flags.cjs"
+_gsd_rt="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+_gsd_gr="$(command -v gsd_run 2>/dev/null || true)"
+case "$_gsd_gr" in /*) ;; *) _gsd_gr="" ;; esac # a gsd_run shell function prints its bare name: not a path
+[ -n "$_gsd_gr" ] && _gsd_gr="$(dirname "$(node -p "require('fs').realpathSync(process.argv[1])" "$_gsd_gr" 2>/dev/null || echo "$_gsd_gr")")/lib"
+GSD_LIB_DIR=""
+_gsd_pick() { for _gsd_d; do if [ -n "$_gsd_d" ] && [ -f "$_gsd_d/$_gsd_lib_probe" ]; then GSD_LIB_DIR="$_gsd_d"; return 0; fi; done; return 1; }
+_gsd_pick "${GSD_TOOLS:+${GSD_TOOLS%/*}/lib}" "$_gsd_rt/gsd-core/bin/lib" "$_gsd_rt/.claude/gsd-core/bin/lib" "$_gsd_rt/.codex/gsd-core/bin/lib" "$_gsd_gr" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/lib" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/lib" || true
+if [ -z "$GSD_LIB_DIR" ]; then echo "ERROR: code-review-flags.cjs not found in the GSD runtime. Looked in: ${GSD_TOOLS:+${GSD_TOOLS%/*}/lib, }${_gsd_rt}/gsd-core/bin/lib (and its .claude and .codex forms), ${_gsd_gr:-next to gsd_run (not on PATH)}, ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/lib, ${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/lib. Reinstall: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi
+export GSD_LIB_DIR
+# gsd-resolve-lib end
 FLAGS_JSON=$(node -e "
-  const { parseCodeReviewFlags } = require('./gsd-core/bin/lib/code-review-flags.cjs');
+  const { parseCodeReviewFlags } = require(require('path').join(process.env.GSD_LIB_DIR, 'code-review-flags.cjs'));
   const flags = parseCodeReviewFlags(process.argv.slice(1));
   process.stdout.write(JSON.stringify(flags));
 " -- "$@" 2>/dev/null)
@@ -47,7 +63,7 @@ FILES_OVERRIDE=$(echo "$FLAGS_JSON" | node -e "process.stdout.write(JSON.parse(r
 FIX_PARAM=""
 if [ "$FIX_FLAG" = "true" ]; then FIX_PARAM="--fix"; fi
 
-GSD_WS=$(echo " $ARGUMENTS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +["'\'']?([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -1)
 INIT=$(gsd_run query init.code-review ${GSD_WS:+--ws=${GSD_WS##* }} "${PHASE_ARG}" $FIX_PARAM)
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 AGENT_SKILLS_REVIEWER=$(gsd_run query agent-skills gsd-code-reviewer ${GSD_WS:+--ws=${GSD_WS##* }})
@@ -76,12 +92,9 @@ Error: Phase ${PHASE_ARG} not found. Run /gsd:progress to see available phases.
 
 This runs BEFORE config gate check so user errors are surfaced immediately regardless of config state.
 
-If FILES_OVERRIDE is set, split by comma into array:
-```bash
-if [ -n "$FILES_OVERRIDE" ]; then
-  IFS=',' read -ra FILES_ARRAY <<< "$FILES_OVERRIDE"
-fi
-```
+If FILES_OVERRIDE is set, Tier 1 below splits it by comma inside its own block (#6152): the split
+and its use must share one shell call, because an orchestrator that runs each fenced block as a
+separate shell call loses any array built here, and `read -a` is bash-only (zsh: `bad option: -a`).
 </step>
 
 <step name="check_config_gate">
@@ -121,16 +134,49 @@ If FILES_OVERRIDE is set (from --files flag):
 ```bash
 if [ -n "$FILES_OVERRIDE" ]; then
   REVIEW_FILES=()
+  # #5519: compare the repository root and each resolved path in ONE form. On Windows Git Bash,
+  # `git rev-parse --show-toplevel` (a native program) reports a mixed path (C:/Users/..) while
+  # GNU `realpath` reports an MSYS POSIX path (/c/Users/..); the two never share a prefix, so
+  # every entry looked "outside". `cygpath -m` exists exactly where the forms differ and maps both
+  # to the mixed form; elsewhere the value passes through unchanged.
+  _gsd_norm_path() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+  }
+  # #6152: resolve a path (symlinks followed when it exists, `..` collapsed when it does not) with node, not GNU
+  # `realpath -m`, which macOS and other BSD userlands do not have.
+  _gsd_resolve_path() {
+    # The path travels in the environment, never as an argument: node parses an argument that starts with `-` as one of
+    # its own options (`--import=…`, `--require=…`), so a hostile list entry would run code.
+    # `realpathSync.native` also expands Windows 8.3 short names (RUNNER~1), which git reports in long form.
+    # A path that does not exist is resolved through its deepest existing ancestor, so a missing file under an 8.3
+    # short temp directory reports the same long form as the repository root.
+    GSD_RESOLVE_PATH="$1" node -e 'const p=require("path"),f=require("fs");let a=p.resolve(process.env.GSD_RESOLVE_PATH);const t=[];for(;;){try{a=f.realpathSync.native(a);break}catch(e){const d=p.dirname(a);if(d===a)break;t.unshift(p.basename(a));a=d}}process.stdout.write(p.join(a,...t))'
+  }
+  # An empty root (git failed) stays empty: the resolver would turn "" into the working directory, so it is only called
+  # on a non-empty answer, and the `-z "$REPO_ROOT"` check below then rejects every entry.
   REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
-  
-  for file_path in "${FILES_ARRAY[@]}"; do
-    # Security: validate path is within repository (prevent path traversal)
-    ABS_PATH=$(realpath -m "${file_path}" 2>/dev/null || echo "${file_path}")
-    if [[ "$ABS_PATH" != "$REPO_ROOT"* ]]; then
+  [ -n "$REPO_ROOT" ] && REPO_ROOT=$(_gsd_norm_path "$(_gsd_resolve_path "$(_gsd_norm_path "$REPO_ROOT")")")
+
+  # #6152: split on commas with parameter expansion alone (no `read -a`, no subshell, no here-string), so the loop runs
+  # in this shell and behaves the same in bash 3.2, zsh and Git Bash.
+  _gsd_rest="${FILES_OVERRIDE},"
+  while [ -n "$_gsd_rest" ]; do
+    file_path=${_gsd_rest%%,*}; _gsd_rest=${_gsd_rest#*,}
+    # Trim leading and trailing blanks so `a.ts, b.ts` lists the two files (no entry names a path with edge blanks).
+    file_path="${file_path#"${file_path%%[![:space:]]*}"}"
+    file_path="${file_path%"${file_path##*[![:space:]]}"}"
+    [ -n "$file_path" ] || continue
+    # Security: validate path is within repository (prevent path traversal). Compare on a path
+    # boundary: the root itself or anything under "<root>/" — a sibling such as "<root>-other"
+    # shares the prefix but is not inside.
+    ABS_PATH=$(_gsd_norm_path "$(_gsd_resolve_path "$(_gsd_norm_path "${file_path}")")")
+    # Fail closed on two shapes that cannot be trusted: an empty root (git failed, so nothing can be
+    # "inside" it) and a path that still holds ".." segments (a resolved path never does).
+    if [ -z "$REPO_ROOT" ] || [[ "$ABS_PATH" == */../* || "$ABS_PATH" == */.. ]] || [[ "$ABS_PATH" != "$REPO_ROOT" && "$ABS_PATH" != "$REPO_ROOT"/* ]]; then
       echo "Error: File path outside repository, skipping: ${file_path}"
       continue
     fi
-    
+
     # Validate path exists (relative to repo root)
     if [ -f "${REPO_ROOT}/${file_path}" ] || [ -f "${file_path}" ]; then
       REVIEW_FILES+=("$file_path")
@@ -138,7 +184,14 @@ if [ -n "$FILES_OVERRIDE" ]; then
       echo "Warning: File not found, skipping: ${file_path}"
     fi
   done
-  
+
+  # #6152: fail closed. An override that resolves to no reviewable file inside the repository is an error, never a
+  # widening to the phase evaluation scope under the `--files override` label.
+  if [ ${#REVIEW_FILES[@]} -eq 0 ]; then
+    echo "Error: --files override resolved to no reviewable file inside the repository; not falling back to phase scope."
+    exit 1
+  fi
+
   echo "File scope: ${#REVIEW_FILES[@]} files from --files override"
 fi
 ```
@@ -243,8 +296,9 @@ sets (the `## Task Commits` rows of the phase's SUMMARYs), restricted to commits
 (a commit that lives only on another branch is named, never counted), with planning artifacts and
 lockfiles excluded. A range (`base..HEAD`) is deliberately not used: it keeps every interleaved
 non-phase commit in its window (#3926, #4563). The resolver also reports, by name rather than by
-count, what the union dropped: `outsideUnion` (changed in the phase window by other commits) and
-`unreachable` (task commits not on this branch). When the union is empty — a phase with no SUMMARY,
+count, what the union dropped: `outsideUnion` (changed in the phase window by other commits),
+`unreachable` (task commits not on this branch) and `unparsedSummaries` (SUMMARYs whose Task Commits
+section yielded no commit id, so their work is not in the union). When the union is empty — a phase with no SUMMARY,
 no task rows, or only planning paths — the resolver widens to the phase-directory range and says so
 (`status: degraded`, `reason`); an unreadable phase or repository is `unresolvable`, never an empty
 scope that reports success. Its `rangeBase` (the parent of the commit that first added the phase
@@ -254,7 +308,7 @@ the reviewer lanes that need an anchor sha.
 # Exit 69 (UNAVAILABLE) is the resolver saying "could not look" (`status: unresolvable`): its JSON
 # carries the reason and is kept. Any other non-zero status means the command did not run: no JSON.
 SCOPE_RC=0
-SCOPE_JSON=$(gsd_run check evaluation-scope --phase "${PADDED_PHASE}" ${LAST_REVIEW_COMMIT:+--since "$LAST_REVIEW_COMMIT"} --raw 2>/dev/null) || SCOPE_RC=$?
+SCOPE_JSON=$(gsd_run check evaluation-scope --phase "${PADDED_PHASE}" ${LAST_REVIEW_COMMIT:+--since} ${LAST_REVIEW_COMMIT:+"$LAST_REVIEW_COMMIT"} --raw 2>/dev/null) || SCOPE_RC=$?
 if [ "$SCOPE_RC" -ne 0 ] && [ "$SCOPE_RC" -ne 69 ]; then SCOPE_JSON=""; fi
 # One field of the resolver's JSON; arrays print one element per line, an absent field prints nothing.
 scope_field() {
@@ -279,6 +333,11 @@ if [ -n "$SCOPE_UNREACHABLE" ]; then
   echo "Task commits not reachable from HEAD (another branch, or dropped by a rebase):"
   printf '%s\n' "$SCOPE_UNREACHABLE" | sed 's/^/  - /'
 fi
+SCOPE_UNPARSED=$(scope_field unparsedSummaries)
+if [ -n "$SCOPE_UNPARSED" ]; then
+  echo "SUMMARYs with a Task Commits section from which no commit id could be read (their work is NOT in the scope below):"
+  printf '%s\n' "$SCOPE_UNPARSED" | sed 's/^/  - /'
+fi
 SCOPE_MISSING=$(scope_field missingOnDisk)
 if [ -n "$SCOPE_MISSING" ]; then
   echo "Scoped paths that no longer exist on disk (not reviewed):"
@@ -286,7 +345,8 @@ if [ -n "$SCOPE_MISSING" ]; then
 fi
 
 if [ ${#REVIEW_FILES[@]} -eq 0 ]; then
-  # Full fallback (per D-02): SUMMARY scoping yielded nothing.
+  # Full fallback (per D-02): SUMMARY scoping yielded nothing. Never reached for a --files override: Tier 1 exits
+  # non-zero when the override resolves to nothing (#6152).
   if [ -n "$SCOPE_FILES" ]; then
     while IFS= read -r file; do
       [ -n "$file" ] && REVIEW_FILES+=("$file")
@@ -433,8 +493,20 @@ DEPTH_PAYLOAD=$(printf '%s\n' "${REVIEW_FILES[@]}" | FLAG_DEPTH="$DEPTH_OVERRIDE
   }));
 ")
 
+# gsd-resolve-lib begin code-review-depth.cjs (#5640): load helpers from the installed runtime, not the cwd
+_gsd_lib_probe="code-review-depth.cjs"
+_gsd_rt="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+_gsd_gr="$(command -v gsd_run 2>/dev/null || true)"
+case "$_gsd_gr" in /*) ;; *) _gsd_gr="" ;; esac # a gsd_run shell function prints its bare name: not a path
+[ -n "$_gsd_gr" ] && _gsd_gr="$(dirname "$(node -p "require('fs').realpathSync(process.argv[1])" "$_gsd_gr" 2>/dev/null || echo "$_gsd_gr")")/lib"
+GSD_LIB_DIR=""
+_gsd_pick() { for _gsd_d; do if [ -n "$_gsd_d" ] && [ -f "$_gsd_d/$_gsd_lib_probe" ]; then GSD_LIB_DIR="$_gsd_d"; return 0; fi; done; return 1; }
+_gsd_pick "${GSD_TOOLS:+${GSD_TOOLS%/*}/lib}" "$_gsd_rt/gsd-core/bin/lib" "$_gsd_rt/.claude/gsd-core/bin/lib" "$_gsd_rt/.codex/gsd-core/bin/lib" "$_gsd_gr" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/lib" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/lib" || true
+if [ -z "$GSD_LIB_DIR" ]; then echo "ERROR: code-review-depth.cjs not found in the GSD runtime. Looked in: ${GSD_TOOLS:+${GSD_TOOLS%/*}/lib, }${_gsd_rt}/gsd-core/bin/lib (and its .claude and .codex forms), ${_gsd_gr:-next to gsd_run (not on PATH)}, ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/lib, ${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/lib. Reinstall: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi
+export GSD_LIB_DIR
+# gsd-resolve-lib end
 DEPTH_JSON=$(echo "$DEPTH_PAYLOAD" | node -e "
-  const { resolveCodeReviewDepth } = require('./gsd-core/bin/lib/code-review-depth.cjs');
+  const { resolveCodeReviewDepth } = require(require('path').join(process.env.GSD_LIB_DIR, 'code-review-depth.cjs'));
   const input = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf-8'));
   process.stdout.write(JSON.stringify(resolveCodeReviewDepth(input)));
 ")
@@ -618,7 +690,9 @@ rm -f "$EXPLICIT_JOINED_STDERR"
 
 EXPLICIT_REVIEWER_SLUGS=()
 if [ -n "$EXPLICIT_JOINED" ]; then
-  IFS=',' read -ra EXPLICIT_REVIEWER_SLUGS <<< "$EXPLICIT_JOINED"
+  # #6152: split with parameter expansion; `read -a` is bash-only (zsh rejects it)
+  _gsd_rest="${EXPLICIT_JOINED},"
+  while [ -n "$_gsd_rest" ]; do _gsd_slug=${_gsd_rest%%,*}; _gsd_rest=${_gsd_rest#*,}; [ -n "$_gsd_slug" ] && EXPLICIT_REVIEWER_SLUGS+=("$_gsd_slug"); done
 fi
 
 EXTERNAL_EVIDENCE_BLOCK=""
@@ -629,16 +703,10 @@ if [ ${#EXPLICIT_REVIEWER_SLUGS[@]} -gt 0 ] && [ -z "$DIFF_BASE" ]; then
   # generic rejection stand unexplained.
   echo "Warning: external reviewer lane(s) requested (${EXPLICIT_REVIEWER_SLUGS[*]}) but no diff base could be resolved (no prior review, no phase-start commit) — skipping external dispatch." >&2
 elif [ ${#EXPLICIT_REVIEWER_SLUGS[@]} -gt 0 ]; then
-  # #4209 R5: a dedicated run-scoped temp dir (same `${TMPDIR:-/tmp}/gsd-review-*` convention
-  # review.md's gather_context step uses), not $PHASE_DIR directly — lane artifacts
-  # (gsd-review-prompt.md, gsd-review-<slug>.md/.err) are read-once evidence for THIS run, never
-  # meant to be committed, and a second dispatch on the same phase would otherwise silently
-  # overwrite the prior run's files in place. Removed by commit_review once the reviewer agent
-  # has read every cited evidence path. An early exit between here and commit_review (a
-  # checkpoint, a halt) leaves this directory on disk — the same trade-off review.md's own
-  # gather_context/cleanup pair already accepts for the identical resource class: a leftover
-  # $TMPDIR entry is cheaper than a cleanup mechanism (e.g. a trap) that could fire before a
-  # later step reads it. Not a regression to fix; matches established precedent.
+  # #4209 R5: a dedicated run-scoped temp dir (same `${TMPDIR:-/tmp}/gsd-review-*` convention as review.md's
+  # gather_context), not $PHASE_DIR: lane artifacts are read-once evidence for THIS run, never committed, and a
+  # second dispatch must not overwrite them. commit_review removes it once the reviewer has read the evidence; an
+  # early exit leaves it on disk, the same accepted trade-off as review.md's gather_context/cleanup pair.
   LANE_RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gsd-review-lanes-XXXXXX")
   DISPATCH_JSON=$(printf '%s\n' "${REVIEW_FILES[@]}" | gsd_run review-lane dispatch-step \
     --repo-root "$REPO_ROOT" --depth "$REVIEW_DEPTH" --base-sha "$DIFF_BASE" \
@@ -736,9 +804,21 @@ if [ -n "$FALLOW_JSON_PATH" ] && [ -f "$FALLOW_JSON_PATH" ]; then
   # Normalize fallow's raw report into the compact {summary, findings[]} contract
   # the reviewer consumes (real fallow schema -> normalized findings).
   FALLOW_NORMALIZED_PATH="${PHASE_DIR}/FALLOW-normalized.json"
+  # gsd-resolve-lib begin fallow-runner.cjs (#5640): load helpers from the installed runtime, not the cwd
+  _gsd_lib_probe="fallow-runner.cjs"
+  _gsd_rt="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  _gsd_gr="$(command -v gsd_run 2>/dev/null || true)"
+  case "$_gsd_gr" in /*) ;; *) _gsd_gr="" ;; esac # a gsd_run shell function prints its bare name: not a path
+  [ -n "$_gsd_gr" ] && _gsd_gr="$(dirname "$(node -p "require('fs').realpathSync(process.argv[1])" "$_gsd_gr" 2>/dev/null || echo "$_gsd_gr")")/lib"
+  GSD_LIB_DIR=""
+  _gsd_pick() { for _gsd_d; do if [ -n "$_gsd_d" ] && [ -f "$_gsd_d/$_gsd_lib_probe" ]; then GSD_LIB_DIR="$_gsd_d"; return 0; fi; done; return 1; }
+  _gsd_pick "${GSD_TOOLS:+${GSD_TOOLS%/*}/lib}" "$_gsd_rt/gsd-core/bin/lib" "$_gsd_rt/.claude/gsd-core/bin/lib" "$_gsd_rt/.codex/gsd-core/bin/lib" "$_gsd_gr" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/lib" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/lib" || true
+  if [ -z "$GSD_LIB_DIR" ]; then echo "ERROR: fallow-runner.cjs not found in the GSD runtime (looked in ${_gsd_rt}/gsd-core/bin/lib (and its .claude and .codex forms), ${_gsd_gr:-next to gsd_run (not on PATH)}, ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/lib, ${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/lib); continuing without it." >&2; fi
+  export GSD_LIB_DIR
+  # gsd-resolve-lib end
   FALLOW_SRC="$FALLOW_JSON_PATH" FALLOW_OUT="$FALLOW_NORMALIZED_PATH" node -e "
     const fs = require('fs');
-    const { normalizeFallowReportFile } = require('./gsd-core/bin/lib/fallow-runner.cjs');
+    const { normalizeFallowReportFile } = require(require('path').join(process.env.GSD_LIB_DIR, 'fallow-runner.cjs'));
     const n = normalizeFallowReportFile(process.env.FALLOW_SRC);
     fs.writeFileSync(process.env.FALLOW_OUT, JSON.stringify(n, null, 2));
   " 2>/dev/null && FALLOW_EMBED_PATH="$FALLOW_NORMALIZED_PATH" || FALLOW_EMBED_PATH="$FALLOW_JSON_PATH"
@@ -751,6 +831,19 @@ if [ -n "$FALLOW_JSON_PATH" ] && [ -f "$FALLOW_JSON_PATH" ]; then
     echo "Warning: skipping structural findings embed (${FALLOW_JSON_SIZE} bytes > ${MAX_FINDINGS_SIZE} bytes). Re-run with narrower scope/profile if needed."
   fi
 fi
+```
+
+Gather the capability review rules addressed to this reviewer (#4790): active `contribution` hooks with `into: code-reviewer`,
+read from the loop point the review step is registered at (`workflow.code_review_point`, default `execute:post`). This is
+advisory by construction: any failure leaves the prompt without them and never blocks the review. The fragments are handed over once,
+below, beside — never instead of — `${AGENT_SKILLS_REVIEWER}`:
+```bash
+REVIEWER_POINT=$(gsd_run query config-get workflow.code_review_point --raw 2>/dev/null) || REVIEWER_POINT="execute:post"
+case "$REVIEWER_POINT" in execute:post|execute:wave:post) ;; *) REVIEWER_POINT="execute:post" ;; esac
+REVIEWER_HOOKS_JSON=$(gsd_run loop render-hooks "${REVIEWER_POINT}" --raw 2>/dev/null) || REVIEWER_HOOKS_JSON=""
+if [[ "$REVIEWER_HOOKS_JSON" == @file:* ]]; then REVIEWER_HOOKS_JSON=$(cat "${REVIEWER_HOOKS_JSON#@file:}" 2>/dev/null || true); fi
+# A literal closing tag inside a fragment is escaped so third-party text cannot end the block early.
+REVIEWER_CONTRIBUTIONS=$(printf '%s' "$REVIEWER_HOOKS_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const h=(JSON.parse(s).activeHooks||[]).filter(x=>x&&x.kind==="contribution"&&x.into==="code-reviewer"&&x.fragment&&typeof x.fragment.inline==="string"&&x.fragment.inline!=="").map(x=>x.fragment.inline.split("</capability_review_rules>").join("<"+String.fromCharCode(92)+"/capability_review_rules>"));if(h.length)process.stdout.write("<capability_review_rules>\n"+h.join("\n\n")+"\n</capability_review_rules>")}catch(e){}})' 2>/dev/null || true)
 ```
 
 Spawn the gsd-code-reviewer agent:
@@ -789,7 +882,9 @@ ${PLAN_FILES_CONFIG:+plan_files:\n${PLAN_FILES_CONFIG}}
 
 Review the listed source files at ${REVIEW_DEPTH} depth. Write findings to ${REVIEW_PATH}.
 Do NOT commit the output — the orchestrator handles that.
-${AGENT_SKILLS_REVIEWER}")
+${AGENT_SKILLS_REVIEWER}
+
+${REVIEWER_CONTRIBUTIONS}")
 ```
 
 > **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
@@ -870,6 +965,8 @@ CRITICAL=$(echo "$FRONTMATTER" | grep -E "^[[:space:]]*(critical|blocker):" | he
 WARNING=$(echo "$FRONTMATTER" | grep "warning:" | head -1 | cut -d: -f2 | xargs)
 INFO=$(echo "$FRONTMATTER" | grep "info:" | head -1 | cut -d: -f2 | xargs)
 TOTAL=$(echo "$FRONTMATTER" | grep "total:" | head -1 | cut -d: -f2 | xargs)
+# #4100: necessity is a SUBSET of warning+info, never part of total. Absent at quick depth.
+NECESSITY=$(echo "$FRONTMATTER" | grep -E "^[[:space:]]*necessity:" | head -1 | cut -d: -f2 | sed 's/#.*//' | xargs)
 ```
 
 Display inline summary to user:
@@ -888,6 +985,7 @@ Display inline summary to user:
     Critical:  ${CRITICAL}
     Warning:   ${WARNING}
     Info:      ${INFO}
+    Necessity: ${NECESSITY:-not assessed} (of the above; skipped by --fix unless --all)
 
 ---
     Total:     ${TOTAL}
@@ -930,13 +1028,18 @@ grep -A 3 "^### CR-\|^### BL-\|^### WR-" "${REVIEW_PATH}" | head -n 12
 **Windows:** This workflow uses bash features (arrays, process substitution). On Windows, it requires
 Git Bash or WSL. Native PowerShell is not supported. The CI matrix (Ubuntu/macOS/Windows)
 runs under Git Bash on Windows runners, which provides bash compatibility.
+The `--files` containment check compares the repository root with each resolved path, and Git Bash
+reports them in different forms (`git rev-parse` returns `C:/Users/...`, GNU `realpath` returns
+`/c/Users/...`), so both are normalized with `cygpath -m` (shipped with Git Bash) before the
+comparison. Relative paths and absolute paths in either form are accepted when they are inside the
+repository (#5519).
 
 **macOS:** macOS ships with bash 3.2 (GPL licensing). This workflow does NOT use `mapfile` (bash 4+
 only) — all array construction uses portable `while IFS= read -r` loops compatible with bash 3.2.
-The `--files` path validation uses `realpath -m` which requires GNU coreutils (install via
-`brew install coreutils`). Without coreutils, the path guard falls back to fail-closed behavior
-(rejects paths it cannot verify), so security is maintained but valid relative paths may be rejected.
-If `--files` validation fails unexpectedly on macOS, install coreutils or use absolute paths.
+The `--files` path validation resolves paths with `node`, so it needs no GNU `realpath -m` and no
+coreutils on macOS or any BSD userland, and it behaves the same under zsh and bash 3.2 (#6152). A
+`--files` list that resolves to no reviewable file inside the repository is an error (non-zero exit),
+never a fall back to phase scope.
 </platform_notes>
 
 <success_criteria>

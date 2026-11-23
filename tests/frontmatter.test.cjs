@@ -2791,6 +2791,7 @@ test('extractFrontmatter handles large frontmatter blocks without body bleed', (
         '# Project State',
         '',
         '**Current Phase:** 1',
+        '**Total Plans in Phase:** 0',
         '**Status:** Ready to execute',
         '**Last Activity:** 2026-07-01',
         '',
@@ -3398,6 +3399,28 @@ describe('extractFrontmatter BOM tolerance (#2977)', () => {
           `${label} must produce re-parseable YAML, not silently collapse to unparseable`);
         assert.strictEqual(roundtrip.weird, ch, `${label} must round-trip to the exact same codepoint`);
       });
+    }
+  });
+
+  // #4998 (trek-e review 2026-10-10, Major 1): js-yaml does not split on
+  // U+2028/U+2029, but a line-anchored reader of a planning document does. A
+  // value holding `:` or `#` was already quoted (so no key can be forged
+  // through this writer); a value without one was emitted bare, and a line
+  // reader of that key (`^stopped_at:\s*(.+)`) got only the part before the
+  // separator. The writer now quotes and escapes both separators.
+  describe('#4998: a value carrying U+2028/U+2029 is quoted and escaped, never emitted bare', () => {
+    for (const [label, sep, escape] of [['U+2028', '\u2028', '\\L'], ['U+2029', '\u2029', '\\P']]) {
+      for (const value of [`a${sep}b`, `a${sep}milestone:evil`]) {
+        test(`${label}: ${JSON.stringify(value)}`, () => {
+          const reconstructed = reconstructFrontmatter({ stopped_at: value, status: 'executing' });
+          assert.ok(!/[\u2028\u2029]/.test(reconstructed), `no raw separator in: ${JSON.stringify(reconstructed)}`);
+          assert.ok(reconstructed.includes(escape), reconstructed);
+          assert.deepStrictEqual(reconstructed.match(/^[a-z_]+:/gm), ['stopped_at:', 'status:'], 'exactly the two keys, line by line');
+          const roundtrip = extractFrontmatter(`---\n${reconstructed}\n---\n`);
+          assert.strictEqual(roundtrip.stopped_at, value);
+          assert.strictEqual(roundtrip.milestone, undefined);
+        });
+      }
     }
   });
 }

@@ -11,7 +11,7 @@ Display banner:
 
 **Verify-command path probe (#2401, #4767).** Before spawning, run the deterministic probe over
 the quick plan's `<automated>` commands and hand its JSON to the checker, exactly as
-`plan-phase.md` does. Quick plans live under `${QUICK_DIR}`, not `.planning/phases/`, so the
+`plan-phase.md` does. Quick plans live under `${QUICK_DIR}`, not `{planning_root}/phases/` (`{planning_root}`: the active scope's root, from `planning.inspect`), so the
 probe takes the directory directly. It never executes command text and never prescribes a
 replacement path.
 
@@ -82,7 +82,7 @@ Agent(
 
 **Handle checker return:**
 
-- **`## VERIFICATION PASSED`:** Display confirmation, proceed to step 6.
+- **`## VERIFICATION PASSED`:** If the return lists an entry whose severity is BLOCKER or WARNING, in the YAML issues block or listed in prose (a mention such as "no warnings" or a zero count is not an entry), handle it as `## ISSUES FOUND` below, counting the prose entries as BLOCKER/WARNING entries; the sentinel never decides alone, and an entry with a missing or unrecognized severity counts as a BLOCKER (#5578). Otherwise display confirmation, proceed to step 6.
 - **`## ISSUES FOUND`:** Count BLOCKER + WARNING entries in the YAML issues block; an entry whose severity is missing or unrecognized counts as a BLOCKER (fail closed). If zero — every entry is explicitly INFO — display `ℹ advisory — {dimension}: {description}` per entry and proceed to step 6; INFO is advisory and never enters the loop (#3724). Otherwise display issues, check iteration count, enter revision loop.
 
 **Revision loop (max 2 iterations):**

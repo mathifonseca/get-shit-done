@@ -10,6 +10,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execTool, execGit, platformWriteSync } from './shell-command-projection.cjs';
+import { runtimeCommand } from './runtime-slash.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- config-file-read.cjs is an export= CommonJS module
+import configFileReadMod = require('./config-file-read.cjs');
+const { readConfigFileBounded } = configFileReadMod;
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import capabilityStateMod = require('./capability-state.cjs');
@@ -248,6 +252,20 @@ function safeReadJson(filePath: string): Graph | null {
   try {
     if (!fs.existsSync(filePath)) return null;
     return JSON.parse(fs.readFileSync(filePath, 'utf8')) as Graph;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Safely read and parse `<planningDir>/config.json` as a bounded regular file (#5759). Returns
+ * null on a missing, non-regular (FIFO/device), oversized, unreadable or malformed file — never
+ * blocks. Not `safeReadJson`: that reader is for graph artifacts and opens blocking.
+ */
+function safeReadConfigJson(planningDir: string): Graph | null {
+  try {
+    const raw = readConfigFileBounded(path.join(planningDir, 'config.json'));
+    return raw === null ? null : JSON.parse(raw) as Graph;
   } catch {
     return null;
   }
@@ -535,7 +553,7 @@ interface GraphLocation {
  * default `<planningDir>/graphs/graph.json` when unset/blank/non-string.
  */
 function resolveGraphLocation(cwd: string, planningDir: string): GraphLocation {
-  const config = safeReadJson(path.join(planningDir, 'config.json'));
+  const config = safeReadConfigJson(planningDir);
   const graphify = (config && (config as Record<string, unknown>)['graphify']) as Record<string, unknown> | undefined;
   const configuredValue = graphify && graphify['graph_path'];
   if (typeof configuredValue === 'string' && configuredValue.trim().length > 0) {
@@ -555,7 +573,7 @@ function graphifyQuery(cwd: string, term: string, options: { budget?: number | n
   const { graphPath, configured } = resolveGraphLocation(cwd, planningDir);
   if (!fs.existsSync(graphPath)) {
     return { error: configured
-      ? `Configured graph not found at ${graphPath}. Set graphify.graph_path or run /gsd:graphify build.`
+      ? `Configured graph not found at ${graphPath}. Set graphify.graph_path or run ${runtimeCommand(cwd, 'graphify build')}.`
       : 'No graph built yet. Run graphify build first.' };
   }
 
@@ -598,7 +616,7 @@ function graphifyStatus(cwd: string): unknown {
   const { graphPath, configured } = resolveGraphLocation(cwd, planningDir);
   if (!fs.existsSync(graphPath)) {
     return { exists: false, graph_path: graphPath, message: configured
-      ? `Configured graph not found at ${graphPath}. Set graphify.graph_path or run /gsd:graphify build.`
+      ? `Configured graph not found at ${graphPath}. Set graphify.graph_path or run ${runtimeCommand(cwd, 'graphify build')}.`
       : 'No graph built yet. Run graphify build to create one.' };
   }
 
@@ -738,7 +756,7 @@ function graphifyBuild(cwd: string): unknown {
   fs.mkdirSync(graphsDir, { recursive: true });
 
   // Read build timeout from config -- default 300s per D-02
-  const config = safeReadJson(path.join(planningDir, 'config.json')) || {};
+  const config = safeReadConfigJson(planningDir) || {};
   const graphifyConfig = config.graphify as Record<string, unknown> | undefined;
   const timeoutSec = (graphifyConfig && graphifyConfig.build_timeout) || 300;
 

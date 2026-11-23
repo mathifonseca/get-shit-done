@@ -25,6 +25,7 @@ const identity = require(path.join(ROOT, 'gsd-core', 'bin', 'lib', 'package-iden
 const pkg = require(path.join(ROOT, 'package.json'));
 const { MANAGED_HOOKS } = require(path.join(ROOT, 'hooks', 'managed-hooks-registry.cjs'));
 const { cleanup, TEST_ENV_BASE } = require('./helpers.cjs');
+const { loaderSpawnEnv, loaderSpawnArgs } = require('./helpers/claude-loader-env.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const { BLOCKING_GUARD_TIMEOUT_S, BLOCKING_GUARD_NAMES } = require(path.join(ROOT, 'gsd-core', 'bin', 'lib', 'runtime-hooks-surface.cjs'));
 
@@ -45,6 +46,12 @@ const HOOKS_JSON_PATH  = path.join(ROOT, 'hooks', 'hooks.json');
 // PROBE_TIMEOUT_MS (15000ms) since this site's pre-existing value differs
 // and this migration never raises a bound without a fresh bench citation.
 const CLAUDE_VERSION_PROBE_TIMEOUT_MS = 5000;
+
+// #4860: `claude plugin details` loads the whole plugin tree (72 skills, 64 agents,
+// hooks) before printing (#5504: the same bound covers the `claude -p` loader-listing run in
+// the registers-once test), so it is a heavier class of subprocess than the
+// `--version` probe above or PROBE_TIMEOUT_MS; measured at a few seconds locally.
+const CLAUDE_PLUGIN_DETAILS_TIMEOUT_MS = 60000;
 
 // ─── Section A: plugin.json ───────────────────────────────────────────────────
 describe('A: .claude-plugin/plugin.json', () => {
@@ -100,13 +107,25 @@ describe('A: .claude-plugin/plugin.json', () => {
     );
   });
 
-  test('commands field is "./commands/gsd/" and that dir exists with at least one .md file', (t) => {
+  test('#5504: commands is declared as an empty array so the default commands/ scan is disabled; commands/gsd/ stays as the generator source', (t) => {
     if (!manifest) { t.skip('manifest could not be parsed'); return; }
-    assert.equal(manifest.commands, './commands/gsd/', 'commands must be "./commands/gsd/"');
-    const resolvedDir = path.resolve(path.dirname(PLUGIN_JSON_PATH), '..', manifest.commands);
-    assert.ok(fs.existsSync(resolvedDir), `resolved commands dir must exist: ${resolvedDir}`);
-    const mdFiles = fs.readdirSync(resolvedDir).filter(f => f.endsWith('.md'));
-    assert.ok(mdFiles.length > 0, `commands dir must contain at least one .md file`);
+    // A `commands` key REPLACES Claude Code's default `commands/` scan; with the key absent the
+    // default scan runs and descends into the nested commands/gsd/, registering every workflow a
+    // second time as `<plugin>:gsd:<stem>` next to the skills/ entry (#4860 renamed the duplicate,
+    // #5504 removes it). Neither absent nor the old path string is acceptable.
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(manifest, 'commands'),
+      'plugin.json must declare "commands": [] — when the key is absent Claude Code scans commands/ (including commands/gsd/) and registers every workflow twice (#5504)'
+    );
+    assert.deepEqual(
+      manifest.commands, [],
+      'plugin.json "commands" must be exactly [] so the skills/ surface is the one workflow surface (a path string re-registers commands/gsd/)'
+    );
+    assert.equal(manifest.skills, './skills/', 'the skills/ surface stays declared');
+    // commands/gsd/ is still the source skills/ is generated from and what the file-copy installer ships.
+    const sourceDir = path.resolve(path.dirname(PLUGIN_JSON_PATH), '..', 'commands', 'gsd');
+    assert.ok(fs.existsSync(sourceDir), `commands/gsd/ must still exist as the skill generator source: ${sourceDir}`);
+    assert.ok(fs.readdirSync(sourceDir).some(f => f.endsWith('.md')), 'commands/gsd/ must contain at least one .md file');
   });
 
   test('#3029: hooks field is ABSENT — Claude Code auto-loads hooks/hooks.json (explicit declaration caused duplicate-rejection)', (t) => {
@@ -411,6 +430,7 @@ describe('C: plugin.json schema validation', () => {
     ...TEST_ENV_BASE,
     HOME: claudeCliHome,
     USERPROFILE: claudeCliHome,
+    GSD_HOME: claudeCliHome,
     CLAUDE_CONFIG_DIR: path.join(claudeCliHome, '.claude'),
   });
 
@@ -739,7 +759,7 @@ describe('D: always-on hook contract drift guard', () => {
     return map;
   }
 
-  test('SessionStart: one no-matcher group with gsd-ensure-canonical-path.js then gsd-check-update.js', () => {
+  test('SessionStart: one no-matcher group with gsd-ensure-canonical-path.js, gsd-path-export.js, then gsd-check-update.js', () => {
     // #997: gsd-ensure-canonical-path.js is wired alongside gsd-check-update.js
     // in the single SessionStart no-matcher group. It must run FIRST so the
     // canonical ~/.claude/gsd-core path (and its @-include targets) exist before
@@ -750,8 +770,8 @@ describe('D: always-on hook contract drift guard', () => {
     // There must be exactly one entry group (key '' = no matcher)
     const noMatcherHooks = groups[''];
     assert.ok(
-      Array.isArray(noMatcherHooks) && noMatcherHooks.length === 2,
-      `SessionStart no-matcher group must contain exactly two hooks; got: ${JSON.stringify(noMatcherHooks)}`
+      Array.isArray(noMatcherHooks) && noMatcherHooks.length === 3,
+      `SessionStart no-matcher group must contain exactly three hooks; got: ${JSON.stringify(noMatcherHooks)}`
     );
     assert.equal(
       noMatcherHooks[0].script, 'gsd-ensure-canonical-path.js',
@@ -761,11 +781,19 @@ describe('D: always-on hook contract drift guard', () => {
       noMatcherHooks[0].timeout, 5,
       'gsd-ensure-canonical-path.js must have a small timeout (5s) — symlink setup is fast'
     );
+    // #5465: persists the gsd-core bin directory on PATH through $CLAUDE_ENV_FILE, which Claude Code
+    // provides to SessionStart hooks only. After the canonical-path bootstrap (it exports the
+    // bundled tree's bin/) and before the background update check.
     assert.equal(
-      noMatcherHooks[1].script, 'gsd-check-update.js',
+      noMatcherHooks[1].script, 'gsd-path-export.js',
+      'gsd-path-export.js must be the second SessionStart hook (#5465)'
+    );
+    assert.equal(noMatcherHooks[1].timeout, 5, 'gsd-path-export.js appends one line; a 5s timeout is ample');
+    assert.equal(
+      noMatcherHooks[2].script, 'gsd-check-update.js',
       'gsd-check-update.js must remain a SessionStart hook'
     );
-    assert.equal(noMatcherHooks[1].timeout, undefined, 'gsd-check-update.js must NOT have a timeout field');
+    assert.equal(noMatcherHooks[2].timeout, undefined, 'gsd-check-update.js must NOT have a timeout field');
   });
 
   test('PreToolUse Write|Edit group: gsd-prompt-guard.js (blocking budget) + gsd-read-guard.js (timeout 5)', () => {
@@ -992,8 +1020,8 @@ describe('G: #997 ensureCanonicalPath() behavioural regression', () => {
       const st = fs.lstatSync(linkPath);
       assert.ok(st.isSymbolicLink(), `${sub} must be a symlink`);
       assert.equal(
-        fs.realpathSync(linkPath),
-        fs.realpathSync(path.join(bundled, sub)),
+        fs.realpathSync.native(linkPath),
+        fs.realpathSync.native(path.join(bundled, sub)),
         `${sub} link must resolve to the bundled subdir`
       );
       // The @-include target now resolves to real bundled content.
@@ -1113,8 +1141,8 @@ describe('G: #997 ensureCanonicalPath() behavioural regression', () => {
     assert.ok(result.prunedStale.includes('references'), 'stale references link must be pruned');
     // Now resolves to the CURRENT bundle.
     assert.equal(
-      fs.realpathSync(linkPath),
-      fs.realpathSync(path.join(pluginRoot, 'gsd-core', 'references')),
+      fs.realpathSync.native(linkPath),
+      fs.realpathSync.native(path.join(pluginRoot, 'gsd-core', 'references')),
       'references must now point at the current bundled tree'
     );
   });
@@ -1131,8 +1159,8 @@ describe('G: #997 ensureCanonicalPath() behavioural regression', () => {
     const result = ensureCanonicalPath({ pluginRoot, homeDir, platform: 'linux', env: {} });
     assert.equal(result.status, 'ensured');
     assert.equal(
-      fs.realpathSync(path.join(canonical, 'workflows')),
-      fs.realpathSync(path.join(pluginRoot, 'gsd-core', 'workflows')),
+      fs.realpathSync.native(path.join(canonical, 'workflows')),
+      fs.realpathSync.native(path.join(pluginRoot, 'gsd-core', 'workflows')),
       'workflows must be repointed to the current bundle'
     );
   });
@@ -1282,6 +1310,42 @@ describe('H: skills surface projection (#1596)', () => {
     }
   });
 
+  // #4860: before the fix the manifest declared BOTH `commands: ./commands/gsd/`
+  // and `skills: ./skills/` for the same workflows, and `claude plugin details`
+  // listed 144 skills (each action once as `<stem>`, once as `gsd-<stem>`).
+  // This asks the real loader — Claude Code is the owner of what a manifest
+  // registers — and skips when the CLI is not on PATH, like Section C2.
+  // #5504: `claude plugin details` reports `Skills (72)` whether or not the command-surface
+  // duplicates load, so it cannot see this defect. The loader's own `system init` event lists
+  // every registered slash command (`<plugin>:<name>`), emitted before any model call, so it is
+  // read here without authentication or a network round trip (#6091: the spawn's environment carries no
+  // credential variable and its hooks are disabled, so that is true of the whole run, not only of `init`).
+  test('#5504: the Claude Code loader registers each workflow exactly once (opportunistic — skip when claude is not on PATH)', (t) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5504-home-'));
+    t.after(() => cleanup(home));
+    // #6091: no credential or provider variable, offline npm, and hooks disabled, so this run neither authenticates
+    // (no model call on the developer's account) nor lets the SessionStart update worker reach the registry.
+    const env = loaderSpawnEnv(process.env, { ...TEST_ENV_BASE, HOME: home, USERPROFILE: home, GSD_HOME: home, CLAUDE_CONFIG_DIR: path.join(home, '.claude') });
+    const probe = spawnSync('claude', ['--version'], { encoding: 'utf-8', timeout: PROBE_TIMEOUT_MS, env });
+    if (probe.error || probe.status !== 0) { t.skip('claude CLI not on PATH'); return; }
+    const res = spawnSync('claude', loaderSpawnArgs(ROOT), { encoding: 'utf-8', timeout: CLAUDE_PLUGIN_DETAILS_TIMEOUT_MS, env, cwd: ROOT, input: '' });
+    const init = (res.stdout || '').split('\n').map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).find((event) => event && event.type === 'system' && event.subtype === 'init');
+    if (!init || !Array.isArray(init.slash_commands)) {
+      t.skip(`this claude CLI did not emit a system init event with slash_commands (exit ${res.status})`);
+      return;
+    }
+    const mine = init.slash_commands.filter((name) => name.startsWith('gsd-core:'));
+    const commandFiles = fs.readdirSync(path.resolve(ROOT, 'commands', 'gsd')).filter(f => f.endsWith('.md'));
+    assert.equal(new Set(mine).size, mine.length, 'no entry may be listed twice');
+    const nested = mine.filter((name) => name.startsWith('gsd-core:gsd:'));
+    assert.deepEqual(nested, [], `commands/gsd/ must not register a gsd:<stem> command entry (default commands/ scan, #5504): ${nested.slice(0, 5).join(', ')}`);
+    const bare = mine.filter((name) => !name.startsWith('gsd-core:gsd-'));
+    assert.deepEqual(bare, [], `every workflow must appear only under its gsd-<stem> skill name: ${bare.slice(0, 5).join(', ')}`);
+    assert.equal(mine.length, commandFiles.length, `each of the ${commandFiles.length} workflows must register once, got ${mine.length} entries`);
+  });
+
   test('parity: one skill dir per command file (DEFECT.GENERATIVE-FIX)', () => {
     const commandsDir = path.resolve(ROOT, 'commands', 'gsd');
     const commandFiles = fs.readdirSync(commandsDir).filter(f => f.endsWith('.md'));
@@ -1294,3 +1358,91 @@ describe('H: skills surface projection (#1596)', () => {
     );
   });
 });
+
+// ─── #6107 (canonical-path hook) ───────────────────────────────────
+//
+// On a case-insensitive volume `fs.realpathSync` keeps the caller's letter case while `realpathSync.native`
+// (realpath(3)) returns the spelling stored on disk. The suite also runs on case-sensitive hosts, so the volume is
+// simulated: `realpathSync` follows Node's documented behaviour (a followed symlink resolves in the target's
+// on-disk spelling, otherwise the caller's spelling is kept) and `.native` always answers the on-disk spelling.
+
+function simulateCaseInsensitiveVolumeForHook(t) {
+  const original = fs.realpathSync;
+  const native = original.native;
+  const fold = (p) => String(p).replace(/([\\/])root(?=[\\/]|$)/i, '$1Root');
+  const nativeVariant = (p, o) => native(fold(p), o);
+  const jsVariant = (p, o) => {
+    const onDisk = native(fold(p), o);
+    return onDisk === fold(p) ? String(p) : onDisk;
+  };
+  jsVariant.native = nativeVariant;
+  // plain assignment, not mock.method: the mock wrapper forwards `.native` to the ORIGINAL function, and the
+  // simulation must answer `.native` itself
+  fs.realpathSync = jsVariant;
+  t.after(() => { fs.realpathSync = original; });
+}
+const flipCaseForHook = (p) => p.replace(/([\\/])Root(?=[\\/]|$)/, '$1root');
+
+describe('#6107: gsd-ensure-canonical-path resolves two spellings of one plugin root to one bundle', () => {
+  const { resolveBundledTree: resolveBundle, ensureCanonicalPath: ensureCanonical, linkPointsAt: pointsAt, MANAGED_SUBDIRS: MANAGED } =
+    require(path.join(ROOT, 'hooks', 'gsd-ensure-canonical-path.js'));
+
+  /** <base>/Root with `gsd-core` a symlink to <base>/Root/Bundle (the on-disk spelling), as in the issue. */
+  function pluginRoot(t) {
+    const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-6107-plugin-')));
+    t.after(() => cleanup(base));
+    const root = path.join(base, 'Root');
+    fs.mkdirSync(path.join(root, 'Bundle'), { recursive: true });
+    for (const sub of MANAGED) fs.mkdirSync(path.join(root, 'Bundle', sub), { recursive: true });
+    fs.symlinkSync(path.join(root, 'Bundle'), path.join(root, 'gsd-core'));
+    return { base, root };
+  }
+
+  test('a symlinked bundle is found under both spellings of the root (the same bundle)', (t) => {
+    simulateCaseInsensitiveVolumeForHook(t);
+    const { root } = pluginRoot(t);
+    const typed = resolveBundle(root);
+    assert.ok(typed, 'the typed spelling resolves a bundle');
+    assert.equal(resolveBundle(flipCaseForHook(root)), typed, 'the case-flipped spelling resolves the same bundle');
+  });
+
+  test('a link created through one spelling reads as correct through the other (idempotent, no relink)', (t) => {
+    simulateCaseInsensitiveVolumeForHook(t);
+    const { base, root } = pluginRoot(t);
+    const homeDir = path.join(base, 'home');
+    fs.mkdirSync(homeDir, { recursive: true });
+    const first = ensureCanonical({ pluginRoot: root, homeDir, platform: 'linux', env: {} });
+    assert.equal(first.status, 'ensured');
+    const second = ensureCanonical({ pluginRoot: flipCaseForHook(root), homeDir, platform: 'linux', env: {} });
+    assert.notEqual(second.status, 'noop', 'the flipped spelling is not mistaken for "no bundle"');
+    assert.deepEqual([...second.linked].sort(), [...first.linked].sort(), 'every managed link still reads as correct');
+    assert.deepEqual(second.prunedStale, [], 'nothing is pruned or relinked because a spelling differs');
+  });
+
+  test('a correct managed link is recognised as correct when its expected target is spelled the other way', (t) => {
+    simulateCaseInsensitiveVolumeForHook(t);
+    const { root } = pluginRoot(t);
+    const linkPath = path.join(root, 'managed-link');
+    const target = path.join(root, 'Bundle', MANAGED[0]);
+    fs.symlinkSync(target, linkPath);
+    assert.equal(pointsAt(linkPath, target), true, 'the on-disk spelling');
+    assert.equal(pointsAt(linkPath, flipCaseForHook(target)), true, 'the case-flipped spelling of the same target');
+    // a link to a DIFFERENT directory is still wrong under either spelling
+    fs.mkdirSync(path.join(root, 'Bundle', 'other'));
+    assert.equal(pointsAt(linkPath, path.join(root, 'Bundle', 'other')), false);
+    assert.equal(pointsAt(linkPath, flipCaseForHook(path.join(root, 'Bundle', 'other'))), false);
+  });
+
+  test('a bundle symlink that escapes the plugin root is still rejected under either spelling', (t) => {
+    simulateCaseInsensitiveVolumeForHook(t);
+    const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-6107-escape-')));
+    t.after(() => cleanup(base));
+    const root = path.join(base, 'Root');
+    fs.mkdirSync(path.join(base, 'Outside'), { recursive: true });
+    fs.mkdirSync(root, { recursive: true });
+    fs.symlinkSync(path.join(base, 'Outside'), path.join(root, 'gsd-core'));
+    assert.equal(resolveBundle(root), null);
+    assert.equal(resolveBundle(flipCaseForHook(root)), null);
+  });
+});
+

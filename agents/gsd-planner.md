@@ -47,7 +47,7 @@ Before planning, discover project context:
 - Load `rules/*.md` as needed during **planning**.
 - Ensure plans account for project skill patterns and conventions.
 
-**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md
+**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md (agent type: `gsd-planner`)
 </project_context>
 
 <context_fidelity>
@@ -196,7 +196,7 @@ Every task has four required fields:
 
 **Inherit the command that already worked (#2401):** reuse `prior_verify_commands` verbatim, prefer `npm --prefix <dir> run <script>`, ground every path you author. @~/.claude/gsd-core/references/planner-verify-command-grounding.md
 
-**Grep gate hygiene:** `grep -c` counts comments, so header prose can be self-invalidating. Use `grep -v '^#' | grep -c token`. Bare `== 0` gates on unfiltered files are forbidden.
+**Grep gate hygiene:** `grep -c` counts comments, so header prose can be self-invalidating. Use `grep -v '^#' | grep -c token`. Bare `== 0` gates on unfiltered files are forbidden. Run every count/match gate against the current tree and record its baseline as `[HEAD=<value> EXPECT<op><value>]` beside it (#4927, #4309), not as a free-form comment: a gate that already passes at HEAD, or whose literal differs in case from the deliverable, is wrong. @~/.claude/gsd-core/references/planner-verify-command-grounding.md
 
 <comment_text_discipline>
 **Comment-text discipline (HARD GATE, #429):** A literal an acceptance criterion negative-greps for must NOT appear verbatim in any `<action>` body. Rules + `<!-- planner-discipline-allow: LIT -->` allowlist + examples: @~/.claude/gsd-core/references/planner-antipatterns.md ("Comment-Text Discipline").
@@ -214,7 +214,7 @@ Every task has four required fields:
 
 **Outcome-focused `<action>`** (fork; when `workflow.spec_outcome_enforcement` is enabled, the default): describe WHAT the task accomplishes, not step-by-step HOW — specificity belongs in `<done>`/`<verify>`. Rules + examples: @~/.claude/gsd-core/references/planner-outcome-specs.md
 
-**<reversibility>** (optional): `rating="reversible|costly|one-way"` + one-line rationale for a decision this task implements. `one-way` inserts a `checkpoint:decision` before this task; `costly` is flagged only; unsure means `reversible`. Rules: @~/.claude/gsd-core/references/planner-reversibility.md
+**<reversibility>** (optional): `rating="reversible|costly|one-way"` + one-line rationale for a decision this task implements. A newly surfaced `one-way` decision inserts a `checkpoint:decision` before this task; one the human already settled (CONTEXT.md except `### Decided autonomously`, an ingested ADR, an answered checkpoint) keeps its rating and gets no new checkpoint; `costly` is flagged only; unsure means `reversible`. Rules: @~/.claude/gsd-core/references/planner-reversibility.md
 
 See @~/.claude/gsd-core/references/planner-guidance.md for Task Types table, Task Sizing rules, Interface-First Task Ordering, and Specificity guidance.
 
@@ -351,9 +351,9 @@ Output: [Artifacts created]
 </execution_context>
 
 <context>
-@.planning/PROJECT.md
-@.planning/ROADMAP.md
-@.planning/STATE.md
+@{project_path}
+@{roadmap_path}
+@{state_path}
 
 # Only reference prior plan SUMMARYs if genuinely needed
 @path/to/relevant/source.ts
@@ -495,7 +495,7 @@ For each artifact: "What must be CONNECTED for this to function?"
 **Step 5: Identify Key Links**
 "Where is this most likely to break?" Key links = critical connections where breakage causes cascading failures.
 
-See @~/.claude/gsd-core/references/planner-guidance.md for a worked example and the `must_haves` YAML format.
+See @~/.claude/gsd-core/references/planner-guidance.md for a worked example, the `must_haves` YAML format, and the `key_links` field contract (`from`/`to` are project-relative file paths; symbols and endpoints go in `via:`).
 
 </goal_backward>
 
@@ -550,7 +550,7 @@ Output: [Working, tested feature]
 
 **RED:** Create test file → write test describing expected behavior → run test (MUST fail) → commit: `test({phase}-{plan}): add failing test for [feature]`
 
-**GREEN:** Write minimal code to pass → run test (MUST pass) → commit: `feat({phase}-{plan}): implement [feature]`
+**GREEN:** Write minimal code to pass → run test (MUST pass) → commit: `feat({phase}-{plan}): implement [feature]` (new behavior) or `fix({phase}-{plan}): correct [defect]` (plan corrects a defect)
 
 **REFACTOR (if needed):** Clean up → run tests (MUST pass) → commit: `refactor({phase}-{plan}): clean up [feature]`
 
@@ -642,8 +642,10 @@ without graph context.
 
 <step name="identify_phase">
 ```bash
-cat .planning/ROADMAP.md
-ls .planning/phases/
+PLANNING_ROOT=$(gsd_run query planning.inspect ${GSD_WS:+--ws=${GSD_WS##* }} --pick generated_from.planning_root)
+: "${PLANNING_ROOT:?}"
+cat "${PLANNING_ROOT}/ROADMAP.md"
+ls "${PLANNING_ROOT}/phases/"
 ```
 
 If multiple phases available, ask which to plan. If obvious (first incomplete), proceed.
@@ -677,7 +679,9 @@ Select top 2-4 phases. Skip phases with no relevance signal.
 
 **Step 3 — Read full SUMMARYs for selected phases:**
 ```bash
-_SUMMARIES=( .planning/phases/{selected-phase}/*-SUMMARY.md )
+PLANNING_ROOT=$(gsd_run query planning.inspect ${GSD_WS:+--ws=${GSD_WS##* }} --pick generated_from.planning_root)
+: "${PLANNING_ROOT:?}"
+_SUMMARIES=( "${PLANNING_ROOT}"/phases/{selected-phase}/*-SUMMARY.md )
 if [ -e "${_SUMMARIES[0]}" ]; then cat "${_SUMMARIES[@]}"; fi
 ```
 
@@ -824,7 +828,7 @@ Use template structure for each PLAN.md.
 
 **Write contract (hard rules — must follow):**
 
-These PLAN.md files are the canonical output of this agent. The orchestrator reads each `.planning/phases/{padded_phase}-{slug}/{padded_phase}-{NN}-PLAN.md` from disk after you return; it does NOT read your return message for the file content.
+These PLAN.md files are the canonical output of this agent. The orchestrator reads each `{phase_dir}/{padded_phase}-{NN}-PLAN.md` from disk after you return; it does NOT read your return message for the file content.
 
 **Write is for net-new PLAN.md only.** For any existing file (`ROADMAP.md`, `.planning/` files) use `Edit` (scoped replacement), never `Write`. See `update_roadmap`.
 
@@ -835,7 +839,8 @@ These PLAN.md files are the canonical output of this agent. The orchestrator rea
    - `Write` the file with only the first section, ending with the sentinel line `<!-- gsd:write-continue -->`.
    - `Read` the file, then `Edit` it, replacing `<!-- gsd:write-continue -->` with the next section followed by the sentinel again. Repeat, one section per `Edit`.
    - On the final section, replace the sentinel with the closing content and no trailing sentinel.
-5. **If writing still fails, surface the actual error in your return message.** **Do NOT silently fall back to returning content** — that hides the failure from the orchestrator and truncates identically.
+5. **Verify the write landed (#4927).** A `Write` that returns success can still have stored a truncated payload. After writing each PLAN.md, run `verify.plan-structure` on it (see below) and `tail -n 5` the file: it must end with the closing `</output>` (or the last closing tag of the template) and must not contain `<!-- gsd:write-continue -->`. If it ends mid-tag, rewrite it with the incremental method in rule 4.
+6. **If writing still fails, surface the actual error in your return message.** **Do NOT silently fall back to returning content** — that hides the failure from the orchestrator and truncates identically.
 
 **CRITICAL — File naming convention (enforced):**
 
@@ -856,7 +861,7 @@ The filename MUST follow the exact pattern: `{padded_phase}-{NN}-PLAN.md`
 - ❌ `plan-01.md`
 - ❌ `01-01-plan.md` (lowercase)
 
-Full write path: `.planning/phases/{padded_phase}-{slug}/{padded_phase}-{NN}-PLAN.md`
+Full write path: `{phase_dir}/{padded_phase}-{NN}-PLAN.md`
 
 Include all frontmatter fields.
 </step>
@@ -891,7 +896,7 @@ Update ROADMAP.md to finalize phase placeholders:
 
 **CRITICAL — use `Edit` (scoped), NOT `Write`, for ROADMAP.md.** A whole-file `Write` destroys all phase entries outside your diff window. Use `Edit` to replace only the target section; use multiple `Edit` calls if needed. NEVER pass the entire ROADMAP.md content to `Write`.
 
-1. Read `.planning/ROADMAP.md`
+1. Read `{roadmap_path}`
 2. Find phase entry (`### Phase {N}:`)
 3. Update placeholders using `Edit` (scoped replacement only):
 
@@ -914,8 +919,10 @@ Plans:
 
 <step name="git_commit">
 ```bash
+PLANNING_ROOT=$(gsd_run query planning.inspect ${GSD_WS:+--ws=${GSD_WS##* }} --pick generated_from.planning_root)
+: "${PLANNING_ROOT:?}"
 gsd_run query commit "docs($PHASE): create phase plan" --files \
-  .planning/phases/$PHASE-*/$PHASE-*-PLAN.md .planning/ROADMAP.md
+  "${PLANNING_ROOT}"/phases/$PHASE-*/$PHASE-*-PLAN.md "${PLANNING_ROOT}/ROADMAP.md"
 ```
 </step>
 

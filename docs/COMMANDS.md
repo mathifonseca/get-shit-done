@@ -51,6 +51,8 @@ Initialize a new project with deep context gathering.
 **Prerequisites:** No existing `.planning/PROJECT.md`
 **Produces:** `PROJECT.md`, `REQUIREMENTS.md`, `ROADMAP.md`, `STATE.md`, `config.json`, `research/`, `CLAUDE.md`
 
+> **Note:** the first milestone is implicit. No milestone identity is recorded at project start — no `MILESTONES.md`, no `milestone:` in `STATE.md` ([ADR-3180](adr/3180-planning-semantic-model-single-owner.md) §7.2 rule 5). The version and name are decided at the first `/gsd-complete-milestone <version>`. See [The implicit first milestone](USER-GUIDE.md#the-implicit-first-milestone).
+
 ```bash
 /gsd-new-project                    # Interactive mode
 /gsd-new-project --auto @prd.md     # Auto-extract from PRD
@@ -275,6 +277,9 @@ Cross-AI plan convergence loop — replan with review feedback until no HIGH con
 | Reviewer flags | No | Pass through every reviewer lane flag: `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
 | `--all` | No | Run every configured reviewer. Lanes are dispatched **sequentially by default**; set `review.parallel_lanes` to `true` to dispatch them concurrently within a single review pass |
 | `--max-cycles N` | No | Override cycle cap (default 3) |
+| `--on-escalation ask\|exit` | No | What happens when cycles run out without converging. `ask` (default) shows the Proceed anyway / Manual review question. `exit` asks nothing, writes no state, prints the final `CYCLE_SUMMARY` line and both concern sections, and ends with `CONVERGENCE_STATUS: <status> cycles=<n> current_high=<N> current_actionable=<M> open_conflicts=<K>` where `<status>` is `open_conflicts`, `stalled` or `max_cycles` (a converged run ends with `converged`). Any other value is refused before cycle 1. See [Run plan-review convergence unattended](how-to/run-plan-review-convergence-unattended.md) |
+
+`/gsd-review --cycle-summary` returns the same `CYCLE_SUMMARY: current_high=<N> current_actionable=<M>` counters and concern sections for callers that assemble review and replanning themselves; the loop's counting rules live there once. Absent when no review ran.
 
 **Exit behavior:** Loop exits when `current_high` and `current_actionable` hit zero; open `## Plan-Revision Conflicts` entries in REVIEWS.md must also be zero. Stall detection warns when the total unresolved review count is not decreasing across cycles. At `--max-cycles`, the escalation gate offers proceed-or-review-manually for HIGH or actionable non-HIGH concerns, but only manual review when a plan-revision conflict is still open — "Proceed anyway" is never offered over an unresolved conflict.
 
@@ -394,7 +399,7 @@ Create PR from completed phase work with auto-generated body.
 | `N` | No | Phase number or milestone version (e.g., `4` or `v1.0`) |
 | `--draft` | No | Create as draft PR |
 
-**Prerequisites:** Phase verified (`/gsd-verify-work` passed), `gh` CLI installed and authenticated
+**Prerequisites:** Phase verified (`/gsd-verify-work` passed), `gh` CLI installed and authenticated, `jq` installed, phase recorded complete in ROADMAP.md
 **Produces:** GitHub PR with rich body from planning artifacts, STATE.md updated
 
 ```bash
@@ -409,6 +414,19 @@ Create PR from completed phase work with auto-generated body.
 - Verification status
 - Key decisions
 - Optional configured PRD-style sections from `ship.pr_body_sections`
+
+**ROADMAP record preflight** (#5221): after the verification check passes and before the gates, `/gsd-ship` runs `roadmap analyze` and reads its `roadmap_record` field with `jq`. The phase ships only when every ROADMAP record of it (checklist entry, progress-table Status) reads complete. Phase numbers match with leading zeros stripped per segment (`03.02` matches `3.2`). Every refusal prints to stderr and stops the workflow with exit 1, before any PR is created:
+
+| Condition | Message (stderr) | Fix |
+|-----------|------------------|-----|
+| Record reads incomplete | `PHASE_NOT_COMPLETE: Run /gsd-verify-work {n} (completes the phase), then re-run /gsd-ship` | Run `/gsd-verify-work {n}`. For a custom-id phase, also tick its checklist entry by hand (a second line says so). |
+| Phase has no checklist entry and no progress-table row | `PHASE_NOT_RECORDED: ROADMAP.md has no checklist entry or progress-table row for phase {n}; ...` | Add an entry or row, run `/gsd-verify-work {n}`, re-run. |
+| Progress table does not parse (e.g. a row with the wrong cell count) | `ROADMAP_TABLE_UNREADABLE: the ROADMAP.md progress table does not parse ...` | Fix the table, re-run. |
+| `roadmap analyze` exits non-zero | `roadmap.analyze failed — see the error above` | Fix the reported error. |
+| Analyze output has no `roadmap_record` field or is not JSON | `roadmap.analyze output unparseable` | Update gsd-core so analyze emits `roadmap_record`. |
+| `jq` is not installed | `jq: command not found`, then `roadmap.analyze output unparseable` | Install `jq`. The check fails closed: without `jq` no phase ships. |
+
+When `.planning/ROADMAP.md` does not exist, the check is skipped.
 
 **Ship gates (capability-driven):** `/gsd-ship` runs every active `ship:pre` gate from the capability registry. Two are on by default:
 
@@ -474,11 +492,19 @@ Verify milestone met its definition of done.
 
 Archive milestone, tag release.
 
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `<version>` | No | Target milestone version (e.g. `v1.0`); required on a project's first milestone, otherwise read from the active milestone header in `ROADMAP.md` |
+| `--ws <name>` | No | Scope the milestone to a workstream; skips the shared `PROJECT.md` evolution review and leaves `PROJECT.md` out of the archive commit |
+
 **Prerequisites:** Milestone audit complete (recommended)
 **Produces:** `MILESTONES.md` entry, git tag
 
+> **Note:** for the project's first milestone this command is also the identity *registration* — the version comes from the `<version>` argument, the name from the separate `--name` value the workflow passes alongside it, because nothing recorded them at `/gsd-new-project` time ([the first milestone is implicit](USER-GUIDE.md#the-implicit-first-milestone)). From the second milestone onward, `/gsd-new-milestone` records the identity as well, at cycle start.
+
 ```bash
-/gsd-complete-milestone
+/gsd-complete-milestone v1.0                # First milestone: name the version
+/gsd-complete-milestone                     # Later milestones: inferred from ROADMAP.md
 ```
 
 **Pre-close artifact audit.** Before archiving, the workflow runs `gsd-tools audit-open` and reports every unresolved item across nine categories:
@@ -495,7 +521,7 @@ Archive milestone, tag release.
 | CONTEXT questions | `*-CONTEXT.md` | questions left open |
 | **Deferred items** | `deferred-items.md` | entry lacks `status: resolved` |
 
-The four phase-scoped categories above (UAT gaps, Verification gaps, CONTEXT questions, Deferred items) read phase directories from **both** the active `.planning/phases/` root and every archived `.planning/milestones/vX.Y-phases/` root (#3458) — an item still unresolved when its milestone closed and its phase directory archived stays visible in every later audit instead of silently disappearing. In `--json` output, an item sourced from an archived milestone carries an `archived_milestone` field (e.g. `"v1.0"`); active items omit the field entirely. The human-readable report labels an archived item's line with `(archived vX.Y)` so a phase number that repeats across milestones (numbering restarts at `01` after each archive) is not misread as one duplicate line.
+The four phase-scoped categories above (UAT gaps, Verification gaps, CONTEXT questions, Deferred items) read phase directories from **both** the active `.planning/phases/` root and every archived milestone root (#3458): `.planning/milestones/vX.Y-phases/` and `.planning/milestones/ws-*/phases/`, plus the same two shapes under each `.planning/workstreams/<name>/milestones/` — an item still unresolved when its milestone closed and its phase directory archived stays visible in every later audit instead of silently disappearing. In `--json` output, an item sourced from an archived milestone carries an `archived_milestone` field (e.g. `"v1.0"`); active items omit the field entirely. The human-readable report labels an archived item's line with `(archived vX.Y)` so a phase number that repeats across milestones (numbering restarts at `01` after each archive) is not misread as one duplicate line.
 
 If any category is non-empty you are prompted with `[R] Resolve` / `[A] Acknowledge all` / `[C] Cancel`. `[A]` calls `gsd-tools audit-open acknowledge` once per open item — the CLI writer that actually suppresses each item starting at the next `audit-open` scan — then records the same items to `STATE.md` under its own `## Deferred Items` heading (a disclosure record, not the suppression mechanism) and closes as `override_closeout`; an all-clear closes as `verified_closeout`.
 
@@ -594,7 +620,7 @@ CRUD for phases in ROADMAP.md — add, insert, remove, or edit phases with a sin
 | `--force` | Allow editing in-progress or completed phases (used with `--edit`) |
 
 **Prerequisites:** `.planning/ROADMAP.md` exists
-**Produces:** Updated ROADMAP.md
+**Produces:** Updated ROADMAP.md. Add and insert also give the new phase a ROADMAP record (#5221), so `/gsd-ship` can read it: a `- [ ] **Phase N: …**` checklist entry after the active milestone's checklist, or, with no checklist, a `Not started` progress-table row; with neither, no readable record is written (`roadmap_entry: none`; also reported when the written entry is one `roadmap analyze` cannot read, e.g. a custom id over 64 characters) and `/gsd-ship` blocks the phase `PHASE_NOT_RECORDED` until you add one.
 
 ```bash
 /gsd-phase "Add authentication system"          # Append new phase with description
@@ -838,7 +864,7 @@ Interactive command center for managing multiple phases from one terminal.
 /gsd-manager --analyze-deps         # Scan ROADMAP phases for dependency relationships before parallel execution
 ```
 
-**Phase completion is disk-strict (ADR-3180 §7.4, issue #3186).** A phase's status here — and in `roadmap analyze`, `roadmap update-plan-progress`, and `phase complete` — is decided by one rule: a passing `*-VERIFICATION.md` on disk, checked unconditionally (plan count is never a precondition, so a zero-plan phase with a passing verification reports complete). A ticked `- [x]` checkbox in `ROADMAP.md` is a human annotation only; it carries no machine authority and is never consulted for these commands' completion verdicts. `roadmap update-plan-progress` additionally withholds writing the checkbox/completion date while any plan in the phase has no matching `*-SUMMARY.md`, mirroring `phase complete`'s own coverage gate.
+**Phase completion is disk-strict (ADR-3180 §7.4, issue #3186).** A phase's status here — and in `roadmap analyze`, `roadmap update-plan-progress`, and `phase complete` — is decided by one rule: a passing `*-VERIFICATION.md` on disk, checked unconditionally (plan count is never a precondition, so a zero-plan phase with a passing verification reports complete). A ticked `- [x]` checkbox in `ROADMAP.md` is a human annotation only; it carries no machine authority and is never consulted for these commands' completion verdicts. `roadmap update-plan-progress` additionally withholds writing the checkbox/completion date while any plan in the phase has no matching `*-SUMMARY.md`, mirroring `phase complete`'s own coverage gate. One reader of the checkbox is not a completion verdict: `/gsd-ship`'s preflight (#5221) first requires the disk verdict (`verification.status` = `passed`), then refuses a phase whose ROADMAP record — checklist checkbox and progress-table Status — does not read complete, or that has no such record, to catch a completion that was never written back. That check grants nothing the disk verdict withheld; the ADR-3180 §7.4 rule above is unchanged.
 
 **Which phase comes *next* is a different question, and the roadmap answers it.** Disk-strictness
 governs whether a phase is *complete*; it does not decide the successor. `phase complete` resolves
@@ -1064,6 +1090,16 @@ Run all remaining phases autonomously.
 /gsd-autonomous --text              # Run with text-mode prompts
 ```
 
+**Smart discuss question classes.** Without `--interactive`, each phase's discuss step classifies every grey-area question:
+
+| Class | Examples | Handling |
+|-------|----------|----------|
+| Technical, reversible | file layout, naming, internal data shapes, error-handling patterns, test approach | Decided without a prompt; shown in one "Decided autonomously" block |
+| Technical, hard to reverse | persisted schema, public API/URL contracts, auth model, new external dependency, data migrations | Asked with a ✅ Recommended answer ("Accept all" per area) |
+| Product / UX / preference | — | Asked neutrally: 2–3 options with trade-offs, no recommendation, no pre-selection |
+
+An unsure question is treated as hard to reverse, or as product. Autonomous decisions are written to the phase `CONTEXT.md` under `### Decided autonomously` and to `DISCUSSION-LOG.md` as `[auto]` lines; they are reversed by editing `CONTEXT.md` or re-running discuss before planning. See [Review or reverse an autonomous decision](how-to/run-phases-autonomously.md#review-or-reverse-an-autonomous-decision).
+
 ### `/gsd-debug`
 
 Systematic debugging with persistent state.
@@ -1168,7 +1204,11 @@ a git repo — "unknown" is reported as unknown, not as fresh.
 
 **Cross-scope install shadowing (`W028`).** When a runtime is installed at both `global` and `local` scope and the host's trigger-resolution rules make one scope's `/gsd-*` surface unreachable — the Claude Code case: personal skill always beats project command — health adds a WARNING-severity advisory naming the shadowed triggers, the winning scope, and the losing scope. It never changes health's pass/fail status and is never auto-fixable (there is no single correct scope to remove), so `--repair` never touches it. Identical to the same advisory GSD Core prints at install time. See [Interpret install-shadow warnings](how-to/interpret-install-shadow-warnings.md).
 
+**Context warnings inactive on a plugin-only Claude Code install (`W032`).** The gsd-core Claude Code plugin registers the context monitor hook (`gsd-context-monitor.js`) but not the statusline that feeds it: the monitor reads `/tmp/claude-ctx-{session_id}.json`, and `gsd-statusline.js` is the only writer, so on a plugin-only install the 35% and 25% remaining warnings never fire. `W032` fires when Claude Code's settings (the global config dir, then the project's `.claude/settings.json` and `settings.local.json`, later scopes overriding earlier ones; managed settings are not read) enable the `gsd-core` plugin — or the plugin is auto-discovered under `<config dir>/skills/` — and the effective `statusLine` command does not contain `gsd-statusline`. An npm install wires the statusline and reports nothing; a statusline of another tool still reports because it does not write the bridge, and so does a wrapper script that calls `gsd-statusline` under a name that does not contain it. The same gap covers the opt-in hooks (`hooks.workflow_guard`, `hooks.community`, `graphify.auto_update`), which only the npm installer registers. Fix: run the npm installer with `npx @opengsd/gsd-core@latest --global`; add `--force-statusline` to replace a statusLine that is already set (a `--local` install skips the statusLine without it). A warning, so it makes the health status `degraded`; other runtimes are not checked.
+
 **Verification report status outside the closed set (`W030`).** A phase's `*-VERIFICATION.md` may carry only `status: passed`, `gaps_found`, or `human_needed`. Any other value — `verified`, `Passed`, `stale`, a number — is a hard error for every other command that reads the report (`verification_status_invalid`); `/gsd-health` instead reports the file as a WARNING naming the value and the accepted set, so the check itself never fails on the defect it diagnoses. Set the report's frontmatter `status:` to an accepted value, or delete the report and re-run the phase's verification with `/gsd-execute-phase` (a deleted report reads `missing`, which routes there). Not auto-fixable. See [`verification status`](CLI-TOOLS.md#verification-status-the-verification-verdict-5118).
+
+**STATE.md far over its line target (`W031`).** STATE.md is a digest with a 100-line target (`templates/state.md`). When the file is more than 3x that (over 300 lines), health adds a WARNING naming the line count. Run `gsd-tools state prune` to archive old Decisions and Recently Completed entries; it does not touch the Quick Tasks table. For that table, `gsd-tools milestone archive-quick <version>` (the command [`/gsd-cleanup`](#gsd-cleanup) offers, opt-in) moves every directory under `.planning/quick/` into `milestones/<version>-quick/` and then resets the table. The reset runs whenever at least one directory exists under `.planning/quick/`, whether or not a table row links to it, and it deletes every row. That includes rows without a task directory, such as those `/gsd-fast` logs, and their text is archived nowhere, so copy them out (or trim them) before running `archive-quick`. `gsd-tools milestone archive-quick <version> --dry-run` lists the directories it would move. When `.planning/quick/` holds no directory, `archive-quick` leaves the table alone, so trim it by hand. Not auto-fixable: `--repair` never touches STATE.md for this warning, because which history to archive is your call.
 
 **`--repair` does not apply destructive fixes.** Resetting config.json
 (`resetConfig`) and regenerating STATE.md (`regenerateState`) are destructive
@@ -1301,6 +1341,41 @@ Extract reusable patterns, anti-patterns, and architectural decisions from compl
 ```
 
 ---
+
+### `gsd-tools verify plan-structure <PLAN.md> --replay`
+
+Opt-in replay of recorded criterion baselines (#4310, [ADR-4310](adr/4310-criterion-replay.md)).
+Without `--replay`, `verify plan-structure` reads text only and runs nothing. With it, the command
+of each `[HEAD=<value> EXPECT…]` notation is run at the project root, and the printed value is
+compared with the recorded `HEAD`. Nothing invokes the flag automatically; you run it by hand.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `<PLAN.md>` | Yes | The plan to check. `--replay` may come before or after it |
+
+| Flag | Description |
+|------|-------------|
+| `--replay` | Run each criterion's command under the replay quarantine and compare its output with the recorded baseline |
+| `--raw` | Emit the JSON payload with no surrounding prose |
+
+**Produces:** the usual `verify plan-structure` JSON, plus a final `replay` key:
+`{ head_sha, results, mismatch_count, statuses }`. Each result is
+`{ line, text, argv, recorded, observed, outcome, rev_drift }`, where `outcome` is `match` or
+`mismatch`. Each status is `{ code, line, text, detail }`. Raw command output is never included.
+**Exit status:** unchanged by replay. A mismatch adds a warning and a status changes nothing. Only
+the static rules (B1 and the rest) decide validity.
+
+**Quarantine.** Replay never starts a shell:
+- Only `grep`, and `git` with `grep`, `ls-files`, `rev-parse` or `rev-list`, may run.
+- Pipes, redirects, globs, `$` expansion and command substitution are `disallowed`.
+- Absolute paths and `..` segments are `disallowed`.
+- Options come from an exact-match allowlist per program, so abbreviations like `--open-files=sh` are `disallowed`.
+- A path that resolves outside the project through a symlink is `disallowed`.
+- Each command gets 10 s and 64 KiB of output. A run replays at most 50 commands within 60 s.
+
+Status codes: `no_command`, `ambiguous_command`, `malformed_command`, `disallowed`,
+`cannot_run`, `timeout`, `output_cap`, `budget_exhausted`, `truncated`, `replay_error`. See
+[Replay recorded baselines](how-to/replay-recorded-baselines.md).
 
 ### `gsd-tools check verify-command-paths`
 
@@ -1485,18 +1560,22 @@ Configure GSD settings interactively — workflow toggles, advanced knobs, integ
 
 | Section | Keys |
 |---------|------|
-| Planning Tuning | `workflow.plan_bounce`, `workflow.plan_bounce_passes`, `workflow.plan_bounce_script`, `workflow.subagent_timeout`, `workflow.inline_plan_threshold` |
+| Planning Tuning | `planner.stall_detection_enabled`, `planner.stall_threshold_minutes`, `planner.stall_detect_interval_minutes`, `workflow.plan_bounce`, `workflow.plan_bounce_passes`, `workflow.plan_bounce_script`, `workflow.subagent_timeout`, `workflow.inline_plan_threshold` |
 | Execution Tuning | `workflow.node_repair`, `workflow.node_repair_budget`, `workflow.auto_prune_state` |
 | Discussion Tuning | `workflow.max_discuss_passes` |
 | Cross-AI Execution | `workflow.cross_ai_execution`, `workflow.cross_ai_command`, `workflow.cross_ai_timeout` |
 | Git Customization | `git.base_branch`, `git.phase_branch_template`, `git.milestone_branch_template` |
 | Runtime / Output | `response_language`, `context_window`, `search_gitignored`, `graphify.build_timeout` |
+| Runtime Model Tiers | `runtime`, `model_profile_overrides.<runtime>.opus`, `model_profile_overrides.<runtime>.sonnet`, `model_profile_overrides.<runtime>.haiku` |
+| Model Policy | `model_policy.provider`, `model_policy.budget`, `model_policy.high`, `model_policy.medium`, `model_policy.low` |
+
+The planner stall threshold and check interval are asked only while `planner.stall_detection_enabled` is `true`; both take whole minutes, minimum `1`, defaults `10` and `5`.
 
 All answers merge via `gsd-tools query config-set`, preserving unrelated keys. API keys are masked (`****<last-4>`) in all output.
 
 ```bash
 /gsd-config                         # Common-case interactive config
-/gsd-config --advanced              # Power-user knobs (six-section prompt)
+/gsd-config --advanced              # Power-user knobs (eight-section prompt)
 /gsd-config --integrations          # API keys, review CLI routing, agent skills
 /gsd-config --profile budget        # Switch to budget profile
 /gsd-config --profile quality       # Switch to quality profile
@@ -1675,6 +1754,48 @@ Trigger semantics match ESLint's `complexity: {max: N}` — strictly greater, so
 
 ---
 
+### `gsd-tools query project-context`
+
+Print the project context GSD resolved for the current directory: which checkout it runs in, which directory owns `.planning/`, and how that was decided. Read-only; use it to diagnose which checkout a command will act in (see [Resolve the project root in a worktree](how-to/resolve-the-project-root-in-a-worktree.md)).
+
+```bash
+gsd-tools query project-context                       # Full context as JSON
+gsd-tools query project-context --raw                 # Print the worktree top level only
+gsd-tools query project-context --project-dir <dir>   # Resolve as if started from <dir>
+```
+
+| Field | Meaning |
+|-------|---------|
+| `projectRoot` | Directory holding the `.planning` entry |
+| `planningRoot` | Canonical (realpath) location of `.planning` |
+| `worktreeRoot` | Top level of the checkout the process runs in |
+| `repoRoot` | Top level of the main checkout (first non-bare `git worktree list` entry) |
+| `gitCommonDir` | Absolute `git rev-parse --git-common-dir`; `null` outside a git repository |
+| `isLinkedWorktree` | `true` when `worktreeRoot` differs from `repoRoot` |
+| `provenance` | `{ source, layout, reason, degraded, warnings }` — how the answer was reached |
+
+`provenance.source` names the rule that found `projectRoot`: `explicit` (`--project-dir`), `ancestor` (a `.planning` in the start directory or one of its parents), `workspace` (the enclosing `planning.sub_repos` workspace), `main-checkout` (a linked worktree with no `.planning` of its own falls back to the main checkout's), or `none` (no `.planning` found; `projectRoot` is the start directory).
+
+`provenance.layout` says how the git facts were obtained: `filesystem` when they were read from `.git`, `gitdir` and `commondir` without starting a process, `git` when `git rev-parse` was asked. A plain checkout, a linked worktree of a non-bare repository and a directory outside any repository are read from the filesystem. Git is asked for anything the reader does not answer for: a start inside a git dir or a bare repository, a worktree of a bare repository, a submodule, a repository with `core.worktree` or `core.bare` set, a config include, an unknown repository format or extension, a config or `HEAD` git would reject, a repository another user owns (on Windows, any repository outside your home directory), and any call with `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`, `GIT_CONFIG_COUNT` or `GIT_CONFIG_PARAMETERS` set. The two paths give the same roots.
+
+`provenance.reason` names the git facts behind the context: `ok`, `bare_main_worktree` (the main repository is bare, so the checkout is its own repo root), `not_git_repo` (not inside a git repository), or one of the degraded reasons `git_timed_out`, `git_unavailable`, `git_error`, `worktree_list_failed`. A degraded context sets `degraded: true` and adds a message to `warnings`; roots fall back to what git had answered or the start directory, and a degraded context never refuses a commit.
+
+```json
+{
+  "projectRoot": "/work/app-wt",
+  "planningRoot": "/work/app-wt/.planning",
+  "worktreeRoot": "/work/app-wt",
+  "repoRoot": "/work/app",
+  "gitCommonDir": "/work/app/.git",
+  "isLinkedWorktree": true,
+  "provenance": { "source": "ancestor", "layout": "filesystem", "reason": "ok", "degraded": false, "warnings": [] }
+}
+```
+
+`gsd-tools commit` uses the same context: it commits in the checkout it runs in and refuses with `reason: "outside_worktree"` when the working directory or a declared path lies outside that checkout, and with `reason: "not_git_repo"` outside a git repository. Both refusals exit non-zero with `committed: false`.
+
+---
+
 ## AI Integration Commands
 
 ### `/gsd-ai-integration-phase`
@@ -1726,12 +1847,14 @@ Update GSD with changelog preview, and optionally sync skills or reapply local p
 |------|-------------|
 | `--sync` | Sync skills from the GSD registry after updating |
 | `--reapply` | Restore local modifications (patches) after updating |
+| `--interactive[=exceptions\|all]` | With `--reapply`: show each of your edits next to the stock text with a recommendation, and keep, retire, or rewrite it on your answer. `all` shows every edit. `exceptions` (the default for bare `--interactive`) shows only edits upstream adopted, partly adopted, reworded around, or orphaned, and keeps the rest. Any other value is rejected. See [Review reapplied patches hunk by hunk](how-to/review-reapplied-patches.md) |
 | `--next` / `--rc` | Target the `@next` RC dist-tag instead of `@latest` (installs or refreshes a release candidate, e.g. `1.4.0-rc.1`; see ADR #660) |
 
 ```bash
 /gsd-update                         # Check for updates and install
 /gsd-update --sync                  # Update and sync skills
 /gsd-update --reapply               # Update and reapply local patches
+/gsd-update --reapply --interactive=all  # Decide each reapplied edit yourself
 /gsd-update --next                  # Install from the @next RC dist-tag
 ```
 
@@ -1763,8 +1886,8 @@ Review source files changed during a phase for bugs, security vulnerabilities, a
 | `--depth=quick\|standard\|deep` | No | Review depth level. Overrides both `workflow.code_review_depth` and any matching `workflow.code_review_depth_overrides` path rule — the flag always wins. `quick`: pattern-matching only (~2 min). `standard`: per-file analysis with language-specific checks (~5–15 min, default). `deep`: cross-file analysis including import graphs and call chains (~15–30 min) |
 | `--files file1,file2,...` | No | Explicit comma-separated file list; skips SUMMARY/git scoping entirely |
 | `--fix` | No | Auto-fix issues after review — reads REVIEW.md, spawns fixer agent, commits each fix atomically |
-| `--fix --all` | No | Include Info findings in fix scope (default: Critical + Warning only) |
-| `--fix --auto` | No | Fix + re-review iteration loop, capped at 3 iterations |
+| `--fix --all` | No | Include Info and necessity findings in fix scope (default: Critical + Warning, excluding necessity findings). Necessity findings are fixed last, by removing code, and are marked for human verification |
+| `--fix --auto` | No | Fix + re-review iteration loop, capped at 3 iterations. Stops early when the fixer reports no findings left in its scope, leaving out-of-scope findings in `REVIEW.md` |
 | *(reviewer-lane flag)* | No | Any flag `gsd_run review-lane flags` reports for the installed roster (e.g. `--codex`, `--agy`) — see below |
 
 **Prerequisites:** Phase has been executed and has SUMMARY.md or git history
@@ -1772,6 +1895,8 @@ Review source files changed during a phase for bugs, security vulnerabilities, a
 **Spawns:** `gsd-code-reviewer` agent; `gsd-code-fixer` agent (with `--fix`); requested external reviewer lane(s) (#4209 — see below)
 
 **Optional external reviewer lanes (#4209):** Pass one or more reviewer-lane flags — any flag the roster declares (run `gsd_run review-lane flags` to list them for your installation, e.g. `--codex`, `--agy`) — to have that lane independently review the same already-resolved file scope alongside the internal `gsd-code-reviewer` agent. The prompt sent to each lane carries only the repository root, canonical file paths, review depth, and base SHA — never source file contents — under four fixed prohibitions: no source mutation, no test execution, no background processes, no polling. An external lane's findings are corroborating evidence only: `gsd-code-reviewer` independently re-verifies every claim against the actual source before writing it to `REVIEW.md`, so there is exactly one `REVIEW.md` schema regardless of how many lanes ran. An explicitly requested lane that is unavailable or fails is reported as a warning — it never falls back to a raw provider CLI call. Omitting every reviewer-lane flag (the default) reviews with only the internal agent, unchanged from before #4209. This is distinct from `/gsd-review`, which reviews `PLAN.md` files before execution — see [Set up cross-AI review](how-to/set-up-cross-ai-review.md).
+
+**Reviewer lanes outside a phase:** call `gsd_run review-lane dispatch-step` directly (outside a workflow fence `gsd_run` is not defined; call `node <install>/gsd-core/bin/gsd-tools.cjs` instead), with changed files on stdin and `--repo-root`, `--depth`, `--base-sha`, `--run-dir` (a fresh temp dir; read each lane's `results[].reviewPath` from the JSON before removing it), `--cap-id code-review --point <point>`, `--explicit <slugs>` (all required). The `code-review` capability must be enabled via `workflow.code_review` and active at `<point>`: `execute:post`, or `execute:wave:post` when `workflow.code_review_point` selects it. `--explicit` takes comma-separated canonical slugs, not flag aliases (`antigravity`, not `agy`); flags are space-separated (`--depth quick`). See `commands/gsd/code-review.md` for details.
 
 **Optional structural pre-pass:** Set `code_quality.fallow.enabled` to `true` to run fallow before the agent review. GSD writes `{phase}/FALLOW.json` and embeds a `Structural Findings (fallow)` section in `REVIEW.md`. Configure scope and profile with `code_quality.fallow.scope` and `code_quality.fallow.profile`.
 
@@ -1857,6 +1982,8 @@ Reviewers are prompted to verify the plan's claims against the actual repository
 | `--all` | Include all available reviewers (CLI + local model servers) |
 
 **No `jq`, `curl`, or `timeout` prerequisite.** Reviewer lanes used to shell out to these for JSON parsing, HTTP calls, and wall-clock bounding, which made five lanes unavailable on a stock Windows/Git-Bash host (no `jq`) and left one lane unbounded on stock macOS (no `timeout` or `gtimeout`). GSD now does all three itself, so every lane runs with nothing on your `PATH` but the reviewer's own CLI. A lane that declares an external tool it genuinely needs still reports itself unavailable with an install hint rather than running into an empty review.
+
+**Local-lane availability:** `gsd_run review-lane availability [--selected a,b]` prints one `<slug>:available|missing` line per first-party local OpenAI-compatible lane (`ollama`, `lm_studio`, `llama_cpp`) in roster order. Each lane's host is `review.<lane>_host` if set, else its descriptor default. The probe is a bounded 2s GET `/v1/models`. When `review.<lane>_host` is set, any HTTP response (including 401, 404, 5xx) counts as `available`, while connection failure or timeout counts as `missing`. When it is unset, the built-in default host (`localhost:11434`, `:1234`, `:8080`) counts as `available` only if it answers 2xx with an OpenAI-style models listing (a JSON object with `object: "list"` and a `data` array of entries carrying a string `id`); an unrelated local service answering 401, 404, a redirect or a non-listing 200 there is `missing`; a default-port server that requires an API key (and so answers 401) must be named through `review.<lane>_host` to count. The same rules apply when you name a local reviewer explicitly: an unavailable default host never receives the review prompt, and a configured host that answers 404 or 5xx is treated as reachable and the run proceeds. Redirects are not followed, and installed third-party lanes are never probed. The `jq` prerequisite is reported separately by the review workflow.
 
 **Unavailable reviewers:** an explicit reviewer flag is an assertion. If you name a reviewer that cannot run on this host — its CLI is not installed, a required external tool is missing, its local server is unreachable, or its egress destination changed (see below) — `/gsd-review` reports an **error** for that reviewer and does not proceed with a reduced set. This holds even when other named reviewers are available: `--codex --qwen` on a host without `qwen` fails rather than silently becoming a Codex-only review.
 

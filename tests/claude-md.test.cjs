@@ -7,6 +7,13 @@
  */
 
 const { test, describe, beforeEach, afterEach } = require('node:test');
+
+// #5017: pinned GSD_HOME (next to HOME) is put back after each test so it never leaks into the next one.
+const __ORIG_GSD_HOME = process.env.GSD_HOME;
+require('node:test').afterEach(() => {
+  if (__ORIG_GSD_HOME === undefined) delete process.env.GSD_HOME;
+  else process.env.GSD_HOME = __ORIG_GSD_HOME;
+});
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
@@ -141,7 +148,7 @@ describe('new-project workflow includes CLAUDE.md generation', () => {
     assert.ok(content.includes('generate-claude-md'));
     // Codex fix: workflow now uses $INSTRUCTION_FILE (AGENTS.md for Codex, CLAUDE.md otherwise)
     assert.ok(
-      content.includes('.planning/ROADMAP.md .planning/STATE.md .planning/REQUIREMENTS.md "$INSTRUCTION_FILE"'),
+      content.includes('--files "{roadmap_path}" "{state_path}" "{requirements_path}" "$INSTRUCTION_FILE"'),
       'final roadmap commit should stage ROADMAP, STATE, REQUIREMENTS, and instruction file'
     );
   });
@@ -240,6 +247,7 @@ describe('generate-claude-md skills section', () => {
     const originalHome = process.env.HOME;
     const originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = homeDir;
+    process.env.GSD_HOME = homeDir; // #5017: the defaults store root follows HOME
     process.env.USERPROFILE = homeDir;
 
     try {

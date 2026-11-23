@@ -117,11 +117,15 @@ If `$VALIDATE_MODE` only:
 **Step 2: Initialize**
 
 ```bash
-DISCUSS_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--discuss([[:space:]]|$) ]]; then DISCUSS_PARAM="--discuss"; fi
-RESEARCH_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--research([[:space:]]|$) ]]; then RESEARCH_PARAM="--research"; fi
-VALIDATE_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--validate([[:space:]]|$) ]]; then VALIDATE_PARAM="--validate"; fi
-FULL_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--full([[:space:]]|$) ]]; then FULL_PARAM="--full"; fi
-GSD_WS=$(echo " $ARGUMENTS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
+DISCUSS_PARAM=""; if [[ "$GSD_ARGS" =~ (^|[[:space:]])--discuss([[:space:]]|$) ]]; then DISCUSS_PARAM="--discuss"; fi
+RESEARCH_PARAM=""; if [[ "$GSD_ARGS" =~ (^|[[:space:]])--research([[:space:]]|$) ]]; then RESEARCH_PARAM="--research"; fi
+VALIDATE_PARAM=""; if [[ "$GSD_ARGS" =~ (^|[[:space:]])--validate([[:space:]]|$) ]]; then VALIDATE_PARAM="--validate"; fi
+FULL_PARAM=""; if [[ "$GSD_ARGS" =~ (^|[[:space:]])--full([[:space:]]|$) ]]; then FULL_PARAM="--full"; fi
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +["'\'']?([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -1)
 INIT=$(gsd_run query init.quick ${GSD_WS:+--ws=${GSD_WS##* }} "$DESCRIPTION" $DISCUSS_PARAM $RESEARCH_PARAM $VALIDATE_PARAM $FULL_PARAM)
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 AGENT_SKILLS_PLANNER=$(gsd_run query agent-skills gsd-planner ${GSD_WS:+--ws=${GSD_WS##* }})
@@ -260,6 +264,12 @@ Create the directory for this quick task:
 ```bash
 QUICK_DIR="${task_dir}"
 mkdir -p "$QUICK_DIR"
+# Worktree-relative form for an isolated executor (#5085): the guard blocks absolute paths outside its worktree.
+_QTOP=$(git rev-parse --show-toplevel 2>/dev/null)
+_QTOP_DIR=$(git -C "$QUICK_DIR" rev-parse --show-toplevel 2>/dev/null)
+QUICK_DIR_REL=$(git -C "$QUICK_DIR" rev-parse --show-prefix 2>/dev/null)
+QUICK_DIR_REL="${QUICK_DIR_REL%/}"
+if [ -z "$QUICK_DIR_REL" ] || [ "$_QTOP" != "$_QTOP_DIR" ]; then QUICK_DIR_REL="$QUICK_DIR"; fi
 ```
 
 Report to user:
@@ -272,7 +282,7 @@ Store `$QUICK_DIR` for use in orchestration.
 
 ---
 
-**Step 4 ordering (#3894):** Check whether `workflow.research_before_questions` is enabled in `.planning/config.json` (or the config from init context) — the same check `/gsd:discuss-phase` and `/gsd:new-project` already make. When **enabled**, execute the research-phase section BELOW BEFORE the discussion-phase section: a gray-area answer given without research is written to `<quick_id>-CONTEXT.md` as a locked decision downstream agents are told not to revisit, so the evidence must come first. When **false or unset**, keep the written order (discussion, then research) — behavior unchanged.
+**Step 4 ordering (#3894):** Check whether `workflow.research_before_questions` is enabled in `{planning_root}/config.json` (`{planning_root}`: the active scope's root, from `planning.inspect`) (or the config from init context) — the same check `/gsd:discuss-phase` and `/gsd:new-project` already make. When **enabled**, execute the research-phase section BELOW BEFORE the discussion-phase section: a gray-area answer given without research is written to `<quick_id>-CONTEXT.md` as a locked decision downstream agents are told not to revisit, so the evidence must come first. When **false or unset**, keep the written order (discussion, then research) — behavior unchanged.
 
 <!-- gsd:section id="discussion-phase" when="flag:--discuss" -->
 If `section_manifest` is `null` or `"discussion-phase"` is in its `included` list: read and execute `gsd-core/workflows/quick/steps/discussion-phase.md`. Otherwise skip — do not read the file.
@@ -405,7 +415,7 @@ fi
 # (`none` also clears the stored harnessFlag, since none applies to sequential
 # dispatch). Best-effort: a write failure here must never fail the task — the
 # guards' own sentinel-absent fallback is safe, just less precise.
-gsd_run query dispatch-isolation --raw --force-isolation "$ISOLATION" >/dev/null 2>&1 || true
+gsd_run query dispatch-isolation --raw --force-isolation "$ISOLATION" ${_RENEW_HELD:+--renew-held} ${_RENEW_HELD:+"$_RENEW_HELD"} >/dev/null 2>&1 || true
 ```
 
 Capture current HEAD before spawning (used for worktree branch check):
@@ -461,7 +471,11 @@ if [ ! -f "$QUICK_RESEARCH_PATH" ] && git cat-file -e "${QUICK_PLAN_COMMIT}:$QUI
   }
 fi
 ` : ''}\`\`\`
-` : ''}
+` : `
+<sequential_execution>
+You are running as a SEQUENTIAL executor agent on the main working tree (set SEQUENTIAL=true in your Step 0 commit guard; a linked worktree on the configured branch is allowed, #4799).
+</sequential_execution>
+`}
 
 <required_reading>
 - ${QUICK_DIR}/${quick_id}-PLAN.md (Plan)
@@ -512,8 +526,9 @@ SUMMARY.md and stop — the user must rerun with worktrees disabled.
 - Execute all tasks in the plan
 - Commit each task atomically (code changes only)
 - Run the <submodule_commit_guard> bash block before every \`git commit\` if SUBMODULE_PATHS is non-empty
-- Create summary at: ${QUICK_DIR}/${quick_id}-SUMMARY.md with `status: complete` in SUMMARY frontmatter (required so the audit-open milestone-close scanner recognises the task as done, not [unknown])
+- Create summary at: ${ISOLATION === "harness-worktree" ? QUICK_DIR_REL : QUICK_DIR}/${quick_id}-SUMMARY.md with `status: complete` in SUMMARY frontmatter (required so the audit-open milestone-close scanner recognises the task as done, not [unknown])
 - Do NOT commit docs artifacts (SUMMARY.md, STATE.md, PLAN.md) — the orchestrator handles the docs commit in Step 8
+- If a Write/Edit is denied by gsd-worktree-path-guard, stop and report the denial in your final message — do not work around it by copying or moving the file with Bash (cp, mv, redirects)
 - Do NOT update ROADMAP.md (quick tasks are separate from planned phases)
 </constraints>
 ",
@@ -526,7 +541,7 @@ SUMMARY.md and stop — the user must rerun with worktrees disabled.
 
 > **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
 
-If the executor ran isolated (`ISOLATION = "harness-worktree"` at dispatch), append its returned `{agent_id, worktree_path, branch, expected_base, allowed_bases}` metadata to `QUICK_WORKTREE_MANIFEST` before cleanup. Set `expected_base` to `${EXPECTED_BASE}` and `allowed_bases` to `["${EXPECTED_BASE}", "${QUICK_PLAN_PARENT}"]` with duplicates removed. If any required field is unavailable, stop and ask for recovery; do not discover global worktrees.
+If the executor ran isolated (`ISOLATION = "harness-worktree"` at dispatch), append its returned `{agent_id, worktree_path, branch, expected_base, allowed_bases}` metadata to `QUICK_WORKTREE_MANIFEST` before cleanup. Set `expected_base` to `${EXPECTED_BASE}` and `allowed_bases` to `["${EXPECTED_BASE}", "${QUICK_PLAN_PARENT}"]` with duplicates and empty values removed. If any required field is unavailable, stop and ask for recovery; do not discover global worktrees.
 
 After executor returns:
 1. **Worktree cleanup:** If the executor ran isolated (`ISOLATION = "harness-worktree"` at dispatch), merge the worktree branch back and clean up:
@@ -659,14 +674,22 @@ escaping the reader (`parseMarkdownTable`) requires, so a `${DESCRIPTION}` conta
 Do NOT use the Edit tool to write this row directly; that raw-interpolation path is the defect this
 step now avoids.
 
+STATE.md is a digest: the row names the task, the task's SUMMARY.md holds the detail (#5830). Set
+`TASK_TITLE` to a one-line title of at most 240 characters — `${DESCRIPTION}` itself when it is
+already one short line, otherwise a summary of it. Never paste the SUMMARY or a multi-sentence
+description into the row. A longer `--task` is still written in full, but the command reports a
+`warnings` entry; if it does, shorten the title next time rather than editing the row.
+
 **If `$VALIDATE_MODE` (or table has Status column):**
 ```bash
-gsd_run quick-tasks-append --quick-id "${quick_id}" --slug "${slug}" --task "${DESCRIPTION}" --status "${VERIFICATION_STATUS}"
+TASK_TITLE="${DESCRIPTION}"  # always this task's text; swap in a one-line summary only if it is long
+gsd_run quick-tasks-append --quick-id "${quick_id}" --slug "${slug}" --task "${TASK_TITLE}" --status "${VERIFICATION_STATUS}"
 ```
 
 **If NOT `$VALIDATE_MODE` (and table has no Status column):**
 ```bash
-gsd_run quick-tasks-append --quick-id "${quick_id}" --slug "${slug}" --task "${DESCRIPTION}"
+TASK_TITLE="${DESCRIPTION}"  # always this task's text; swap in a one-line summary only if it is long
+gsd_run quick-tasks-append --quick-id "${quick_id}" --slug "${slug}" --task "${TASK_TITLE}"
 ```
 
 Both forms emit the row this step previously authored by hand: `--quick-id`/`--slug` derive the same
@@ -681,7 +704,7 @@ a positional ordinal and `Directory` reads `—`.
 
 Use `date` from init:
 ```
-Last activity: ${date} - Completed quick task ${quick_id}: ${DESCRIPTION}
+Last activity: ${date} - Completed quick task ${quick_id}: ${TASK_TITLE}
 ```
 
 Use the Edit tool for 7a/7b/7d (section creation and the Last activity line). 7c above writes through `gsd_run quick-tasks-append`, not the Edit tool.
@@ -695,7 +718,7 @@ Stage and commit quick task artifacts. This step MUST always run — even if the
 Build file list:
 - `${QUICK_DIR}/${quick_id}-PLAN.md`
 - `${QUICK_DIR}/${quick_id}-SUMMARY.md`
-- `.planning/STATE.md`
+- `${STATE_PATH}`
 - If `$DISCUSS_MODE` and context file exists: `${QUICK_DIR}/${quick_id}-CONTEXT.md`
 - If `$RESEARCH_MODE` and research file exists: `${QUICK_DIR}/${quick_id}-RESEARCH.md`
 - If `$VALIDATE_MODE` and verification file exists: `${QUICK_DIR}/${quick_id}-VERIFICATION.md`

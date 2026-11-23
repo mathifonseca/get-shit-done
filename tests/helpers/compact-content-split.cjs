@@ -32,7 +32,7 @@ const path = require('node:path');
 
 const {
   REPO_ROOT,
-  GIT_TIMEOUT_MS,
+  EMITTED_RUNTIME_GIT_TIMEOUT_MS,
   safeDirArgs,
 } = require('./emitted-runtime.cjs');
 const { NEW_FILE_CAP, ACK_TRAILER_DELIM, normalizeAckReason } = require('./emitted-diff.cjs');
@@ -172,6 +172,21 @@ const KNOWN_BOILERPLATE_PREFIXES = [
 ];
 
 /**
+ * The four-line argument-capture block (#5143) every shell fence that reads the
+ * typed text opens with: a quoted heredoc whose body is the `$ARGUMENTS` token,
+ * then a trailing-newline strip. A Read-loaded detail file is a separate shell
+ * context from its spine, so each carries its own copy — the same sanctioned
+ * duplication as the launcher preamble. Exact lines only: nothing else that
+ * merely starts with `$ARGUMENTS` is exempt.
+ */
+const ARGUMENT_CAPTURE_LINES = new Set([
+  "IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true",
+  '$ARGUMENTS',
+  'GSD_ARGS_END',
+  "GSD_ARGS=${GSD_ARGS%$'\\n'}",
+]);
+
+/**
  * Is `line` one of the corpus's known sanctioned cross-file duplicates: the
  * canonical `gsd_run` launcher bootstrap preamble (see
  * `gsd-core/workflows/_runtime-launcher.snippet.sh`,
@@ -190,6 +205,7 @@ const KNOWN_BOILERPLATE_PREFIXES = [
  */
 function isKnownSanctionedBoilerplate(line) {
   if (line.startsWith('_GSD_SHIM_NAME="gsd-tools.cjs";')) return true;
+  if (ARGUMENT_CAPTURE_LINES.has(line)) return true;
   return KNOWN_BOILERPLATE_PREFIXES.some((prefix) => line.startsWith(prefix));
 }
 
@@ -304,7 +320,7 @@ const BOUNDARY_VALUE_SEP = '\x1d'; // between multiple values of the SAME traile
  * — never an empty result — same "a git failure is a hard error" law as
  * every other git-touching helper in this test suite.
  */
-function boundaryTrailerGit(args, { cwd = REPO_ROOT, timeoutMs = GIT_TIMEOUT_MS } = {}) {
+function boundaryTrailerGit(args, { cwd = REPO_ROOT, timeoutMs = EMITTED_RUNTIME_GIT_TIMEOUT_MS } = {}) {
   const result = runGit([...safeDirArgs(cwd), ...args], { cwd, timeoutMs });
   if (result.outcome === OUTCOME.EXITED && result.exitCode === 0) {
     return result.stdout;
@@ -397,7 +413,7 @@ function parseBoundaryMoveTrailerValues(values) {
  * @param {{baseRef: string, headRef?: string, cwd?: string, timeoutMs?: number}} opts
  * @returns {{declarations: Map<string, {reason: string}>, errors: string[]}}
  */
-function readBoundaryMoveTrailers({ baseRef, headRef = 'HEAD', cwd = REPO_ROOT, timeoutMs = GIT_TIMEOUT_MS } = {}) {
+function readBoundaryMoveTrailers({ baseRef, headRef = 'HEAD', cwd = REPO_ROOT, timeoutMs = EMITTED_RUNTIME_GIT_TIMEOUT_MS } = {}) {
   let mergeBaseOut;
   try {
     mergeBaseOut = boundaryTrailerGit(['merge-base', baseRef, headRef], { cwd, timeoutMs });

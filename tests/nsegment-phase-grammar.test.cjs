@@ -22,8 +22,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { HOOK_FANOUT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
-const TIMEOUT = 5000;
+// Each spawn runs a bash that pipes through grep/awk: a shell fan-out, not a single short probe. A fixed
+// 5 s bound returned '' on a loaded macOS runner (the push run on next at 60176b8ab8 went red on
+// `23.1.2 extracts 23.1.2`, took 5007 ms) and failed the base-health gate for every queued PR.
+const TIMEOUT = HOOK_FANOUT_TIMEOUT_MS;
 
 const CODE_REVIEW = path.join(__dirname, '..', 'gsd-core', 'workflows', 'code-review.md');
 const CODE_REVIEW_FIX = path.join(__dirname, '..', 'gsd-core', 'workflows', 'code-review-fix.md');
@@ -435,7 +439,7 @@ describe('#4748 — the $((10#$PHASE_INT)) split sites carry a letter suffix int
         }
 
         test(`the commit-scope ERE built from PHASE_N matches both the padded and the unpadded scope of a letter phase${label}`, () => {
-          // Each site feeds PHASE_N into `^[a-z]+\((0*${PHASE_N})-(0*${PLAN_N})\):`
+          // Each site feeds PHASE_N into `^[a-z]+\((0*${PHASE_N})-(0*${PLAN_N})\)!?:`
           // — the #4003 zero-pad-tolerant scope. Prove the value it now yields
           // for `03A` matches the two subjects an executor could have written,
           // and does NOT match the letter-less phase 3.
@@ -443,7 +447,7 @@ describe('#4748 — the $((10#$PHASE_INT)) split sites carry a letter suffix int
             'set -e',
             splitLine,
             nLine,
-            `SCOPE_RE="^[a-z]+\\((0*\${${site.output}})-(0*1)\\):"`,
+            `SCOPE_RE="^[a-z]+\\((0*\${${site.output}})-(0*1)\\)!?:"`,
             'for s in "feat(3A-01): x" "feat(03A-1): x"; do printf \'%s\\n\' "$s" | grep -qE "$SCOPE_RE" || { echo "MISS $s"; exit 3; }; done',
             'printf \'%s\\n\' "feat(3-01): x" | grep -qE "$SCOPE_RE" && { echo "FALSE-MATCH"; exit 4; }',
             'echo OK',
@@ -549,10 +553,10 @@ describe('#4748 — autonomous.md --from/--to/--only and plan-review-convergence
   const prcText = fs.readFileSync(PLAN_REVIEW_CONVERGENCE, 'utf8');
 
   const sites = [
-    { name: 'autonomous.md --from', pattern: extractGrepPattern(autonomousText, 'FROM_PHASE=$(echo "$ARGUMENTS" | grep -oE'), args: (v) => `--from ${v}`, tail: "| awk '{print $2}'" },
-    { name: 'autonomous.md --to', pattern: extractGrepPattern(autonomousText, 'TO_PHASE=$(echo "$ARGUMENTS" | grep -oE'), args: (v) => `--from 1 --to ${v}`, tail: "| awk '{print $2}'" },
-    { name: 'autonomous.md --only', pattern: extractGrepPattern(autonomousText, 'ONLY_PHASE=$(echo "$ARGUMENTS" | grep -oE'), args: (v) => `--only ${v} --interactive`, tail: "| awk '{print $2}'" },
-    { name: 'plan-review-convergence.md', pattern: extractGrepPattern(prcText, 'PHASE=$(echo "$ARGUMENTS" | grep -oE'), args: (v) => `${v} --codex --max-cycles 3`, tail: '| head -1' },
+    { name: 'autonomous.md --from', pattern: extractGrepPattern(autonomousText, 'FROM_PHASE=$(echo "$GSD_ARGS" | grep -oE'), args: (v) => `--from ${v}`, tail: "| awk '{print $2}'" },
+    { name: 'autonomous.md --to', pattern: extractGrepPattern(autonomousText, 'TO_PHASE=$(echo "$GSD_ARGS" | grep -oE'), args: (v) => `--from 1 --to ${v}`, tail: "| awk '{print $2}'" },
+    { name: 'autonomous.md --only', pattern: extractGrepPattern(autonomousText, 'ONLY_PHASE=$(echo "$GSD_ARGS" | grep -oE'), args: (v) => `--only ${v} --interactive`, tail: "| awk '{print $2}'" },
+    { name: 'plan-review-convergence.md', pattern: extractGrepPattern(prcText, 'PHASE=$(echo "$GSD_ARGS" | grep -oE'), args: (v) => `${v} --codex --max-cycles 3`, tail: '| head -1' },
   ];
 
   function extract(site, v) {

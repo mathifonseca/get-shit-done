@@ -693,11 +693,12 @@ describe('F. Real registry execute:wave:post shape — guard against accidental 
     // by #4740 removing claude-orchestration's execute:wave:pre contribution.
     // Fork: playwright, definition-of-done and adversarial-validation contribute here
     // (were inline <step> blocks in execute-phase.md before the capability migration).
-    assert.strictEqual(point.contributions.length, 5,
-      `execute:wave:post must have 5 contributions; got ${point.contributions.length}`);
+    // #5984: mempalace's into:verifier contribution moved to execute:post.
+    assert.strictEqual(point.contributions.length, 4,
+      `execute:wave:post must have 4 contributions; got ${point.contributions.length}`);
     const capIds = point.contributions.map(c => c.capId).sort();
     assert.deepStrictEqual(capIds,
-      ['adversarial-validation', 'definition-of-done', 'external-job', 'mempalace', 'playwright'],
+      ['adversarial-validation', 'definition-of-done', 'external-job', 'playwright'],
       `execute:wave:post contributions mismatch; got ${capIds.join(',')}`);
   });
 

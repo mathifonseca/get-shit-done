@@ -40,8 +40,7 @@
 
 const path = require('node:path');
 
-const { cleanup } = require('../helpers.cjs');
-const { MANIFEST_FAMILIES, runMinimalInstall, buildParityManifest } = require('./install-shared.cjs');
+const { MANIFEST_FAMILIES, installRuntimeFixture, buildParityManifest } = require('./install-shared.cjs');
 
 /**
  * Number of runtime manifests the guard expects to cover. Asserted, so a glob that
@@ -222,7 +221,7 @@ function stripSkillPrefix(dirName) {
  * capability registry — the only place that mapping is declared.
  * Returns null when the runtime declares none.
  */
-function nativePluginDescriptor(runtime) {
+function nativePluginDescriptor(runtime, key = 'nativePlugin') {
   // Required lazily so a missing build surfaces at call time with a clear message
   // rather than at module load for callers that never touch this family.
   let registry;
@@ -239,7 +238,7 @@ function nativePluginDescriptor(runtime) {
     && registry.runtimes[runtime]
     && registry.runtimes[runtime].runtime
     && registry.runtimes[runtime].runtime.hostBehaviors;
-  return (entry && entry.nativePlugin) || null;
+  return (entry && entry[key]) || null;
 }
 
 // ─── The table ────────────────────────────────────────────────────────────────
@@ -609,6 +608,25 @@ const PROVENANCE_RULES = [
     },
   },
 
+  // ── Descriptor-declared terminal-client (CLI) plugin ───────────────────────
+  // OpenCode 2.x statusline: plugins/<dir>/<file>, source declared by hostBehaviors.nativeCliPlugin.
+  {
+    id: 'native-cli-plugin',
+    kind: 'descriptor',
+    roots: ['plugins'],
+    pattern: /^gsd-statusline\/tui\.tsx$/,
+    sources: (m, ctx) => {
+      const cli = nativePluginDescriptor(ctx.runtime, 'nativeCliPlugin');
+      if (!cli || !cli.source) {
+        throw new Error(
+          `emitted-provenance: runtime "${ctx.runtime}" emits ${ctx.rel} but declares ` +
+          'no hostBehaviors.nativeCliPlugin.source in the capability registry',
+        );
+      }
+      return [cli.source];
+    },
+  },
+
   // ── Code-derived: content is a literal in a repo source file ──────────────
   // Attributable on purpose. Marking these exempt would make them permanently
   // blind — they could change forever without ever raising an alarm.
@@ -849,15 +867,18 @@ assertNoIdentityTransforms(PROVENANCE_RULES);
  * @param {object} [deps]  injected for testability (hostile-input coverage below) —
  *   production callers use the defaults.
  * @param {Array}    [deps.families]  MANIFEST_FAMILIES by default
- * @param {function} [deps.install]   runMinimalInstall by default
+ * @param {function} [deps.install]   installRuntimeFixture by default: the trees are
+ *   only read here, so each is the run's shared one (#6335)
  * @param {function} [deps.build]     buildParityManifest by default
- * @param {function} [deps.clean]     cleanup by default
+ * @param {function} [deps.clean]     called with each root after its build. Nothing by
+ *   default: a shared tree is not this caller's to remove. A caller that injects an
+ *   `install` making private trees injects the matching `clean`.
  */
 function loadManifests({
   families = MANIFEST_FAMILIES,
-  install = runMinimalInstall,
+  install = installRuntimeFixture,
   build = buildParityManifest,
-  clean = cleanup,
+  clean = () => {},
 } = {}) {
   return families.map(({ name, runtime, scope }) => {
     const { configDir, root } = install({ runtime, scope });

@@ -25,12 +25,16 @@ Parse `$ARGUMENTS` for the idea summary.
 First, check for an enrich flag:
 
 ```bash
-if echo "$ARGUMENTS" | grep -qE '\-\-enrich[[:space:]]+SEED-[0-9]+(-[a-zA-Z0-9]{3})?'; then
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
+if echo "$GSD_ARGS" | grep -qE '\-\-enrich[[:space:]]+SEED-[0-9]+(-[a-zA-Z0-9]{3})?'; then
   # Anchor on the flag and capture the COMPLETE id — uppercase-tolerant, since
   # the docs display SEED-YYMMDD-XXX. A leftmost `SEED-[0-9]+` would truncate
   # an uppercase or malformed suffix to its date and enrich an arbitrary
   # same-day seed (#4378 review).
-  ENRICH_MATCH=$(echo "$ARGUMENTS" | grep -oE '\-\-enrich[[:space:]]+SEED-[0-9]+(-[a-zA-Z0-9]{3})?' | head -1)
+  ENRICH_MATCH=$(echo "$GSD_ARGS" | grep -oE '\-\-enrich[[:space:]]+SEED-[0-9]+(-[a-zA-Z0-9]{3})?' | head -1)
   ENRICH_TARGET=${ENRICH_MATCH##*[[:space:]]}
   SEED_FILE=$(ls .planning/seeds/${ENRICH_TARGET}-*.md 2>/dev/null) || true
   if [ -z "$SEED_FILE" ]; then
@@ -44,8 +48,8 @@ if echo "$ARGUMENTS" | grep -qE '\-\-enrich[[:space:]]+SEED-[0-9]+(-[a-zA-Z0-9]{
   fi
   # Skip to enrich-seed step — do not prompt for $IDEA
 else
-  if [ -n "$ARGUMENTS" ]; then
-    IDEA="$ARGUMENTS"
+  if [ -n "$GSD_ARGS" ]; then
+    IDEA="$GSD_ARGS"
   else
     # Ask only when no arguments at all
     # What's the idea? (one sentence)
@@ -69,12 +73,12 @@ mkdir -p .planning/seeds
 
 <step name="generate-seed-id">
 ```bash
-# Seed id: date + 3 random base36 chars (the `.planning/quick/` shape).
+# Seed id: date + 3 random base36 chars (the quick-task id shape).
 # NO shared counter: `.planning/seeds/` is shared, but each worktree only sees
 # what has merged — counting files collides across parallel workstreams (#4378).
 # Residual bound: two workstreams planting the same day before either merges
 # can still draw the same suffix (~1 in 46,656 per pair) — the same bound the
-# `.planning/quick/` scheme accepts.
+# quick-task id scheme accepts.
 SEED_DATE=$(date +%y%m%d)
 SEED_ID=""
 for _SEED_ATTEMPT in 1 2; do

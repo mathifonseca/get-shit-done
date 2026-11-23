@@ -44,7 +44,7 @@ Core package and are stamped with the package version at release (per
 ADR-1244 D6). They are not subject to the consent or integrity-pin flow applied
 to third-party capabilities.
 
-### Feature capabilities (role: feature) — 27
+### Feature capabilities (role: feature) — 28
 
 Feature capabilities extend what the loop does — contributing research,
 planning, execution, verification, or ship artefacts at the loop extension
@@ -59,6 +59,7 @@ points.
 | `broken-windows` | feature | full | `>=1.7.0` | `ship:pre` | gate | first-party |
 | `claude-orchestration` | feature | full | `>=1.7.0` | `plan:post` | contribution | first-party |
 | `code-review` | feature | full | `>=1.6.0` | `execute:wave:post`, `execute:post` | step | first-party |
+| `deep-verify` | feature | full | `>=1.22.0` | `verify:pre` | step | first-party |
 | `definition-of-done` | feature | full | `>=1.6.0` | `execute:wave:post` | contribution | first-party |
 | `design-spec` | feature | full | `>=1.6.0` | `discuss:post` | contribution | first-party |
 | `drift` | feature | full | `>=1.6.0` | `plan:pre`, `execute:wave:post` | gate | first-party |
@@ -67,7 +68,7 @@ points.
 | `graphify` | feature | full | `>=1.6.0` | — | — | first-party |
 | `intel` | feature | full | `>=1.6.0` | `plan:pre` | step | first-party |
 | `live-dom-uat` | feature | full | `>=1.11.0` | `execute:wave:post` | step | first-party |
-| `mempalace` | feature | full | `>=1.6.0` | `discuss:pre`, `discuss:post`, `plan:pre`, `plan:post`, `execute:wave:post`, `verify:post`, `ship:post` | step, contribution | first-party |
+| `mempalace` | feature | full | `>=1.6.0` | `discuss:pre`, `discuss:post`, `plan:pre`, `plan:post`, `execute:post`, `verify:post`, `ship:post` | step, contribution | first-party |
 | `nyquist` | feature | full | `>=1.6.0` | `verify:post` | step | first-party |
 | `pattern-mapper` | feature | full | `>=1.6.0` | `plan:pre` | step | first-party |
 | `playwright` | feature | full | `>=1.6.0` | `execute:wave:post` | contribution | first-party |

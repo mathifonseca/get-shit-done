@@ -20,6 +20,7 @@ import { platformWriteSync, retryRenameSync, posixNormalize } from './shell-comm
 import { realClock, type Clock } from './clock.cjs';
 import { isInstallScopeId, type InstallScope } from './install-scope.cjs';
 import { tryWithinRootLexical } from './security.cjs';
+import { hasJsoncFeatures, setJsoncValue } from './jsonc-edit.cjs';
 // #2874 (ADR-58 cleanup phase): this file is the ~1200-line migration
 // plan/apply/rollback/lock/journal engine — almost none of it is on the
 // installRuntimeArtifacts call tree. Only `readInstallManifest` and
@@ -333,9 +334,24 @@ function readInstallManifest(configDir: string): InstallManifest {
   };
 }
 
+/** Which OpenCode generation the install was made for (ADR-5331 D2; #5337). Deterministic: no timestamps. */
+interface HostGeneration {
+  runtime: 'opencode';
+  generation: 1 | 2;
+  version: string | null;
+}
+
 interface InstallState {
   schemaVersion: number;
   appliedMigrations: Array<Record<string, unknown>>;
+  hostGeneration?: HostGeneration;
+}
+
+function normalizeHostGeneration(raw: unknown): HostGeneration | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  if (r.runtime !== 'opencode' || (r.generation !== 1 && r.generation !== 2)) return undefined;
+  return { runtime: 'opencode', generation: r.generation, version: typeof r.version === 'string' ? r.version : null };
 }
 
 function readInstallState(configDir: string): InstallState {
@@ -344,9 +360,11 @@ function readInstallState(configDir: string): InstallState {
     return { schemaVersion: 1, appliedMigrations: [] };
   }
   const s = state as Record<string, unknown>;
+  const hostGeneration = normalizeHostGeneration(s.hostGeneration);
   return {
     schemaVersion: typeof s.schemaVersion === 'number' ? s.schemaVersion : 1,
     appliedMigrations: Array.isArray(s.appliedMigrations) ? s.appliedMigrations as Array<Record<string, unknown>> : [],
+    ...(hostGeneration ? { hostGeneration } : {}),
   };
 }
 
@@ -748,9 +766,32 @@ interface PlannedAction extends MigrationAction {
   requestedType?: string;
   backupRelPath?: string | null;
   value?: unknown;
+  /** Path edits equivalent to `value`, applied as text edits when the file carries JSONC syntax (#5334). */
+  edits?: Array<{ path: string[]; value: unknown }>;
   deleteIfEmpty?: boolean;
   prompt?: unknown;
   choices?: unknown[];
+}
+
+/**
+ * The text a `rewrite-json` action writes. A file with JSONC syntax (comments, trailing commas, or a
+ * `.jsonc` name) is edited in place from the action's `edits`, so the user's annotations survive (#5334);
+ * everything else, and any edit the text editor cannot place, is written as the action's whole `value`.
+ */
+function renderRewrittenJson(fullPath: string, action: PlannedAction): string {
+  if (Array.isArray(action.edits) && action.edits.length > 0) {
+    let original: string | null = null;
+    try { original = fs.readFileSync(fullPath, 'utf8'); } catch { /* fall through to the value rewrite */ }
+    if (original !== null && (fullPath.endsWith('.jsonc') || hasJsoncFeatures(original))) {
+      let text: string | null = original;
+      for (const edit of action.edits) {
+        text = setJsoncValue(text, edit.path, edit.value);
+        if (text === null) break;
+      }
+      if (text !== null) return text;
+    }
+  }
+  return JSON.stringify(action.value, null, 2) + '\n';
 }
 
 interface MigrationPlan {
@@ -853,6 +894,7 @@ function planInstallerMigrations({
       }
       if (action.type === 'rewrite-json') {
         action.value = rawAction.value;
+        if (Array.isArray(rawAction.edits)) action.edits = rawAction.edits as Array<{ path: string[]; value: unknown }>;
         action.deleteIfEmpty = rawAction.deleteIfEmpty === true;
       }
       if (rawAction.prompt) action.prompt = rawAction.prompt;
@@ -1046,7 +1088,7 @@ function applyInstallerMigrationPlan({
             rollbackRelPath: path.posix.join(rollbackRootRelPath, normalized),
           }));
         } else {
-          platformWriteSync(fullPath, JSON.stringify(action.value, null, 2) + '\n');
+          platformWriteSync(fullPath, renderRewrittenJson(fullPath, action));
           journal.actions.push(journalAction(action, 'rewritten', {
             rollbackRelPath: path.posix.join(rollbackRootRelPath, normalized),
           }));
@@ -1097,6 +1139,7 @@ function applyInstallerMigrationPlan({
     writeInstallState(configDir, {
       schemaVersion: 1,
       appliedMigrations: nextApplied,
+      ...(state.hostGeneration ? { hostGeneration: state.hostGeneration } : {}),
     });
 
     return {
@@ -1177,6 +1220,7 @@ function markPendingMigrationsApplied({
     writeInstallState(configDir, {
       schemaVersion: 1,
       appliedMigrations: nextApplied,
+      ...(state.hostGeneration ? { hostGeneration: state.hostGeneration } : {}),
     });
   }
   return newlyApplied;
@@ -1257,6 +1301,18 @@ function runInstallerMigrations({
 // and may be used by test code that patches this module.
 void sleepSync;
 
+/**
+ * Record which OpenCode generation this install targets (ADR-5331 D2; #5337). Idempotent and
+ * atomic; leaves the applied-migrations journal untouched.
+ */
+function recordHostGeneration(configDir: string, info: { generation: 1 | 2; version?: string | null }): void {
+  const state = readInstallState(configDir);
+  const next: HostGeneration = { runtime: 'opencode', generation: info.generation, version: info.version ?? null };
+  const prev = state.hostGeneration;
+  if (prev && prev.generation === next.generation && prev.version === next.version) return;
+  writeInstallState(configDir, { ...state, hostGeneration: next });
+}
+
 export = {
   DEFAULT_MIGRATIONS_DIR,
   INSTALL_MIGRATION_LOCK_NAME,
@@ -1273,6 +1329,7 @@ export = {
   planInstallerMigrations,
   readInstallManifest,
   readInstallState,
+  recordHostGeneration,
   runInstallerMigrations,
   writeInstallState,
 };

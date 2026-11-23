@@ -253,6 +253,39 @@ function runInstalledTreeAudit(cwd, opts = {}) {
 }
 
 /**
+ * `-c safe.directory=<repoRoot>` for the baseline's git calls (#5659). On the gsd-test bench the
+ * checkout is owned by a different uid than the one running the tests, so git refuses every command
+ * ("detected dubious ownership") and the baseline silently resolved to nothing, which sent the
+ * integrity tests to their zero-tolerance fallback. git honors `safe.directory` from the command line
+ * only; scoping it to the audited repo root (never `*`, never global config) trusts exactly the
+ * checkout being audited. Same precedent as scripts/lint-compiled-artifact-sync.cjs.
+ */
+function safeDirectoryArgs(repoRoot) {
+  // git compares safe.directory against its forward-slash path, also on Windows.
+  return ['-c', `safe.directory=${String(repoRoot).replace(/\\/g, '/')}`];
+}
+
+/**
+ * One line saying why no baseline resolved (#5659), for the integrity gate's zero-tolerance message.
+ * Without it a git refusal (ownership, a missing git, a broken checkout) is indistinguishable from a
+ * checkout that simply has no `origin/next`, which is how the ownership problem hid. Only the first
+ * line git printed is kept.
+ */
+function explainNoBaseline(repoRoot, { execFileSyncImpl = execFileSync } = {}) {
+  try {
+    execFileSyncImpl('git', [...safeDirectoryArgs(repoRoot), 'rev-parse', '--git-dir'], {
+      cwd: repoRoot,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (error) {
+    const detail = String((error && (error.stderr || error.message)) || '').trim().split(/\r?\n/)[0];
+    return `git could not read ${repoRoot}${detail ? `: ${detail}` : ''}`;
+  }
+  return 'no baseline ref (origin/next, next) resolved, or it lacks package.json / package-lock.json';
+}
+
+/**
  * Extracts package.json + package-lock.json (optionally under `subdir`,
  * e.g. 'sdk') from `ref` at git object level into a fresh temp directory --
  * no working-tree checkout, no `node_modules` install. Returns the temp
@@ -260,17 +293,17 @@ function runInstalledTreeAudit(cwd, opts = {}) {
  * clone that never fetched it) or either file is absent at that ref --
  * callers treat `null` as "no baseline available", not an error.
  */
-function extractBaselineTree(ref, repoRoot, subdir = '') {
+function extractBaselineTree(ref, repoRoot, subdir = '', { execFileSyncImpl = execFileSync } = {}) {
   const rel = (name) => (subdir ? path.posix.join(subdir, name) : name);
   let pkgJson;
   let lockJson;
   try {
-    pkgJson = execFileSync('git', ['show', `${ref}:${rel('package.json')}`], {
+    pkgJson = execFileSyncImpl('git', [...safeDirectoryArgs(repoRoot), 'show', `${ref}:${rel('package.json')}`], {
       cwd: repoRoot,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    lockJson = execFileSync('git', ['show', `${ref}:${rel('package-lock.json')}`], {
+    lockJson = execFileSyncImpl('git', [...safeDirectoryArgs(repoRoot), 'show', `${ref}:${rel('package-lock.json')}`], {
       cwd: repoRoot,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -290,13 +323,43 @@ function extractBaselineTree(ref, repoRoot, subdir = '') {
 const NULL_SHA = '0000000000000000000000000000000000000000';
 
 /**
+ * On a pull_request run (GITHUB_BASE_REF set) the pin `pull_request.base.sha` can be OLDER than the
+ * base commit the tested merge ref actually contains (#5797, #5897): the baseline lockfile then
+ * predates part of `next`, and packages `next` itself made vulnerable read as introduced by the PR.
+ * Advance the pin to `merge-base(origin/<GITHUB_BASE_REF>, HEAD)` -- fixed for a given HEAD, since the
+ * base tip only gains commits HEAD lacks -- but only when the pin is an ancestor of it, so the result
+ * is never below the pin. Every other case returns the pin unchanged: no GITHUB_BASE_REF (push,
+ * merge_group, release lanes), a base ref or merge-base git cannot resolve (shallow clone), or a pin
+ * that is not an ancestor. A PR's own lockfile change is in HEAD only, so it still diffs as introduced.
+ */
+function advancePinToMergedBase(pin, repoRoot, { execFileSyncImpl = execFileSync } = {}) {
+  const baseBranch = process.env.GITHUB_BASE_REF;
+  if (!baseBranch) return pin;
+  const git = (args) => execFileSyncImpl('git', [...safeDirectoryArgs(repoRoot), ...args], {
+    cwd: repoRoot,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  try {
+    const mergeBase = String(git(['merge-base', `origin/${baseBranch}`, 'HEAD'])).trim();
+    if (!mergeBase || mergeBase === pin) return pin;
+    git(['merge-base', '--is-ancestor', pin, mergeBase]); // throws (exit 1) when the pin is not an ancestor
+    return mergeBase;
+  } catch {
+    return pin;
+  }
+}
+
+/**
  * Resolves the git ref to diff against, in priority order:
  *   1. AUDIT_BASELINE_REF env var -- the primary mechanism. CI sets this
  *      explicitly (see .github/workflows/test.yml) to github.event.pull_
  *      request.base.sha on a pull_request event, or github.event.before on
  *      a push event -- both pinned, race-free values Git/GitHub track for
  *      exactly this purpose. Prefer this over anything below whenever the
- *      caller can provide it.
+ *      caller can provide it. On a pull_request event the pin is a FLOOR,
+ *      not the answer: it is advanced to merge-base(origin/<GITHUB_BASE_REF>,
+ *      HEAD) when that is a descendant of the pin (see advancePinToMergedBase).
  *   2. GITHUB_BASE_REF (GitHub Actions sets this on pull_request events)
  *      resolved against the LIVE origin/<branch> tip. Only reached if
  *      AUDIT_BASELINE_REF wasn't set -- e.g. a workflow that forgot to
@@ -322,12 +385,14 @@ const NULL_SHA = '0000000000000000000000000000000000000000';
  * Returns '' if none resolve -- callers fall back to strict zero-tolerance
  * rather than silently skipping the gate.
  */
-function resolveBaselineRef(repoRoot) {
-  if (process.env.AUDIT_BASELINE_REF) return process.env.AUDIT_BASELINE_REF;
+function resolveBaselineRef(repoRoot, { execFileSyncImpl = execFileSync } = {}) {
+  if (process.env.AUDIT_BASELINE_REF) {
+    return advancePinToMergedBase(process.env.AUDIT_BASELINE_REF, repoRoot, { execFileSyncImpl });
+  }
   if (process.env.GITHUB_BASE_REF) return `origin/${process.env.GITHUB_BASE_REF}`;
   if (process.env.GITHUB_EVENT_NAME === 'push') {
     try {
-      const parent = execFileSync('git', ['rev-parse', '--verify', 'HEAD~1'], {
+      const parent = execFileSyncImpl('git', [...safeDirectoryArgs(repoRoot), 'rev-parse', '--verify', 'HEAD~1'], {
         cwd: repoRoot,
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -338,7 +403,7 @@ function resolveBaselineRef(repoRoot) {
     }
   }
   try {
-    execFileSync('git', ['rev-parse', '--verify', 'origin/next'], {
+    execFileSyncImpl('git', [...safeDirectoryArgs(repoRoot), 'rev-parse', '--verify', 'origin/next'], {
       cwd: repoRoot,
       stdio: 'ignore',
     });
@@ -347,7 +412,7 @@ function resolveBaselineRef(repoRoot) {
     // fall through to a plain local branch
   }
   try {
-    execFileSync('git', ['rev-parse', '--verify', 'next'], {
+    execFileSyncImpl('git', [...safeDirectoryArgs(repoRoot), 'rev-parse', '--verify', 'next'], {
       cwd: repoRoot,
       stdio: 'ignore',
     });
@@ -366,6 +431,7 @@ module.exports = {
   runNpmAuditWithRetry,
   extractBaselineTree,
   resolveBaselineRef,
+  explainNoBaseline,
   isTimeoutKill,
   buildTimeoutKillError,
   sleepSyncMs,

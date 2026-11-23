@@ -125,6 +125,12 @@ const SIZE_ONLY_WORKFLOWS = new Set([
   // Splitting it per the progressive-disclosure pattern is the real fix and is worth its own change
   // — it is already a step file extracted from execute-phase.md for that same reason.
   'gsd-core/workflows/execute-phase/steps/code-review-disposition.md',
+  // ~51.4K after #4790's reviewer-contribution block. This file sat at 49,961 chars on next — 39
+  // below the 50K prompt-stuffing threshold — so, exactly like review.md and quick.md above, it was
+  // going to trip on whatever was added to it next; the block is ~1.5K of code and its rationale.
+  // Size-only: still fully injection scanned. Splitting it per the progressive-disclosure pattern is
+  // the real fix and is worth its own change.
+  'gsd-core/workflows/code-review.md',
 ]);
 
 // ─── Scanner ────────────────────────────────────────────────────────────────
@@ -624,4 +630,15 @@ describe('shell scanner (scripts/prompt-injection-scan.sh) — #3175 left-bounda
     assert.equal(result.outcome, 'exited');
     assert.equal(result.exitCode, 1, 'real "DAN mode" payload must still fire');
   });
+
+  // #5904 — test files whose literals tripped the receiver-blind exec pattern or the
+  // instruction-override pattern must scan clean, since any PR touching them runs the scan.
+  for (const rel of ['core-utils.test.cjs', 'antigravity-reviewer.test.cjs', 'no-unbounded-spawn.test.cjs']) {
+    test(`regression #5904: tests/${rel} scans clean`, () => {
+      const target = path.join(PROJECT_ROOT, 'tests', rel);
+      const result = runHook(SCAN_SCRIPT, ['--file', target], { interpreter: 'bash', timeoutMs: QUICK_SPAWN_TIMEOUT_MS });
+      assert.equal(result.outcome, 'exited');
+      assert.equal(result.exitCode, 0, `expected clean scan, got:\n${result.stdout}`);
+    });
+  }
 });

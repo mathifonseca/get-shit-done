@@ -107,12 +107,27 @@ artifact whose purpose is telling triaged from forgotten.
 **The limitation that follows, stated rather than hidden.** When an ID *is* reused, the new finding
 is recorded `open` (nobody decided anything about it) and the earlier decision **loses its row** —
 the ledger keys rows on the finding ID, and two rows under one ID is an ambiguity, not a record. The
-drop is reported on the console, naming the ID and what had been decided — for a *recorded* decision.
+drop is reported on the console, naming the ID and what had been decided — for a *recorded* decision,
+on every path that displaces one: a plain re-review, a fix report that decides the new finding, and a
+row carried only by a fix report (#5802).
 A prior row still sitting at `open` is replaced silently, and deliberately: `open` means nobody had
 decided anything, so there is no decision to lose. Preserving a recorded decision in the file
 was tried and withdrawn: it needed a second identity scheme and produced a fresh defect on each of
 three review passes. Recovery is the ledger's own git history where `commit_docs` is on — which is
 why the console reports the drop rather than pointing at a commit that may not exist.
+
+**Ids with a review-scoped prefix are refused loudly, never skipped (#5802).** The id grammar is
+`<CR|BL|WR|IN>-NN`. A review heading such as `### W6-CR-01: …` is not read as a finding; it is counted
+into the `unparsed:` shortfall and named on the console ("carry a prefix before the id"). The same holds for a prefixed heading in a fix report (named, not reconciled) and for a multi-segment
+prefix (`W6-R2-CR-01`). A ledger row
+outside the grammar (`| R1-WR-01 | … |`, an indented row, or a row with an unknown disposition) is named on the console and
+kept verbatim after the generated rows, not deleted by the whole-file rewrite; it is not counted in
+`open:` or `total:`. When a regenerated row takes the id of such a row, the row is reset to `open`
+(a value outside the enum is coerced to the safe default) and the console names it with the
+disposition and reason it held, so a hand-set value is never replaced silently. A disposition is
+read case-insensitively (`Deferred` is `deferred`). Two rows for one id are named (the last is used), and
+console names are masked for control characters and capped. A frontmatter `- id:` entry outside the grammar ends
+the previous entry, so its `title:` is never attributed to another finding.
 
 **Two residuals, since (ID, title) is not proof of identity.** A ledger written before titles were
 recorded carries none, so its decisions are inherited on the ID alone — refusing there would reset
@@ -189,3 +204,31 @@ re-review loop rewrites REVIEW.md on every iteration — a ledger kept inside it
 the next pass — and because REVIEW.md has a single writer (`gsd-code-reviewer`) that the gate is
 not. The gate remains advisory throughout: it reports and records, and never blocks phase
 completion.
+
+**Necessity findings (#4100):** at `standard` and `deep` depth the reviewer also asks whether the
+problem a piece of code addresses can occur in this stack at all. Code that is correct and reachable
+but guards against nothing (an impossible-state guard, a concern another layer already owns, a
+pattern whose prerequisites do not hold, a requirement that has lapsed, an abstraction with one
+instantiation) is reported as an ordinary Warning or Info finding carrying a `**Category:** necessity`
+line, never as Critical, and must cite the evidence that the state cannot occur. The frontmatter
+`necessity:` key counts them as a subset of `warning` + `info`; `total:` and the finding IDs are
+unchanged, so the disposition ledger records them like any other finding. Removing code is a scope
+decision, so `--fix` skips necessity findings and `--fix --all` includes them last, each marked for
+human verification. `--fix --auto` also stops once the fixer reports nothing left in its scope,
+rather than re-running to its iteration cap over findings it will never touch. See
+[Resolve necessity findings](../how-to/resolve-necessity-findings.md).
+
+**CI/CD pipeline files (#4101):** workflow files, Dockerfiles, compose files and deploy scripts get
+their own reliability rubric, recognized by path rather than extension. Their defects rarely fail a
+test; they surface at release or deploy time, so the reviewer is the only automated gate that reads
+them before merge. At `standard` and `deep` depth the reviewer checks for non-idempotent steps,
+missing job timeouts, deploy workflows without a concurrency guard, per-environment rebuilds instead
+of build-once/promote, deploys without a health check or rollback, `continue-on-error` on a
+load-bearing step, static cloud credentials where OIDC is supported, and unpinned third-party
+actions. The rubric is read on demand from `gsd-core/references/cicd-review-patterns.md`, which also
+lists what does not count (global tool installs, reusable-workflow calls, tag and SHA pins). `quick`
+depth runs the mechanical subset on GitHub Actions workflows only. Pipeline findings are Warning;
+hardcoded secrets stay Critical. The REVIEW.md format and the fixer scope are unchanged. Quick mode's
+own check list now names its checks and runs each from one command block, which also closes a gap:
+quick reviews now catch secret values containing `-`, `.` or `/`, `passthru`, and commented-out code.
+See [Resolve CI/CD pipeline findings](../how-to/resolve-cicd-pipeline-findings.md).

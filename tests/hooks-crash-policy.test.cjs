@@ -46,6 +46,7 @@ const { createTempDir, cleanup, TEST_ENV_BASE } = require('./helpers.cjs');
 const { runHook: runHookSeam, runNode, OUTCOME } = require('./helpers/process-seam.cjs');
 const { gitOrThrow, GIT_FIXTURE_TIMEOUT_MS } = require('./helpers/git-fixture.cjs');
 const { PROBE_TIMEOUT_MS, STAGED_HOOK_SCRIPT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+const { assertNoLeftoverStall } = require('./helpers/stall-leftovers.cjs');
 const { ensureBuiltHooks } = require('../scripts/run-tests.cjs');
 const { BLOCKING_GUARD_PROBE_TIMEOUT_MS } = require('../hooks/lib/git-probe.js');
 
@@ -328,6 +329,12 @@ const TABLE = [
     allow: () => ({ payload: undefined }),
   },
   {
+    file: 'gsd-path-export.js',
+    stdinTimeoutMs: null, // never reads stdin: it only needs $CLAUDE_ENV_FILE and its own install layout (#5465)
+    declaredOnCrash: null, // no HOOK_ON_CRASH import/usage; every failure path is a silent no-op then allow()
+    allow: () => ({ payload: undefined }),
+  },
+  {
     file: 'gsd-cursor-post-tool.js',
     stdinTimeoutMs: 10000,
     declaredOnCrash: null,
@@ -519,6 +526,8 @@ describe('hooks-crash-policy: #3911 git-probe timeout forced via a stub git -> a
   // to the budget cannot leave the stub finishing inside it (no timeout, no
   // diagnostic).
   const GIT_STUB_SLEEP_MS = BLOCKING_GUARD_PROBE_TIMEOUT_MS + 1000;
+  /** The stub's stall; `exec`'d so the hook's git bound kills it, and asserted gone after each cell (#6086). */
+  const GIT_STUB_STALL_COMMAND = `sleep ${(GIT_STUB_SLEEP_MS / 1000).toFixed(3)}1`;
 
   let stubDir;
 
@@ -532,14 +541,16 @@ describe('hooks-crash-policy: #3911 git-probe timeout forced via a stub git -> a
     // win32-only t.skip() on each case below.
     if (process.platform !== 'win32') {
       const shPath = path.join(stubDir, 'git');
-      fs.writeFileSync(shPath, `#!/bin/sh\nsleep ${(GIT_STUB_SLEEP_MS / 1000).toFixed(3)}\nexit 0\n`);
+      // `exec` so the hook's git bound kills the stall itself, not the shell above it (#6086).
+      fs.writeFileSync(shPath, `#!/bin/sh\nexec ${GIT_STUB_STALL_COMMAND}\n`);
       fs.chmodSync(shPath, 0o755);
     }
   });
 
-  // Every affected hook resolves 'git' with NO explicit `env` override on its
-  // own spawnSync call (see hooks/*.js's `SPAWNOPT`/`currentBranch`), so it
-  // inherits the HOOK PROCESS's own `process.env.PATH` — which is exactly the
+  // Every affected hook resolves 'git' with `env: gitEnv()` on its own
+  // spawnSync call (see hooks/*.js's `SPAWNOPT`/`currentBranch`) — process.env
+  // minus the repo-location vars (#5548) — so it inherits the HOOK PROCESS's own
+  // `process.env.PATH` unchanged — which is exactly the
   // `env` this test hands the hook via runHook()/baseEnv(). Setting PATH to
   // ONLY the stub dir guarantees the hook's internal git spawn resolves to
   // the stub, not a real git binary that might legitimately be fast.
@@ -589,8 +600,8 @@ describe('hooks-crash-policy: #3911 git-probe timeout forced via a stub git -> a
       const r = runHook(c.file, {
         payload,
         cwd,
-        // The stub dir must resolve FIRST (git() calls carry no explicit `env`
-        // override, so they inherit this exact PATH) — but the stub script
+        // The stub dir must resolve FIRST (git() calls pass `env: gitEnv()`,
+        // which keeps this exact PATH) — but the stub script
         // itself still needs a working `sh`/`sleep`, so the real PATH is
         // appended after it, never before (a real `git` earlier in PATH would
         // defeat the stub entirely).
@@ -612,6 +623,7 @@ describe('hooks-crash-policy: #3911 git-probe timeout forced via a stub git -> a
         r.stderr, /git probe/,
         `stderr diagnostic must name the git probe that could not run; got: ${r.stderr}`
       );
+      assertNoLeftoverStall(assert, GIT_STUB_STALL_COMMAND, `${c.file}: the git stub's stall`);
     });
   }
 });

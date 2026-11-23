@@ -66,7 +66,7 @@ Before executing, discover project context:
 - Load `rules/*.md` as needed during **implementation**.
 - Follow skill rules relevant to the task you are about to commit.
 
-**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md
+**agent_skills:** self-load per @~/.claude/gsd-core/references/agent-skills-bootstrap.md (agent type: `gsd-executor`)
 
 **CLAUDE.md enforcement:** If `./CLAUDE.md` exists, treat its directives as hard constraints during execution. Before committing each task, verify that code changes do not violate CLAUDE.md rules (forbidden patterns, required conventions, mandated tools). If a task action would contradict a CLAUDE.md directive, apply the CLAUDE.md rule — it takes precedence over plan instructions. Document any CLAUDE.md-driven adjustments as deviations (Rule 2: auto-add missing critical functionality).
 
@@ -117,7 +117,7 @@ PLAN_START_EPOCH=$(date +%s)
 If running inside a git worktree, capture authoritative worktree identity before
 any task commit changes HEAD. The execute-phase orchestrator consumes this from
 your final `<worktree_metadata>` return block to build the wave cleanup manifest
-without relying on runtime harness metadata (#1297).
+without relying on runtime harness metadata (#1297). On the claude-orchestration Workflow path, return the same four fields through its structured-output schema instead (#4747).
 
 ```bash
 GSD_WORKTREE_PATH=""
@@ -405,6 +405,7 @@ Completed Tasks table gives continuation agent context. Commit hashes verify wor
 <continuation_handling>
 If spawned as continuation agent (`<completed_tasks>` in prompt):
 
+0. If the prompt carries `<paused_branch>` (a `harness-worktree` continuation, #6118): after the `worktree_branch_check` passes and before anything else, capture `GSD_WORKTREE_EXPECTED_BASE` first (the `worktree_metadata_capture` rule), then run `git merge --ff-only <paused_branch>`. If it fails, HALT and return blocked; never reset, cherry-pick or rewrite.
 1. Verify previous commits exist: `git log --oneline -5`
 2. DO NOT redo completed tasks
 3. Start from resume point in prompt
@@ -518,10 +519,14 @@ if [ "$IS_PROTECTED" = "__GSD_RUN_UNAVAILABLE__" ] || [ -z "$IS_PROTECTED" ]; th
 fi
 if [ "$IS_PROTECTED" != "false" ]; then
   echo "FATAL: refusing to commit — HEAD is on '$ACTUAL_BRANCH' (protected/default branch)." >&2
-  echo "Re-home onto a phase/agent branch (#2924, #3819); override: git.allow_default_branch_commits:true in .planning/config.json." >&2
+  echo "Re-home onto a phase/agent branch (#2924, #3819); override: git.allow_default_branch_commits:true in the project config.json." >&2
   exit 1
 fi
-if [ -f .git ]; then  # worktree
+# #4799: set SEQUENTIAL=true ONLY if your prompt has a `<sequential_execution>` block (the
+# orchestrator dispatched you onto its own working tree, which may be a linked phase worktree on
+# the configured branch). Otherwise leave it false: the allow-list below applies (fails closed).
+SEQUENTIAL=false
+if [ -f .git ] && [ "$SEQUENTIAL" != "true" ]; then  # agent-isolated worktree
   # Positive allow-list: HEAD must be on a per-agent branch (`agent-<id>` or
   # legacy `worktree-agent-<id>`). This catches feature/* and any other
   # arbitrary branch that the deny-list would silently allow (#2924, #1995).
@@ -612,7 +617,7 @@ back, those deletions appear on the main branch, destroying prior-wave work (#20
 - `git clean` (any flags — `-f`, `-fd`, `-fdx`, `-n`, etc.)
 - `git rm` on files not explicitly created by the current task
 - `git checkout -- .` or `git restore .` (blanket working-tree resets that discard files)
-- `git reset --hard` except inside the `<worktree_branch_check>` step at agent startup
+- `git reset --hard` (no exception: `<worktree_branch_check>` is verify-only, #48)
 - `git update-ref refs/heads/<protected>` (resolved protected branch, #2924, #3819). Prohibited.
   If you discover that your worktree HEAD is attached to a protected branch and your
   commits landed there, **DO NOT** "recover" by force-rewinding the protected ref —
@@ -638,7 +643,7 @@ back, those deletions appear on the main branch, destroying prior-wave work (#20
   touching `refs/stash`:
 
   - **Move WIP off the working tree:** commit it to a throwaway branch you own
-    (e.g. `git checkout -b scratch-/<task>-wip && git add -A && git commit -m "wip"`),
+    (e.g. `git checkout -b scratch-/<task>-wip && git add -A && git commit -m "chore(wip): scratch"`),
     then `git checkout <your-worktree-branch>` to return to your task. The
     throwaway branch lives in the per-worktree branch namespace and never
     collides with sibling worktrees.
@@ -657,13 +662,13 @@ file individually. If a file appears untracked but is not part of your task, lea
 </destructive_git_prohibition>
 
 <summary_creation>
-After all tasks complete, create `{phase}-{plan}-SUMMARY.md` at `.planning/phases/XX-name/`.
+After all tasks complete, create `{phase}-{plan}-SUMMARY.md` at `{phase_dir}/` (the scoped phase directory from init).
 
 Use the Write tool to create files — never use `Bash(cat << 'EOF')` or heredoc commands for file creation.
 
 **Write contract (hard rules — must follow):**
 
-This file is the canonical output of this step. The orchestrator reads `.planning/phases/XX-name/{phase}-{plan}-SUMMARY.md` from disk after you return; it does NOT read your return message for the file content.
+This file is the canonical output of this step. The orchestrator reads `{phase_dir}/{phase}-{plan}-SUMMARY.md` from disk after you return; it does NOT read your return message for the file content.
 
 1. **Default: write the whole file in a single `Write` call.** On most runtimes this is correct and reliable — do this unless rule 4 applies.
 2. **Do NOT return the SUMMARY.md content in your response.** Your return message is a brief confirmation; the content lives on disk.
@@ -785,7 +790,14 @@ Unless `workflow.verification_discipline` is `false` (default `true`): no comple
 </verification_discipline>
 
 <state_updates>
-After SUMMARY.md, update STATE.md using `gsd-tools query` state handlers (named flags):
+After SUMMARY.md, update ROADMAP.md progress FIRST, then STATE.md. The ROADMAP write is the step that can decline (`missing_phase_details`), and a decline stops the plan before any STATE.md write, so STATE.md never advances past a plan the ROADMAP did not record:
+
+```bash
+# Update ROADMAP.md progress for this phase (plan counts, status). A decline stops here, before STATE.md moves.
+PROGRESS=$(gsd_run query roadmap.update-plan-progress "${PHASE_NUMBER}") && REASON=$(jq -er '.reason//""' <<<"$PROGRESS") && [ "$REASON" != missing_phase_details ] || { echo "ERROR: ROADMAP update-plan-progress did not complete for ${PHASE_NUMBER}-${PLAN} (missing_phase_details decline, failed query, or jq not installed). STOP: skip this plan's completion steps." >&2; exit 1; }
+```
+
+Then update STATE.md using `gsd-tools query` state handlers (named flags):
 
 ```bash
 # Advance plan counter (handles edge cases automatically)
@@ -812,9 +824,6 @@ gsd_run query state.record-session \
 ```
 
 ```bash
-# Update ROADMAP.md progress for this phase (plan counts, status)
-gsd_run query roadmap.update-plan-progress "${PHASE_NUMBER}"
-
 # Mark completed requirements from PLAN.md frontmatter
 # Extract the `requirements` array from the plan's frontmatter, then mark each complete
 gsd_run query requirements.mark-complete ${REQ_IDS}
@@ -842,8 +851,10 @@ gsd_run query state.add-blocker --text "Blocker description"
 <final_commit>
 This commit must re-run the Step 0 assertion above (#3819).
 ```bash
+PLANNING_ROOT=$(gsd_run query planning.inspect ${GSD_WS:+--ws=${GSD_WS##* }} --pick generated_from.planning_root)
+: "${PLANNING_ROOT:?}"
 gsd_run query commit "docs({phase}-{plan}): complete [plan-name] plan" --files \
-  .planning/phases/XX-name/{phase}-{plan}-SUMMARY.md .planning/STATE.md .planning/ROADMAP.md .planning/REQUIREMENTS.md
+  "${PLANNING_ROOT}/phases/XX-name/{phase}-{plan}-SUMMARY.md" "${PLANNING_ROOT}/STATE.md" "${PLANNING_ROOT}/ROADMAP.md" "${PLANNING_ROOT}/REQUIREMENTS.md"
 ```
 
 Separate from per-task commits — captures execution results only.
@@ -854,7 +865,7 @@ one of these shapes:
 - `{committed: true, hash, reason: 'committed'}` — commit succeeded; record
   the hash in the completion format.
 - `{committed: false, skipped: true, reason: 'skipped_commit_docs_false'}` —
-  the user has `commit_docs: false` in `.planning/config.json`. **This is an
+  the user has `commit_docs: false` in `{planning_root}/config.json` (`{planning_root}`: the active scope's root, from `planning.inspect`). **This is an
   intentional success path.** Record "skipped (commit_docs disabled)" in the
   completion format and move on.
 - `{committed: false, skipped: true, reason: 'skipped_gitignored'}` —

@@ -28,12 +28,38 @@
  * injected via `withInstallFs`/`installRuntimeArtifacts(..., { fs })`,
  * exactly the class of bug those two modules were fixed for.
  */
-import path from 'node:path';
 import os from 'node:os';
+import { resolveGsdHome } from './runtime-homes.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- #6030 CJS interop import, as in the sibling config modules
+import configLoader = require('./config-loader.cjs');
+const { _deepMergeConfig, globalDefaultsPath } = configLoader;
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- config-file-read.cjs is an export= CommonJS module
+import configFileReadMod = require('./config-file-read.cjs');
+const { unboundedConfigFileReason, printablePath, readConfigFileBounded } = configFileReadMod;
+
+/**
+ * Text of an install-time config file, or null (with a printable-path warning) when it is not a
+ * regular file within the cap or cannot be read. The real fs uses the descriptor-bound reader;
+ * an injected adapter gets the stat guard before its own read (#5759).
+ */
+function readInstallConfigText(absPath: string, label: string): string | null {
+  try {
+    if (isRealInstallFs()) return readConfigFileBounded(absPath);
+    const unbounded = unboundedConfigFileReason(absPath);
+    if (unbounded !== null) {
+      process.stderr.write(`gsd: warning — could not read ${label} (${printablePath(absPath)}): ${unbounded}\n`);
+      return null;
+    }
+    return installFs().readFileSync(absPath, 'utf-8');
+  } catch (err) {
+    process.stderr.write(`gsd: warning — could not read ${label} (${printablePath(absPath)}): ${printablePath((err as Error).message)}\n`);
+    return null;
+  }
+}
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- install-fs-adapter.cjs is an export= CommonJS module
 import installFsAdapter = require('./install-fs-adapter.cjs');
-const { installFs } = installFsAdapter;
+const { installFs, isRealInstallFs } = installFsAdapter;
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- install-effort-resolver.cjs is an export= CommonJS module
 import installEffortResolver = require('./install-effort-resolver.cjs');
 const { _readGsdConfigFile, _findAncestorGsdConfigPath } = installEffortResolver as {
@@ -70,10 +96,11 @@ interface RuntimeProfileResolver {
  */
 function readGsdGlobalModelOverrides(options: ReadOptions = {}): Record<string, string> | null {
   try {
-    const home = options.homedir ? options.homedir() : os.homedir();
-    const defaultsPath = path.join(home, '.gsd', 'defaults.json');
+    const home = resolveGsdHome(options.homedir ? options.homedir() : os.homedir());
+    const defaultsPath = globalDefaultsPath(home);
     if (!installFs().existsSync(defaultsPath)) return null;
-    const raw = installFs().readFileSync(defaultsPath, 'utf-8');
+    const raw = readInstallConfigText(defaultsPath, 'global defaults'); // #5759: never block on a planted FIFO
+    if (raw === null) return null;
     const parsed = JSON.parse(raw) as { model_overrides?: unknown };
     const overrides = parsed.model_overrides;
     if (!overrides || typeof overrides !== 'object') return null;
@@ -110,7 +137,10 @@ function readGsdEffectiveModelOverrides(targetDir: string | null = null, options
     const candidate = _findAncestorGsdConfigPath(targetDir);
     if (candidate) {
       try {
-        const parsed = JSON.parse(installFs().readFileSync(candidate, 'utf-8')) as { model_overrides?: unknown };
+        // #5759: refuse a FIFO/device/oversized project config before the adapter's blocking read.
+        const text = readInstallConfigText(candidate, 'project config');
+        if (text === null) throw new Error('unusable project config');
+        const parsed = JSON.parse(text) as { model_overrides?: unknown };
         if (parsed && typeof parsed === 'object' && parsed.model_overrides && typeof parsed.model_overrides === 'object') {
           projectOverrides = parsed.model_overrides as Record<string, string>;
         }
@@ -123,7 +153,7 @@ function readGsdEffectiveModelOverrides(targetDir: string | null = null, options
 
   if (!global && !projectOverrides) return null;
   // Per-project wins on conflict; preserve non-conflicting global keys.
-  return { ...(global || {}), ...(projectOverrides || {}) };
+  return _deepMergeConfig(global || {}, projectOverrides || {}) as Record<string, string>;
 }
 
 type AgentTools = Record<string, string[]>;
@@ -154,8 +184,8 @@ function readGsdAgentTools(config: Record<string, unknown> | null): AgentTools |
  * model override resolver.
  */
 function readGsdEffectiveAgentTools(targetDir: string | null = null, options: ReadOptions = {}): AgentTools | null {
-  const home = options.homedir ? options.homedir() : os.homedir();
-  const globalConfig = _readGsdConfigFile(path.join(home, '.gsd', 'defaults.json'), 'global defaults');
+  const home = resolveGsdHome(options.homedir ? options.homedir() : os.homedir());
+  const globalConfig = _readGsdConfigFile(globalDefaultsPath(home), 'global defaults');
 
   let projectConfig: Record<string, unknown> | null = null;
   if (targetDir) {
@@ -171,7 +201,7 @@ function readGsdEffectiveAgentTools(targetDir: string | null = null, options: Re
     && Object.prototype.hasOwnProperty.call(projectConfig, 'agent_tools')
     && project === null) return {};
   if (!global && !project) return null;
-  return { ...(global || {}), ...(project || {}) };
+  return _deepMergeConfig(global || {}, project || {}) as AgentTools;
 }
 
 interface RuntimeProfileMergedConfig {
@@ -201,7 +231,7 @@ interface RuntimeProfileMergedConfig {
  */
 function readGsdRuntimeProfileResolver(targetDir: string | null = null): RuntimeProfileResolver | null {
   const homeDefaults = _readGsdConfigFile(
-    path.join(os.homedir(), '.gsd', 'defaults.json'),
+    globalDefaultsPath(resolveGsdHome()),
     '~/.gsd/defaults.json',
   );
 
@@ -213,6 +243,10 @@ function readGsdRuntimeProfileResolver(targetDir: string | null = null): Runtime
     if (candidate) projectConfig = _readGsdConfigFile(candidate, '.planning/config.json');
   }
 
+  // Each key is a whole value, not a field-by-field merge: the project's truthy value replaces
+  // the home value outright. A model policy or tier-override table assembled from both files
+  // would name a provider from one and budgets from the other, so these four stay a replace
+  // (#3705: model_policy follows the same project-wins-over-home precedence as the others).
   const merged: RuntimeProfileMergedConfig = {
     runtime:
       (projectConfig && (projectConfig.runtime as string | undefined)) ||
@@ -226,7 +260,6 @@ function readGsdRuntimeProfileResolver(targetDir: string | null = null): Runtime
       (projectConfig && projectConfig.model_profile_overrides) ||
       (homeDefaults && homeDefaults.model_profile_overrides) ||
       null,
-    // #3705: same project-wins-over-home precedence as every other key here.
     model_policy:
       (projectConfig && projectConfig.model_policy) ||
       (homeDefaults && homeDefaults.model_policy) ||

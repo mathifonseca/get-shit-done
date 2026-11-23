@@ -4,13 +4,16 @@
  *
  * Establishes the exact contract every extracted rule builds onto: the
  * frozen `SEVERITY`/`REMEDY_ACTION`/`REMEDY_RISK` enums, the
- * `Diagnostic`/`Remedy`/`Rule` shapes, the `RULES` container (the 32 rules
- * extracted from `cmdValidateHealth`, `src/verify.cts:1616-2577`, are
- * concatenated in from each rule-group file under
- * `src/health-diagnostic-rules/`), the `evaluateRules` evaluator, and the
+ * `Diagnostic`/`Remedy`/`Rule` shapes, the `RULES` container (the 35 rules
+ * — 31 extracted from `cmdValidateHealth` in `src/verify.cts`, plus
+ * the new W028, W029, W030 and W031 — are concatenated in from the nine
+ * rule-group files under `src/health-diagnostic-rules/`), the
+ * `evaluateRules` evaluator, and the
  * `applyRepairs` `--repair`/`--backfill` dispatcher — whose per-action
  * handlers are REAL here (ported behavior-preserving from
- * `verify.cts:2405-2553`'s repair switch), not stubs.
+ * `cmdValidateHealth`'s repair switch in `verify.cts`), not stubs. Line
+ * citations of the form `verify.cts:NNNN` below are historical: they point
+ * at `verify.cts` as it stood at extraction time (#3309).
  *
  * `applyRepairs` does not receive a `PlanningSnapshot` (its call-site
  * signature, `(cwd, diagnostics, repair, backfill)`, is a locked contract —
@@ -62,8 +65,14 @@ type Rule = healthDiagnosticTypesMod.Rule;
 // ─── Rule table ─────────────────────────────────────────────────────────────
 
 // Populated by concatenating each rule group's exported `RULES` array (design
-// doc, "Rule table organization" section) — the 32 rule functions extracted
-// from `cmdValidateHealth`, `src/verify.cts:1616-2577`.
+// doc, "Rule table organization" section) — the rule functions extracted
+// from `cmdValidateHealth` in `src/verify.cts`, plus the rules added since
+// (W028, W029, W030, W031, W032). The count is asserted only by
+// `tests/health-diagnostic.test.cjs`'s frozen RULES test;
+// `scripts/lint-health-diagnostic-rule-table.cjs` checks that every code is
+// unique, every severity is valid and every code has a fixture test (except
+// the codes it lists in `PERMANENTLY_INERT_CODES`, currently W024's inert
+// stub), but it does not check the count.
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import rootExistenceMod = require('./health-diagnostic-rules/root-existence.cjs');
@@ -85,6 +94,8 @@ import milestoneArchiveHygieneMod = require('./health-diagnostic-rules/milestone
 import consistencyMod = require('./health-diagnostic-rules/consistency.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import installSurfaceShadowingMod = require('./health-diagnostic-rules/install-surface-shadowing.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- #6430 context-bridge.cjs is an export= CommonJS module
+import contextBridgeMod = require('./health-diagnostic-rules/context-bridge.cjs');
 
 const RULES: Rule[] = [
   ...rootExistenceMod.RULES,
@@ -96,6 +107,7 @@ const RULES: Rule[] = [
   ...worktreeHealthMod.RULES,
   ...milestoneArchiveHygieneMod.RULES,
   ...installSurfaceShadowingMod.RULES,
+  ...contextBridgeMod.RULES,
 ];
 
 /**
@@ -133,6 +145,9 @@ const { getMilestoneInfo } = roadmapParserMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import stateMod = require('./state.cjs');
 const { writeStateMd, assertVerificationReportsReadable } = stateMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import verificationMod = require('./verification.cjs');
+const { repairLegacyVerificationStatus } = verificationMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatter = require('./frontmatter.cjs');
 const { extractFrontmatter } = frontmatter;
@@ -213,27 +228,25 @@ interface RepairPaths {
 /**
  * Derive every filesystem path a repair handler needs, from `cwd` alone —
  * exactly how `cmdValidateHealth` derived them pre-migration
- * (`verify.cts:1644-1652`/`2301-2302`). `config.json`/`MILESTONES.md`/
- * `milestones/` are root-scoped (`planningRoot`); `STATE.md` is
- * workstream-scoped (`planningDir`) — the same root-vs-workstream split
- * `buildConfigField`/`buildStateFields` (`planning-snapshot.cts`) already
- * document for the read side.
+ * (`verify.cts:1644-1652`/`2301-2302`). `config.json` is project-scoped (the project base,
+ * never the workstream); `STATE.md`, `MILESTONES.md` and `milestones/` are scoped by
+ * `planningDir` (#5881): the workstream's own pair under a workstream, which is where
+ * `milestone complete` archives to and `init.complete-milestone` reports, and the same pair the
+ * W018 detection (`buildMilestoneArchiveStatusField`, `planning-snapshot.cts`) compares.
  */
 function repairPaths(cwd: string): RepairPaths {
-  // #3749: the project root is PROJECT-aware but deliberately NOT workstream-
-  // scoped — under GSD_PROJECT, config.json/MILESTONES.md/milestones belong to
-  // `.planning/<project>/` (the same base init.new-project's config_path
-  // names); under GSD_WORKSTREAM they stay at the workstream PARENT, keeping
-  // the documented root-vs-workstream split. planningDir(cwd, null) is exactly
-  // that base: project env honored, ws env suppressed.
+  // #3749: the config base is PROJECT-aware but deliberately NOT workstream-scoped — under
+  // GSD_PROJECT, config.json belongs to `.planning/<project>/` (the same base
+  // init.new-project's config_path names). planningDir(cwd, null) is exactly that base: project
+  // env honored, ws env suppressed. MILESTONES.md and milestones/ follow the workstream (#5881).
   const rootBase = planningDir(cwd, null);
   const wsBase = planningDir(cwd);
   return {
     rootBase,
     configPath: path.join(rootBase, 'config.json'),
     statePath: path.join(wsBase, 'STATE.md'),
-    milestonesPath: path.join(rootBase, 'MILESTONES.md'),
-    milestonesArchiveDir: path.join(rootBase, 'milestones'),
+    milestonesPath: path.join(wsBase, 'MILESTONES.md'),
+    milestonesArchiveDir: path.join(wsBase, 'milestones'),
   };
 }
 
@@ -319,10 +332,32 @@ interface RepairOutcome {
  * shape, collapsed to one seam here since every case now shares one
  * caller).
  */
-function runRepairAction(cwd: string, action: RemedyAction, paths: RepairPaths): RepairOutcome {
+function runRepairAction(
+  cwd: string,
+  action: RemedyAction,
+  paths: RepairPaths,
+  args: Record<string, unknown> = {},
+): RepairOutcome {
   const { rootBase, configPath, statePath, milestonesPath, milestonesArchiveDir } = paths;
 
   switch (action) {
+    case REMEDY_ACTION.REPAIR_VERIFICATION_STATUS: {
+      // #5291: the report path comes from the finding's own remedy args, not
+      // from user input; `repairLegacyVerificationStatus` re-verifies that it is
+      // a report contained in its phase directory before it writes a byte.
+      const file = typeof args['file'] === 'string' ? args['file'] : '';
+      if (file === '') return { success: false, error: 'no report path on the finding' };
+      const repaired = repairLegacyVerificationStatus(file);
+      if (!repaired.ok) return { success: false, error: repaired.reason };
+      return {
+        success: true,
+        path: path.relative(cwd, file).split(path.sep).join('/'),
+        detail: repaired.legacyStatusKept
+          ? `status ${repaired.from} -> ${repaired.to}; the report's existing legacy_status was left as it was`
+          : `status ${repaired.from} -> ${repaired.to}; original kept as legacy_status`,
+      };
+    }
+
     case REMEDY_ACTION.CREATE_CONFIG:
     case REMEDY_ACTION.RESET_CONFIG: {
       platformWriteSync(configPath, JSON.stringify(defaultConfigPayload(), null, 2));
@@ -373,7 +408,11 @@ function runRepairAction(cwd: string, action: RemedyAction, paths: RepairPaths):
     case REMEDY_ACTION.ADD_NYQUIST_KEY:
     case REMEDY_ACTION.ADD_AI_INTEGRATION_PHASE_KEY: {
       const key = action === REMEDY_ACTION.ADD_NYQUIST_KEY ? 'nyquist_validation' : 'ai_integration_phase';
-      const configRaw = fs.readFileSync(configPath, 'utf-8');
+      // Bounded read (#5759): a FIFO/device/oversized config throws (the repair fails, never blocks).
+      const configRaw = configLoaderMod.readConfigFileBounded(configPath);
+      if (configRaw === null) {
+        throw Object.assign(new Error(`ENOENT: no such file or directory, open '${configPath}'`), { code: 'ENOENT' });
+      }
       const configParsed = JSON.parse(configRaw) as Record<string, unknown>;
       if (!configParsed['workflow']) configParsed['workflow'] = {};
       const wf = configParsed['workflow'] as Record<string, unknown>;
@@ -466,6 +505,32 @@ function applyRepairs(
   const details: RepairDetail[] = [];
   const paths = repairPaths(cwd);
 
+  // #5291: a legacy-status repair is the CURE for the refusal the pre-check
+  // below enforces, so it runs first (a report edit is its only write and it
+  // validates its own target); the pre-check then sees the repaired reports.
+  const statusRepairs = new Set<Diagnostic>();
+  if (repair) {
+    for (const diagnostic of diagnostics) {
+      const { remedy, code } = diagnostic;
+      if (remedy.action !== REMEDY_ACTION.REPAIR_VERIFICATION_STATUS || remedy.risk === REMEDY_RISK.DESTRUCTIVE) continue;
+      statusRepairs.add(diagnostic);
+      try {
+        const outcome = runRepairAction(cwd, remedy.action, paths, remedy.args);
+        details.push({
+          code,
+          action: remedy.action,
+          success: outcome.success,
+          ...(outcome.path ? { path: outcome.path } : {}),
+          ...(outcome.detail ? { detail: outcome.detail } : {}),
+          ...(outcome.error ? { error: outcome.error } : {}),
+        });
+        if (outcome.success) applied.push(code);
+      } catch (err) {
+        details.push({ code, action: remedy.action, success: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  }
+
   // #5118 (no write before the error): a requested REGENERATE_STATE rewrites
   // STATE.md from every phase's report and throws on one whose `status` is
   // outside the closed set — but other repairs in the SAME run (config,
@@ -488,6 +553,7 @@ function applyRepairs(
   for (const diagnostic of diagnostics) {
     const { remedy, code } = diagnostic;
     if (remedy.action === REMEDY_ACTION.ADVISE) continue;
+    if (statusRepairs.has(diagnostic)) continue;
 
     const requested =
       remedy.action === REMEDY_ACTION.BACKFILL_MILESTONES ? repair || backfill : repair;

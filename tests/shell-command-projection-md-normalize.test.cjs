@@ -250,6 +250,33 @@ describe('#4725: write normalization must not reflow untouched prose', () => {
   });
 });
 
+describe('#4304: fenced heading normalization compatibility', () => {
+  test('default Markdown normalization matches upstream/next around a fenced heading followed by prose', () => {
+    const input = '```md\n### Phase 99: Example\nprose\n```\n';
+    // Golden bytes from upstream/next. Bracket
+    // writers may opt into preserving the input fence, but the default seam
+    // remains the upstream implementation used by every legacy convention.
+    const upstreamBytes = '```md\n\n### Phase 99: Example\n\nprose\n```\n';
+
+    assert.equal(normalizeContent(MD, input).content, upstreamBytes);
+  });
+
+  test('bracket preservation uses the shared CommonMark scanner for tilde fences', () => {
+    const input = [
+      '~~~md',
+      '### [CK.02] 99: Example',
+      '- [ ] [CK.02] 99: Literal checklist',
+      '~~~',
+      '',
+    ].join('\n');
+
+    assert.equal(
+      normalizeContent(MD, input, { preserveFencedMarkdownStructure: true }).content,
+      input,
+    );
+  });
+});
+
 // Found while implementing #5105: the markdown rules ran over the YAML frontmatter block
 // too, so every .md write re-shaped frontmatter lines no writer touched — a blank line
 // around each column-0 `# comment` (read as a heading) and after a column-0 `- item`, and
@@ -370,4 +397,574 @@ describe('#5105: write normalization leaves the frontmatter block untouched', ()
       { seed: 5105, numRuns: 500, endOnFailure: true },
     );
   });
+});
+
+describe('#5113: a verbatim write publishes the content exactly as given', () => {
+  const tight = '# T\r\n**field**: yes\r\n### H\r\ntext\r\n\r\n\r\n\r\nend';
+
+  test('normalizeContent leaves a verbatim write untouched, and still normalizes by default', () => {
+    assert.equal(normalizeContent(MD, tight, { verbatim: true }).content, tight);
+    assert.notEqual(normalizeContent(MD, tight).content, tight, 'the default stays a whole-document normalization');
+  });
+
+  test('platformWriteSync honours verbatim on disk', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5113-'));
+    try {
+      const file = path.join(dir, MD);
+      platformWriteSync(file, tight, { verbatim: true });
+      assert.equal(fs.readFileSync(file, 'utf-8'), tight);
+      platformWriteSync(file, tight);
+      assert.notEqual(fs.readFileSync(file, 'utf-8'), tight);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
+// #5165: normalization is scoped to what a write changed relative to the document it replaces.
+{
+  const { contentChangedAfterNormalize } = require('../gsd-core/bin/lib/shell-command-projection.cjs');
+
+  describe('#5165 scoped Markdown normalization', () => {
+    const lf = (s) => s.replace(/\r\n/g, '\n').replace(/\n*$/, '\n');
+
+    test('untouched regions are published as written: no blank after headings or after a list', () => {
+      const prior = '### Phase 1: One\n**Goal**: one\n- a\n- b\nafter\n';
+      assert.equal(normalizeContent(MD, prior, { prior }).content, prior);
+      assert.notEqual(normalizeContent(MD, prior).content, prior, 'the no-prior pure path still normalizes');
+    });
+
+    test('replacing a line in place adds no blank lines around it', () => {
+      const prior = '#### Phase 4: Four\n**Goal**: four\n  1. it works\n**Plans**: 1 plan\n#### Phase 5: Five\n**Goal**: five\n';
+      const next = prior.replace('**Plans**: 1 plan', '**Plans**: 1/1 plans complete');
+      assert.equal(normalizeContent(MD, next, { prior }).content, next);
+    });
+
+    test('a deletion that makes two lines newly adjacent re-spaces that junction only', () => {
+      const prior = '### H\ntext\n- a\nmore\n';
+      const next = '### H\n- a\nmore\n';
+      // `### H` and `- a` were not adjacent before: the write made the junction, so the
+      // after-heading rule applies to it. `- a`/`more` was untouched and stays tight.
+      assert.equal(normalizeContent(MD, next, { prior }).content, '### H\n\n- a\nmore\n');
+    });
+
+    test('a deletion between lines that need no separation changes nothing else', () => {
+      const prior = 'one\nstray\ntwo\n- a\nthree\n';
+      assert.equal(normalizeContent(MD, 'one\ntwo\n- a\nthree\n', { prior }).content, 'one\ntwo\n- a\nthree\n');
+    });
+
+    test('a heading that replaces a prose line in place brings its own separation', () => {
+      const prior = 'intro\nStatus line\nbody\n';
+      const next = 'intro\n## Status\nbody\n';
+      assert.equal(normalizeContent(MD, next, { prior }).content, 'intro\n\n## Status\n\nbody\n');
+    });
+
+    test('a fence that replaces a prose line in place brings its own separation', () => {
+      const prior = 'intro\nplaceholder\nbody\n';
+      const next = 'intro\n```\nbody\n';
+      assert.equal(normalizeContent(MD, next, { prior }).content, 'intro\n\n```\nbody\n');
+    });
+
+    test('renaming a heading in place keeps the tight line after it (the roadmap template shape)', () => {
+      const prior = '#### Phase 5: Five\n**Goal**: five\n**Plans**: TBD\n#### Phase 6: Six\n**Goal**: six\n';
+      const next = prior.replace('Phase 5: Five', 'Phase 5: Five (renamed)');
+      assert.equal(normalizeContent(MD, next, { prior }).content, next);
+      const renumbered = prior.replace('Phase 6: Six', 'Phase 7: Six');
+      assert.equal(normalizeContent(MD, renumbered, { prior }).content, renumbered);
+    });
+
+    test('replacing a fence line with a fence line keeps the spacing around it', () => {
+      const prior = 'intro\n```js\ncode\n```\nafter\n';
+      const next = prior.replace('```js', '```ts');
+      assert.equal(normalizeContent(MD, next, { prior }).content, next);
+    });
+
+    test('a BOM on either first line does not make an unchanged document look rewritten', () => {
+      const prior = '﻿### Phase 1\n**Goal**: one\n- a\nafter\n';
+      for (const next of [prior, prior.slice(1)]) {
+        assert.equal(normalizeContent(MD, next, { prior }).content, next);
+      }
+      assert.equal(normalizeContent(MD, prior.slice(1), { prior: prior.slice(1) }).content, prior.slice(1));
+    });
+
+    test('a decorated table cell edit leaves untouched sections tight', () => {
+      const prior = '## Progress\n| Phase | Status |\n|---|---|\n| 1 | Planned |\n### Next\ntext\n';
+      const next = prior.replace('Planned', '**Complete**');
+      assert.equal(normalizeContent(MD, next, { prior }).content, next);
+    });
+
+    test('an inserted section is still normalized', () => {
+      const prior = 'intro line\n';
+      const next = 'intro line\n## New\ntext\n';
+      assert.equal(normalizeContent(MD, next, { prior }).content, 'intro line\n\n## New\n\ntext\n');
+    });
+
+    test('without a prior the whole document is normalized, byte-identical to before', () => {
+      const doc = '## H\n- a\ntext\n\n\n\nend\n';
+      assert.equal(normalizeContent(MD, doc).content, '## H\n\n- a\n\ntext\n\nend\n');
+      assert.equal(normalizeContent(MD, doc, { prior: '' }).content, normalizeContent(MD, doc).content);
+    });
+
+    test('a CRLF prior and CRLF document publish LF with untouched junctions kept', () => {
+      const prior = '## H\r\ntext\r\n- a\r\nafter\r\n';
+      const next = '## H\r\ntext\r\n- a\r\nafter!\r\n';
+      assert.equal(normalizeContent(MD, next, { prior }).content, '## H\ntext\n- a\nafter!\n');
+    });
+
+    test('frontmatter stays untouched and the body is scoped', () => {
+      const prior = '---\na: 1\n# note\nb: 2\n---\n# Heading\ntext\n';
+      const next = '---\na: 1\n# note\nb: 3\n---\n# Heading\ntext\n';
+      assert.equal(normalizeContent(MD, next, { prior }).content, next);
+    });
+
+    test('a fenced block next to untouched prose is preserved', () => {
+      const prior = 'prose\n```\ncode\n```\nprose2\n';
+      const next = 'prose\n```\ncode!\n```\nprose2\n';
+      assert.equal(normalizeContent(MD, next, { prior }).content, next);
+    });
+
+    describe('platformWriteSync reads the prior within bounds and in the caller encoding', () => {
+      const withDir = (fn) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5165-'));
+        try { fn(path.join(dir, MD)); } finally { cleanup(dir); }
+      };
+      // A tight list (untouched, would be re-spaced if the whole document were normalized),
+      // padded with one-char lines to the requested byte size.
+      const doc = (bytes) => {
+        const head = '### H\n- a\ntail line\n';
+        const pad = Math.max(0, bytes - Buffer.byteLength(head));
+        return head + 'x'.repeat(Math.max(0, pad - 1)) + '\n';
+      };
+
+      const MAX_PRIOR = 2 * 1024 * 1024;
+      for (const [label, bytes, scoped] of [
+        ['limit-1', MAX_PRIOR - 1, true],
+        ['limit', MAX_PRIOR, true],
+        ['limit+1', MAX_PRIOR + 1, false],
+      ]) {
+        test(`a ${label}-byte prior is ${scoped ? 'read: untouched spacing kept' : 'not read: whole document normalized'}`, () => {
+          withDir((file) => {
+            const prior = doc(bytes);
+            assert.equal(Buffer.byteLength(prior), bytes, 'fixture size');
+            fs.writeFileSync(file, prior);
+            platformWriteSync(file, prior.replace('x\n', 'y\n'));
+            const out = fs.readFileSync(file, 'utf-8');
+            assert.equal(out.startsWith('### H\n- a\ntail line\n'), scoped);
+          });
+        });
+      }
+
+      test('a destination that is not a regular file is not read as a prior (no hang on a device)', (t) => {
+        if (process.platform === 'win32') return t.skip('no /dev/zero on Windows');
+        withDir((file) => {
+          fs.symlinkSync('/dev/zero', file);
+          platformWriteSync(file, '### H\n- a\ntail line\n');
+          assert.equal(fs.lstatSync(file).isFile(), true, 'the symlink is replaced by the published file');
+          assert.equal(fs.readFileSync(file, 'utf-8'), '### H\n\n- a\n\ntail line\n', 'normalized whole, as a new file');
+        });
+      });
+
+      test('a latin1 prior is decoded as latin1, so unchanged lines still match', () => {
+        withDir((file) => {
+          const prior = '### Café\n- a\ntail line\n';
+          fs.writeFileSync(file, prior, 'latin1');
+          platformWriteSync(file, prior.replace('tail line', 'tail line!'), { encoding: 'latin1' });
+          assert.equal(fs.readFileSync(file, 'latin1'), '### Café\n- a\ntail line!\n');
+        });
+      });
+    });
+
+    test('contentChangedAfterNormalize compares what the scoped write would land', () => {
+      const before = '### H\ntext\n';
+      assert.equal(contentChangedAfterNormalize(MD, before, before), false);
+      assert.equal(contentChangedAfterNormalize(MD, before, '### H\ntext2\n'), true);
+    });
+
+    describe('edit-distance cap (limit-1 / limit / limit+1 replaced lines)', () => {
+      // Replacing a line is a delete plus an insert: 2 edits. 200 replaced lines
+      // are exactly 400 edits (the cap); 201 are 402. The replacement is a list item
+      // beside prose: scoped, its edges inherit the prior spacing (no blank line);
+      // whole-document normalization separates every list item from the prose after it.
+      const build = (replaced) => {
+        const prior = Array.from({ length: 500 }, (_, i) => `Item ${i}`).join('\n') + '\n';
+        const lines = prior.split('\n');
+        for (let r = 0; r < replaced; r++) lines[r * 2] = `- Changed ${r}`;
+        return { prior, next: lines.join('\n') };
+      };
+      for (const [replaced, scoped] of [[199, true], [200, true], [201, false]]) {
+        test(`${replaced} replaced lines ${scoped ? 'stay scoped' : 'fall back to whole-document normalization'}`, () => {
+          const { prior, next } = build(replaced);
+          const out = normalizeContent(MD, next, { prior }).content;
+          const hasBlank = out.split('\n').slice(0, -1).some((l) => l === '');
+          assert.equal(hasBlank, !scoped);
+        });
+      }
+    });
+
+    // Alphabet: prose, headings, tight list items, fence lines and blank lines.
+    const lineGen = fc.oneof(
+      fc.stringMatching(/^[A-Z][a-z]{1,8}( [a-z]{1,8}){0,3}\.$/),
+      fc.stringMatching(/^#{1,3} [A-Za-z]{1,8}$/),
+      fc.stringMatching(/^[-*] [A-Za-z]{1,8}$/),
+      fc.stringMatching(/^[1-9]\. [A-Za-z]{1,8}$/),
+      fc.constant('```'),
+      fc.constant(''),
+    );
+    const docGen = fc.array(lineGen, { minLength: 1, maxLength: 30 }).map((l) => l.join('\n') + '\n');
+
+    test('property: a document written over itself is published byte-identical', () => {
+      fc.assert(
+        fc.property(docGen, (doc) => {
+          assert.equal(normalizeContent(MD, doc, { prior: doc }).content, lf(doc));
+        }),
+        { seed: 5165, numRuns: 300, endOnFailure: true },
+      );
+    });
+
+    // Writing the same content twice must land the same file. (Re-normalizing the persisted
+    // result against itself would be vacuous: it is property 1 applied to `once`.)
+    test('property: writing the same content again over its own result is a no-op (idempotent)', () => {
+      fc.assert(
+        fc.property(docGen, docGen, (next, prior) => {
+          const once = normalizeContent(MD, next, { prior }).content;
+          assert.equal(normalizeContent(MD, next, { prior: once }).content, once);
+        }),
+        { seed: 51651, numRuns: 300, endOnFailure: true },
+      );
+    });
+
+    test('property: lines shared with the prior keep their spacing', () => {
+      fc.assert(
+        fc.property(docGen, fc.nat({ max: 29 }), fc.stringMatching(/^[A-Z][a-z]{2,8}\.$/), (prior, at, replacement) => {
+          const lines = prior.split('\n');
+          const idx = at % Math.max(1, lines.length - 1);
+          lines[idx] = replacement;
+          const next = lines.join('\n');
+          const out = normalizeContent(MD, next, { prior }).content.split('\n');
+          // Replacing one line in place changes that line only (scoped), up to trailing-newline policy.
+          const expected = lf(next).split('\n');
+          assert.deepEqual(out, expected);
+        }),
+        { seed: 51652, numRuns: 300, endOnFailure: true },
+      );
+    });
+  });
+}
+
+/**
+ * #5831: the shell-projection seam's no-fallback atomic write
+ * (`platformWriteSync(..., { atomic: true })`), byte-exact restore
+ * (`platformRestoreFileSync`) and byte read (`platformReadBytesSync`).
+ *
+ * The default `platformWriteSync` falls back to a direct write when the temp
+ * file cannot be written or atomically renamed; that direct write truncates
+ * the destination before it can fail. The atomic mode never touches the
+ * destination except by rename, and removes its temp file on every failure.
+ */
+describe('#5831: atomic write, restore and byte read in the shell-projection seam', () => {
+  const { beforeEach, afterEach, mock } = require('node:test');
+  const { createTempDir, mockPartialWriteThenThrow } = require('./helpers.cjs');
+  const scp = require('../gsd-core/bin/lib/shell-command-projection.cjs');
+  const PREVIOUS = '# Archive\n\nEarlier entries that exist nowhere else.\n';
+  let dir;
+  let target;
+
+  beforeEach(() => {
+    dir = createTempDir('gsd-atomic-write-');
+    target = path.join(dir, 'ARCHIVE.md');
+  });
+
+  afterEach(() => {
+    mock.restoreAll();
+    cleanup(dir);
+  });
+
+  function siblings() {
+    return fs.readdirSync(dir).sort();
+  }
+
+  function errno(code) {
+    return Object.assign(new Error(`${code}: simulated`), { code });
+  }
+
+  // ── platformWriteSync { atomic: true } ─────────────────────────────────
+
+  test('an atomic write publishes the same normalized content as a default write', () => {
+    const other = path.join(dir, 'OTHER.md');
+    const content = '# Title\r\n\r\n\r\n\r\nbody';
+    scp.platformWriteSync(target, content, { atomic: true });
+    scp.platformWriteSync(other, content);
+    assert.deepStrictEqual(fs.readFileSync(target), fs.readFileSync(other));
+    assert.deepStrictEqual(siblings(), ['ARCHIVE.md', 'OTHER.md'], 'no temp file is left');
+  });
+
+  for (const destination of ['present', 'absent']) {
+    test(`an atomic write reports the dev/ino of the file it published via onCreated (destination ${destination})`, () => {
+      if (destination === 'present') fs.writeFileSync(target, PREVIOUS);
+      const seen = [];
+      scp.platformWriteSync(target, '# New\n', { atomic: true, onCreated: (id) => seen.push(id) });
+      const st = fs.statSync(target, { bigint: true });
+      assert.deepStrictEqual(seen, [{ dev: st.dev, ino: st.ino }]);
+    });
+
+    test(`a temp-file write that fails partway never falls back to a direct write (destination ${destination})`, () => {
+      if (destination === 'present') fs.writeFileSync(target, PREVIOUS);
+      const before = destination === 'present' ? fs.readFileSync(target) : null;
+      // The temp write lands some bytes, then fails; every write to the
+      // destination itself truncates it first and then fails — the
+      // direct-write fallback on a full disk.
+      const restore = mockPartialWriteThenThrow(fs, (p) => typeof p === 'string' && p.startsWith(target), 3, { resolveDescriptors: true });
+      try {
+        assert.throws(() => scp.platformWriteSync(target, '# New\n', { atomic: true }), (err) => err.code === 'ENOSPC');
+      } finally {
+        restore();
+      }
+      if (before === null) assert.strictEqual(fs.existsSync(target), false, 'the destination stays absent');
+      else assert.deepStrictEqual(fs.readFileSync(target), before, 'the destination keeps its previous bytes');
+      assert.deepStrictEqual(siblings(), destination === 'present' ? ['ARCHIVE.md'] : [], 'the partial temp file is removed');
+    });
+  }
+
+  // The default write falls back to a direct write when the temp file cannot be written. That
+  // fallback truncates the destination, but it captures the old bytes first and puts them back
+  // when its own write fails, so the same failure ends with the previous bytes and no temp file.
+  test('the same failure under a default write puts the previous bytes back and leaves no temp file', () => {
+    fs.writeFileSync(target, PREVIOUS);
+    const restore = mockPartialWriteThenThrow(fs, (p) => typeof p === 'string' && p.startsWith(target), 3, { resolveDescriptors: true });
+    try {
+      assert.throws(() => scp.platformWriteSync(target, '# New\n'), (err) => err.code === 'ENOSPC');
+    } finally {
+      restore();
+    }
+    assert.deepStrictEqual(fs.readFileSync(target), Buffer.from(PREVIOUS), 'the direct-write fallback restored it');
+    assert.deepStrictEqual(siblings(), ['ARCHIVE.md'], 'no temp file is left');
+  });
+
+  test('a rename that cannot be atomic (EXDEV) throws and leaves the destination and no temp file', () => {
+    fs.writeFileSync(target, PREVIOUS);
+    mock.method(fs, 'renameSync', () => { throw errno('EXDEV'); });
+    assert.throws(() => scp.platformWriteSync(target, '# New\n', { atomic: true }), (err) => err.code === 'EXDEV');
+    mock.restoreAll();
+    assert.strictEqual(fs.readFileSync(target, 'utf-8'), PREVIOUS);
+    assert.deepStrictEqual(siblings(), ['ARCHIVE.md']);
+  });
+
+  // onCreated reports a published file only: a failed rename unlinks the temp and frees its inode.
+  test('onCreated is not called when the rename fails', () => {
+    fs.writeFileSync(target, PREVIOUS);
+    const seen = [];
+    mock.method(fs, 'renameSync', () => { throw errno('EIO'); });
+    assert.throws(
+      () => scp.platformWriteSync(target, '# New\n', { atomic: true, onCreated: (id) => seen.push(id) }),
+      (err) => err.code === 'EIO',
+    );
+    mock.restoreAll();
+    assert.strictEqual(seen.length, 0);
+    assert.strictEqual(fs.readFileSync(target, 'utf-8'), PREVIOUS);
+    assert.deepStrictEqual(siblings(), ['ARCHIVE.md']);
+  });
+
+  test('onCreated is not called when the parent-directory check refuses the publish', () => {
+    fs.writeFileSync(target, PREVIOUS);
+    const seen = [];
+    const swappedAway = `${dir}.swapped`;
+    const createTemp = (basePath, _suffix, mode) => {
+      const tmpPath = `${basePath}.swap.${process.pid}.tmp`;
+      const fd = fs.openSync(tmpPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, mode);
+      if (process.platform === 'win32') {
+        // Windows refuses to rename a directory while a handle opened inside it is open (the rename
+        // threw here and the test never reached the check), so the swap is simulated: the
+        // directory's identity reads as a different one from now on.
+        const realStat = fs.statSync;
+        mock.method(fs, 'statSync', (p, ...rest) => {
+          const st = realStat.call(fs, p, ...rest);
+          if (p !== dir) return st;
+          return { dev: st.dev, ino: typeof st.ino === 'bigint' ? st.ino + 1n : st.ino + 1 };
+        });
+        return { fd, tmpPath };
+      }
+      // Replace the parent directory with a different one after the walk recorded its identity.
+      fs.renameSync(dir, swappedAway);
+      fs.mkdirSync(dir);
+      return { fd, tmpPath };
+    };
+    try {
+      assert.throws(() => scp.platformWriteSync(target, '# New\n', {
+        atomic: true,
+        onCreated: (id) => seen.push(id),
+        writeSeams: { createTemp },
+      }), (err) => err.code === 'ENXIO');
+      assert.strictEqual(seen.length, 0);
+    } finally {
+      mock.restoreAll();
+      cleanup(dir);
+      if (fs.existsSync(swappedAway)) fs.renameSync(swappedAway, dir);
+    }
+  });
+
+  // ── platformRestoreFileSync ────────────────────────────────────────────
+
+  test('a restore puts back the exact bytes, unnormalized', () => {
+    const bytes = Buffer.concat([Buffer.from('# A\r\n\r\n\r\n\r\nno trailing newline'), Buffer.from([0xff, 0xfe])]);
+    fs.writeFileSync(target, 'something else\n');
+    scp.platformRestoreFileSync(target, bytes);
+    assert.deepStrictEqual(fs.readFileSync(target), bytes);
+    assert.deepStrictEqual(siblings(), ['ARCHIVE.md']);
+  });
+
+  test('restoring "absent" removes the file, and is a no-op when it is already gone', () => {
+    fs.writeFileSync(target, PREVIOUS);
+    scp.platformRestoreFileSync(target, null);
+    assert.strictEqual(fs.existsSync(target), false);
+    scp.platformRestoreFileSync(target, null);
+    assert.deepStrictEqual(siblings(), []);
+  });
+
+  test('a restore whose temp write creates the file and then fails leaves no temp file and the destination as it was', () => {
+    fs.writeFileSync(target, 'published block\n');
+    const before = fs.readFileSync(target);
+    const restore = mockPartialWriteThenThrow(fs, (p) => typeof p === 'string' && p.startsWith(target + '.restore.'), 2, { resolveDescriptors: true });
+    try {
+      assert.throws(() => scp.platformRestoreFileSync(target, Buffer.from(PREVIOUS)), (err) => err.code === 'ENOSPC');
+    } finally {
+      restore();
+    }
+    assert.deepStrictEqual(fs.readFileSync(target), before);
+    assert.deepStrictEqual(siblings(), ['ARCHIVE.md'], 'the partial restore temp file is removed');
+  });
+
+  // ── platformReadBytesSync ──────────────────────────────────────────────
+
+  test('a byte read returns the exact bytes, null when absent, and throws on other errors', () => {
+    const bytes = Buffer.from([0x23, 0x0d, 0x0a, 0xff]);
+    fs.writeFileSync(target, bytes);
+    assert.deepStrictEqual(scp.platformReadBytesSync(target), bytes);
+    assert.strictEqual(scp.platformReadBytesSync(path.join(dir, 'missing.md')), null);
+    assert.throws(() => scp.platformReadBytesSync(dir), (err) => err.code === 'EISDIR');
+  });
+
+  // ── hostile names and special files ────────────────────────────────────
+
+  const posixOnly = { skip: process.platform === 'win32' ? 'POSIX symlinks and FIFOs' : false };
+
+  // The real temp name is `<target>.<label>.<pid>.<12 hex>`; a fixed first `randomBytes` result makes
+  // the first attempt land on a name the test has already planted, so the collision really happens.
+  function forceFirstTempSuffix(hexSuffix) {
+    const nodeCrypto = require('node:crypto');
+    const realRandomBytes = nodeCrypto.randomBytes;
+    const state = { calls: 0, opened: [] };
+    mock.method(nodeCrypto, 'randomBytes', (...args) => (state.calls++ === 0 ? Buffer.from(hexSuffix, 'hex') : realRandomBytes(...args)));
+    // Every path opened, so a test can prove the planted name was really attempted.
+    const realOpen = fs.openSync;
+    mock.method(fs, 'openSync', (p, ...rest) => {
+      if (typeof p === 'string') state.opened.push(p);
+      return realOpen.call(fs, p, ...rest);
+    });
+    return state;
+  }
+  const FIXED_HEX = '0a0b0c0d0e0f';
+
+  test('an atomic publish never writes through a symlink planted at the temp name its first attempt picks', posixOnly, () => {
+    const victim = path.join(dir, 'victim.txt');
+    fs.writeFileSync(victim, 'ORIGINAL');
+    const planted = `${target}.tmp.${process.pid}.${FIXED_HEX}`;
+    fs.symlinkSync(victim, planted);
+    const rng = forceFirstTempSuffix(FIXED_HEX);
+    scp.platformWriteSync(target, '# New\n', { atomic: true });
+    mock.restoreAll();
+    assert.ok(rng.opened.includes(planted), 'the planted name was attempted, so the collision really happened');
+    assert.ok(rng.calls >= 2, 'the first temp name collided with the planted link and a new one was drawn');
+    assert.strictEqual(fs.readFileSync(victim, 'utf-8'), 'ORIGINAL', 'the symlink target is untouched');
+    assert.strictEqual(fs.readFileSync(target, 'utf-8'), '# New\n');
+  });
+
+  test('a restore never writes through a symlink planted at the temp name its first attempt picks', posixOnly, () => {
+    const victim = path.join(dir, 'victim.txt');
+    fs.writeFileSync(victim, 'ORIGINAL');
+    fs.writeFileSync(target, 'current\n');
+    const planted = `${target}.restore.${process.pid}.${FIXED_HEX}`;
+    fs.symlinkSync(victim, planted);
+    const rng = forceFirstTempSuffix(FIXED_HEX);
+    scp.platformRestoreFileSync(target, Buffer.from(PREVIOUS));
+    mock.restoreAll();
+    assert.ok(rng.opened.includes(planted), 'the planted name was attempted, so the collision really happened');
+    assert.ok(rng.calls >= 2, 'the first temp name collided with the planted link and a new one was drawn');
+    assert.strictEqual(fs.readFileSync(victim, 'utf-8'), 'ORIGINAL', 'the symlink target is untouched');
+    assert.strictEqual(fs.readFileSync(target, 'utf-8'), PREVIOUS);
+  });
+
+  test('a byte read with noFollow refuses a symlink (ELOOP); without it the link is read through', posixOnly, () => {
+    const real = path.join(dir, 'real.md');
+    fs.writeFileSync(real, 'LINKED BYTES');
+    const link = path.join(dir, 'link.md');
+    fs.symlinkSync(real, link);
+    assert.throws(() => scp.platformReadBytesSync(link, { noFollow: true }), (err) => err.code === 'ELOOP');
+    assert.deepStrictEqual(scp.platformReadBytesSync(link), Buffer.from('LINKED BYTES'));
+    assert.deepStrictEqual(scp.platformReadBytesSync(real, { noFollow: true }), Buffer.from('LINKED BYTES'), 'a regular file reads normally');
+  });
+
+  test('restoring an absent file with a mode creates it with that mode', () => {
+    scp.platformRestoreFileSync(target, Buffer.from(PREVIOUS), { mode: 0o600 });
+    assert.strictEqual(fs.readFileSync(target, 'utf-8'), PREVIOUS);
+    if (process.platform !== 'win32') assert.strictEqual(fs.statSync(target).mode & 0o777, 0o600, 'the given mode is applied');
+  });
+
+  test('a restore refuses, with ENXIO, a directory that is not the one it had at entry', () => {
+    fs.writeFileSync(target, 'current\n');
+    const realStat = fs.statSync;
+    let parentStats = 0;
+    mock.method(fs, 'statSync', (p, ...rest) => {
+      const st = realStat.call(fs, p, ...rest);
+      // The directory is stat'ed as bigint; +1n is exact where a number id past 2^53 would not move.
+      if (p === dir && ++parentStats > 1) return { dev: st.dev, ino: typeof st.ino === 'bigint' ? st.ino + 1n : st.ino + 1 };
+      return st;
+    });
+    assert.throws(() => scp.platformRestoreFileSync(target, Buffer.from(PREVIOUS)), (err) => err.code === 'ENXIO');
+    mock.restoreAll();
+    assert.strictEqual(fs.readFileSync(target, 'utf-8'), 'current\n', 'the destination is untouched');
+    assert.deepStrictEqual(siblings(), ['ARCHIVE.md'], 'no temp file is left');
+  });
+
+  test('a byte read of a FIFO fails with ENXIO instead of blocking', posixOnly, () => {
+    const { spawnSync } = require('node:child_process');
+    const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+    assert.strictEqual(spawnSync('mkfifo', [target], { timeout: PROBE_TIMEOUT_MS }).status, 0, 'mkfifo');
+    const lib = require.resolve('../gsd-core/bin/lib/shell-command-projection.cjs');
+    const script = `try { require(${JSON.stringify(lib)}).platformReadBytesSync(${JSON.stringify(target)}); console.log('READ'); }` +
+      ` catch (e) { console.log('THREW ' + e.code); }`;
+    const child = spawnSync(process.execPath, ['-e', script], { timeout: PROBE_TIMEOUT_MS, encoding: 'utf-8' });
+    assert.strictEqual(child.error, undefined, `the read must not block (${child.error && child.error.code})`);
+    assert.strictEqual(child.stdout.trim(), 'THREW ENXIO');
+  });
+
+  test('restoring "absent" with an identity unlinks only the file that identity names', () => {
+    fs.writeFileSync(target, 'created by this run\n');
+    const { dev, ino } = fs.lstatSync(target, { bigint: true });
+    // A different inode takes the name: created while the first still exists.
+    const incoming = path.join(dir, 'incoming.md');
+    fs.writeFileSync(incoming, 'FOREIGN\n');
+    fs.renameSync(incoming, target);
+
+    assert.throws(() => scp.platformRestoreFileSync(target, null, { unlinkOnlyIf: { dev, ino } }), (err) => err.code === 'ESTALE');
+    assert.strictEqual(fs.readFileSync(target, 'utf-8'), 'FOREIGN\n', 'the foreign file stays');
+
+    const mine = fs.lstatSync(target, { bigint: true });
+    scp.platformRestoreFileSync(target, null, { unlinkOnlyIf: { dev: mine.dev, ino: mine.ino } });
+    assert.strictEqual(fs.existsSync(target), false, 'a matching identity is unlinked');
+    scp.platformRestoreFileSync(target, null, { unlinkOnlyIf: { dev: mine.dev, ino: mine.ino } });
+  });
+
+  // ── permission bits ────────────────────────────────────────────────────
+
+  for (const mode of [0o600, 0o640, 0o644]) {
+    test(`an atomic write and a restore keep the destination's permission bits (${mode.toString(8)})`, () => {
+      fs.writeFileSync(target, PREVIOUS);
+      fs.chmodSync(target, mode);
+      scp.platformWriteSync(target, '# New\n', { atomic: true });
+      if (process.platform !== 'win32') assert.strictEqual(fs.statSync(target).mode & 0o777, mode, 'the atomic publish keeps the mode');
+      scp.platformRestoreFileSync(target, Buffer.from(PREVIOUS));
+      if (process.platform !== 'win32') assert.strictEqual(fs.statSync(target).mode & 0o777, mode, 'the restore keeps the mode');
+      assert.strictEqual(fs.readFileSync(target, 'utf-8'), PREVIOUS);
+    });
+  }
 });

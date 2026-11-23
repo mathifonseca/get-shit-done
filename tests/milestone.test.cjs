@@ -1609,6 +1609,138 @@ describe('requirements ready-ids command (#2388 shared-ID gate)', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// execute-plan.md update_requirements — the shared-ID gate runs as written (#4956)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('execute-plan.md update_requirements block runs as written (#4956)', () => {
+  const { spawnSync } = require('node:child_process');
+  const { readWorkflowCombined } = require('./helpers.cjs');
+  const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
+  const workflow = (name) => readWorkflowCombined(path.join(__dirname, '..', 'gsd-core', 'workflows', name));
+
+  let tmpDir;
+  beforeEach(() => { tmpDir = createTempProject(); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  /** The first ```bash block inside <step name="update_requirements"> of execute-plan.md. */
+  function updateRequirementsBash() {
+    const lines = splitLines(workflow('execute-plan.md'));
+    const start = lines.findIndex((line) => line.includes('<step name="update_requirements">'));
+    assert.notEqual(start, -1, 'execute-plan.md: update_requirements step not found');
+    const body = [];
+    let inBash = false;
+    for (const line of lines.slice(start + 1)) {
+      if (!inBash && /^```bash\s*$/.test(line)) inBash = true;
+      else if (inBash && /^```\s*$/.test(line)) return body.join('\n');
+      else if (inBash) body.push(line);
+    }
+    throw new Error('execute-plan.md: no bash block in update_requirements');
+  }
+
+  const haveTools = () => {
+    const probe = (cmd) => spawnSync(cmd, ['--version'], { encoding: 'utf-8', timeout: PROBE_TIMEOUT_MS });
+    return probe('bash').status === 0 && probe('jq').status === 0;
+  };
+
+  const REQUIREMENTS = `# Requirements
+
+## Feature
+
+- [ ] **SHARED-01**: declared by both plans
+- [ ] **ONLY1-01**: only plan 01 declares this
+- [ ] **ONLY2-01**: only plan 02 declares this
+
+## Traceability
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| SHARED-01 | Phase 5 | Pending |
+| ONLY1-01 | Phase 5 | Pending |
+| ONLY2-01 | Phase 5 | Pending |
+`;
+
+  function fixture() {
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), REQUIREMENTS, 'utf-8');
+    const dir = path.join(tmpDir, '.planning', 'phases', '05-05-feature');
+    fs.mkdirSync(dir, { recursive: true });
+    const plan1 = path.join(dir, '05-05-01-a-PLAN.md');
+    const plan2 = path.join(dir, '05-05-02-b-PLAN.md');
+    fs.writeFileSync(plan1, '---\nphase: 05-05\nplan: 01\nrequirements: [SHARED-01, ONLY1-01]\n---\nA\n');
+    fs.writeFileSync(plan2, '---\nphase: 05-05\nplan: 02\nrequirements: [SHARED-01, ONLY2-01]\n---\nB\n');
+    return { dir, plan1, plan2 };
+  }
+
+  /** Run the workflow's own bash with `gsd_run` bound to the real CLI, as the finishing plan would. */
+  function runBlock(planPath, reqIds) {
+    const script = [
+      `gsd_run() { node "${TOOLS_PATH}" "$@"; }`,
+      `PLAN_PATH="${planPath}"`,
+      `REQ_IDS="${reqIds}"`,
+      updateRequirementsBash(),
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: tmpDir,
+      encoding: 'utf-8',
+      timeout: PROBE_TIMEOUT_MS,
+      env: { ...process.env, ...TEST_ENV_BASE },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  }
+
+  const requirements = () => fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+
+  test('an ID only this plan declares is marked Complete; a shared ID whose sibling has not finished is not', (t) => {
+    if (!haveTools()) return t.skip('bash and jq are required to run the workflow block');
+    const { dir, plan1 } = fixture();
+    fs.writeFileSync(path.join(dir, '05-05-01-a-SUMMARY.md'), 'done\n');
+
+    runBlock(plan1, 'SHARED-01 ONLY1-01');
+
+    const out = requirements();
+    assert.match(out, /- \[x\] \*\*ONLY1-01\*\*/, 'a single-plan ID is ready and must be marked');
+    assert.match(out, /\| ONLY1-01 \| Phase 5 \| Complete \|/);
+    assert.match(out, /- \[ \] \*\*SHARED-01\*\*/, 'a shared ID must wait for plan 02');
+    assert.match(out, /\| SHARED-01 \| Phase 5 \| Pending \|/);
+  });
+
+  test('the plan that finishes last marks the shared ID Complete', (t) => {
+    if (!haveTools()) return t.skip('bash and jq are required to run the workflow block');
+    const { dir, plan2 } = fixture();
+    fs.writeFileSync(path.join(dir, '05-05-01-a-SUMMARY.md'), 'done\n');
+    fs.writeFileSync(path.join(dir, '05-05-02-b-SUMMARY.md'), 'done\n');
+
+    runBlock(plan2, 'SHARED-01 ONLY2-01');
+
+    const out = requirements();
+    assert.match(out, /- \[x\] \*\*SHARED-01\*\*/);
+    assert.match(out, /\| SHARED-01 \| Phase 5 \| Complete \|/);
+    assert.match(out, /- \[x\] \*\*ONLY2-01\*\*/);
+  });
+
+  test('CONTROL: a plan whose IDs are all blocked marks nothing', (t) => {
+    if (!haveTools()) return t.skip('bash and jq are required to run the workflow block');
+    const { dir, plan1 } = fixture();
+    fs.writeFileSync(path.join(dir, '05-05-01-a-SUMMARY.md'), 'done\n');
+
+    runBlock(plan1, 'SHARED-01');
+
+    assert.equal(requirements(), REQUIREMENTS);
+  });
+
+  test('no workflow or agent passes --raw to requirements.ready-ids, whose --raw output is prose', () => {
+    const offenders = [];
+    for (const rel of ['execute-plan.md', 'execute-phase.md', 'quick.md']) {
+      splitLines(workflow(rel)).forEach((line, i) => {
+        if (/requirements\.ready-ids\b/.test(line) && /--raw\b/.test(line) && /gsd_run|gsd-tools/.test(line)) {
+          offenders.push(`${rel}:${i + 1}`);
+        }
+      });
+    }
+    assert.deepEqual(offenders, []);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // requirements revert-phase command — gaps_found revert (#2388)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2139,6 +2271,116 @@ describe('bug #2946: unstarted-phase guard runs independent of STATE.md mileston
     );
   });
 
+  // #5726: the mismatch check reads the STATE milestone through the one owner,
+  // so a value that spells the requested version (quoted), a null/empty value and
+  // a `milestone:` line in the body are not drift. The matching-version control
+  // shows the guard fires identically with no WARNING.
+  test('a genuinely different STATE version (v2.0) still emits the mismatch WARNING (positive control)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap v1.0\n\n### Phase 2: Real Work\n**Goal:** Not started\n',
+    );
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), '---\nmilestone: v2.0\nstatus: active\n---\n# State\n');
+    const result = runGsdTools(
+      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run'],
+      tmpDir,
+    );
+    assert.ok(result.error.includes('WARNING:') && result.error.includes('v2.0'), result.error);
+  });
+
+  for (const [label, stateText] of [
+    ['a matching unquoted version (control)', '---\nmilestone: v1.0\nstatus: active\n---\n# State\n'],
+    ['a quoted matching version', '---\nmilestone: "v1.0"\nstatus: active\n---\n# State\n'],
+    ['an explicit null', '---\nmilestone: null\nstatus: active\n---\n# State\n'],
+    ['an empty quoted string', "---\nmilestone: ''\nstatus: active\n---\n# State\n"],
+    ['no frontmatter key and a fenced body example', '---\nstatus: active\n---\n# State\n\n```\nmilestone: v9.9\n```\n'],
+    ['a version spelled without the leading v', '---\nmilestone: 1.0\nstatus: active\n---\n# State\n'],
+    ['a no-frontmatter line with a trailing comment', 'milestone: v1.0 # current\n# State\n'],
+    ['a no-frontmatter double-quoted version (#5726)', 'milestone: "v1.0"\n# State\n'],
+    ['a no-frontmatter single-quoted version (#5726)', "milestone: 'v1.0'\n# State\n"],
+    ['a no-frontmatter empty quoted string reads as absent (#5726)', 'milestone: ""\n# State\n'],
+    ['a no-frontmatter quoted version with a trailing comment (#5726)', 'milestone: "v1.0" # note\n# State\n'],
+    ['a no-frontmatter quoted "null" reads as explicit null like the frontmatter path (#5726)', 'milestone: "null"\n# State\n'],
+    ['a no-frontmatter tilde reads as explicit null (#5726)', 'milestone: ~\n# State\n'],
+    ['a frontmatter quoted "null" reads as explicit null (FAILSAFE decodes it to null text) (#5726)', '---\nmilestone: "null"\nstatus: active\n---\n# State\n'],
+  ]) {
+    test(`no WARNING is emitted for ${label}`, () => {
+      fs.writeFileSync(
+        path.join(tmpDir, '.planning', 'ROADMAP.md'),
+        '# Roadmap v1.0\n\n### Phase 2: Real Work\n**Goal:** Not started\n',
+      );
+      fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateText);
+      const result = runGsdTools(
+        ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run'],
+        tmpDir,
+      );
+      assert.strictEqual(result.success, false, 'guard must still fire');
+      assert.ok(
+        !result.error.includes('WARNING:'),
+        `no WARNING expected for ${label}; got: ${result.error}`,
+      );
+    });
+  }
+
+  // #5726: a `#` inside quotes is literal content, and YAML escapes decode the
+  // way the frontmatter parser decodes them. Each names a version that is not v1.0.
+  for (const [label, stateText, named] of [
+    ['a no-frontmatter quoted version containing a hash', 'milestone: "v1.0 # x"\n# State\n', 'v1.0 # x'],
+    ['a no-frontmatter single-quoted version with a doubled quote', "milestone: 'it''s v1'\n# State\n", "it's v1"],
+    ['a no-frontmatter double-quoted version with an escaped quote', 'milestone: "a\\"b"\n# State\n', 'a"b'],
+  ]) {
+    test(`the mismatch WARNING names the decoded value for ${label} (#5726)`, () => {
+      fs.writeFileSync(
+        path.join(tmpDir, '.planning', 'ROADMAP.md'),
+        '# Roadmap v1.0\n\n### Phase 2: Real Work\n**Goal:** Not started\n',
+      );
+      fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateText);
+      const result = runGsdTools(
+        ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run'],
+        tmpDir,
+      );
+      assert.ok(
+        result.error.includes('WARNING:') && result.error.includes(named),
+        `expected a WARNING naming ${named}; got: ${result.error}`,
+      );
+    });
+  }
+
+  // #5726: the raw (no-frontmatter) line and the frontmatter field decode through
+  // the same YAML loader, so any milestone string rendered as a double-quoted,
+  // single-quoted or plain scalar reads identically on both paths.
+  test('a milestone scalar reads the same from raw STATE.md and from frontmatter (#5726)', () => {
+    const fc = require('fast-check');
+    const { extractCurrentMilestoneScoped } = require('../gsd-core/bin/lib/roadmap-parser.cjs');
+    const roadmap = '# Roadmap\n\n## v1.0 Shipped\n\n### Phase 1: A\n**Goal:** x\n\n## v2.0 Next\n\n### Phase 2: B\n**Goal:** y\n';
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
+    const quotedChars = ['a', 'Z', '0', '1', '.', '-', 'v', ' ', '#', "'", '"', '\\', ':', '~'];
+    const plainChars = ['a', 'Z', '0', '1', '.', '-', 'v', '_'];
+    const spellings = {
+      double: (s) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`,
+      single: (s) => `'${s.replace(/'/g, "''")}'`,
+      plain: (s) => s,
+    };
+    const read = (stateText) => {
+      fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateText);
+      return JSON.stringify(extractCurrentMilestoneScoped(roadmap, tmpDir));
+    };
+    fc.assert(
+      fc.property(
+        fc.constantFrom('double', 'single', 'plain'),
+        fc.array(fc.constantFrom(...quotedChars), { maxLength: 12 }).map((a) => a.join('')),
+        fc.array(fc.constantFrom(...plainChars), { minLength: 1, maxLength: 8 }).map((a) => a.join('')),
+        (kind, quotedValue, plainValue) => {
+          const value = kind === 'plain' ? plainValue : quotedValue;
+          const rendered = spellings[kind](value);
+          return read(`milestone: ${rendered}\n# State\n`)
+            === read(`---\nmilestone: ${rendered}\nstatus: active\n---\n# State\n`);
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+
   test('guard is a no-op when the scoped ROADMAP has no Phase headings (fresh project)', () => {
     // STATE in sync, ROADMAP scopes for v1.0 but lists NO phase headings →
     // scan yields zero unstarted phases, guard must not fire.
@@ -2477,7 +2719,9 @@ describe('enhancement #72 — Business Context template section', () => {
   });
 
   test('milestone evolution reviews Business Context only when present', () => {
-    const ms = parseMilestoneContract(fs.readFileSync(COMPLETE_MILESTONE, 'utf-8'));
+    // The review lives in complete-milestone/steps/project-md-evolution-review.md (#5195), so read the workflow with its steps.
+    const { readWorkflowCombined } = require('./helpers.cjs');
+    const ms = parseMilestoneContract(readWorkflowCombined(COMPLETE_MILESTONE));
     assert.ok(ms.mentionsBusinessContext, 'complete-milestone must mention Business Context in its review');
     assert.ok(ms.hasConditionalReview, 'the Business Context milestone review must be conditional on the section being present');
   });

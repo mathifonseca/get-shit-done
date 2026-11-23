@@ -26,12 +26,15 @@
  * seam is injected so the evaluator is trivially testable without spawning.
  */
 
+import path from 'node:path';
+import { capCodeUnits } from './code-unit-cap.cjs';
+
 // ─── Public constants ─────────────────────────────────────────────────────────
 
 /** Default command timeout for `command-exit-zero` (30s). Matches execTool default. */
 const COMMAND_EXIT_ZERO_DEFAULT_TIMEOUT_MS = 30_000;
 
-/** Hard cap on the stderr/stdout tail embedded in the gate `message`. */
+/** Hard cap on the whole gate `message` (prefix + output tail, or prefix + command head on timeout). */
 const COMMAND_MAX_OUTPUT_CHARS = 2000;
 
 /** Hard cap on the declared command length (defense-in-depth against ARGV overflow / abuse). */
@@ -63,7 +66,8 @@ interface BoundedShellResult {
 
 interface PredicateDeps {
   runBoundedShell(opts: { command: string; cwd: string; timeoutMs: number }): BoundedShellResult;
-  findPhaseArtifact(phaseDir: string, artifactSuffix: string): string | null;
+  /** All distinct matches for the artifact, in any order; `[]` when absent. Entries must be realpaths: the evaluator dedupes by string, so a symlink to one file counts once only if both names resolve to the same path. */
+  findPhaseArtifact(phaseDir: string, artifactSuffix: string): string[];
   readFrontmatter(filePath: string): Record<string, unknown>;
 }
 
@@ -87,9 +91,17 @@ function interpolate(command: string, ctx: PredicateContext): string {
   });
 }
 
-/** Cap a string at COMMAND_MAX_OUTPUT_CHARS so gate messages stay context-bounded. */
-function trimToMax(s: string): string {
-  return s.length > COMMAND_MAX_OUTPUT_CHARS ? s.slice(0, COMMAND_MAX_OUTPUT_CHARS) : s;
+/**
+ * `prefix` + `text` capped at COMMAND_MAX_OUTPUT_CHARS in total, keeping the TAIL (errors land last;
+ * ADR-2008) or the HEAD (a command's program name). `capCodeUnits` owns the surrogate-safe cut: the
+ * cap counts UTF-16 units, so a plain cut can orphan half a surrogate pair (U+FFFD in JSON).
+ * A prefix that alone fills the cap leaves no room for text: the prefix is cut to the cap.
+ */
+function prefixedCap(prefix: string, text: string, keep: 'head' | 'tail'): string {
+  const budget = COMMAND_MAX_OUTPUT_CHARS - prefix.length;
+  // Guard for a malformed `exitCode` (a long non-numeric string); a real prefix is under 45 characters.
+  if (budget <= 0) return capCodeUnits(prefix, COMMAND_MAX_OUTPUT_CHARS, 'head');
+  return prefix + capCodeUnits(text, budget, keep);
 }
 
 function isNonEmptyString(v: unknown): v is string {
@@ -122,11 +134,16 @@ function evaluateCommandExitZero(
 
   const interpolated = interpolate(command, ctx);
   const res = deps.runBoundedShell({ command: interpolated, cwd: ctx.cwd, timeoutMs });
+  const hasStderr = isNonEmptyString(res.stderr);
 
   if (res.timedOut) {
+    const prefix = `command timed out after ${Math.round(timeoutMs / 1000)}s: `;
     return {
       block: true,
-      message: trimToMax(`command timed out after ${Math.round(timeoutMs / 1000)}s: ${res.stderr || interpolated}`),
+      // The command's head (program name, leading args) identifies it; only stderr is tail-capped.
+      message: hasStderr
+        ? prefixedCap(prefix, res.stderr, 'tail')
+        : prefixedCap(prefix, interpolated, 'head'),
       details: { kind: 'command-exit-zero', timedOut: true, signal: res.signal },
     };
   }
@@ -141,11 +158,10 @@ function evaluateCommandExitZero(
 
   // Non-zero (incl. null exit from a signal kill) => block. Surface code + stderr/stdout tail.
   const code = res.exitCode === null ? '<none>' : String(res.exitCode);
-  const tail = trimToMax(res.stderr || res.stdout || '');
-  const message = tail ? `command exited ${code}: ${tail}` : `command exited ${code}`;
+  const output = hasStderr ? res.stderr : isNonEmptyString(res.stdout) ? res.stdout : '';
   return {
     block: true,
-    message: trimToMax(message),
+    message: output ? prefixedCap(`command exited ${code}: `, output, 'tail') : `command exited ${code}`,
     details: { kind: 'command-exit-zero', exitCode: res.exitCode, signal: res.signal },
   };
 }
@@ -170,8 +186,15 @@ function evaluateArtifactFrontmatterEquals(
     throw new Error('artifact-frontmatter-equals predicate requires an "equals" key');
   }
   const targetDir = isNonEmptyString(ctx.phaseDir) ? ctx.phaseDir : ctx.cwd;
-  const filePath = deps.findPhaseArtifact(targetDir, artifactSuffix);
-  if (!filePath) {
+  // Plain `.sort()` (no locale) so the outcome never depends on directory listing order (#5313).
+  // Set: finders return realpaths, so a symlink to the same file is one artifact, not two.
+  const found: unknown = deps.findPhaseArtifact(targetDir, artifactSuffix);
+  // A pre-#5313 dep returned `string | null`; a silent null -> "not found" block or per-character spread would mislead.
+  if (!Array.isArray(found)) {
+    throw new Error('predicate deps "findPhaseArtifact" must return an array of paths');
+  }
+  const candidates = [...new Set(found as string[])].sort();
+  if (candidates.length === 0) {
     return {
       block: true,
       message: `Artifact matching ${artifactSuffix} not found in ${targetDir}`,
@@ -179,7 +202,17 @@ function evaluateArtifactFrontmatterEquals(
     };
   }
 
-  const fm = deps.readFrontmatter(filePath);
+  // #5313: never pick one of several matches (listing order is OS-dependent); a throw would fail open via onError.
+  if (candidates.length > 1) {
+    const names = candidates.map((c) => path.relative(targetDir, c).split(path.sep).join('/')).join(', ');
+    return {
+      block: true,
+      message: `Multiple artifacts match ${artifactSuffix} in ${targetDir}: ${names}; remove or rename all but one`,
+      details: { kind: 'artifact-frontmatter-equals', ambiguous: true, candidates },
+    };
+  }
+
+  const fm = deps.readFrontmatter(candidates[0]);
 
   const actualValue = fm[field];
   // eslint-disable-next-line @typescript-eslint/no-base-to-string

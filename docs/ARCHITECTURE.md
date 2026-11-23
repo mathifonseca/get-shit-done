@@ -290,6 +290,7 @@ Runtime hooks that integrate with the host AI agent:
 | `gsd-context-monitor.js` | `PostToolUse` / `AfterTool` | Injects agent-facing context warnings at 35%/25% remaining by default (configurable — see [CONFIGURATION.md](CONFIGURATION.md)) |
 | `gsd-check-update.js` | `SessionStart` | Foreground trigger for the background update check |
 | `gsd-ensure-canonical-path.js` | `SessionStart` | For Claude Code plugin installs, symlinks `~/.claude/gsd-core/{bin,contexts,references,templates,workflows}` to the plugin's bundled tree so `@~/.claude/gsd-core/...` includes resolve; runs first in `SessionStart`, no-op in classic installs, self-heals after `claude plugin update` (#997) |
+| `gsd-path-export.js` | `SessionStart` | Appends the installed `gsd-core/bin` directory to `$CLAUDE_ENV_FILE` (provided to SessionStart hooks only) so a later Bash call resolves `gsd_run` from PATH; no-op when the variable is unset |
 | `gsd-check-update-worker.js` | (helper) | Background worker spawned by `gsd-check-update.js`; no direct event registration |
 | `gsd-prompt-guard.js` | `PreToolUse` | Scans `.planning/` writes for prompt injection patterns (advisory) |
 | `gsd-read-injection-scanner.js` | `PostToolUse` | Scans Read tool output for injected instructions in untrusted content |
@@ -348,21 +349,23 @@ Behavior differences from the pre-refactor router:
 
 | Field | Meaning |
 |-------|---------|
-| `status` | `resolved` (exactly the unit's own commits), `degraded` (the preferred evidence was absent or empty, so `files` come from wider evidence; `reason` says why) or `unresolvable` (git or the phase could not be read, including a git timeout; `files` is empty and means "could not look"). A plan or quick unit that matches nothing is `resolved` with `reason: no-matching-commits` (or `empty-after-exclusions` when its commits touched only excluded paths): git was read and the answer is "none", and the verb reports it as `advisory`, not `pass` |
+| `status` | `resolved` (exactly the unit's own commits), `degraded` (the preferred evidence was absent or empty, so `files` come from wider evidence; `reason` says why) or `unresolvable` (git or the phase could not be read, including a git timeout; `files` is empty and means "could not look"). A plan or quick unit that matches nothing is `resolved` with `reason: no-matching-commits` (or `empty-after-exclusions` when its commits touched only excluded paths, or `merge-only` when every match is a merge, which carries only its own resolutions): git was read and the answer is "none", and the verb reports it as `advisory`, not `pass` |
 | `source` | `task-commits`, `plan-subjects`, `quick-subjects`, `phase-range` or `none` |
 | `commits` | the unit's commits (`sha`, `subject`, optionally `body` and `files`) |
 | `changedFiles` / `files` / `missingOnDisk` | every path the commits touched; the subset that exists on disk (the reviewable set); the subset that no longer exists, **by name** |
-| `outsideUnion` | files changed in the phase window by commits that are *not* the unit's, by name |
+| `outsideUnion` | files changed in the phase window by commits that are *not* the unit's, by name. What a listed catch-up merge (base branch merged into the phase branch) brought in from the base is base work the union deliberately omits, so it is not named here either, under an exact rule: a file is omitted only when it is in the merge's diff against its first parent, no listed commit sits on the merge's second-parent side, no listed non-merge commit is an ancestor of the second parent after the phase start (a branch forked from the phase), every merge-base of the two parents (`git merge-base --all`) is `rangeBase` or an ancestor of it (the fork-point rule: a side forked from phase work is phase work), and no commit of the phase window (`<rangeBase>..<newest listed commit>` minus what the second parent reaches, listed or not, made before or after the merge, the merge itself excluded) touched the file; any other merge commit in that window counts through its own changes against each of its parents (`git log -m`), so a phase-side merge's conflict resolution or edit is phase work, and a clean one over-includes (a file stays named, never hidden). Anything doubtful is named: an advisory false positive is accepted, hidden phase work is not. No merge-base, an empty-tree `rangeBase` (the phase directory arrived with the root commit) or any git call for that merge that fails or times out subtracts nothing for that merge only, and the scope stays `resolved`. Accepted cost: a second catch-up merge forks at the first catch-up's base commit, which is after `rangeBase`, so the base files it brings in are named as an advisory false positive. A SUMMARY whose every listed commit is a merge is `merge-only-task-commits`; a task commit that touched only excluded paths is not a merge, so it keeps the ordinary reasons. A phase branch merged into its base keeps its listed task commits on the merged side, so the base work in the window is still named |
 | `unreachable` | listed task commits that are not reachable from the evaluated ref (another branch, dropped by a rebase), by name |
+| `unparsedSummaries` | phase units: the live SUMMARY files that have a `## Task Commits` section from which no commit id could be read, or in which a task row yielded no id, by name. Their work is not in the scope, so it is reported instead of left to read as complete. A task row may carry a qualifier before its colon (`**Task 1 (tracer):**`, `**Task 1 RED:**`), and the backticked ids on the first list level nested under a task row (a TDD task's RED and GREEN sub-bullets; wrapped description lines allowed, a blank line ends the row) belong to that row |
 | `rangeBase` | the phase-start anchor (the parent of the commit that first added the phase directory, or `--since`), for consumers that need an anchor sha |
 
 The design rules:
 
-- **The scope is a union, not a range.** A range keeps every interleaved non-phase commit in its window. Measured on a 9,676-commit repository, the range held 23, 194 and 602 files for three phases where the union of the phases' own commits held 9, 42 and 69. A phase's commits are the `## Task Commits` rows of its SUMMARY files (section-scoped, row-scoped, backtick-anchored: a sha quoted in prose is not a task commit); a merge commit contributes its diff against its first parent.
+- **The scope is a union, not a range.** A range keeps every interleaved non-phase commit in its window. Measured on a 9,676-commit repository, the range held 23, 194 and 602 files for three phases where the union of the phases' own commits held 9, 42 and 69. A phase's commits are the `## Task Commits` rows of its SUMMARY files (section-scoped, row-scoped, backtick-anchored: a sha quoted in prose is not a task commit); a merge commit contributes only what the merge itself changed (its conflict resolutions and edits, from `git show --remerge-diff`, git 2.36 or newer), so a clean merge contributes nothing in either direction: a catch-up merge of the base branch into the phase branch adds none of the base's files, and a phase branch merged into its base adds none either, its files coming from its own task commits. On a git without `--remerge-diff`, and for an octopus merge, a merge contributes no files rather than the base branch's work. A SUMMARY whose listed commits are merges alone (for example only the phase-into-base merge sha) has no task commits of its own to read, so it degrades to the phase range with `reason: merge-only-task-commits`, never `resolved` with just the merge's edits.
 - **Only commits reachable from the evaluated ref count.** The former `git log --all` let a commit on any branch satisfy a check.
 - **An empty union never becomes an empty scope.** A phase with no SUMMARY, no task rows, no reachable task commits, or only planning paths degrades to the phase-directory range and reports `degraded` with the reason. A phase directory git has never seen, or an unreadable repository, is `unresolvable`.
-- **Plan commits are matched on the subject.** `<type>(<phase>-<plan>):` is anchored, tolerant of zero padding (`03-01`, `3-1`) and of decimal, N-segment and letter-suffixed phase numbers, and escapes every metacharacter, so `03-01` never matches `03-010`.
+- **Plan commits are matched on the subject.** `<type>(<phase>-<plan>):` is anchored, tolerant of zero padding (`03-01`, `3-1`) and of decimal, N-segment and letter-suffixed phase numbers, and escapes every metacharacter, so `03-01` never matches `03-010`. An id carrying the project's CONFIGURED `project_code` (`PRJ-01-01` with `project_code: "PRJ"`, #5271) matches either spelling of the same plan — `feat(PRJ-01-01):` and `feat(01-01):` — because the two init verbs hand out different phase tokens for one plan. The code is stripped only when it is the configured one, matched case-sensitively; the configured value only has to pass a safety check (a letter first, then letters, digits, `_`, `.` or `-`, at most 32 characters), so `gsd` and `AUTH-X` work. An id that merely looks coded (`AUTH-01-02`), and an unusable `project_code` value, keeps the literal behaviour. Every spelling is built by `qualifiedPlanSubjectPattern`, the builder the workstream-qualified id proposed in #5177 is meant to share.
 - **Every git call is bounded** by the `execGit` seam; a timeout or a missing git is `unresolvable`, never a throw and never an empty scope.
+- **A `planning.sub_repos` workspace is read repo by repo** ([#5867](https://github.com/open-gsd/gsd-core/issues/5867)). The workspace root need not be a git repo: the resolver runs the same lookup in each configured sub-repo (and in the root, when the root is itself a repo) and merges the result. Commits are ordered newest first by committer time with `maxCommits` applied to the merged list; `changedFiles`, `files`, `missingOnDisk`, `outsideUnion` and each `commits[].files` are workspace-relative (`<sub-repo>/<path>`); a phase task-commit id is resolved in whichever sub-repo holds it, and one no sub-repo holds is named in `unreachable`. `--ref`, `--pathspec`, `--milestone-bound` (each repo bounded at its own latest tag; a repo with none is unbounded) and `--committed-since` apply inside every repo, and a sub-repo that has no such commit (an empty repo, or a `--ref` only another repo has) contributes nothing; a `--since` commit filters the repo that holds it by ancestry and every other repo by that commit's committer time (a `--since` no repo holds is `unresolvable`: `since-not-found`). Names are normalized (`./app/` is `app`), at most 64 are read, a phase's task-commit ids times repos are capped at 1024 lookups (`sub-repo-too-many-lookups`), sub-repo git runs with `core.fsmonitor=false`, and a folder that is part of the workspace root's own repo is covered by the root. A configured sub-repo that is missing (also when the workspace root is itself a repo), escapes the project (symlinks included), or sits inside some other repo without being its own root makes the scope `unresolvable` with a reason naming it (`sub-repo-unreadable:<name>:<cause>`, `sub-repo-escapes-root:<name>`, `sub-repo-invalid:<index>`, `sub-repo-too-many`). A phase with no task commits has no phase-start anchor in a sub-repo, so unless the workspace root is a repo that tracked the phase directory it is an empty `degraded` scope whose reason ends `:no-phase-start-anchor` (advisory, never a pass). `--pathspec` is a git pathspec evaluated inside each repo, so it is repo-relative (`src`, not `api/src`); two config names that resolve to one repo are read once under the first spelling listed; a sub-repo whose directory cannot be run in makes the ancestry answer unknown (`null`). `tdd-review-checkpoint`'s ancestry check asks the workspace root (when it owns its repo) and then each sub-repo, and the first repo that holds the commits answers; a repo that times out leaves the answer unknown (`null`), never "no". Without `sub_repos` nothing changes.
 
 Workflows reach it as `gsd_run check evaluation-scope`:
 
@@ -370,9 +373,12 @@ Workflows reach it as `gsd_run check evaluation-scope`:
 gsd_run check evaluation-scope --phase <phase> [--since <sha>] --raw      # a phase (or --phase-dir <dir>; --ref <ref>)
 gsd_run check evaluation-scope --plan <phase>-<plan> --raw                # a plan: --commits-only, --max-commits N,
                                                                           #   --milestone-bound, --committed-since <date>,
-                                                                          #   --pathspec <glob> (repeatable)
+                                                                          #   --pathspec <glob> (repeatable),
+                                                                          #   --all-branches (plan/quick only; see below)
 gsd_run check evaluation-scope --quick <quick-id> --include-files --raw   # a quick task
 ```
+
+`--all-branches` (plan and quick units only; a usage failure on a phase) looks the unit's commits up across every local branch instead of the commits reachable from `--ref`, and adds `latestCommitTime` (unix seconds of the newest match, or `null`) to the payload. It exists for the executor stall probe ([#6117](https://github.com/open-gsd/gsd-core/issues/6117)): a worktree executor's commits sit on its own unmerged agent branch until the wave merges. It is an explicit opt-in; the gates keep the reachable-from-ref contract above, and without the flag the payload is unchanged.
 
 The verb is a resolver, not a policy: it always reports `block: false`, and the caller decides what a `degraded` or `unresolvable` scope means. `scripts/lint-evaluation-scope-drift.cjs` fails CI when a gate module, `verify`, a workflow or an agent derives its own range again (`git log … --all`, `git diff … ..HEAD`, a `HEAD~N` anchor, a hand-rolled phase-start anchor, a commit-message lookup); its allowlist pins exact non-scope sites and is drained, never renewed.
 
@@ -535,6 +541,8 @@ Node.js CLI utility (`gsd-tools.cjs`) with domain modules split across `gsd-core
 | `audit-command-router.cjs` | ADR-959 capability command router (phase 4d-impl-3); extracted from the `case 'audit-uat':` and `case 'audit-open':` arms in `gsd-tools.cjs`; `routeAuditUat` → `uat.cjs:cmdAuditUat`, `routeAuditOpen` → `audit.cjs:{auditOpenArtifacts,formatAuditReport}`; discovered via `commandFamilies` in the capability registry |
 | `intel-command-router.cjs` | ADR-959 capability command router (phase 4d-impl-4, last first-party cutover); extracted from the `case 'intel':` arm in `gsd-tools.cjs`; `routeIntelCommand` → all 9 intel subcommands via lazy `require('./intel.cjs')`; preserves non-raw `timeAgo` transform on `status.files[*].updated_at`; discovered via `commandFamilies` in the capability registry |
 | `runtime-hooks-surface.cjs` | Hook-surface writer and configured-entrypoint validation module (ADR-857 phase 5f-1); owns Cline rules/agents-md/pre-tool-use hook generation, Cursor/Windsurf `hooks.json`, Kimi hook TOML, Copilot session-hook config, Codex hook-block management, and construction-time records for paths emitted into runtime configuration. Installer success requires those records to pass non-executing file-type and interpreter-resolution checks. |
+
+`gsd-tools.cjs` requires each of these modules on first use (#5865). A command loads the modules it runs, plus the ones every command goes through before dispatch: those `main()` uses first (`cli-exit`, `io`, `project-root`, `project-context`, `cli-skew-check`, `active-workstream-store`, `cli-surface`, and what they require) and the capability-dispatch stack (`capability-registry`, `capability-loader` and theirs). `runtime-identity` loads 32 `lib/` modules, where every command used to load about 220.
 
 
 ---
@@ -782,7 +790,7 @@ Equivalent paths for other runtimes:
 ├── ROADMAP.md              # Phase breakdown with status tracking
 ├── STATE.md                # Living memory: position, decisions, blockers, metrics
 ├── config.json             # Workflow configuration
-├── MILESTONES.md           # Completed milestone archive
+├── MILESTONES.md           # Completed milestone archive (absent until the first /gsd-complete-milestone)
 ├── research/               # Domain research from /gsd-new-project
 │   ├── SUMMARY.md
 │   ├── STACK.md
@@ -975,7 +983,8 @@ Debounce: 5 tool uses between repeated warnings. Severity escalation (WARNING→
 - All hooks wrap in try/catch, exit silently on error
 - stdin timeout guard (3s) prevents hanging on pipe issues
 - Stale metrics (>60s old) are ignored
-- Missing bridge files handled gracefully (subagents, fresh sessions)
+- Missing bridge files handled gracefully (fresh sessions)
+- Subagent inputs (`agent_id` a non-empty string) exit silently before any bridge or sentinel access: they share the parent's `session_id`, so any reading would be the parent's (#6360)
 - Context monitor is advisory — never issues imperative commands that override user preferences
 
 ### Package Legitimacy Gate (v1.42.1)
@@ -1045,7 +1054,7 @@ The migration-specific ownership and source snapshots live in
 | Runtime | Global root | Local root | Invocation surface | Agent surface | Config and hooks |
 | --- | --- | --- | --- | --- | --- |
 | Claude Code | `~/.claude` | `./.claude` | Global `skills/gsd-*/SKILL.md` (flat, #924); local `commands/gsd/*.md` | `agents/gsd-*.md` | `settings.json` hook and statusLine entries |
-| OpenCode | `~/.config/opencode` | `./.opencode` | `commands/gsd-*.md` | `agents/gsd-*.md` | `opencode.json` or `opencode.jsonc`; no GSD hooks |
+| OpenCode (1.x and 2.x) | `~/.config/opencode` | `./.opencode` | `commands/gsd-*.md`; every command is also a model-loadable skill (`skills/gsd-*/SKILL.md`) | `agents/gsd-*.md`, with a `permission:` block denying the tools an agent's `tools:` allowlist leaves out | `opencode.json` or `opencode.jsonc` (edited as text, so a commented file keeps its comments); one native plugin, `plugins/gsd-core.js`, that serves both generations and runs the `hooks/` guards under Node — see [OpenCode 1.x and 2.x](#opencode-1x-and-2x) |
 | Kilo | `~/.config/kilo` | `./.kilo` | `command/gsd-*.md` | `agents/gsd-*.md` | `kilo.json` or `kilo.jsonc`; no GSD hooks |
 | Kimi CLI | First-existing generic root: `~/.config/agents` recommended, then `~/.agents` when `~/.agents/skills` exists and `~/.config/agents/skills` does not | Deferred and guarded | `skills/gsd-*/SKILL.md` (flat) invoked as `/skill:gsd-*` | `agents/gsd.yaml`, `agents/gsd.md`, and `agents/subagents/gsd-*` YAML/prompt pairs | Explicit `kimi --agent-file <configRoot>/agents/gsd.yaml`; no GSD hooks or statusline |
 | Codex | `~/.codex` | `./.codex` | `skills/gsd-*/SKILL.md` (flat) | `agents/` source markdown plus per-agent TOML (Codex auto-discovers each `agents/gsd-*.toml`; this is the sole canonical role registration, #2406) | `config.toml` bare `[agents]` dispatch-tuning scalar (`max_depth`, no per-role `[agents.gsd-*]` tables), `[features].hooks` (canonical; legacy alias `codex_hooks` is recognized and migrated forward on reinstall, #3566), and hook tables |
@@ -1059,6 +1068,51 @@ The migration-specific ownership and source snapshots live in
 | Hermes Agent | `~/.hermes` | `./.hermes` | `skills/gsd/ns-*/SKILL.md` (6 routers, prefix='') + `skills/gsd/ns-*/skills/<name>/SKILL.md` (nested concretes) | `agents/gsd-*.md` | Common GSD settings and hook entries where supported |
 | CodeBuddy | `~/.codebuddy` | `./.codebuddy` | `skills/gsd-*/SKILL.md` (flat, `user-invocable: false`) | `agents/gsd-*.md` | `/gsd-*` slash commands under `commands/`; common GSD settings and hook entries where supported |
 | Cline | `~/.cline` | project root | `skills/gsd-ns-*/SKILL.md` (6 routers) + `skills/gsd-ns-*/skills/<name>/SKILL.md` (nested concretes) + `.clinerules` | Rules only | No GSD hooks or statusline |
+
+### OpenCode 1.x and 2.x
+
+OpenCode 1.x and 2.x use the same `opencode` command and config directories and cannot be installed side by side,
+so one `opencode` runtime serves both. The design is recorded in
+[ADR-5331](adr/5331-opencode-v2-support-and-v1-sunset.md); Kilo is a fork on the 1.x line and is unaffected.
+
+- **Generation detection** (`opencode-version.cts`): a bounded, argv-only `opencode --version` run (`1.19.0` on 1.x,
+  `opencode v2.0.27` on 2.x), `GSD_OPENCODE_GENERATION=1|2` to force it, and 2.x-only config signals as a fallback.
+  An undeterminable generation is `null` and keeps today's behavior. The installer prints the result and records it as
+  `hostGeneration` in `gsd-install-state.json`, which `update-context` reports.
+- **One plugin, two entrypoints:** `plugins/gsd-core.js` exports `server` (1.x) and a non-enumerable `setup` (2.x). `setup`
+  is inert unless it is handed a 2.x context (1.18.29 and 1.19.0 also call it, with one that has no `tool`). Both
+  adapters run the same guards; the 2.x `shell` and `patch` tool ids map to `Bash` and `MultiEdit`; `file.edited`, which
+  2.x never emits, is derived from completed edit-tool calls on `.planning/config.json`.
+- **Hooks run under Node.** Inside OpenCode `process.execPath` is the OpenCode binary, so the plugin starts hook
+  scripts with `node` from `PATH` (override: `GSD_HOOK_RUNTIME`); before this every guard was silently skipped (#4849).
+- **Spawn arguments differ by generation** and are adapted when a command line is built: 2.x has no `--dir` (the worker
+  binds through its working directory, which 2.x takes from `$PWD`, so it must be launched from a shell that has
+  `cd`'d there) and no `--variant` (effort rides on the model as `provider/model#variant`); the reviewer lane drops the
+  trailing stdin `-`, which 2.x sends to the model as text, and runs `--standalone` so no background service outlives it.
+- **Config edits preserve JSONC.** `jsonc-edit.cts` splices only the keys GSD owns, so an annotated `opencode.jsonc` or
+  `kilo.jsonc` keeps its comments, trailing commas and layout through install, migration and uninstall (#5334). Plain
+  JSON without comments is rewritten as before. GSD never writes 2.x-only shapes to user config.
+- **MCP companion.** The installer registers `mcp.gsd` with `--no-prompts`; OpenCode would otherwise list every GSD
+  prompt as a second `gsd:<name>` slash command next to the command files. Migration 011 converges existing entries.
+  The entry stays in the 1.x shape, which 2.x reads in place; 2.x's default Code Mode is left as it is, because the
+  companion's tools are reached by exact name from GSD workflows and nothing relies on them being native tools.
+- **Data directory.** 2.x adds its own session tables beside 1.x's and 1.x keeps working; a data directory 2.x creates
+  from scratch has no 1.x tables and 1.x cannot open it. The installer reads the schema (never writes it) and says which
+  case applies.
+- **Uninstall is complete on both generations:** it removes every staged `hooks/lib` helper (derived from what the
+  installer copies, so the lists cannot drift), the install state and migration-journal records (backups of files the
+  user modified are kept), an empty `settings.json`, the GSD `mcp` entry in both shapes, empty directories GSD created,
+  and the `~/.gsd/defaults.json` keys the install set once no other runtime needs them and the user has not changed them.
+
+- **Phase 3 additions (#5339).** The OpenCode-only parity code in the plugin sits between `gsd:opencode-parity` markers and
+  is absent from the byte-identical Kilo mirror: the four opt-in `.sh` hooks (commit validation, phase boundary, session
+  state, graphify auto-update) run under bash, with their config gates re-checked in-process so a project that has not
+  opted in pays no spawn; advisories are appended to the tool result (OpenCode shows neither a plugin's stderr nor its
+  metadata to the model); the 2.x adapter treats the first event naming a session as `session.created`, because a 2.x
+  `run` never emits one. The terminal-client plugin `plugins/gsd-statusline/tui.tsx` (descriptor key
+  `hostBehaviors.nativeCliPlugin`) renders the output of `hooks/gsd-statusline.js` in the `home.footer.status` and
+  `prompt.footer.status` slots; 1.x never loads it. The deprecation notice and freeze date live in `opencode-version.cts`
+  (`describeDeprecationNotice`, `OPENCODE_V1_FREEZE_DATE`). Execution evidence: [verification matrix](reference/opencode-v2-verification-matrix.md).
 
 ### Upstream Contract Sources
 

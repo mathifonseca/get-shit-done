@@ -21,6 +21,13 @@
 process.env.GSD_TEST_MODE = '1';
 
 const { test, describe, beforeEach, afterEach, before, after } = require('node:test');
+
+// #5017: pinned GSD_HOME (next to HOME) is put back after each test so it never leaks into the next one.
+const __ORIG_GSD_HOME = process.env.GSD_HOME;
+require('node:test').afterEach(() => {
+  if (__ORIG_GSD_HOME === undefined) delete process.env.GSD_HOME;
+  else process.env.GSD_HOME = __ORIG_GSD_HOME;
+});
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -56,6 +63,8 @@ const {
 const {
   MINIMAL_SKILL_ALLOWLIST,
   PROFILES,
+  loadSkillsManifest,
+  resolveProfile,
   isMinimalMode,
   shouldInstallSkill,
   stageSkillsForMode,
@@ -73,7 +82,7 @@ const {
   walk,
   simulateHookCopy,
   installerEnv,
-  runMinimalInstall,
+  runMinimalInstall, copyRuntimeFixture,
   manifestSkillSet,
   manifestAgentCount,
   collectSkillBasenamesOnDisk,
@@ -81,7 +90,8 @@ const {
 
 /**
  * collectSkillBasenamesOnDisk(configDir, runtime, scope) re-resolves the
- * runtime's skills-kind layout via os.homedir(). runMinimalInstall() already
+ * runtime's skills-kind layout via os.homedir(). runMinimalInstall() (and so the
+ * tree a copy is made from) already
  * sandboxes HOME/USERPROFILE to `root` for the spawned install subprocess,
  * but that sandboxing does not persist into this (parent) process — without
  * re-sandboxing here, Codex's skills-kind `home: ".agents"` override
@@ -93,6 +103,7 @@ function collectSkillBasenamesOnDiskSandboxed(configDir, runtime, scope, root) {
   const savedHome = process.env.HOME;
   const savedUserProfile = process.env.USERPROFILE;
   process.env.HOME = root;
+  process.env.GSD_HOME = root; // #5017: the defaults store root follows HOME
   process.env.USERPROFILE = root;
   try {
     return collectSkillBasenamesOnDisk(configDir, runtime, scope);
@@ -103,6 +114,24 @@ function collectSkillBasenamesOnDiskSandboxed(configDir, runtime, scope, root) {
     else process.env.USERPROFILE = savedUserProfile;
   }
 }
+
+// #5503: the agents the eight core skills spawn, from the real manifest. The manifest also
+// carries non-agent `gsd-*` tokens (skill and file names mentioned in the workflows), so keep
+// only names that are real agent files.
+const REAL_SKILLS_MANIFEST = loadSkillsManifest();
+const ALL_AGENT_STEMS = fs.readdirSync(path.join(__dirname, '..', 'agents'))
+  .filter((f) => f.startsWith('gsd-') && f.endsWith('.md') && !f.endsWith('.compact.md'))
+  .map((f) => f.slice(0, -3));
+const CORE_SPAWNED_AGENTS = (() => {
+  const out = new Set();
+  for (const stem of PROFILES.core) {
+    for (const a of REAL_SKILLS_MANIFEST.get(`_calls_agents_${stem}`) || []) {
+      if (ALL_AGENT_STEMS.includes(a)) out.add(a);
+    }
+  }
+  return out;
+})();
+const NON_CORE_AGENT_STEMS = ALL_AGENT_STEMS.filter((a) => !CORE_SPAWNED_AGENTS.has(a));
 
 // ─── Section 9: install-profiles — MINIMAL_SKILL_ALLOWLIST ───────────────────
 
@@ -364,7 +393,7 @@ describe('install-profiles: allowlist scope guards', () => {
 describe('install: --minimal honoured for every runtime, on-disk matches manifest', () => {
   for (const runtime of SKILL_RUNTIMES) {
     for (const scope of ['global', 'local']) {
-      test(`${runtime} --${scope} --minimal: mode, skills, zero agents, on-disk matches manifest`, () => {
+      test(`${runtime} --${scope} --minimal: mode, skills, only core-spawned agents, on-disk matches manifest`, () => {
         const { manifest, configDir, root } = runMinimalInstall({ runtime, scope, extraArgs: ['--minimal'] });
         try {
           assert.ok(manifest, `${runtime} ${scope} must produce manifest`);
@@ -373,18 +402,23 @@ describe('install: --minimal honoured for every runtime, on-disk matches manifes
             [...manifestSkillSet(manifest)].sort(),
             [...MINIMAL_SKILL_ALLOWLIST].sort(),
           );
-          assert.strictEqual(manifestAgentCount(manifest), 0);
-
           const onDisk = collectSkillBasenamesOnDiskSandboxed(configDir, runtime, scope, root);
           const inManifest = manifestSkillSet(manifest);
           assert.deepStrictEqual([...onDisk].sort(), [...inManifest].sort());
           // Not the shared listAgentFiles() helper: asserts on the INSTALLED
-          // dest dir (must be empty in --minimal mode), not the source roster.
+          // dest dir (only agents the core skills spawn in --minimal mode), not the source roster.
           const agentsDir = path.join(configDir, 'agents');
           if (fs.existsSync(agentsDir)) {
             const gsdAgents = fs.readdirSync(agentsDir)
-              .filter(f => f.startsWith('gsd-') && f.endsWith('.md'));
-            assert.deepStrictEqual(gsdAgents, []);
+              .filter(f => f.startsWith('gsd-') && f.endsWith('.md'))
+              // Copilot names its agent files gsd-<name>.agent.md.
+              .map(f => f.replace(/(\.agent)?\.md$/, ''));
+            // #5503: a runtime that stages agents at all stages exactly the ones the eight core
+            // skills spawn: not none (the bug), not the full roster.
+            if (gsdAgents.length > 0) {
+              assert.deepStrictEqual([...gsdAgents].sort(), [...CORE_SPAWNED_AGENTS].sort(),
+                `${runtime} ${scope}: staged agents must be exactly the core-spawned set`);
+            }
           }
         } finally {
           cleanup(root);
@@ -396,14 +430,14 @@ describe('install: --minimal honoured for every runtime, on-disk matches manifes
 
 describe('install: Cline --minimal (rules-based, no skills/ dir)', () => {
   for (const scope of ['global', 'local']) {
-    test(`cline --${scope} --minimal: mode=minimal, zero agents, .clinerules present`, () => {
+    test(`cline --${scope} --minimal: mode=minimal, only core-spawned agents, .clinerules present`, () => {
       const { manifest, configDir, root } = runMinimalInstall({
         runtime: 'cline', scope, extraArgs: ['--minimal'],
       });
       try {
         assert.ok(manifest, 'cline must produce manifest');
         assert.strictEqual(manifest.mode, 'minimal');
-        assert.strictEqual(manifestAgentCount(manifest), 0);
+        assert.strictEqual(manifestAgentCount(manifest), CORE_SPAWNED_AGENTS.size);
         assert.ok(fs.existsSync(path.join(configDir, '.clinerules')));
       } finally {
         cleanup(root);
@@ -471,18 +505,18 @@ describe('install: manifest records mode for both profiles', () => {
     assert.ok(r.agentCount > 0);
   });
 
-  test('--minimal records mode: "minimal" with exactly 8 skills and 0 agents', () => {
+  test('--minimal records mode: "minimal" with exactly 8 skills and only the core-spawned agents', () => {
     const r = sharedMinimalManifestInstall();
     assert.strictEqual(r.mode, 'minimal');
     assert.strictEqual(r.skillCount, 8);
-    assert.strictEqual(r.agentCount, 0);
+    assert.strictEqual(r.agentCount, CORE_SPAWNED_AGENTS.size);
   });
 
   test('--core-only is an alias for --minimal', () => {
     const r = manifestModeAfterInstall(['--core-only']);
     assert.strictEqual(r.mode, 'minimal');
     assert.strictEqual(r.skillCount, 8);
-    assert.strictEqual(r.agentCount, 0);
+    assert.strictEqual(r.agentCount, CORE_SPAWNED_AGENTS.size);
   });
 });
 
@@ -546,25 +580,27 @@ describe('install-minimal-backcompat: --minimal and --profile=core produce same 
 });
 
 describe('install: Codex full → minimal downgrade cleans stale agent state', () => {
-  test('--minimal removes stale .toml agents and strips [agents.gsd-*] from config.toml', () => {
+  test('--minimal removes stale non-core .toml agents and strips [agents.gsd-*] from config.toml, keeping the core agents', () => {
     const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-codex-downgrade-'));
     try {
+      const [staleA, staleB] = NON_CORE_AGENT_STEMS;
+      assert.ok(staleA && staleB, 'precondition: at least two agents are not spawned by a core skill');
       const agentsDir = path.join(targetDir, 'agents');
       fs.mkdirSync(agentsDir, { recursive: true });
-      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.md'), 'stale\n');
-      fs.writeFileSync(path.join(agentsDir, 'gsd-planner.md'), 'stale\n');
-      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.toml'), 'name = "gsd-executor"\n');
-      fs.writeFileSync(path.join(agentsDir, 'gsd-planner.toml'), 'name = "gsd-planner"\n');
+      fs.writeFileSync(path.join(agentsDir, `${staleA}.md`), 'stale\n');
+      fs.writeFileSync(path.join(agentsDir, `${staleB}.md`), 'stale\n');
+      fs.writeFileSync(path.join(agentsDir, `${staleA}.toml`), `name = "${staleA}"\n`);
+      fs.writeFileSync(path.join(agentsDir, `${staleB}.toml`), `name = "${staleB}"\n`);
       fs.writeFileSync(path.join(agentsDir, 'my-custom-agent.md'), 'user owns this\n');
       const codexConfig = [
         '# user-owned setting',
         'model = "gpt-5"',
         '',
         '# GSD Agent Configuration — managed by gsd-core installer',
-        '[agents.gsd-executor]',
+        `[agents.${staleA}]`,
         'cmd = "stale"',
         '',
-        '[agents.gsd-planner]',
+        `[agents.${staleB}]`,
         'cmd = "stale"',
         '',
       ].join('\n');
@@ -582,20 +618,22 @@ describe('install: Codex full → minimal downgrade cleans stale agent state', (
       assert.ok(result.stdout || result.stderr);
 
       const remaining = fs.existsSync(agentsDir) ? fs.readdirSync(agentsDir) : [];
-      assert.ok(!remaining.includes('gsd-executor.md'));
-      assert.ok(!remaining.includes('gsd-planner.md'));
-      assert.ok(!remaining.includes('gsd-executor.toml'));
-      assert.ok(!remaining.includes('gsd-planner.toml'));
+      for (const stale of [staleA, staleB]) {
+        assert.ok(!remaining.includes(`${stale}.md`), `${stale}.md is not spawned by a core skill and must be pruned`);
+        assert.ok(!remaining.includes(`${stale}.toml`), `${stale}.toml is not spawned by a core skill and must be pruned`);
+      }
       assert.ok(remaining.includes('my-custom-agent.md'));
+      // #5503: the agents the core skills spawn are (re)installed.
+      for (const agent of CORE_SPAWNED_AGENTS) {
+        assert.ok(remaining.includes(`${agent}.toml`), `${agent}.toml must be installed for core`);
+      }
 
       const configPath = path.join(targetDir, 'config.toml');
-      if (fs.existsSync(configPath)) {
-        const config = fs.readFileSync(configPath, 'utf8');
-        assert.ok(!config.includes('[agents.gsd-executor]'));
-        assert.ok(!config.includes('[agents.gsd-planner]'));
-        assert.ok(config.includes('model = "gpt-5"'));
-      }
       assert.ok(fs.existsSync(configPath));
+      const config = fs.readFileSync(configPath, 'utf8');
+      assert.ok(!config.includes(`[agents.${staleA}]`));
+      assert.ok(!config.includes(`[agents.${staleB}]`));
+      assert.ok(config.includes('model = "gpt-5"'));
     } finally {
       cleanup(targetDir);
     }
@@ -603,13 +641,15 @@ describe('install: Codex full → minimal downgrade cleans stale agent state', (
 });
 
 describe('install: Claude full → minimal downgrade removes stale agents', () => {
-  test('--minimal removes stale gsd-*.md agents but preserves user-owned agents', () => {
+  test('--minimal removes stale non-core gsd-*.md agents but preserves user-owned agents and the core agents', () => {
     const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-claude-downgrade-'));
     try {
+      const [staleA, staleB] = NON_CORE_AGENT_STEMS;
+      assert.ok(staleA && staleB, 'precondition: at least two agents are not spawned by a core skill');
       const agentsDir = path.join(targetDir, 'agents');
       fs.mkdirSync(agentsDir, { recursive: true });
-      fs.writeFileSync(path.join(agentsDir, 'gsd-executor.md'), 'stale\n');
-      fs.writeFileSync(path.join(agentsDir, 'gsd-planner.md'), 'stale\n');
+      fs.writeFileSync(path.join(agentsDir, `${staleA}.md`), 'stale\n');
+      fs.writeFileSync(path.join(agentsDir, `${staleB}.md`), 'stale\n');
       fs.writeFileSync(path.join(agentsDir, 'my-custom-agent.md'), 'user owns this\n');
 
       runNode(
@@ -618,10 +658,14 @@ describe('install: Claude full → minimal downgrade removes stale agents', () =
       );
 
       const remaining = fs.existsSync(agentsDir) ? fs.readdirSync(agentsDir) : [];
-      assert.ok(!remaining.includes('gsd-executor.md'));
-      assert.ok(!remaining.includes('gsd-planner.md'));
+      assert.ok(!remaining.includes(`${staleA}.md`));
+      assert.ok(!remaining.includes(`${staleB}.md`));
       assert.ok(remaining.includes('my-custom-agent.md'));
-      assert.deepStrictEqual(remaining.filter(f => f.startsWith('gsd-')), []);
+      assert.deepStrictEqual(
+        remaining.filter((f) => f.startsWith('gsd-')).sort(),
+        [...CORE_SPAWNED_AGENTS].map((a) => `${a}.md`).sort(),
+        'only the agents the core skills spawn remain',
+      );
     } finally {
       cleanup(targetDir);
     }
@@ -2986,7 +3030,7 @@ describe('#4087 regression: Codex install stages the hook helpers its hooks requ
     throwIfFailed(
       runNode([INSTALL_SCRIPT, '--codex', '--global', '--yes', '--no-sdk', '--config-dir', configDir], {
         timeoutMs: INSTALL_TIMEOUT_MS,
-        env: { ...process.env, HOME: configDir, USERPROFILE: configDir },
+        env: { ...process.env, HOME: configDir, USERPROFILE: configDir, GSD_HOME: configDir },
       }),
       `node ${INSTALL_SCRIPT} --codex --global --config-dir ${configDir}`,
     );
@@ -3240,7 +3284,7 @@ describe('#4087 review: Windsurf install stages the hook helpers its hooks requi
     throwIfFailed(
       runNode([INSTALL_SCRIPT, '--windsurf', '--global', '--yes', '--config-dir', configDir], {
         timeoutMs: INSTALL_TIMEOUT_MS,
-        env: { ...process.env, HOME: configDir, USERPROFILE: configDir },
+        env: { ...process.env, HOME: configDir, USERPROFILE: configDir, GSD_HOME: configDir },
       }),
       `node ${INSTALL_SCRIPT} --windsurf --global --config-dir ${configDir}`,
     );
@@ -3282,7 +3326,7 @@ describe('#3023 pi shared-hooks bundle avoids the host-reserved hooks/ directory
 
   for (const scope of ['local', 'global']) {
     test(`pi ${scope} install: no host-reserved hooks/ dir, bundle staged under ${PI_BUNDLE_DIR}/, manifested`, (t) => {
-      const { manifest, configDir, root } = runMinimalInstall({ runtime: 'pi', scope });
+      const { manifest, configDir, root } = copyRuntimeFixture({ runtime: 'pi', scope });
       t.after(() => cleanup(root));
 
       const reserved = path.join(configDir, PI_RESERVED_DIR);
@@ -3468,5 +3512,209 @@ describe('bug #3981: blocking-guard timeout budget + migration', () => {
     };
     assert.equal(findTimeout('gsd-read-guard.js'), 5, 'advisory read guard keeps its 5 s budget');
     assert.equal(findTimeout('gsd-context-monitor.js'), 10, 'context monitor keeps its 10 s budget');
+  });
+});
+
+// ─── #5503: a core install stages the agents its skills spawn ────────────────
+
+describe('#5503 core profile stages the agents its skills spawn', () => {
+  // Agents the issue names, spawned by name from the core skills' workflows.
+  const REQUIRED_CORE_AGENTS = [
+    'gsd-roadmapper', 'gsd-planner', 'gsd-plan-checker', 'gsd-phase-researcher', 'gsd-executor', 'gsd-verifier',
+  ];
+  const expected = [...CORE_SPAWNED_AGENTS].sort();
+  const AGENTS_SRC_DIR = path.join(__dirname, '..', 'agents');
+
+  const allAgentStems = () => fs.readdirSync(AGENTS_SRC_DIR)
+    .filter((f) => f.startsWith('gsd-') && f.endsWith('.md') && !f.endsWith('.compact.md'))
+    .map((f) => f.slice(0, -3));
+
+  const installedAgentStems = (configDir) => {
+    const dir = path.join(configDir, 'agents');
+    if (!fs.existsSync(dir)) return [];
+    return fs.readdirSync(dir)
+      .filter((f) => f.startsWith('gsd-') && f.endsWith('.md'))
+      .map((f) => f.slice(0, -3))
+      .sort();
+  };
+
+  test('precondition: the real manifest says the core skills spawn the six named agents', () => {
+    for (const agent of REQUIRED_CORE_AGENTS) {
+      assert.ok(expected.includes(agent), `${agent} must be referenced by a core skill, got ${JSON.stringify(expected)}`);
+    }
+  });
+
+  for (const [label, extraArgs] of [['--profile=core', ['--profile=core']], ['--minimal', ['--minimal']]]) {
+    test(`${label} stages the agents the core skills spawn`, () => {
+      const { manifest: installManifest, configDir, root } = runMinimalInstall({ runtime: 'claude', scope: 'global', extraArgs });
+      try {
+        const installed = installedAgentStems(configDir);
+        for (const agent of REQUIRED_CORE_AGENTS) {
+          assert.ok(installed.includes(agent), `${label}: ${agent} must be installed, got ${JSON.stringify(installed)}`);
+        }
+        assert.deepStrictEqual(installed, expected, `${label}: installed agents must be exactly the agents the core skills reference`);
+        // Independence: closing over the real manifest must not widen the skill set.
+        assert.deepStrictEqual([...manifestSkillSet(installManifest)].sort(), [...PROFILES.core].sort(),
+          `${label}: the core skill set must stay exactly the eight core skills`);
+      } finally {
+        cleanup(root);
+      }
+    });
+
+    test(`${label} stages only the agents its skills reference, not the full roster`, () => {
+      const { configDir, root } = runMinimalInstall({ runtime: 'claude', scope: 'global', extraArgs });
+      try {
+        const installed = new Set(installedAgentStems(configDir));
+        const notReferenced = allAgentStems().filter((a) => !expected.includes(a));
+        for (const agent of notReferenced) {
+          assert.ok(!installed.has(agent), `${label}: ${agent} is not spawned by a core skill and must not be staged`);
+        }
+      } finally {
+        cleanup(root);
+      }
+    });
+  }
+
+  test('a full -> core downgrade prunes the non-core agents and keeps the core ones', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5503-downgrade-'));
+    try {
+      const full = runMinimalInstall({ runtime: 'claude', scope: 'global', extraArgs: ['--profile=full'], root });
+      const fullAgents = installedAgentStems(full.configDir);
+      assert.ok(fullAgents.length > expected.length, 'precondition: a full install stages more agents than core');
+      const core = runMinimalInstall({ runtime: 'claude', scope: 'global', extraArgs: ['--profile=core'], root });
+      assert.deepStrictEqual(installedAgentStems(core.configDir), expected, 'the downgrade must leave exactly the core agent set');
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('codex core agent source matches the profile, not the whole roster', () => {
+    const { configDir, root } = runMinimalInstall({ runtime: 'codex', scope: 'global', extraArgs: ['--profile=core'] });
+    try {
+      assert.ok(fs.existsSync(path.join(configDir, 'config.toml')), 'codex install must write config.toml');
+      // Codex agent roles are the per-agent agents/gsd-*.toml files.
+      const agentsToml = path.join(configDir, 'agents');
+      const registered = (fs.existsSync(agentsToml) ? fs.readdirSync(agentsToml) : [])
+        .filter((f) => f.startsWith('gsd-') && f.endsWith('.toml'))
+        .map((f) => f.slice(0, -5))
+        .sort();
+      for (const agent of REQUIRED_CORE_AGENTS) {
+        assert.ok(registered.includes(agent), `codex core: ${agent} must have a role file, got ${JSON.stringify(registered)}`);
+      }
+      assert.deepStrictEqual(registered, expected, 'codex core installs exactly the agent roles the core skills reference');
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('resolveProfile derives agents from agentManifest without widening the skill set', () => {
+    const resolved = resolveProfile({ modes: ['core'], manifest: new Map(), agentManifest: REAL_SKILLS_MANIFEST });
+    assert.deepStrictEqual([...resolved.skills].sort(), [...PROFILES.core].sort());
+    // resolveProfile reports every gsd-* token the core workflows mention; staging keeps only real agent files.
+    assert.deepStrictEqual([...resolved.agents].filter((a) => ALL_AGENT_STEMS.includes(a)).sort(), expected);
+    for (const agent of expected) assert.ok(resolved.agents.has(agent), `${agent} must be derived from agentManifest`);
+  });
+
+  test('resolveProfile without agentManifest derives agents from the closure manifest exactly as before', () => {
+    assert.equal(resolveProfile({ modes: ['core'], manifest: new Map() }).agents.size, 0, 'the empty-manifest default is unchanged');
+    assert.ok(resolveProfile({ modes: ['standard'], manifest: REAL_SKILLS_MANIFEST }).agents.size > 0,
+      'a tiered profile still derives agents from its own closure');
+  });
+});
+
+// ─── #5954: the manifest an install leaves describes the final bytes it wrote ──
+// The first writeManifest hashes gsd-core/** before the Codex `@~/.claude/gsd-core/` include rewrite
+// (and, for Copilot/Antigravity/Kimi, the include retarget) changes those files. Only the Codex
+// agent-roles branch re-hashed afterwards, so any other install left a stale manifest and the next
+// reinstall reported every rewritten file as a local patch.
+describe('#5954: a reinstall with no edits reports no local patches', () => {
+  const crypto = require('node:crypto');
+  const { writeActiveProfile } = require('../gsd-core/bin/lib/install-profiles.cjs');
+  const { writeSurface } = require('../gsd-core/bin/lib/surface.cjs');
+
+  function installInto(runtime, configDir, extraArgs = []) {
+    const r = runNode([INSTALL_SCRIPT, `--${runtime}`, '--global', '--config-dir', configDir, ...extraArgs], { env: installerEnv(), timeoutMs: INSTALL_TIMEOUT_MS });
+    assert.equal(r.exitCode, 0, `${runtime} install failed: ${r.stderr}${r.stdout}`);
+    return r.stdout + r.stderr;
+  }
+
+  /** Manifest entries whose file exists on disk but whose hash is not the file's current hash. */
+  function staleEntries(configDir) {
+    const manifest = JSON.parse(fs.readFileSync(path.join(configDir, MANIFEST_NAME), 'utf8'));
+    return Object.entries(manifest.files || {}).filter(([rel, hash]) => {
+      const file = path.join(configDir, rel);
+      return fs.existsSync(file) && crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') !== hash;
+    }).map(([rel]) => rel);
+  }
+
+  function agentFreeSurface(configDir) {
+    const skills = [...REAL_SKILLS_MANIFEST.keys()].filter((k) => !k.startsWith('_calls_agents_'));
+    const keep = skills.filter((s) => !(REAL_SKILLS_MANIFEST.get(`_calls_agents_${s}`) || []).length).slice(0, 1);
+    writeActiveProfile(configDir, 'core');
+    writeSurface(configDir, { baseProfile: 'core', disabledClusters: [], explicitAdds: keep, explicitRemoves: skills.filter((s) => !keep.includes(s)) });
+  }
+
+  for (const scenario of [
+    { runtime: 'codex', label: 'codex, agentless surface (no agent roles registered)', prepare: agentFreeSurface, expectSkipLine: true },
+    { runtime: 'codex', label: 'codex, default profile', prepare: () => {}, expectSkipLine: false },
+    { runtime: 'codex', label: 'codex --minimal', prepare: () => {}, expectSkipLine: false, extraArgs: ['--minimal'] },
+    { runtime: 'kimi', label: 'kimi (include retarget)', prepare: () => {}, expectSkipLine: false },
+    { runtime: 'copilot', label: 'copilot (include retarget)', prepare: () => {}, expectSkipLine: false },
+    { runtime: 'antigravity', label: 'antigravity (include retarget)', prepare: () => {}, expectSkipLine: false },
+    { runtime: 'claude', label: 'claude global (no rewrite: unchanged)', prepare: () => {}, expectSkipLine: false },
+  ]) {
+    test(`${scenario.label}: the manifest matches the disk and reinstalls write no gsd-local-patches/`, () => {
+      const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5954-'));
+      try {
+        const extra = scenario.extraArgs || [];
+        installInto(scenario.runtime, configDir, extra);
+        scenario.prepare(configDir);
+        installInto(scenario.runtime, configDir, extra);
+        const third = installInto(scenario.runtime, configDir, extra);
+        if (scenario.expectSkipLine) assert.match(third, /Skipping Codex agent config generation/, 'the profile registers no agent roles');
+        assert.deepEqual(staleEntries(configDir), [], 'every manifest hash equals the on-disk hash of that file');
+        assert.doesNotMatch(third, /Local patches detected|locally modified/, 'no phantom local patches');
+        assert.equal(fs.existsSync(path.join(configDir, 'gsd-local-patches')), false, 'no gsd-local-patches/ backup');
+      } finally {
+        cleanup(configDir);
+      }
+    });
+  }
+
+  for (const runtime of ['codex', 'kimi', 'copilot']) {
+    test(`${runtime}: an edited file the include rewrite changed keeps its gsd-pristine/ baseline`, () => {
+      const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5954-pristine-'));
+      try {
+        installInto(runtime, configDir);
+        installInto(runtime, configDir);
+        const edited = 'gsd-core/workflows/add-backlog.md';
+        fs.appendFileSync(path.join(configDir, edited), '\nlocal edit by the user\n');
+        const out = installInto(runtime, configDir);
+        assert.match(out, /gsd-pristine\/.{0,12}\(1 file\(s\)\) via hash-validated new-release source/, 'the baseline is regenerated and hash-validated');
+        assert.ok(fs.existsSync(path.join(configDir, 'gsd-pristine', edited)), 'the baseline file exists');
+      } finally {
+        cleanup(configDir);
+      }
+    });
+  }
+
+  test('a real user edit to an installed GSD file is still detected and backed up', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5954-edit-'));
+    try {
+      installInto('codex', configDir);
+      agentFreeSurface(configDir);
+      installInto('codex', configDir);
+      const manifest = JSON.parse(fs.readFileSync(path.join(configDir, MANIFEST_NAME), 'utf8'));
+      const edited = Object.keys(manifest.files).find((rel) => rel.startsWith('gsd-core/workflows/') && rel.endsWith('.md'));
+      assert.ok(edited, 'the install carries a workflow file to edit');
+      fs.appendFileSync(path.join(configDir, edited), '\nlocal edit by the user\n');
+      const out = installInto('codex', configDir);
+      assert.match(out, /Local patches detected|locally modified/, 'the edit is reported');
+      assert.ok(fs.existsSync(path.join(configDir, 'gsd-local-patches')), 'and backed up');
+      const backedUp = JSON.parse(fs.readFileSync(path.join(configDir, 'gsd-local-patches', 'backup-meta.json'), 'utf8'));
+      assert.deepEqual(backedUp.files, [edited], 'only the edited file, not the rewritten include files');
+    } finally {
+      cleanup(configDir);
+    }
   });
 });

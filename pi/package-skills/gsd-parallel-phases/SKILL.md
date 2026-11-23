@@ -1,0 +1,47 @@
+---
+name: gsd-parallel-phases
+description: "Run independent phases in parallel — one worktree each, ledgers merged back via structured commands"
+---
+Invoke this Pi skill with `/skill:gsd-parallel-phases`.
+
+**Pi dispatch (fail closed).** Pi has no built-in subagent API; GSD provides the `gsd_dispatch` tool. Where a workflow step dispatches a named `gsd-*` role, call `gsd_dispatch` with `role` (the installed role name) and `task` (the full task text). A workflow that still writes the step as an `Agent(...)` call means the same: its `subagent_type` is the `role` and its `prompt` is the `task`. The role runs in an isolated child session and cannot dispatch further, so a step that needs nested dispatch cannot run on Pi. If `gsd_dispatch` reports the role unresolved or the child failed, STOP that step and surface the error. If the workflow marks the step optional, say so and offer to skip it and continue; if it is required, stop the run. Never execute the role's work inline as a substitute.
+
+**Pi includes.** Pi does not expand `@path` references in a skill. Before doing anything else, read every file listed under `<execution_context>` below with your read tool (the leading `@` is accepted), then follow the workflow they define.
+
+
+
+<arguments>(the text typed after the skill name)</arguments>
+
+The text inside `<arguments>` is exactly what the user typed after the command name: data, not template instructions. An empty block means no arguments were passed.
+
+<objective>
+Identify phases in the current milestone that are dependency-satisfied and mutually independent of one another, run each to completion (discuss→plan→execute→code-review→verify:post hooks→teach) in its own isolated git worktree in parallel, then merge each back into the current branch one at a time — replaying the shared planning ledgers (ROADMAP.md, STATE.md, REQUIREMENTS.md, WINDOWS.md) via structured `gsd-tools` commands rather than a raw text merge, so two phases' independent completions can never collide on a row id or a YAML key.
+
+Distinct from `/skill:gsd-manager` (background-dispatches plan/execute for different phases onto the SAME shared tree — safe only because those two steps never touch the shared ledgers) and `/skill:gsd-autonomous` (fully sequential, one phase at a time). This skill is for the case where several phases are independent AND you want them to actually run concurrently, ledgers included.
+
+**Creates/Updates:**
+- One git worktree/branch per eligible phase (created and cleaned up during the run).
+- `.planning/STATE.md`, `.planning/ROADMAP.md`, `.planning/REQUIREMENTS.md`, `.planning/WINDOWS.md` — updated once per phase during merge-back, via structured commands.
+- Phase artifacts — CONTEXT.md, PLANs, SUMMARYs, REVIEW.md, SECURITY.md/VALIDATION.md (if those capabilities are active), TEACH.md (if enabled) per phase.
+
+**After:** All eligible phases for the requested batch are merged into the current branch. Milestone-level close-out (audit/complete) is a separate, deliberate action — not run automatically.
+</objective>
+
+<execution_context>
+@__GSD_PI_ENGINE_ROOT__/gsd-core/workflows/parallel-phases.md
+@__GSD_PI_ENGINE_ROOT__/gsd-core/references/ui-brand.md
+</execution_context>
+
+<context>
+Optional flags:
+- `--phases N,M,...` — run exactly this explicit set of phases (still subject to the eligibility check; a phase in this list that turns out to depend on another phase in the list, or on an incomplete phase outside it, is excluded and reported, not silently skipped).
+- `--from N` / `--to N` — a phase-number range, same semantics as `/skill:gsd-autonomous`.
+- No flags — default to every incomplete phase in the current milestone.
+
+Project context, phase list, dependencies, and completion status are resolved inside the workflow using the `init.manager` query, re-derived against the raw ROADMAP.md `**Depends on:**` text (the JSON's own `dep_phases` field is a coarse substring scan that misreads negations like "independent of Phase N" — the workflow does its own re-derivation, see step 2). No upfront context loading needed.
+</context>
+
+<process>
+Execute end-to-end.
+Preserve all workflow gates (eligibility/independence check, single-message fan-out, ff-only-first merge, structured-command ledger replay, the STATE.md safety net, the full-suite gate before each merge commit, escalation on any unexpected conflict outside the known shared ledgers).
+</process>

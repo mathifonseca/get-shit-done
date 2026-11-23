@@ -38,6 +38,7 @@ const POINT_ORDER = [
   'verify:post',
   'ship:pre',
   'ship:post',
+  'review:pre', // #3997 — pinned to the generated contract by tests/review-capability-contributions.test.cjs
 ];
 
 // C1: Artifact availability — host-produced artifacts become available at their step's :post
@@ -74,6 +75,21 @@ for (const entry of LOOP_HOST_CONTRACT) {
   for (const point of entry.points) {
     POINT_TO_CONTRACT.set(point, entry);
   }
+}
+
+// #3997 — the release that introduced a loop point added after the original twelve. A capability
+// that declares a hook at such a point installs on an older core that rejects the point, so its
+// `engines.gsd` must EXCLUDE every older core (checked in validateAgainstContract). Additive-only:
+// a point never leaves this table, and a point from the original twelve never enters it.
+const POINT_MIN_ENGINE = Object.freeze({ 'review:pre': '1.23.0' });
+
+// Every released core line below the lowest introducing release, probed against `engines.gsd`.
+// A finite probe set, not a range-intersection proof (documented known limit, ADR-3997).
+function olderCoreProbes(minVersion) {
+  const [major, minor] = minVersion.split('.').map(Number);
+  const probes = ['0.0.0'];
+  for (let m = 0; m < minor; m += 1) probes.push(major + '.' + m + '.0', major + '.' + m + '.99');
+  return probes;
 }
 
 // ─── Config-slice validation ──────────────────────────────────────────────────
@@ -856,6 +872,7 @@ const VALID_CONVERTER_NAMES = new Set([
   'convertClaudeCommandToKimiSkill',
   'convertClaudeCommandToKimiCodeSkill',
   'convertClaudeCommandToOpencodeSkill',
+  'convertClaudeCommandToPiSkill',
   'convertClaudeCommandToTraeSkill',
   'convertClaudeCommandToWindsurfSkill',
   'convertClaudeCommandToWindsurfWorkflow',
@@ -879,6 +896,8 @@ const VALID_CONVERTER_NAMES = new Set([
   // and the kilo/opencode agent converters (shared with those runtimes'
   // commands-kind entries, options-bag signature `(content, {isAgent, modelOverride})`).
   'convertClaudeAgentToHermesAgent',
+  // #5569 (ADR-5559 §3) — the role file Pi's gsd_dispatch loads.
+  'convertClaudeAgentToPiAgent',
   'convertClaudeToKiloFrontmatter',
   'convertClaudeToOpencodeFrontmatter',
 ]);
@@ -939,7 +958,29 @@ const VALID_SUBAGENT_TOOLKITS = new Set(['full', 'read-only', 'built-in-only']);
 const VALID_EFFORT_SURFACES   = new Set(['argv', 'none']);
 // ADR-1239 Codex-binding amendment (#2584): how a host isolates concurrent
 // same-wave executors — a dispatch sub-field, not a top-level axis.
-const VALID_DISPATCH_ISOLATION = new Set(['harness-worktree', 'orchestrator-worktree', 'none']);
+// #4561: consumed from the single owner (src/dispatch-isolation.cts, compiled to
+// the ./dispatch-isolation.cjs sibling) instead of restated. This file is
+// hand-written and tracked while the owner is a build artifact. Every consumer
+// already runs post-build — gsd-tools.cjs after its ensureRuntimeBuild(), CI's
+// lint lane after its explicit `build:lib` step, the tests after `pretest` —
+// and gen-capability-registry.cjs (the one direct script consumer) already
+// requires the compiled text-lines.cjs before this module loads. The remaining
+// exposure is a tree whose lib was built BEFORE this module existed: the build
+// seam keys on a single sentinel file, so it reads that tree as built and a
+// bare `Cannot find module` would surface with no remedy attached. Name it.
+const VALID_DISPATCH_ISOLATION = (() => {
+  try {
+    return require('./dispatch-isolation.cjs').DISPATCH_ISOLATION_VOCABULARY;
+  } catch (err) {
+    if (err && err.code === 'MODULE_NOT_FOUND' && /dispatch-isolation\.cjs/.test(String(err.message))) {
+      throw new Error(
+        'capability-validator: the compiled runtime lib ./dispatch-isolation.cjs is missing — this tree was built '
+        + 'before src/dispatch-isolation.cts existed. Run `npm run build:lib` (#4561).',
+      );
+    }
+    throw err;
+  }
+})();
 
 // ─── Reviewer lane body (ADR-2782 D1/D2/D3/D7/D8) ────────────────────────────
 //
@@ -1233,6 +1274,20 @@ function validateArtifactKindEntry(capId, entry, prefix) {
   if (entry.recursive !== undefined) {
     if (typeof entry.recursive !== 'boolean') {
       errors.push(ctx + '.recursive must be a boolean if present (got: ' + typeof entry.recursive + ')');
+    }
+  }
+
+  // excludeSuffixes — optional; filename suffixes the agents staging skips (#5569: Pi omits .compact.md)
+  if (entry.excludeSuffixes !== undefined) {
+    if (!Array.isArray(entry.excludeSuffixes)) {
+      errors.push(ctx + '.excludeSuffixes must be an array of non-empty strings if present');
+    } else {
+      for (let i = 0; i < entry.excludeSuffixes.length; i++) {
+        const s = entry.excludeSuffixes[i];
+        if (typeof s !== 'string' || s.length === 0 || s.includes('/') || s.includes('\\')) {
+          errors.push(ctx + '.excludeSuffixes[' + i + '] must be a non-empty string without path separators');
+        }
+      }
     }
   }
 
@@ -1857,6 +1912,11 @@ const KNOWN_REVIEWER_FIELDS = new Set([
   // effort", which emits no effort argument at all.
   'effortConfigKey',
   'defaultEffort',
+  // `contextWindowTokens` / `contextWindowConfigKey` added by #4559, same optional/backward-compatible
+  // shape as `promptBudgetKey`: a manifest authored before they existed keeps validating, and an
+  // absent or non-positive window resolves to "no derived prompt cap" at the invocation boundary.
+  'contextWindowTokens',
+  'contextWindowConfigKey',
   'handler',
 ]);
 
@@ -1899,6 +1959,10 @@ const REVIEWER_EFFORT_LEVELS = new Set(['minimal', 'low', 'medium', 'high', 'xhi
  * silently rot away from reality (DEFECT.GENERATIVE-FIX).
  */
 const KNOWN_HOST_BEHAVIORS = new Set([
+  // #2586: declares runtime-level feature axes GSD does not/cannot support on
+  // omitting the key on every other runtime carries no inverted meaning.
+  // this host (e.g. Codex's `["context-warnings","phase-lifecycle-display"]`)
+  // — present-and-populated / absent-is-unsupported-empty convention, so
   'agentFileExtension',
   'agentFrontmatterExtensions',
   'agentManifestStyle',
@@ -1916,6 +1980,7 @@ const KNOWN_HOST_BEHAVIORS = new Set([
   'combinedFamilyInstall',
   'commandBodyConverter',
   'contentRewriteProfile',
+  'defaultHomeIncludeRoot',
   'doneBannerStyle',
   'flatCommandDir',
   'frontmatterDialect',
@@ -1936,6 +2001,7 @@ const KNOWN_HOST_BEHAVIORS = new Set([
   'managedHookEvents',
   'mcpCompanion',
   'namedSubagentsSupported',
+  'nativeCliPlugin',
   'nativeModelAliases',
   'nativePlugin',
   'noPathRewrite',
@@ -1944,6 +2010,7 @@ const KNOWN_HOST_BEHAVIORS = new Set([
   'ownsClaudePaths',
   'permissionsSchema',
   'pluginOnlyInstall',
+  'powershellHooksOnWindows',
   'projectInstructionFile',
   'reapplyCommand',
   'reclaimsKimiLegacyHooksRoot',
@@ -1952,6 +2019,7 @@ const KNOWN_HOST_BEHAVIORS = new Set([
   'requiresSubagentPair',
   'restoreAtRefTildeInAgents',
   'restoreAtRefTildeInSpecTree',
+  'retargetsGsdCoreProsePath',
   'retiredArtifacts',
   'rewriteClaudeAtIncludes',
   'settingsFileByScope',
@@ -1971,10 +2039,6 @@ const KNOWN_HOST_BEHAVIORS = new Set([
   'specRootSkillPass',
   'tomlConfigInstall',
   'trackCategoryDescription',
-  // #2586: declares runtime-level feature axes GSD does not/cannot support on
-  // this host (e.g. Codex's `["context-warnings","phase-lifecycle-display"]`)
-  // — present-and-populated / absent-is-unsupported-empty convention, so
-  // omitting the key on every other runtime carries no inverted meaning.
   'unsupportedFeatures',
   'verificationStyle',
   'writeCategoryDescription',
@@ -2485,6 +2549,16 @@ function validateReviewerBodyFields(cap) {
     );
   }
 
+  // #4559: optional. Absent or null is "no declared window"; a present key must be a dotted
+  // config key string. The window's VALUE is narrowed (never rejected) by `resolveLaneCap`.
+  if (r.contextWindowConfigKey !== undefined && r.contextWindowConfigKey !== null
+      && (typeof r.contextWindowConfigKey !== 'string' || r.contextWindowConfigKey.length === 0)) {
+    errors.push(
+      ctx + ' reviewer.contextWindowConfigKey must be a dotted config key or null ' +
+      '(got: ' + describeValue(r.contextWindowConfigKey) + ')',
+    );
+  }
+
   // ── handler (D6) — closed first-party enum; null is the default ────────────
   if (r.handler !== null && !VALID_LANE_HANDLERS.has(r.handler)) {
     errors.push(
@@ -2572,7 +2646,7 @@ function validateLaneProbe(ctx, probe) {
     if (!isPositiveIntegerMs(probe.timeoutMs)) {
       errors.push(
         ctx + ' reviewer.probe.timeoutMs must be a positive integer of milliseconds for kind "' +
-        probe.kind + '" — an unbounded probe hangs every /gsd:review invocation ' +
+        probe.kind + '" — an unbounded probe hangs every /gsd-review invocation ' +
         '(got: ' + describeValue(probe.timeoutMs) + ')',
       );
     }
@@ -3170,7 +3244,34 @@ function validateAgainstContract(cap, capId) {
     }
   }
 
+  errors.push(...validateEngineForNewerPoints(cap, prefix));
+
   return errors;
+}
+
+/**
+ * #3997: a capability with a hook at a point introduced after the original twelve must declare an
+ * `engines.gsd` range that no older core satisfies, otherwise it installs on a core that rejects
+ * the point. Scoped: a capability with no such hook is never asked for a range.
+ *
+ * @param {object} cap
+ * @param {string} prefix  Error prefix (`capability "<id>"`).
+ * @returns {string[]}
+ */
+function validateEngineForNewerPoints(cap, prefix) {
+  const hooks = [].concat(cap.steps || [], cap.contributions || [], cap.gates || []);
+  const gated = [...new Set(hooks.map((h) => h && h.point).filter((p) => typeof p === 'string' && Object.prototype.hasOwnProperty.call(POINT_MIN_ENGINE, p)))];
+  if (gated.length === 0) return [];
+  const { semverSatisfies, compareSemverCore } = require('./semver-compare.cjs');
+  const minVersion = gated.map((p) => POINT_MIN_ENGINE[p]).sort(compareSemverCore).pop();
+  const range = cap.engines && cap.engines.gsd;
+  const message = prefix + ' declares a hook at ' + gated.join(', ') + ' (introduced in GSD ' + minVersion + ') so engines.gsd must exclude older cores, e.g. ">=' + minVersion + '"';
+  if (typeof range !== 'string' || range.trim() === '') return [message + '; engines.gsd is absent'];
+  const admitted = olderCoreProbes(minVersion).find((v) => semverSatisfies(v, range));
+  if (admitted !== undefined) {
+    return [message + '; engines.gsd ' + JSON.stringify(range) + ' still admits ' + admitted];
+  }
+  return [];
 }
 
 /**
@@ -3929,6 +4030,7 @@ module.exports = {
   POINT_ORDER,
   HOST_ARTIFACT_EARLIEST_POINT_IDX,
   VALID_LOOP_POINTS,
+  POINT_MIN_ENGINE,
   POINT_TO_CONTRACT,
   VALID_CONFIG_SLICE_TYPES,
   KEBAB_RE,

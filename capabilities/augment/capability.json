@@ -1,7 +1,7 @@
 {
   "id": "augment",
   "role": "runtime",
-  "version": "1.16.0",
+  "version": "1.23.0",
   "title": "Augment Code",
   "description": "Augment Code CLI — commands + nested-skill artifact layout; settings-json hook surface; Claude hook event dialect; tier-2 support.",
   "tier": "core",
@@ -87,6 +87,9 @@
     "permissionWriter": null,
     "extendedHookEvents": [],
     "hostBehaviors": {
+      "unsupportedFeatures": [
+        "context-warnings"
+      ],
       "commandBodyConverter": "convertClaudeToAugmentMarkdown",
       "mcpCompanion": "settings-json",
       "contentRewriteProfile": "slash-lookahead-own-derived"

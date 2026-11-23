@@ -327,7 +327,8 @@ found by path-construction search over `src/`, `bin/`, `hooks/`, `scripts/` at `
 | Site | What it re-implements |
 |---|---|
 | `src/capability-activation.cts` `resolveConfigKey` | A full four-level walk (loadConfig result → workstream file → root file → schema default) returning `{found, value}` with **no layer**. The closest thing to the epic's owner that already exists, and the reason the owner must absorb these rather than become another walk beside them |
-| `src/config.cts` `resolveFromRootConfig` + `resolveSchemaDefault` | `cmdConfigGet`'s own workstream→root→schema cascade (#2702, #2256) |
+| `src/config.cts` `resolveFromRootConfig` | `cmdConfigGet`'s own workstream→root inheritance rung (#2702, #2256) |
+| `src/config-schema-defaults.cts` `resolveSchemaDefault` | `cmdConfigGet`'s schema-default fallback, extracted from `src/config.cts` by C1 (#5096) and shared with the resolver |
 | `src/config-loader.cts` `_globalBaseCfg` (Branch D) | The 26-key `??` / `\|\|` projection of `~/.gsd/defaults.json` — #4071's site |
 | `src/config.cts` `buildNewProjectConfig` | A project-creation merge of `~/.gsd/defaults.json` |
 | `src/install-model-override-resolver.cts` | Install-time global+project merges (`model_overrides`, `agent_tools`, runtime/profile) |
@@ -406,3 +407,38 @@ an assertion, not inside C4.
 - The child issues do not exist yet; C1–C5 are proposed boundaries, and each needs its own approval.
 - Decision 4 freezes raw output (ruled 2026-09-20). A lossless raw mode would reverse a decision
   recorded here and needs its own issue before C2 is planned.
+
+## Amendment — 2026-11-08: C2 (#6029) deviations ruled by the owner
+
+C2 delivers Decisions 3 and 4 with two owner-ruled deviations, recorded here so a later child does
+not read them as drift:
+
+- **The shared parser is not byte-for-byte the setter's.** Decision 3 says the parser is extracted
+  "verbatim" and shared "unchanged". Its numeric branch used `Number()`, which retypes `' '` as
+  `0`, `' 5'` as `5` and `'0x10'` as `16`. `parseConfigArgValue` now accepts only a decimal literal
+  (optional sign, digits with an optional fraction, optional exponent, no surrounding whitespace,
+  no radix prefix) that is finite, so that text stays a string in both `config-set` and
+  `config-get --default`. Every other branch, and every decimal result, is unchanged.
+- **Raw `--default` bytes follow the value policy.** Decision 4 freezes raw output. Two raw cells
+  on the `--default` arm change because the encoder now applies the existing per-key policy to the
+  parsed value rather than to the argv text: a secret key's `--raw --default null` prints `(unset)`
+  (it masked the four characters `null` as `****`, so an unset key read as set), and
+  `planner.stall_detection_enabled --raw --default false` prints `false` (the string `"false"`
+  failed the #4570 boolean check and read as `true`). Every other raw byte is unchanged and
+  pinned by tests.
+
+The child issues now exist: C1 #5096, C2 #6029, C3 #6030, C4 #6031, C5 #6032.
+
+## Amendment — 2026-11-19: C1 (#5096) keys are canonical spellings
+
+The Config Value Resolution Module resolves a declared key exactly as written. It does not apply
+the Config Loader's flat-then-nested alias reading, which `CONFIG_KEY_ALIASES` (#5470) declares
+for twenty-one settings. The two owners can therefore disagree for a flat spelling: with a flat
+`research: false`, `loadConfig` resolves `false`, while `resolveConfigValue('workflow.research')`
+reports the schema default and the flat `research` is not configured. C1 leaves that difference in
+place because it migrates no caller. C3 must close it for each loader reader it migrates, either by
+resolving the alias in the owner or by keeping that reader on the loader, and must not inherit the
+difference silently.
+
+The non-object section barrier (C1) reads the effective project configuration, the root file merged
+with the active workstream file, so a flat key in either file outranks the blocked nested alias.

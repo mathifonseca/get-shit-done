@@ -12,7 +12,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, captureFdSync } = require('./helpers.cjs');
+const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
+const { runGsdTools, runGsdToolsCaptured, createTempDir, createTempProject, createTempGitProject, cleanup, captureFdSync } = require('./helpers.cjs');
 const { createFixture, seedWorkstream, writeState } = require('./fixtures/index.cjs');
 // ADR-3473 §8.7 (#3872): git-fixture spawns for the state_head rows (10/11)
 // go through the throw-preserving wrapper, never a raw execFileSync.
@@ -698,6 +699,256 @@ None
 
     const state = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
     assert.match(state, /- Vendor quote updated from \$1\.00 to \$2\.00 pending approval/);
+  });
+
+  // #4926: the text-file flags take a read-once INPUT, so a readable file
+  // anywhere is accepted (it used to be confined to the project root). Every
+  // refusal from these three verbs goes through the fault path: an unreadable
+  // file, a blank required field, a missing STATE.md. They used to print
+  // `{ added: false }` or `{ error }` at exit 0, which a caller gating on `$?`
+  // read as success.
+  describe('#4926 text-file inputs: any readable file is accepted; every refusal exits non-zero', () => {
+    let outsideDir;
+    const stateBody = `# Project State
+
+## Decisions
+None yet.
+
+## Blockers
+None
+
+## Roadmap Evolution
+None
+`;
+    const statePath = () => path.join(tmpDir, '.planning', 'STATE.md');
+
+    beforeEach(() => {
+      fs.writeFileSync(statePath(), stateBody);
+      outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4926-outside-'));
+    });
+
+    afterEach(() => {
+      cleanup(outsideDir);
+    });
+
+    const flags = [
+      { name: 'add-decision --summary-file', argv: (f) => ['state', 'add-decision', '--phase', '3', '--summary-file', f], flag: '--summary-file' },
+      { name: 'add-decision --rationale-file', argv: (f) => ['state', 'add-decision', '--phase', '3', '--summary', 'Chosen', '--rationale-file', f], flag: '--rationale-file' },
+      { name: 'add-blocker --text-file', argv: (f) => ['state', 'add-blocker', '--text-file', f], flag: '--text-file' },
+      { name: 'add-roadmap-evolution --note-file', argv: (f) => ['state', 'add-roadmap-evolution', '--phase', '3', '--note-file', f], flag: '--note-file' },
+    ];
+
+    // Where a scratch file can live relative to the project root.
+    const locations = [
+      { name: 'an unrelated absolute temp path', make: () => path.join(outsideDir, 'entry.md') },
+      { name: 'a sibling directory of the project', make: () => {
+        const siblingDir = path.join(path.dirname(tmpDir), `${path.basename(tmpDir)}-sibling-4926`);
+        fs.mkdirSync(siblingDir, { recursive: true });
+        return path.join(siblingDir, 'entry.md');
+      } },
+      { name: 'the parent directory of the project', make: () => path.join(path.dirname(tmpDir), `gsd-4926-parent-${path.basename(tmpDir)}.md`) },
+    ];
+
+    for (const f of flags) {
+      for (const loc of locations) {
+        test(`${f.name} accepts a readable file in ${loc.name}`, () => {
+          const file = loc.make();
+          fs.writeFileSync(file, 'Scratch entry 4926 $1.00\n');
+          try {
+            const result = runGsdTools(f.argv(file), tmpDir);
+
+            assert.strictEqual(result.exitCode, 0, `Command failed: ${result.error}`);
+            assert.strictEqual(JSON.parse(result.output).added, true);
+            assert.ok(fs.readFileSync(statePath(), 'utf-8').includes('Scratch entry 4926 $1.00'), 'the file contents must reach STATE.md');
+          } finally {
+            cleanup(path.basename(path.dirname(file)).endsWith('-sibling-4926') ? path.dirname(file) : file);
+          }
+        });
+      }
+
+      test(`${f.name} naming a missing file exits 1 with reason usage and leaves STATE.md untouched`, () => {
+        const result = runGsdTools([...f.argv(path.join(outsideDir, 'missing.md')), '--json-errors'], tmpDir);
+
+        assert.strictEqual(result.exitCode, 1, `refusal must exit non-zero; stdout: ${result.output}`);
+        const envelope = JSON.parse(result.error);
+        assert.strictEqual(envelope.ok, false);
+        assert.strictEqual(envelope.reason, ERROR_REASON.USAGE);
+        assert.ok(envelope.message.startsWith(`${f.flag} could not be read`), `refusal must name the flag; got: ${envelope.message}`);
+        assert.strictEqual(fs.readFileSync(statePath(), 'utf-8'), stateBody, 'STATE.md must be byte-identical after a refusal');
+      });
+    }
+
+    // A readable but empty (or whitespace-only) file leaves a required field with
+    // no text. That refusal used to be `{ error: '<field> required' }` at exit 0.
+    const requiredFlags = [
+      { flag: '--summary-file', field: 'summary', argv: (f) => ['state', 'add-decision', '--phase', '3', '--summary-file', f] },
+      { flag: '--text-file', field: 'text', argv: (f) => ['state', 'add-blocker', '--text-file', f] },
+      { flag: '--note-file', field: 'note', argv: (f) => ['state', 'add-roadmap-evolution', '--phase', '3', '--note-file', f] },
+    ];
+    const blankContents = [
+      { name: 'an empty file', content: '' },
+      { name: 'a whitespace-only file', content: '  \n\t\n' },
+    ];
+
+    for (const r of requiredFlags) {
+      for (const blank of blankContents) {
+        test(`${r.flag} naming ${blank.name} exits 1 with reason usage and leaves STATE.md untouched`, () => {
+          const file = path.join(outsideDir, 'blank.md');
+          fs.writeFileSync(file, blank.content);
+
+          const result = runGsdTools([...r.argv(file), '--json-errors'], tmpDir);
+
+          assert.strictEqual(result.exitCode, 1, `refusal must exit non-zero; stdout: ${result.output}`);
+          const envelope = JSON.parse(result.error);
+          assert.strictEqual(envelope.reason, ERROR_REASON.USAGE);
+          assert.ok(envelope.message.startsWith(`${r.field} required`), `got: ${envelope.message}`);
+          assert.strictEqual(fs.readFileSync(statePath(), 'utf-8'), stateBody, 'STATE.md must be byte-identical after a refusal');
+        });
+      }
+    }
+
+    // The inline form of a required field follows the same rule as the file form:
+    // a whitespace-only `--summary` / `--text` used to be written as a blank
+    // bullet at exit 0, while `--note` and every blank file were refused.
+    const requiredInline = [
+      { flag: '--summary', field: 'summary', argv: (v) => ['state', 'add-decision', '--phase', '3', '--summary', v] },
+      { flag: '--text', field: 'text', argv: (v) => ['state', 'add-blocker', '--text', v] },
+      { flag: '--note', field: 'note', argv: (v) => ['state', 'add-roadmap-evolution', '--phase', '3', '--note', v] },
+    ];
+
+    for (const r of requiredInline) {
+      test(`a whitespace-only inline ${r.flag} exits 1 with reason usage and leaves STATE.md untouched`, () => {
+        const result = runGsdTools([...r.argv('  \t '), '--json-errors'], tmpDir);
+
+        assert.strictEqual(result.exitCode, 1, `refusal must exit non-zero; stdout: ${result.output}`);
+        const envelope = JSON.parse(result.error);
+        assert.strictEqual(envelope.reason, ERROR_REASON.USAGE);
+        assert.ok(envelope.message.startsWith(`${r.field} required`), `got: ${envelope.message}`);
+        assert.strictEqual(fs.readFileSync(statePath(), 'utf-8'), stateBody, 'STATE.md must be byte-identical after a refusal');
+      });
+    }
+
+    // The rationale is optional: an empty --rationale-file means "no rationale",
+    // exactly as `--rationale ""` does, so the decision is still written.
+    test('an empty --rationale-file is not a refusal: the decision is written without a rationale', () => {
+      const file = path.join(outsideDir, 'rationale.md');
+      fs.writeFileSync(file, '');
+
+      const result = runGsdTools(['state', 'add-decision', '--phase', '3', '--summary', 'Chosen', '--rationale-file', file], tmpDir);
+
+      assert.strictEqual(result.exitCode, 0, `Command failed: ${result.error}`);
+      assert.deepStrictEqual(JSON.parse(result.output), { added: true, decision: '- [Phase 3]: Chosen' });
+    });
+
+    // Same parity for the optional field: a whitespace-only rationale, inline or
+    // file, is "no rationale" rather than a dangling ` — ` suffix.
+    for (const form of [
+      { name: 'inline --rationale', argv: () => ['--rationale', '  \t '] },
+      { name: '--rationale-file', argv: () => {
+        const file = path.join(outsideDir, 'rationale.md');
+        fs.writeFileSync(file, '  \n\t\n');
+        return ['--rationale-file', file];
+      } },
+    ]) {
+      test(`a whitespace-only ${form.name} writes the decision without a rationale`, () => {
+        const result = runGsdTools(['state', 'add-decision', '--phase', '3', '--summary', 'Chosen', ...form.argv()], tmpDir);
+
+        assert.strictEqual(result.exitCode, 0, `Command failed: ${result.error}`);
+        assert.deepStrictEqual(JSON.parse(result.output), { added: true, decision: '- [Phase 3]: Chosen' });
+      });
+    }
+
+    const verbs = [
+      { name: 'add-decision', argv: ['state', 'add-decision', '--phase', '3', '--summary', 'Chosen'] },
+      { name: 'add-blocker', argv: ['state', 'add-blocker', '--text', 'Blocked'] },
+      { name: 'add-roadmap-evolution', argv: ['state', 'add-roadmap-evolution', '--phase', '3', '--note', 'Moved'] },
+    ];
+
+    for (const v of verbs) {
+      test(`${v.name} with no STATE.md exits 1 with reason usage and creates nothing`, () => {
+        cleanup(statePath());
+
+        const result = runGsdTools([...v.argv, '--json-errors'], tmpDir);
+
+        assert.strictEqual(result.exitCode, 1, `refusal must exit non-zero; stdout: ${result.output}`);
+        const envelope = JSON.parse(result.error);
+        assert.strictEqual(envelope.reason, ERROR_REASON.USAGE);
+        assert.strictEqual(envelope.message, 'STATE.md not found');
+        assert.strictEqual(fs.existsSync(statePath()), false, 'no STATE.md may be created by a refusal');
+      });
+    }
+
+    test('under --exit-contract=v2 a blank required file and a missing STATE.md also project to the USAGE code', () => {
+      const file = path.join(outsideDir, 'blank.md');
+      fs.writeFileSync(file, '');
+      assert.strictEqual(runGsdTools(['state', 'add-blocker', '--text-file', file, '--exit-contract=v2'], tmpDir).exitCode, 64);
+
+      cleanup(statePath());
+      assert.strictEqual(runGsdTools(['state', 'add-blocker', '--text', 'Blocked', '--exit-contract=v2'], tmpDir).exitCode, 64);
+    });
+
+    test('a directory passed as --summary-file is refused the same way', () => {
+      const result = runGsdTools(['state', 'add-decision', '--summary-file', outsideDir, '--json-errors'], tmpDir);
+
+      assert.strictEqual(result.exitCode, 1);
+      assert.strictEqual(JSON.parse(result.error).reason, ERROR_REASON.USAGE);
+      assert.strictEqual(fs.readFileSync(statePath(), 'utf-8'), stateBody);
+    });
+
+    test('under --exit-contract=v2 the refusal projects to the USAGE code, not DEGRADED', () => {
+      const result = runGsdTools(['state', 'add-decision', '--summary-file', path.join(outsideDir, 'missing.md'), '--exit-contract=v2'], tmpDir);
+
+      assert.strictEqual(result.exitCode, 64);
+    });
+
+    test('a relative path still resolves against the project root, not the process cwd', () => {
+      fs.writeFileSync(path.join(tmpDir, '.planning', 'decision.md'), 'Relative entry.\n');
+
+      const result = runGsdTools(['state', 'add-decision', '--phase', '3', '--summary-file', '.planning/decision.md', '--cwd', tmpDir], outsideDir);
+
+      assert.strictEqual(result.exitCode, 0, `Command failed: ${result.error}`);
+      assert.deepStrictEqual(JSON.parse(result.output), { added: true, decision: '- [Phase 3]: Relative entry.' });
+    });
+
+    // An unconfined path is hostile input, so the read is bounded: a file over
+    // the documented 256 KiB cap is refused without being read whole.
+    const TEXT_FILE_MAX_BYTES = 256 * 1024;
+
+    const assertRefused = (result, flag, why) => {
+      assert.strictEqual(result.exitCode, 1, `refusal must exit non-zero; stdout: ${result.output}`);
+      const envelope = JSON.parse(result.error);
+      assert.strictEqual(envelope.reason, ERROR_REASON.USAGE);
+      assert.ok(envelope.message.startsWith(`${flag} could not be read`), `refusal must name the flag; got: ${envelope.message}`);
+      assert.ok(envelope.message.endsWith(`(${why})`), `refusal must say why; got: ${envelope.message}`);
+      assert.strictEqual(fs.readFileSync(statePath(), 'utf-8'), stateBody, 'STATE.md must be byte-identical after a refusal');
+    };
+
+    for (const f of flags) {
+      for (const { name, size } of [
+        { name: 'one byte under the cap', size: TEXT_FILE_MAX_BYTES - 1 },
+        { name: 'exactly the cap', size: TEXT_FILE_MAX_BYTES },
+      ]) {
+        test(`${f.name} accepts a file of ${name}`, () => {
+          const file = path.join(outsideDir, 'entry.md');
+          const text = 'x'.repeat(size);
+          fs.writeFileSync(file, text);
+
+          const result = runGsdTools(f.argv(file), tmpDir);
+
+          assert.strictEqual(result.exitCode, 0, `Command failed: ${result.error}`);
+          assert.strictEqual(JSON.parse(result.output).added, true);
+          assert.ok(fs.readFileSync(statePath(), 'utf-8').includes(text), 'the whole file must reach STATE.md');
+        });
+      }
+
+      test(`${f.name} naming a file one byte over the cap exits 1 with reason usage and leaves STATE.md untouched`, () => {
+        const file = path.join(outsideDir, 'entry.md');
+        fs.writeFileSync(file, 'x'.repeat(TEXT_FILE_MAX_BYTES + 1));
+
+        assertRefused(runGsdTools([...f.argv(file), '--json-errors'], tmpDir), f.flag, `larger than ${TEXT_FILE_MAX_BYTES} bytes`);
+      });
+    }
+    // The FIFO and device rows need a real OS and live in tests/state.platform.test.cjs.
   });
 });
 
@@ -3066,13 +3317,7 @@ describe('cmdStateUpdateProgress (state update-progress)', () => {
     fs.writeFileSync(path.join(phase01Dir, '01-01-PLAN.md'), '# Plan\n');
     fs.writeFileSync(path.join(phase01Dir, '01-01-SUMMARY.md'), '# Summary\n');
 
-    const { runNode } = require('./helpers/process-seam.cjs');
-    const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-    const { TOOLS_PATH: toolsPath, TEST_ENV_BASE } = require('./helpers.cjs');
-    const rec = runNode(
-      [toolsPath, 'state', 'update-progress'],
-      { cwd: tmpDir, env: { ...process.env, ...TEST_ENV_BASE }, timeoutMs: PROBE_TIMEOUT_MS },
-    );
+    const rec = runGsdToolsCaptured(['state', 'update-progress'], tmpDir);
     assert.equal(rec.exitCode, 0, `Command failed: ${rec.stderr}`);
     const output = JSON.parse(rec.stdout);
     assert.strictEqual(output.updated, true, `scope gate must not withhold; got ${rec.stdout}`);
@@ -3489,11 +3734,13 @@ describe('cmdStateRecordSession (state record-session)', () => {
     );
   });
 
-  test('#4763: an archive-section Stopped At displaced by the document-wide writer is surfaced', () => {
-    // The writer replaces the FIRST case-insensitive label match anywhere in
-    // the document; a Session Continuity Archive line can precede the live
-    // block. The capture mirrors the writer (document-wide), so the displaced
-    // archive record is surfaced instead of silently lost.
+  test('#4763: an archive-section Stopped At above ## Session is left as is; the session section gets the write', () => {
+    // #4998 review (trek-e 5608265301, Major 1): the writer used to replace the
+    // FIRST label match anywhere, so an archive line above the live block took
+    // the write while the session section — the one the frontmatter sync and
+    // state-snapshot read — stayed stale. It now writes in the session section,
+    // as `state update` does, and the capture mirrors it: the archive line was
+    // not displaced, so it is not reported as displaced.
     const withArchive = [
       '# Project State',
       '',
@@ -3512,17 +3759,19 @@ describe('cmdStateRecordSession (state record-session)', () => {
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
-    assert.strictEqual(
-      output.replacedRecord['Stopped At'],
-      'archived Phase 1 record',
-      'the displaced archive line must be surfaced — the writer is document-wide',
-    );
+    assert.ok(output.updated.includes('Stopped At'), result.output);
+    assert.strictEqual(output.replacedRecord, undefined, 'the archive line was not displaced');
+    const after = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    assert.ok(after.includes('## Session Continuity Archive\n\n**Stopped at:** archived Phase 1 record\n'), after);
+    assert.match(after.slice(after.indexOf('\n## Session\n')), /\*\*Stopped at:\*\* Phase 2\n/);
+    assert.match(after, /^stopped_at: Phase 2$/m, 'the frontmatter syncs the value written');
   });
 
-  test('#4763: a wrapped multi-line Stopped At record is surfaced whole', () => {
-    // stateExtractField alone is first-line-only; the displaced record joins
-    // its continuation lines via stateFieldContinuation so a wrapped handoff
-    // is not truncated in the payload.
+  test('#4763/#4998: a wrapped multi-line Stopped At record is left whole and reported, not displaced', () => {
+    // Before #4998 the single-line writer replaced only the first line and
+    // orphaned the second, and #4763 surfaced the whole old record. Now the
+    // record is not displaced at all: the field is left whole, so there is no
+    // replacedRecord, and the payload names it as skipped with its tail.
     const wrapped = [
       '# Project State',
       '',
@@ -3539,10 +3788,16 @@ describe('cmdStateRecordSession (state record-session)', () => {
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
-    assert.strictEqual(
-      output.replacedRecord['Stopped At'],
-      'Phase 2, Plan 1 — handoff:\nthe verifier asked for a re-run of the failing probe',
-      'the displaced record includes its continuation lines',
+    assert.strictEqual(output.replacedRecord, undefined, 'nothing was displaced');
+    assert.deepStrictEqual(output.skipped, [{
+      field: 'Stopped At',
+      reason: 'wrapped_value',
+      continuation: 'the verifier asked for a re-run of the failing probe',
+    }]);
+    const after = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    assert.ok(
+      after.includes('**Stopped at:** Phase 2, Plan 1 — handoff:\nthe verifier asked for a re-run of the failing probe\n'),
+      `the wrapped record must survive byte-for-byte:\n${after}`,
     );
   });
 
@@ -4103,6 +4358,7 @@ Progress: [..........] 0%
 ## Current Position
 
 Phase: 1 (Setup) — EXECUTING
+Total Plans in Phase: 0
 Status: Executing Phase 1
 
 ### Notes
@@ -5523,8 +5779,10 @@ describe('#3395: planned-phase refreshes the stale Phase line and persists --nam
     // (state json included) re-reads.
     assert.ok(!currentPositionBlock(stateContent).includes('35.1'),
       `the stale 35.1 phase prose must be refreshed away from ## Current Position; STATE.md was:\n${stateContent}`);
-    assert.ok(/Phase: 35\.3 — READY TO EXECUTE/m.test(stateContent),
-      `Current Position Phase line must read "Phase: 35.3 — READY TO EXECUTE"; STATE.md was:\n${stateContent}`);
+    // #5369: with no --name the label carries the curated frontmatter name, so the body line and the
+    // frontmatter agree on it (the fixture's `current_phase_name` is `unattended-launch-prerequisites`).
+    assert.ok(/Phase: 35\.3 \(unattended-launch-prerequisites\) — READY TO EXECUTE/m.test(stateContent),
+      `Current Position Phase line must read "Phase: 35.3 (unattended-launch-prerequisites) — READY TO EXECUTE"; STATE.md was:\n${stateContent}`);
     // The read path must agree with the write path.
     const json = JSON.parse(runGsdTools(['state', 'json', '--raw'], tmpDir, PINNED_ENV).output);
     assert.strictEqual(json.current_phase, '35.3',
@@ -6803,6 +7061,23 @@ describe('#3696 state validate — last_activity invariant (S008/S009) and --str
       writeCleanState(['Last activity: 2026-08-19 — done', line]);
       const { output } = validate();
       assert.ok(!findWarning(output, 'S009'), `"${line}" is structure, not a continuation; got: ${JSON.stringify(output.warnings)}`);
+    }
+  });
+
+  // #4998 changed the shared continuation grammar (trek-e review 2026-10-10,
+  // Minor 7): a fence or sibling field indented up to three spaces, and a
+  // sibling label carrying `.`, `(`, `)` or `/`, end the field. Pinned at the
+  // S009 caller: each is structure, and prose — indented or not — still wraps.
+  test('S009 under the #4998 grammar: indented fences and wider sibling labels are structure, prose still wraps', () => {
+    for (const line of ['   ```', '  ~~~', '   **Blockers:** none', '  Blockers: none', 'Phase 3.1 status: ok',
+      'Next (planned): plan 2', '    indented code']) {
+      writeCleanState(['Last activity: 2026-08-19 — done', line]);
+      const { output } = validate();
+      assert.ok(!findWarning(output, 'S009'), `"${line}" is structure; got: ${JSON.stringify(output.warnings)}`);
+    }
+    for (const line of ['and the rest of the sentence', '  and an indented rest', 'see 3.1 for details, then: more']) {
+      writeCleanState(['Last activity: 2026-08-19 — done', line]);
+      assert.ok(findWarning(validate().output, 'S009'), `"${line}" continues the field`);
     }
   });
 
@@ -8556,7 +8831,7 @@ describe('ADR-3408 §8.5 Matrix (#3471): stale-but-present, and the report resid
     test('E3: cmdStateBeginPhase — `updated` names only the fields whose persisted value actually changed (happy path)', () => {
       const content = [
         '---', 'gsd_state_version: 1.0', '---', '',
-        '# Project State', '', '## Current Position', '', 'Status: Not started', '', '## Session', '',
+        '# Project State', '', '## Current Position', '', 'Plan: 0 of 0', 'Status: Not started', '', '## Session', '',
       ].join('\n');
       fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), content);
 
@@ -8575,7 +8850,7 @@ describe('ADR-3408 §8.5 Matrix (#3471): stale-but-present, and the report resid
     test('E3 (preservation): cmdStateBeginPhase — a curated field round-tripped to its ORIGINAL value is not reported', () => {
       const content = [
         '---', 'gsd_state_version: 1.0', 'stopped_at: "curated stop must survive"', '---', '',
-        '# Project State', '', '## Current Position', '', 'Status: Not started', '', '## Session', '',
+        '# Project State', '', '## Current Position', '', 'Plan: 0 of 0', 'Status: Not started', '', '## Session', '',
       ].join('\n');
       fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), content);
 
@@ -9912,6 +10187,27 @@ describe('state add-roadmap-evolution (bug #1140)', () => {
     );
     assert.strictEqual(JSON.parse(second.output).reason, 'duplicate', 'flattened entry must dedupe on replay');
   });
+
+  // #4998 review 2026-10-14 (same class as Major 1): the flatten covered only
+  // CR/LF, so a U+2028/U+2029 survived into the bullet and started a forged
+  // `**Status:**` line for the `m`-flag readers — measured: stateExtractField
+  // read `completed`.
+  for (const [name, sep] of [['U+2028', '\u2028'], ['U+2029', '\u2029']]) {
+    test(`flattens a ${name} in the note, so it cannot start a forged field line`, () => {
+      writeState(tmpDir, STATE_WITH_ACC_CONTEXT);
+      const notePath = path.join(tmpDir, 'note.txt');
+      fs.writeFileSync(notePath, `line one${sep}**Status:** completed`);
+      const result = runGsdTools(
+        ['state', 'add-roadmap-evolution', '--phase', '9', '--action', 'edited', '--note-file', notePath],
+        tmpDir
+      );
+      assert.ok(result.success, `Command failed: ${result.error}`);
+      const state = readState(tmpDir);
+      assert.ok(state.includes('- Phase 9 edited: line one **Status:** completed'), `note not flattened:\n${state}`);
+      assert.ok(!state.includes(sep), `${name} must not reach STATE.md`);
+      assert.ok(!state.split(/\r\n|[\r\n\u2028\u2029]/).some((l) => l.startsWith('**Status:**')), 'no forged field line');
+    });
+  }
 
   test('deduplicates an identical entry on replay', () => {
     writeState(tmpDir, STATE_WITH_ACC_CONTEXT);
@@ -11792,12 +12088,27 @@ describe('T6 section-splice characterization — begin-phase', () => {
     const d = createTempProject();
     try {
       fs.writeFileSync(path.join(d, '.planning', 'STATE.md'), STATE_NO_CURRENT_POS);
-      const result = runGsdTools(['state', 'begin-phase', '--phase', '1', '--name', 'Setup', '--plans', '3'], d);
+      const result = runGsdTools(['state', 'begin-phase', '--phase', '1', '--name', 'Setup'], d);
       assert.ok(result.success, `Command failed: ${result.error}`);
       const output = JSON.parse(result.output);
-      // Expect phase, phase_name and plan_count in response even if fields weren't updated
+      // Expect phase and phase_name in the response even if fields weren't updated
       assert.strictEqual(output.phase, '1', 'phase must be reported in response');
-      assert.strictEqual(output.plan_count, 3, 'plan_count must be reported in response');
+    } finally {
+      cleanup(d);
+    }
+  });
+
+  // #6399: with --plans the count has to land somewhere; a STATE.md with no Current Position section and no
+  // `Total Plans in Phase` field refuses with the typed reason instead of reporting a count it did not record.
+  test('begin-phase --plans on a STATE.md with no Current Position and no total field refuses (#6399)', () => {
+    const d = createTempProject();
+    try {
+      const statePath = path.join(d, '.planning', 'STATE.md');
+      fs.writeFileSync(statePath, STATE_NO_CURRENT_POS);
+      const result = runGsdTools(['--json-errors', 'state', 'begin-phase', '--phase', '1', '--name', 'Setup', '--plans', '3'], d);
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(JSON.parse(result.error).reason, 'plans_no_line');
+      assert.strictEqual(fs.readFileSync(statePath, 'utf-8'), STATE_NO_CURRENT_POS, 'nothing is written');
     } finally {
       cleanup(d);
     }
@@ -13453,9 +13764,6 @@ const { stateExtractField } = require('../gsd-core/bin/lib/state-document.cjs');
 const { collectSection } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
 const { stripFrontmatter } = require('../gsd-core/bin/lib/frontmatter.cjs');
 
-const ROOT = path.join(__dirname, '..');
-const TOOLS_PATH = path.join(ROOT, 'gsd-core', 'bin', 'gsd-tools.cjs');
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -13473,19 +13781,16 @@ function readState(dir) {
 }
 
 function runGsdState(args, cwd) {
-  const { runNode } = require('./helpers/process-seam.cjs');
-  const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
   const env = {
-    ...process.env,
     GSD_SESSION_KEY: '',
     CODEX_THREAD_ID: '',
     CLAUDE_SESSION_ID: '',
     CLAUDE_CODE_SSE_PORT: '',
     OPENCODE_SESSION_ID: '',
   };
-  const r = runNode([TOOLS_PATH, 'state', ...args], { cwd, env, timeoutMs: PROBE_TIMEOUT_MS });
+  const r = runGsdToolsCaptured(['state', ...args], cwd, env);
   if (r.exitCode === 0) return { success: true };
-  return { success: false, error: r.stderr.trim() || `exited with outcome=${r.outcome} exitCode=${r.exitCode}` };
+  return { success: false, error: r.stderr.trim() || `exited with exitCode=${r.exitCode}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -17927,352 +18232,6 @@ describe('bug #2440 — shouldPreserveExistingProgress does not ratchet total_pl
   });
 }
 
-// ─── #2573: state_head commit provenance on the write seam ───────────────────
-
-describe('syncStateFrontmatter — state_head commit provenance (#2573)', () => {
-  const { runGit } = require('./helpers/process-seam.cjs');
-  const { syncStateFrontmatter } = require('../gsd-core/bin/lib/state.cjs');
-  const { extractFrontmatter } = require('../gsd-core/bin/lib/frontmatter.cjs');
-  const { createTempGitProject: mkGit } = require('./helpers.cjs');
-
-  const dirs = [];
-  const track = (d) => { dirs.push(d); return d; };
-  afterEach(() => { while (dirs.length) cleanup(dirs.pop()); });
-
-  const MINIMAL_STATE = [
-    '---',
-    'status: executing',
-    '---',
-    '',
-    '# Session State',
-    '',
-    'Status: executing',
-    '',
-  ].join('\n');
-
-  test('stamps state_head with the full HEAD sha of the project repo', () => {
-    const dir = track(mkGit('gsd-2573-'));
-    const head = runGit(['rev-parse', 'HEAD'], { cwd: dir }).stdout.trim();
-
-    const synced = syncStateFrontmatter(MINIMAL_STATE, dir);
-    const fm = extractFrontmatter(synced);
-
-    assert.strictEqual(fm.state_head, head,
-      'state_head must record the commit STATE.md was written against');
-  });
-
-  test('omits state_head entirely when the project is not a git repo (degrade, never throw)', () => {
-    // trek-e's approval condition 3: degrade to no-signal rather than throwing
-    // when the commit is unresolvable. A non-repo is the canonical case.
-    const dir = track(createTempProject('gsd-2573-nogit-'));
-
-    let synced;
-    assert.doesNotThrow(() => { synced = syncStateFrontmatter(MINIMAL_STATE, dir); },
-      'a non-git project must not throw');
-    const fm = extractFrontmatter(synced);
-
-    assert.ok(!('state_head' in fm),
-      `state_head must be absent outside a git repo, got ${JSON.stringify(fm.state_head)}`);
-  });
-
-  test('drops a PRE-EXISTING state_head when the commit becomes unresolvable (never carried forward)', () => {
-    // The omission test above feeds MINIMAL_STATE, which has no pre-existing
-    // state_head — so it never reaches the #2202 carry-forward loop, which
-    // copies any key absent from derivedFm straight back from the old file.
-    // This fixture DOES carry a stamp, so it exercises that branch.
-    //
-    // state-transition.cts classifies state_head as { preservation: 'derive' }:
-    // "Never preserved: a stale stamp would claim STATE.md was written against
-    // a commit it wasn't." A carried-forward value contradicts that contract and
-    // asserts provenance the file no longer has.
-    const STAMPED_STATE = [
-      '---',
-      'status: executing',
-      'state_head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-      '---',
-      '',
-      '# Session State',
-      '',
-      'Status: executing',
-      '',
-    ].join('\n');
-
-    const dir = track(createTempProject('gsd-2573-stale-stamp-'));
-
-    let synced;
-    assert.doesNotThrow(() => { synced = syncStateFrontmatter(STAMPED_STATE, dir); },
-      'a non-git project must not throw even with a pre-existing stamp');
-    const fm = extractFrontmatter(synced);
-
-    assert.ok(!('state_head' in fm),
-      `a stale state_head must be DROPPED, not carried forward, when the commit is unresolvable — got ${JSON.stringify(fm.state_head)}`);
-  });
-
-  test('restamps state_head to the new HEAD after a commit (freshness proxy resets on write)', () => {
-    // Goodhart guard, asserted rather than assumed: the counter resets as a
-    // side effect of ANY state write, so state_head means "written at this
-    // commit", never "STATE's content is accurate". Pinning it here so nobody
-    // later builds a gate on the derived commit distance.
-    const dir = track(mkGit('gsd-2573-restamp-'));
-    const first = extractFrontmatter(syncStateFrontmatter(MINIMAL_STATE, dir)).state_head;
-
-    fs.writeFileSync(path.join(dir, 'unrelated.txt'), 'change\n');
-    runGit(['add', '-A'], { cwd: dir });
-    runGit(['commit', '-m', 'unrelated'], { cwd: dir });
-    const second = extractFrontmatter(syncStateFrontmatter(MINIMAL_STATE, dir)).state_head;
-
-    const head = runGit(['rev-parse', 'HEAD'], { cwd: dir }).stdout.trim();
-    assert.notStrictEqual(second, first, 'a new commit must produce a new state_head');
-    assert.strictEqual(second, head, 'state_head must track the current HEAD');
-  });
-
-  test('carries a body-absent last_activity forward instead of dropping it (#2622 B1)', () => {
-    // #2622 B1: the #2202 carry-forward loop skips `source: 'free'` fields
-    // (state_head) so an unresolvable stamp is never re-asserted — but it must
-    // NOT skip `last_activity` ({source:'body', preservation:'derive'}). When the
-    // body carries no "Last activity:" line, buildStateFrontmatter omits the
-    // field, and the existing frontmatter value has to survive: dropping it is
-    // silent frontmatter data loss and would defeat #2570's staleness signal
-    // downstream. A non-git project keeps this on the carry-forward path
-    // (state_head is simply absent) and needs no subprocess.
-    const STATE_WITH_ACTIVITY = [
-      '---',
-      'status: executing',
-      'last_activity: 2026-01-15',
-      '---',
-      '',
-      '# Session State',
-      '',
-      'Status: executing',
-      '',
-    ].join('\n');
-
-    const dir = track(createTempProject('gsd-2622-b1-'));
-    const fm = extractFrontmatter(syncStateFrontmatter(STATE_WITH_ACTIVITY, dir));
-
-    assert.strictEqual(fm.last_activity, '2026-01-15',
-      'a body-absent last_activity must carry forward, not be dropped by the state_head narrowing');
-  });
-});
-
-
-// ─── #2573: property invariants for the state_head fence ─────────────────────
-//
-// `state_head` is read from disk and then passed to git AS AN ARGUMENT, which
-// makes this a parser with a security-relevant fence — the class the repo's
-// testing standards require fast-check coverage for. Example-based tests pin
-// the shapes we thought of; these pin the invariant for the ones we didn't.
-
-describe('readStateHeadFreshness — property invariants (#2573)', () => {
-  const fc = require('./helpers/fast-check-setup.cjs');
-  const { runGit } = require('./helpers/process-seam.cjs');
-  const { after } = require('node:test');
-  const fs = require('node:fs');
-  const os = require('node:os');
-  const path = require('node:path');
-  const { cleanup } = require('./helpers.cjs');
-  const { readStateHeadFreshness } = require('../gsd-core/bin/lib/state.cjs');
-
-  const propDirs = [];
-  after(() => { while (propDirs.length) cleanup(propDirs.pop()); });
-
-  function gitRepo() {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-prop-'));
-    propDirs.push(dir);
-    runGit(['init', '-q'], { cwd: dir });
-    runGit(['config', 'user.email', 't@t.com'], { cwd: dir });
-    runGit(['config', 'user.name', 'T'], { cwd: dir });
-    runGit(['config', 'commit.gpgsign', 'false'], { cwd: dir });
-    fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
-    runGit(['add', '-A'], { cwd: dir });
-    runGit(['commit', '-q', '-m', 'seed'], { cwd: dir });
-    return dir;
-  }
-
-const HEX_RE = /^[0-9a-f]{4,40}$/i;
-
-  const repo = gitRepo();
-
-  test('(a) total function — never throws for arbitrary input', () => {
-    fc.assert(
-      fc.property(fc.anything(), (value) => {
-        readStateHeadFreshness(repo, value);
-        return true;
-      }),
-    );
-  });
-
-  test('(b) fence — non-hex input never yields a stamp', () => {
-    fc.assert(
-      fc.property(fc.string(), (s) => {
-        const r = readStateHeadFreshness(repo, s);
-        if (HEX_RE.test(s.trim())) return true; // valid shape: out of scope here
-        return r.state_head === null && r.commits_behind === null && r.commit_stale === null;
-      }),
-    );
-  });
-
-  test('(c) tri-state integrity — unknown never reads as known-fresh', () => {
-    fc.assert(
-      fc.property(fc.string(), (s) => {
-        const r = readStateHeadFreshness(repo, s);
-        const validTri = r.commit_stale === null || r.commit_stale === true || r.commit_stale === false;
-        const unknownIsNull = r.commits_behind === null ? r.commit_stale === null : true;
-        const agreement = typeof r.commits_behind === 'number'
-          ? r.commit_stale === (r.commits_behind > 0)
-          : true;
-        return validTri && unknownIsNull && agreement;
-      }),
-    );
-  });
-
-  test('(d) no git-argument injection — dash-led values are rejected by the fence', () => {
-    fc.assert(
-      fc.property(
-        fc.constantFrom('--all', '-n', '--not', '--output=/tmp/pwn', '--help', '-- --all'),
-        fc.string(),
-        (flag, tail) => {
-          const r = readStateHeadFreshness(repo, `${flag}${tail}`);
-          return r.state_head === null && r.commits_behind === null && r.commit_stale === null;
-        },
-      ),
-    );
-  });
-
-  test('(f) a NON-ANCESTOR stamp resolves to unknown, never to "known fresh"', () => {
-    // `rev-list --count A..B` exits 0 with "0" when A is unreachable from B, so
-    // reset --hard / rebase / squash / force-push past the stamp used to render
-    // as commit_stale:false — "known fresh" for a codebase that was rewound.
-    // That collapses the exact unknown-vs-fresh distinction the tri-state exists
-    // to preserve, so a non-ancestor stamp must come back null.
-    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-nonanc-'));
-    propDirs.push(d);
-    const g = (argv) => runGit(argv, { cwd: d }).stdout;
-    g(['init', '-q']); g(['config', 'user.email', 't@t.com']); g(['config', 'user.name', 'T']);
-    g(['config', 'commit.gpgsign', 'false']);
-    fs.writeFileSync(path.join(d, 'a.txt'), 'a\n');
-    g(['add', '-A']); g(['commit', '-q', '-m', 'base']);
-    const base = g(['rev-parse', 'HEAD']).trim();
-    fs.writeFileSync(path.join(d, 'b.txt'), 'b\n');
-    g(['add', '-A']); g(['commit', '-q', '-m', 'c1']);
-    const tip = g(['rev-parse', 'HEAD']).trim();
-    g(['reset', '--hard', '-q', base]);
-
-    const r = readStateHeadFreshness(d, tip);
-    assert.strictEqual(r.commits_behind, null, 'a non-ancestor stamp has no meaningful distance');
-    assert.strictEqual(r.commit_stale, null, 'unknown must NOT report as false ("known fresh")');
-  });
-
-  test('(e) a real HEAD sha always resolves to zero commits behind', () => {
-    const head = runGit(['rev-parse', 'HEAD'], { cwd: repo }).stdout.trim();
-    const r = readStateHeadFreshness(repo, head);
-    assert.strictEqual(r.commits_behind, 0);
-    assert.strictEqual(r.commit_stale, false);
-    assert.strictEqual(r.state_head, head.slice(0, 7));
-  });
-
-  test('(g) a project whose nearest .git is an ANCESTOR repo resolves to unknown, never "known fresh"', () => {
-    // #2573 degrade path D5. `git rev-parse HEAD` walks UP from cwd to the
-    // nearest enclosing .git — nothing pins that repo to the project. A GSD
-    // project living under an unrelated repo (a dotfiles/notes checkout, or the
-    // outer workspace of a planning.sub_repos layout) measures its freshness
-    // against a repo it has no relationship to.
-    //
-    // The stamp below IS that ancestor repo's HEAD, so pre-fix the ancestry
-    // check passes, rev-list returns 0, and the tri-state reports
-    // commit_stale:false — "known fresh" for a directory that is not in that
-    // repo at all. Same invariant violation as (f), reached by another route.
-    const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-ancestor-'));
-    propDirs.push(outer);
-    const g = (argv) => runGit(argv, { cwd: outer }).stdout;
-    g(['init', '-q']); g(['config', 'user.email', 't@t.com']); g(['config', 'user.name', 'T']);
-    g(['config', 'commit.gpgsign', 'false']);
-    fs.writeFileSync(path.join(outer, 'unrelated.txt'), 'x\n');
-    g(['add', '-A']); g(['commit', '-q', '-m', 'outer']);
-    const outerHead = g(['rev-parse', 'HEAD']).trim();
-
-    // The project itself is NOT a git repo — it merely sits inside one.
-    const project = path.join(outer, 'nested-project');
-    fs.mkdirSync(path.join(project, '.planning'), { recursive: true });
-
-    const r = readStateHeadFreshness(project, outerHead);
-    assert.strictEqual(r.commit_stale, null,
-      'a stamp resolved against an ancestor repo is UNKNOWN — it must not report false ("known fresh")');
-    assert.strictEqual(r.commits_behind, null,
-      'distance measured against an unrelated repo is not a meaningful count');
-  });
-
-  test('(i) a sub_repos workspace resolves to unknown even though it owns its own repo', () => {
-    // #2573 D5, sub_repos flavor. (g) covers the case where the project owns NO
-    // .git. This is the harder one: the outer workspace owns BOTH .planning/ and
-    // its own repo, so projectOwnsItsRepo passes — yet every code commit lands in
-    // a nested child repo and the outer HEAD never advances.
-    //
-    // Pre-fix that stamps the outer HEAD, --is-ancestor passes trivially,
-    // rev-list counts 0, and the tri-state reports commit_stale:false — "known
-    // fresh" — no matter how far the children have moved. That is a WRONG answer,
-    // not a missing one: the same invariant (g) protects, reached by a third
-    // route. docs/CONFIGURATION.md describes sub_repos as scoping work per
-    // sub-repo "instead of treating the outer repo as a monorepo", so an outer
-    // wrapper that is itself a repo is a supported layout, not a contrived one.
-    const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-subrepos-'));
-    propDirs.push(outer);
-    const g = (argv) => runGit(argv, { cwd: outer }).stdout;
-    g(['init', '-q']); g(['config', 'user.email', 't@t.com']); g(['config', 'user.name', 'T']);
-    g(['config', 'commit.gpgsign', 'false']);
-    fs.mkdirSync(path.join(outer, '.planning'), { recursive: true });
-    fs.writeFileSync(
-      path.join(outer, '.planning', 'config.json'),
-      JSON.stringify({ planning: { sub_repos: ['frontend'] } }, null, 2),
-    );
-    fs.writeFileSync(path.join(outer, 'wrapper.txt'), 'x\n');
-    g(['add', '-A']); g(['commit', '-q', '-m', 'outer']);
-    const outerHead = g(['rev-parse', 'HEAD']).trim();
-
-    // A separately tracked child repo — where the real work happens. The outer
-    // repo is deliberately NOT advanced past `outerHead` afterwards, which is
-    // precisely the topology that makes the stale reading look fresh.
-    const child = path.join(outer, 'frontend');
-    fs.mkdirSync(child, { recursive: true });
-    const gc = (argv) => runGit(argv, { cwd: child }).stdout;
-    gc(['init', '-q']); gc(['config', 'user.email', 't@t.com']); gc(['config', 'user.name', 'T']);
-    gc(['config', 'commit.gpgsign', 'false']);
-    fs.writeFileSync(path.join(child, 'app.js'), 'let a = 1;\n');
-    gc(['add', '-A']); gc(['commit', '-q', '-m', 'child']);
-
-    const r = readStateHeadFreshness(outer, outerHead);
-    assert.strictEqual(r.commit_stale, null,
-      'a sub_repos workspace cannot substantiate a freshness claim from the outer ' +
-      'HEAD — it must report unknown, never false ("known fresh")');
-    assert.strictEqual(r.commits_behind, null,
-      'a distance measured against the wrapper repo is not a meaningful count');
-  });
-
-  test('(j) a plain single-repo project is NOT degraded by the sub_repos check', () => {
-    // Over-tightening guard for (i), mirroring what (h) does for (g). An empty or
-    // absent sub_repos must leave the normal path untouched — a check that
-    // degraded every project to unknown would "pass" (i) while destroying the
-    // feature, which is the failure mode this pins.
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-plain-'));
-    propDirs.push(dir);
-    const g = (argv) => runGit(argv, { cwd: dir }).stdout;
-    g(['init', '-q']); g(['config', 'user.email', 't@t.com']); g(['config', 'user.name', 'T']);
-    g(['config', 'commit.gpgsign', 'false']);
-    fs.mkdirSync(path.join(dir, '.planning'), { recursive: true });
-    fs.writeFileSync(
-      path.join(dir, '.planning', 'config.json'),
-      JSON.stringify({ planning: { sub_repos: [] } }, null, 2),
-    );
-    fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
-    g(['add', '-A']); g(['commit', '-q', '-m', 'base']);
-    const head = g(['rev-parse', 'HEAD']).trim();
-
-    const r = readStateHeadFreshness(dir, head);
-    assert.strictEqual(r.commit_stale, false,
-      'an empty sub_repos list is a normal single-repo project — it must resolve');
-    assert.strictEqual(r.commits_behind, 0);
-  });
-});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // #3468 matrix section B, rows B7/B8 — ADR-3408 §8.2's bright line, exercised
@@ -19123,9 +19082,13 @@ describe('#3871 / #3756: curated progress must survive a write on an archived mi
   // for the current milestone, exactly as it is right after `milestone
   // complete --archive-phases` runs while STATE.md has not yet been
   // advanced to a new milestone.
-  function buildArchivedMilestoneFixture(cwd) {
+  function buildArchivedMilestoneFixture(cwd, { emptyPhasesDir = false } = {}) {
     const planningDir = path.join(cwd, '.planning');
     fs.mkdirSync(planningDir, { recursive: true });
+    // #6279: `milestone complete` moves the phase dirs out but KEEPS the
+    // parent `.planning/phases/`, so the real post-close shape is an
+    // existing-but-empty directory, not an absent one.
+    if (emptyPhasesDir) fs.mkdirSync(path.join(planningDir, 'phases'), { recursive: true });
 
     fs.writeFileSync(
       path.join(planningDir, 'ROADMAP.md'),
@@ -19159,8 +19122,9 @@ describe('#3871 / #3756: curated progress must survive a write on an archived mi
       }
     });
 
-    // Deliberately NO .planning/phases/ directory at all for the current
-    // milestone — the archived-milestone shape this issue is about.
+    // By default NO .planning/phases/ directory at all for the current
+    // milestone — the archived-milestone shape #3756 is about. The #6279
+    // tests below pass emptyPhasesDir to add the empty directory instead.
 
     fs.writeFileSync(
       path.join(planningDir, 'STATE.md'),
@@ -19241,6 +19205,116 @@ describe('#3871 / #3756: curated progress must survive a write on an archived mi
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     assertCuratedProgressSurvived(cwd);
+  });
+
+  // #6279: the same two verbs with an EXISTING-but-empty `.planning/phases/`
+  // (what `milestone complete` actually leaves). The empty walk derived
+  // total_plans 0 while total_phases still came from the ROADMAP headings,
+  // so the resync merge took the 0 and left 32 of 0 plans complete.
+  test('recordSessionOnArchivedMilestoneWithEmptyPhasesDirKeepsTotalPlans', (t) => {
+    const cwd = createTempDir('gsd-6279-record-session-');
+    t.after(() => cleanup(cwd));
+    buildArchivedMilestoneFixture(cwd, { emptyPhasesDir: true });
+
+    const result = runGsdTools(['state', 'record-session', '--stopped-at', 'Milestone closed'], cwd);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    assertCuratedProgressSurvived(cwd);
+  });
+
+  test('addDecisionOnArchivedMilestoneWithEmptyPhasesDirKeepsTotalPlans', (t) => {
+    const cwd = createTempDir('gsd-6279-add-decision-');
+    t.after(() => cleanup(cwd));
+    buildArchivedMilestoneFixture(cwd, { emptyPhasesDir: true });
+
+    const result = runGsdTools(
+      ['state', 'add-decision', '--phase', '05-01', '--summary', 'Ship v1.0', '--rationale', 'milestone complete'],
+      cwd,
+    );
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    assertCuratedProgressSurvived(cwd);
+  });
+
+  // #6279 guard: the fix must not freeze totals on an ACTIVE milestone. With
+  // a real phase directory on disk the walk measured something, so a plan
+  // that was deleted still lowers total_plans below the stored value.
+  test('activeMilestonePlanDeletionStillLowersTotalPlans', (t) => {
+    const cwd = createTempDir('gsd-6279-active-');
+    t.after(() => cleanup(cwd));
+    const planningDir = path.join(cwd, '.planning');
+    const phaseDir = path.join(planningDir, 'phases', '01-foo');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(planningDir, 'ROADMAP.md'),
+      ['## v1.0 Current 🚧', '', '### Phase 1: Foo', '### Phase 2: Bar', ''].join('\n'),
+    );
+    // Three plans were stored; one was deleted from disk, two remain.
+    fs.writeFileSync(path.join(phaseDir, '01-01-PLAN.md'), '# Plan\n');
+    fs.writeFileSync(path.join(phaseDir, '01-02-PLAN.md'), '# Plan\n');
+    fs.writeFileSync(
+      path.join(planningDir, 'STATE.md'),
+      [
+        '---',
+        'gsd_state_version: 1.0',
+        'milestone: v1.0',
+        'status: executing',
+        'progress:',
+        '  total_phases: 2',
+        '  completed_phases: 0',
+        '  total_plans: 3',
+        '  completed_plans: 0',
+        '  percent: 0',
+        '---',
+        '',
+        '# Project State',
+        '',
+        '## Session Continuity',
+        '',
+        '**Last session:** 2024-01-10',
+        '**Stopped at:** Phase 1, Plan 2',
+        '**Resume file:** None',
+        '',
+      ].join('\n'),
+    );
+
+    const result = runGsdTools(['state', 'record-session', '--stopped-at', 'Plan 3 dropped'], cwd);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const fm = frontmatterLib.extractFrontmatter(fs.readFileSync(path.join(planningDir, 'STATE.md'), 'utf-8'));
+    assert.ok(fm && fm.progress, 'STATE.md frontmatter must still carry a progress block');
+    assert.strictEqual(Number(fm.progress.total_plans), 2, 'total_plans must follow the disk count down when a real phase dir was scanned');
+  });
+
+  // #6279 guard: an empty `.planning/phases/` alone is not an archived
+  // milestone. STATE asserts v2.0 and only v1.0 was archived, so the empty
+  // walk is a real measurement and the stored plan total drops to the disk 0.
+  test('emptyPhasesDirWithoutThisMilestonesArchiveTakesDiskZero', (t) => {
+    const cwd = createTempDir('gsd-6279-no-archive-');
+    t.after(() => cleanup(cwd));
+    const planningDir = path.join(cwd, '.planning');
+    fs.mkdirSync(path.join(planningDir, 'phases'), { recursive: true });
+    fs.mkdirSync(path.join(planningDir, 'milestones', 'v1.0-phases', '01-foo'), { recursive: true });
+    fs.writeFileSync(
+      path.join(planningDir, 'ROADMAP.md'),
+      ['## v2.0 Current 🚧', '', '### Phase 2: Bar', '### Phase 3: Baz', ''].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(planningDir, 'STATE.md'),
+      [
+        '---', 'gsd_state_version: 1.0', 'milestone: v2.0', 'status: executing',
+        'progress:', '  total_phases: 2', '  completed_phases: 0', '  total_plans: 3', '  completed_plans: 0', '  percent: 0',
+        '---', '', '# Project State', '', '## Session Continuity', '',
+        '**Last session:** 2024-01-10', '**Stopped at:** None', '**Resume file:** None', '',
+      ].join('\n'),
+    );
+
+    const result = runGsdTools(['state', 'record-session', '--stopped-at', 'Plans dropped'], cwd);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const fm = frontmatterLib.extractFrontmatter(fs.readFileSync(path.join(planningDir, 'STATE.md'), 'utf-8'));
+    assert.ok(fm && fm.progress, 'STATE.md frontmatter must still carry a progress block');
+    assert.strictEqual(Number(fm.progress.total_plans), 0, 'without this milestone\'s archive the empty walk is a measurement: total_plans takes the disk 0');
   });
 
   // The over-preservation guard: a genuinely empty project (no phases
@@ -21878,4 +21952,1820 @@ describe('#5105: STATE.md writers replace an adjacent empty frontmatter block', 
       });
     }
   }
+});
+
+// ─── #4998: a quoted milestone keeps its decoded value across writes ─────────
+
+describe('#4998 regression: state writes keep a quoted milestone value unchanged', () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = createTempProject(); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  // The decoded milestone value carries literal double quotes, so YAML must
+  // double-quote and escape it — the shape the raw `^milestone:` line read
+  // captured verbatim (quotes and backslashes) and re-serialized.
+  const QUOTED_MILESTONE = '"v1.1 — Example milestone"';
+
+  function seed(sessionLines) {
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '03-example'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), [
+      '# Roadmap', '', '## Phases', '', '- [ ] **Phase 3: Example** - thing', '',
+      '### Phase 3: Example', '**Goal**: do it', '',
+    ].join('\n'));
+    const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+    fs.writeFileSync(statePath, [
+      '---',
+      'gsd_state_version: 1.0',
+      `milestone: ${JSON.stringify(QUOTED_MILESTONE)}`,
+      'milestone_name: Example',
+      'status: executing',
+      '---',
+      '',
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 3 of 3 (Example)',
+      'Plan: 1 of 2',
+      'Status: Executing',
+      '',
+      '## Session Continuity',
+      '',
+      ...sessionLines,
+      '',
+    ].join('\n'));
+    return statePath;
+  }
+
+  test('ten consecutive state.* writes leave the decoded milestone unchanged in STATE.md and state.json', () => {
+    const statePath = seed(['Last session: 2026-01-01', 'Stopped at: Phase 2 complete', 'Resume file: None']);
+    const writes = [
+      ['state', 'begin-phase', '--phase', '3', '--name', 'Example', '--plans', '2'],
+      ['state', 'add-decision', '--summary', 'a decision'],
+      ['state', 'record-session', '--stopped-at', 'mid phase 3'],
+      ['state', 'sync'],
+    ];
+    for (let i = 0; i < 10; i++) {
+      const res = runGsdTools(writes[i % writes.length], tmpDir);
+      assert.ok(res.success, `write ${i} failed: ${res.error}`);
+      const fm = frontmatterLib.extractFrontmatter(fs.readFileSync(statePath, 'utf-8'));
+      assert.strictEqual(fm.milestone, QUOTED_MILESTONE, `STATE.md milestone drifted after write ${i}`);
+      const stateJsonPath = path.join(tmpDir, '.planning', 'state.json');
+      if (i === 0) assert.ok(fs.existsSync(stateJsonPath), 'premise: begin-phase publishes state.json');
+      if (fs.existsSync(stateJsonPath)) {
+        const json = JSON.parse(fs.readFileSync(stateJsonPath, 'utf-8'));
+        assert.strictEqual(json.milestone, QUOTED_MILESTONE,
+          `state.json must carry the decoded milestone, not the on-disk YAML text (write ${i})`);
+      }
+    }
+  });
+});
+
+// ─── #4998: record-session never orphans a wrapped value or invents a line ───
+
+describe('#4998 regression: record-session leaves a wrapped field whole and inserts in the template\'s shape', () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = createTempProject(); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  const statePath = () => path.join(tmpDir, '.planning', 'STATE.md');
+  function seed(frontmatter, sessionLines, heading = '## Session Continuity') {
+    fs.writeFileSync(statePath(), [
+      '---', 'gsd_state_version: 1.0', 'status: executing', ...frontmatter, '---',
+      '', '# Project State', '', heading, '', ...sessionLines, '',
+    ].join('\n'));
+  }
+  function session() {
+    const body = fs.readFileSync(statePath(), 'utf-8');
+    return body.slice(body.search(/^## Session/m));
+  }
+  // runGsdToolsCaptured, not runGsdTools: the success path's stderr carries the warning.
+  function recordSession(...args) {
+    const rec = runGsdToolsCaptured(['state', 'record-session', ...args], tmpDir);
+    assert.equal(rec.exitCode, 0, `record-session failed: ${rec.stderr}`);
+    return { json: JSON.parse(rec.stdout), stderr: rec.stderr };
+  }
+
+  test('the issue repro: a wrapped Last session is left whole, named, and the rest of the record still written', () => {
+    seed([], [
+      'Last session: archived milestone v1.0 and moved its files',
+      'to .planning/milestones/, all phase directories archived.',
+      'Stopped at: Phase 2 complete',
+      'Resume file: None',
+    ]);
+    const { json, stderr } = recordSession('--stopped-at', 'Phase 3 plan 1 done');
+    assert.deepStrictEqual(json.updated, ['Stopped At']);
+    assert.deepStrictEqual(json.skipped, [{
+      field: 'Last session', reason: 'wrapped_value',
+      continuation: 'to .planning/milestones/, all phase directories archived.',
+    }]);
+    assert.match(stderr, /left Last session unchanged — its value continues onto the next line/);
+    assert.match(stderr, /Fold the value onto one line, or put a blank line before that line/);
+    assert.strictEqual(session(), [
+      '## Session Continuity', '',
+      'Last session: archived milestone v1.0 and moved its files',
+      'to .planning/milestones/, all phase directories archived.',
+      'Stopped at: Phase 3 plan 1 done',
+      'Resume file: None', '',
+    ].join('\n'));
+  });
+
+  // trek-e review 5608265301 (Minor 2): the continuation is STATE.md text of any
+  // length, so at most 200 characters of it are echoed, in the JSON and on stderr.
+  for (const length of [199, 200, 201]) {
+    test(`a ${length}-character continuation is echoed ${length > 200 ? 'cut to 200 characters and marked' : 'whole'}`, () => {
+      const tail = 'w'.repeat(length);
+      seed([], ['Last session: 2026-01-01', 'Stopped at: Phase 2 complete', tail, 'Resume file: None']);
+      const { json, stderr } = recordSession('--stopped-at', 'Phase 3');
+      const echoed = length > 200 ? `${'w'.repeat(200)}…` : tail;
+      assert.deepStrictEqual(json.skipped, [{ field: 'Stopped At', reason: 'wrapped_value', continuation: echoed }]);
+      assert.ok(stderr.includes(JSON.stringify(echoed)), stderr);
+      assert.ok(!stderr.includes('w'.repeat(201)), 'stderr never carries more than the bound');
+      assert.ok(session().includes(`Stopped at: Phase 2 complete\n${tail}\n`), 'the file keeps the whole value');
+    });
+  }
+
+  // Codex review of the first draft: a separate note directly below a field
+  // looks exactly like a wrapped value, so deleting the "tail" deletes the note.
+  for (const [name, note] of [
+    ['an unseparated prose note', "Deployment requires the operator's approval."],
+    ['a two-space-indented bullet', '  - verify the probe before resuming'],
+  ]) {
+    test(`${name} directly below Stopped at survives byte-for-byte`, () => {
+      seed([], ['Last session: 2026-01-01', 'Stopped at: Phase 2 complete', note, 'Resume file: None']);
+      const { json } = recordSession('--stopped-at', 'Phase 3 plan 1 done');
+      assert.deepStrictEqual(json.skipped, [{ field: 'Stopped At', reason: 'wrapped_value', continuation: note.trim() }]);
+      assert.strictEqual(json.replacedRecord, undefined, 'nothing was displaced');
+      // The note stays directly under the record; the write path's own list
+      // spacing may add a blank line after a bullet, which is not this check.
+      assert.ok(session().includes(`Stopped at: Phase 2 complete\n${note}\n`), session());
+    });
+  }
+
+  test('the check reads the line the writer edits — a wrapped look-alike in a fence does not block the real field', () => {
+    // stateReplaceField's bold rung skips fenced blocks; a label-regex lookup
+    // would land on the fenced example and refuse the real, single-line field.
+    fs.writeFileSync(statePath(), [
+      '---', 'gsd_state_version: 1.0', 'status: executing', '---', '', '# Project State', '',
+      '```', '**Stopped at:** example value', 'that wraps inside a fence', '```', '',
+      '## Session', '', '**Last session:** 2026-01-01', '**Stopped at:** Phase 2 complete', '**Resume file:** None', '',
+    ].join('\n'));
+    const { json } = recordSession('--stopped-at', 'Phase 3 plan 1 done');
+    assert.strictEqual(json.skipped, undefined, JSON.stringify(json));
+    assert.ok(session().includes('**Stopped at:** Phase 3 plan 1 done'), session());
+    assert.ok(fs.readFileSync(statePath(), 'utf-8').includes('**Stopped at:** example value\nthat wraps inside a fence'));
+  });
+
+  test('when every field to write wraps, nothing is written and the payload says why', () => {
+    seed([], ['Last session: started', 'the migration', 'Stopped at: midway', 'through the migration', 'Resume file: None']);
+    const before = fs.readFileSync(statePath(), 'utf-8');
+    const { json } = recordSession('--stopped-at', 'Phase 3 plan 1 done');
+    assert.strictEqual(json.recorded, false);
+    assert.deepStrictEqual(json.skipped.map((s) => s.field), ['Last session', 'Stopped At']);
+    assert.strictEqual(fs.readFileSync(statePath(), 'utf-8'), before, 'STATE.md must be untouched');
+  });
+
+  test('a missing Stopped at goes in plain form between Last session and Resume file, not bold above them', () => {
+    seed([], ['Last session: 2026-01-01', 'Resume file: None']);
+    recordSession('--stopped-at', 'Phase 3 plan 1 done');
+    assert.match(session(), /^## Session Continuity\n\nLast session: \S+\nStopped at: Phase 3 plan 1 done\nResume file: None\n$/);
+    assert.ok(!session().includes('**Stopped at:**'), session());
+  });
+
+  test('a missing field is inserted below a wrapped sibling\'s own lines, never between them', () => {
+    seed([], ['Last session: archived milestone v1.0', '  - a two-space bullet note', 'Resume file: None']);
+    recordSession('--stopped-at', 'Phase 3 plan 1 done');
+    assert.ok(session().includes(
+      'Last session: archived milestone v1.0\n  - a two-space bullet note\n'), session());
+    assert.match(session(), /a two-space bullet note\n\n?Stopped at: Phase 3 plan 1 done\nResume file: None/);
+  });
+
+  test('a canonical ## Session holding a wrapped field gets an insert, not the whole-section rewrite', () => {
+    seed([], ['**Last session:** archived milestone v1.0 and moved', 'its files to milestones.', '**Resume file:** None'], '## Session');
+    const { json } = recordSession('--stopped-at', 'Phase 3 plan 1 done');
+    assert.deepStrictEqual(json.skipped.map((s) => s.field), ['Last session']);
+    assert.strictEqual(session(), [
+      '## Session', '',
+      '**Last session:** archived milestone v1.0 and moved', 'its files to milestones.',
+      '**Stopped at:** Phase 3 plan 1 done', '**Resume file:** None', '',
+    ].join('\n'));
+  });
+
+  // Codex review of this half: every insert path, not only the skip path,
+  // must keep a note below a field and land outside examples.
+  test('a canonical ## Session with a note and a missing field keeps the note (no whole-section rewrite)', () => {
+    seed([], ['**Last session:** 2026-01-01', '**Stopped at:** Phase 2', 'Deployment requires operator approval.'], '## Session');
+    recordSession('--stopped-at', 'Phase 2', '--resume-file', 'plan.md');
+    assert.ok(session().includes(
+      '**Stopped at:** Phase 2\nDeployment requires operator approval.\n**Resume file:** plan.md'), session());
+  });
+
+  test('with no session heading, a skipped field does not reappear with the new value in the appended section', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '',
+      'Last session: 2026-01-01', 'Stopped at: old handoff', 'its continuation', ''].join('\n'));
+    const { json } = recordSession('--stopped-at', 'new handoff', '--resume-file', 'plan.md');
+    assert.deepStrictEqual(json.skipped.map((s) => s.field), ['Stopped At']);
+    assert.ok(!json.updated.includes('Stopped At'), JSON.stringify(json));
+    assert.ok(!fs.readFileSync(statePath(), 'utf-8').includes('new handoff'));
+  });
+
+  test('a fenced example of a sibling label is never the insertion anchor', () => {
+    seed([], ['```', '**Last session:** example', '```', 'Last session: 2026-01-01', 'Resume file: None']);
+    recordSession('--stopped-at', 'Phase 3');
+    assert.ok(session().includes('```\n**Last session:** example\n```\n'), session());
+    assert.match(session(), /\nLast session: \S+\nStopped at: Phase 3\nResume file: None/);
+  });
+
+  test('a nested fence (```` around ```) is one example — its inner label is never the anchor', () => {
+    seed([], ['````md', '```', '**Last session:** example', '```', '````', 'Last session: 2026-01-01', 'Resume file: None']);
+    recordSession('--stopped-at', 'Phase 3');
+    // Non-blank lines: the write path's own spacing may add blanks in a fence.
+    const lines = session().split(/\r?\n/).filter(Boolean);
+    const close = lines.lastIndexOf('````');
+    assert.ok(lines[close + 1].startsWith('Last session: '), session());
+    assert.deepStrictEqual(lines.slice(close + 2, close + 4), ['Stopped at: Phase 3', 'Resume file: None']);
+  });
+
+  test('an insert below a sibling stops before an indented fence, never inside it', () => {
+    seed([], ['Last session: 2026-01-01', '  ```', '**Resume file:** example', '  ```', 'Resume file: None']);
+    recordSession('--stopped-at', 'Phase 3');
+    const lines = session().split(/\r?\n/).filter(Boolean);
+    const at = lines.indexOf('Stopped at: Phase 3');
+    assert.deepStrictEqual(lines.slice(at, at + 4), ['Stopped at: Phase 3', '  ```', '**Resume file:** example', '  ```']);
+  });
+
+  // trek-e review 2026-10-10, Minor 2: the heading gets its line terminator
+  // and the fields go below it — never glued onto the heading, never dropped.
+  for (const heading of ['## Session Continuity', '## Session']) {
+    test(`a ${heading} heading at EOF with no newline gets the fields below it`, () => {
+      fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '', heading].join('\n'));
+      const { json } = recordSession('--stopped-at', 'Phase 3');
+      assert.strictEqual(json.recorded, true, JSON.stringify(json));
+      assert.match(readState(), new RegExp(`\\n${heading}\\n(?:\\n)?\\*\\*Last session:\\*\\* \\S+\\n\\*\\*Stopped at:\\*\\* Phase 3\\n`));
+      assert.strictEqual(frontmatterStoppedAt(), 'Phase 3');
+    });
+  }
+
+  test('`**Label**:` siblings anchor the insert, which uses the readable `**Label:**` spelling', () => {
+    seed([], ['**Last session**: 2026-01-01', '**Resume file**: None']);
+    const { json } = recordSession('--stopped-at', 'Phase 3');
+    assert.ok(json.updated.includes('Stopped At'), JSON.stringify(json));
+    assert.match(session(), /\*\*Last session\*\*: \S+\n\*\*Stopped at:\*\* Phase 3\n\*\*Resume file\*\*: None/);
+    assert.strictEqual(frontmatterLib.extractFrontmatter(fs.readFileSync(statePath(), 'utf-8')).stopped_at, 'Phase 3');
+  });
+
+  test('a frontmatter-only stopped_at the write replaces is reported in replacedRecord', () => {
+    seed(['stopped_at: "derive from git log; do not read this field"'], ['Last session: 2026-01-01', 'Resume file: None']);
+    const { json } = recordSession('--stopped-at', 'Phase 3 plan 1 done');
+    assert.deepStrictEqual(json.replacedRecord, { 'Stopped At': 'derive from git log; do not read this field' });
+    assert.strictEqual(frontmatterLib.extractFrontmatter(fs.readFileSync(statePath(), 'utf-8')).stopped_at, 'Phase 3 plan 1 done');
+  });
+  // ─── trek-e review 2026-10-09: the four items the body had deferred ───────
+  function readState() { return fs.readFileSync(statePath(), 'utf-8'); }
+  function frontmatterStoppedAt() {
+    const m = readState().match(/^stopped_at:\s*(.*)$/m);
+    return m ? m[1].replace(/^"(.*)"$/, '$1') : null;
+  }
+
+  test('(a) a line break in --stopped-at is refused before anything is written', () => {
+    seed([], ['Last session: 2026-01-01', 'Stopped at: Phase 2', 'Resume file: None']);
+    const before = readState();
+    for (const value of ['line one\nForged: line', 'line one\rForged: line']) {
+      const rec = runGsdToolsCaptured(['state', 'record-session', '--stopped-at', value], tmpDir);
+      assert.notStrictEqual(rec.exitCode, 0, `must refuse ${JSON.stringify(value)}`);
+      assert.match(rec.stderr, /--stopped-at must be a single line/);
+      assert.strictEqual(readState(), before, 'STATE.md must be untouched');
+    }
+  });
+
+  test('(b) a **Stopped at**: (colon-outside) line that is updated reads back into frontmatter', () => {
+    seed(['stopped_at: old handoff'], ['**Last session**: 2026-01-01', '**Stopped at**: old handoff', '**Resume file**: None'], '## Session');
+    const { json } = recordSession('--stopped-at', 'new handoff');
+    assert.ok(json.updated.includes('Stopped At'), JSON.stringify(json));
+    // Respelled to the readable form on the line written; siblings untouched.
+    assert.ok(session().includes('**Stopped at:** new handoff\n**Resume file**: None'), session());
+    assert.strictEqual(frontmatterStoppedAt(), 'new handoff', readState());
+  });
+
+  test('(c) an indented fence directly below Stopped at is not its continuation — the field is written', () => {
+    seed([], ['Last session: 2026-01-01', 'Stopped at: Phase 2', '  ```', '  example', '  ```', 'Resume file: None']);
+    const { json } = recordSession('--stopped-at', 'Phase 3');
+    assert.strictEqual(json.skipped, undefined, JSON.stringify(json));
+    assert.ok(session().includes('Stopped at: Phase 3\n  ```\n  example\n  ```\n'), session());
+  });
+
+  test('(c) an indented sibling field directly below Stopped at is not its continuation', () => {
+    seed([], ['Last session: 2026-01-01', 'Stopped at: Phase 2', '  **Resume file:** plan.md']);
+    const { json } = recordSession('--stopped-at', 'Phase 3');
+    assert.strictEqual(json.skipped, undefined, JSON.stringify(json));
+    assert.ok(session().includes('Stopped at: Phase 3\n  **Resume file:** plan.md'), session());
+  });
+
+  test('(d) no session heading, a wrapped field and a frontmatter stopped_at: the appended section keeps the record', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', 'stopped_at: old handoff', '---', '', '# Project State', '',
+      'Stopped at: old handoff', 'its continuation', ''].join('\n'));
+    const { json } = recordSession('--stopped-at', 'new handoff', '--resume-file', 'plan.md');
+    assert.deepStrictEqual(json.skipped.map((s) => s.field), ['Stopped At']);
+    assert.ok(!json.updated.includes('Stopped At'), JSON.stringify(json));
+    assert.ok(readState().includes('Stopped at: old handoff\nits continuation\n'), 'the wrapped field is whole');
+    assert.match(session(), /\*\*Stopped at:\*\* old handoff\n\*\*Resume file:\*\* plan\.md/);
+    assert.strictEqual(frontmatterStoppedAt(), 'old handoff', 'the frontmatter record survives');
+  });
+
+  test('no session heading: an authored Resume file is carried into the appended section, not reset to None', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '',
+      'Stopped at: Phase 2', 'Resume file: .planning/phases/02/02-01-PLAN.md', ''].join('\n'));
+    recordSession('--stopped-at', 'Phase 3');
+    assert.match(session(), /\*\*Stopped at:\*\* Phase 3\n\*\*Resume file:\*\* \.planning\/phases\/02\/02-01-PLAN\.md/);
+  });
+
+  test('no session heading: a table-only Resume file is carried, not shadowed by None', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '',
+      '| Field | Value |', '| --- | --- |', '| Resume file | .planning/phases/02/02-01-PLAN.md |', ''].join('\n'));
+    recordSession('--stopped-at', 'Phase 3');
+    assert.match(session(), /\*\*Resume file:\*\* \.planning\/phases\/02\/02-01-PLAN\.md/);
+  });
+
+  test('no session heading: nothing is inserted into frontmatter, even a block scalar holding a field-like line', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', 'handoff_notes: |', '  Resume file: old-plan.md', '  keep this', '---', '',
+      '# Project State', ''].join('\n'));
+    recordSession('--stopped-at', 'Phase 3');
+    const fm = frontmatterLib.extractFrontmatter(readState());
+    assert.match(String(fm.handoff_notes), /Resume file: old-plan\.md\s+keep this/, readState());
+    assert.match(session(), /\*\*Stopped at:\*\* Phase 3/);
+  });
+
+  test('no session heading: a field-like line in frontmatter is never the carried value', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', 'notes: |', '  **Stopped at:** example handoff', '---', '',
+      '# Project State', '', 'Stopped at: real handoff', ''].join('\n'));
+    const { json } = recordSession('--stopped-at', 'real handoff');
+    assert.match(session(), /\*\*Stopped at:\*\* real handoff/);
+    assert.strictEqual(frontmatterStoppedAt(), 'real handoff', readState());
+    assert.strictEqual(json.replacedRecord, undefined, JSON.stringify(json));
+  });
+
+  test('no session heading: an archive section is never the insertion target', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '',
+      '## Session Continuity Archive', '', 'Resume file: old-plan.md', ''].join('\n'));
+    recordSession('--stopped-at', 'Phase 3');
+    const archive = collectSection(readState(), (h) => h.text.trim() === 'Session Continuity Archive', { levelBounded: true }).body;
+    assert.ok(!archive.includes('Phase 3'), archive);
+    assert.match(readState(), /\n## Session\n\n\*\*Last session:\*\* \S+\n\*\*Stopped at:\*\* Phase 3\n/);
+  });
+
+  test('no session heading and no session field: the canonical section is still appended', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', ''].join('\n'));
+    recordSession('--stopped-at', 'Phase 3');
+    assert.match(readState(), /\n## Session\n\n\*\*Last session:\*\* \S+\n\*\*Stopped at:\*\* Phase 3\n\*\*Resume file:\*\* None\n/);
+  });
+
+  // ─── trek-e review 2026-10-10 ─────────────────────────────────────────────
+  function runTool(...args) {
+    return runGsdToolsCaptured(args, tmpDir);
+  }
+
+  // Major 1: U+2028/U+2029 start a line for every `m`-flag reader, so they
+  // forged a body field (U+2028) and frontmatter keys (U+2029) — the latter
+  // reached state.json as `status: completed`.
+  for (const [name, sep] of [['U+2028', '\u2028'], ['U+2029', '\u2029']]) {
+    for (const flag of ['--stopped-at', '--resume-file']) {
+      test(`(Major 1) ${flag} carrying ${name} is refused before anything is written`, () => {
+        seed(['stopped_at: before'], ['Last session: 2026-01-01', 'Stopped at: before', 'Resume file: None']);
+        const before = readState();
+        const rec = runTool('state', 'record-session', flag, `a${sep}status: completed${sep}**Resume file:** forged`);
+        assert.notStrictEqual(rec.exitCode, 0, rec.stdout);
+        assert.match(rec.stderr, new RegExp(`${flag} must be a single line`));
+        assert.strictEqual(readState(), before, 'STATE.md must be untouched');
+        assert.strictEqual(frontmatterLib.extractFrontmatter(readState()).status, 'executing');
+      });
+    }
+  }
+
+  // Minor 1: update/patch now say why, instead of "field not found" / a bare `failed`.
+  for (const [name, value] of [['LF', 'a\nb'], ['CR', 'a\rb'], ['U+2028', 'a\u2028b'], ['U+2029', 'a\u2029b']]) {
+    test(`(Minor 1) state update and state patch refuse a ${name} value by name, writing nothing`, () => {
+      seed([], ['Last session: 2026-01-01']);
+      fs.writeFileSync(statePath(), readState().replace('# Project State', '# Project State\n\nStatus: ok'));
+      const before = readState();
+      const update = runTool('state', 'update', 'Status', value);
+      assert.notStrictEqual(update.exitCode, 0);
+      assert.match(update.stderr, /state update: the value for "Status" must be a single line/);
+      const patch = runTool('state', 'patch', '--Status', value);
+      assert.notStrictEqual(patch.exitCode, 0);
+      assert.match(patch.stderr, /state patch: the value for "Status" must be a single line/);
+      assert.strictEqual(readState(), before);
+    });
+  }
+
+  // Major 3: a fenced example is never the field written; insertion and
+  // replacement now agree.
+  test('(Major 3) a fenced example in ## Session is left alone; the real field is inserted outside it', () => {
+    seed([], ['```', 'Last session: example', '```'], '## Session');
+    const { json } = recordSession('--stopped-at', 'new');
+    assert.ok(json.updated.includes('Last session'), JSON.stringify(json));
+    assert.ok(session().includes('```\nLast session: example\n```'), `the example is untouched:\n${session()}`);
+    const live = session().split('\n').filter((l) => /^\*\*Last session:\*\* /.test(l));
+    assert.strictEqual(live.length, 1, session());
+    assert.strictEqual(frontmatterStoppedAt(), 'new');
+  });
+
+  test('(Major 3) a fenced example ABOVE the real fields: the real ones are replaced, the example is not', () => {
+    seed([], ['```', 'Last session: example', 'Stopped at: example', '```', 'Last session: 2026-01-01', 'Stopped at: old', 'Resume file: None']);
+    const { json } = recordSession('--stopped-at', 'new');
+    assert.deepStrictEqual(json.skipped, undefined, JSON.stringify(json));
+    assert.ok(session().includes('```\nLast session: example\nStopped at: example\n```'), session());
+    // The write path's own spacing may add a blank line after a fence.
+    assert.match(session(), /```\r?\n(?:\r?\n)?Last session: (?!2026-01-01)\S+\r?\nStopped at: new\r?\nResume file: None/);
+    assert.deepStrictEqual(json.replacedRecord, { 'Stopped At': 'old' }, 'the prior record is the real line, not the example');
+    // The sync reads what the writer wrote — never the fenced example.
+    assert.strictEqual(json.recorded, true);
+    assert.strictEqual(frontmatterStoppedAt(), 'new', readState());
+  });
+
+  // trek-e review 5638530738 (Minor 3): with no session heading, Last session
+  // and Last Date are read by no reader (state-snapshot reads them from a
+  // session section only), so a body line carrying one is not written in place
+  // — as `state update`/`patch` refuse it — and a wrapped one is left whole.
+  // The appended section carries the new timestamp.
+  for (const [label, lines] of [
+    ['Last session', ['Last session: started', 'then continued here.']],
+    ['Last Date', ['Last Date: 2026-01-01 and', 'a wrapped tail']],
+  ]) {
+    test(`(Minor 3) no session heading: a wrapped ${label} body line is left whole, and the new section carries the new timestamp`, () => {
+      fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '', ...lines, ''].join('\n'));
+      const { json } = recordSession('--stopped-at', 'X');
+      assert.strictEqual(json.skipped, undefined, JSON.stringify(json));
+      assert.ok(readState().includes(`${lines.join('\n')}\n`), 'the body line is untouched');
+      assert.match(session(), /^## Session\n\n\*\*Last session:\*\* \d{4}-\d{2}-\d{2}T\S+\n\*\*Stopped at:\*\* X\n/);
+      assert.strictEqual(JSON.parse(runTool('state-snapshot').stdout).session.stopped_at, 'X');
+    });
+  }
+
+  test('(Major 1) no session heading: a carried table cell holding U+2028 is left out and named, never written as a line', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '',
+      '| Field | Value |', '| --- | --- |', '| Resume file | a\u2028**Status:** forged |', ''].join('\n'));
+    const { json } = recordSession('--stopped-at', 'X');
+    assert.deepStrictEqual(json.skipped, [{ field: 'Resume file', reason: 'line_separator' }]);
+    assert.ok(!/\*\*Resume file:\*\*/.test(session()), session());
+    assert.match(session(), /\*\*Stopped at:\*\* X\n/);
+  });
+
+  // Codex review (round 1 of this update): the other session writers and the
+  // snapshot read agree with the fence rule too.
+  test('(Codex 1) `state update "Stopped At"` writes the live line, not a fenced example, and the sync reads it', () => {
+    seed([], ['```md', 'Stopped at: example', '```', 'Stopped at: real', 'Resume file: None'], '## Session');
+    const rec = runTool('state', 'update', 'Stopped At', 'new');
+    assert.strictEqual(rec.exitCode, 0, rec.stderr);
+    assert.ok(session().includes('```md\nStopped at: example\n```'), session());
+    assert.match(session(), /\nStopped at: new\n/);
+    assert.strictEqual(frontmatterStoppedAt(), 'new', readState());
+  });
+
+  test('(Codex 2) a `## Session` heading that is only a fenced example is not a section: the real one is appended', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '',
+      '```md', '## Session', 'Last session: example', 'Stopped at: example', 'Resume file: None', '```', ''].join('\n'));
+    const { json } = recordSession('--stopped-at', 'new');
+    assert.strictEqual(json.recorded, true, JSON.stringify(json));
+    // Non-blank lines: the write path's own spacing may add blanks in a fence.
+    const lines = readState().split(/\r?\n/).filter(Boolean);
+    const open = lines.indexOf('```md');
+    assert.deepStrictEqual(lines.slice(open, open + 6),
+      ['```md', '## Session', 'Last session: example', 'Stopped at: example', 'Resume file: None', '```'], readState());
+    assert.match(readState(), /\n## Session\n\n\*\*Last session:\*\* \S+\n\*\*Stopped at:\*\* new\n/);
+    assert.strictEqual(frontmatterStoppedAt(), 'new');
+  });
+
+  test('(Codex 3) `state snapshot` reads the live session lines, not fenced examples', () => {
+    seed([], ['```md', 'Stopped at: example', 'Resume file: example.md', '```', 'Stopped at: live', 'Resume file: plan.md'], '## Session');
+    const rec = runTool('state-snapshot');
+    assert.strictEqual(rec.exitCode, 0, rec.stderr);
+    const snap = JSON.parse(rec.stdout);
+    assert.deepStrictEqual([snap.session.stopped_at, snap.session.resume_file], ['live', 'plan.md']);
+  });
+
+  test('(Codex 4) an authored `**Resume file**: plan.md` survives a call without --resume-file', () => {
+    seed([], ['**Last session:** 2026-01-01', '**Stopped at:** old', '**Resume file**: plan.md'], '## Session');
+    const { json } = recordSession('--stopped-at', 'new');
+    assert.ok(!json.updated.includes('Resume File'), JSON.stringify(json));
+    assert.ok(session().includes('**Resume file**: plan.md'), session());
+  });
+
+  test('(Codex 4) a `**Resume file**: plan.md` that --resume-file replaces is reported in replacedRecord', () => {
+    seed([], ['**Last session:** 2026-01-01', '**Stopped at:** old', '**Resume file**: plan.md'], '## Session');
+    const { json } = recordSession('--stopped-at', 'new', '--resume-file', 'next.md');
+    assert.strictEqual(json.replacedRecord['Resume File'], 'plan.md', JSON.stringify(json));
+  });
+
+  // Codex review round 2.
+  test('(Codex r2) `state patch --"Stopped At"` writes the live session line, not a fenced example', () => {
+    seed([], ['```md', 'Stopped at: example', '```', 'Stopped at: real', 'Resume file: None'], '## Session');
+    const rec = runTool('state', 'patch', '--Stopped At', 'new');
+    assert.strictEqual(rec.exitCode, 0, rec.stderr);
+    assert.ok(session().includes('```md\nStopped at: example\n```'), session());
+    assert.match(session(), /\nStopped at: new\n/);
+    assert.strictEqual(frontmatterStoppedAt(), 'new', readState());
+  });
+
+  // trek-e review 5563202317 (Major 2): every session field `state update` /
+  // `state patch` writes goes inside the session section, never a fenced example
+  // — and the call reports the write it made.
+  for (const [label, line] of [['Resume File', 'Resume file'], ['Last session', 'Last session'], ['Last Date', 'Last Date']]) {
+    for (const verb of ['update', 'patch']) {
+      test(`(review Major 2) \`state ${verb}\` of ${label} writes the live session line, not a fenced example`, () => {
+        const example = ['```md', `${line}: example`, '```'];
+        seed([], [...example, `${line}: old`, 'Stopped at: real'], '## Session');
+        const args = verb === 'update' ? ['update', label, 'new'] : ['patch', `--${label}`, 'new'];
+        const rec = runTool('state', ...args);
+        assert.strictEqual(rec.exitCode, 0, rec.stderr);
+        const reported = JSON.parse(rec.stdout).updated;
+        assert.ok(verb === 'update' ? reported === true : reported.includes(label), rec.stdout);
+        assert.ok(session().includes(example.join('\n')), session());
+        assert.match(session(), new RegExp(`\\n${line}: new\\n`));
+        assert.ok(!session().includes(`${line}: old`), session());
+      });
+    }
+  }
+
+  // trek-e review 5608265301 (Major 1): record-session writes in the session
+  // section, as `state update` does, so an archive above it is left as is and
+  // the report names the live record it replaced.
+  test('(review Major 2) record-session over an archive above ## Session writes the live record and reports it displaced', () => {
+    const archive = ['## Session Continuity Archive', '', 'Last session: archived date', 'Stopped at: archived handoff', 'Resume file: archived.md', ''];
+    fs.writeFileSync(statePath(), ['---', 'gsd_state_version: 1.0', 'status: executing', '---', '', '# Project State', '',
+      ...archive, '## Session', '', 'Last session: live date', 'Stopped at: live handoff', 'Resume file: live.md', ''].join('\n'));
+    const { json } = recordSession('--stopped-at', 'new handoff', '--resume-file', 'new.md');
+    assert.strictEqual(json.recorded, true, JSON.stringify(json));
+    assert.deepStrictEqual(json.replacedRecord, { 'Stopped At': 'live handoff', 'Resume File': 'live.md' });
+    assert.ok(readState().includes(archive.join('\n')), readState());
+    assert.match(readState(), /\n## Session\n\nLast session: \S+\nStopped at: new handoff\nResume file: new\.md\n/);
+  });
+
+  // trek-e review 5608265301 (Major 1): a field whose only line is outside the
+  // session section is inserted into that section — where the frontmatter sync
+  // and state-snapshot read it — not written on the outside line, which left
+  // `stopped_at` stale behind a reported success.
+  for (const [layout, outside, lines] of [
+    ['a bold-label line above an empty ## Session', '**Stopped at**: old', ['## Session', '## Session Continuity', '']],
+    ['a bold line above a ## Session holding a table row and an unclosed fence', '**Stopped at:** old',
+      ['', '## Session', '', '| Stopped at | old |', '', '~~~', 'unclosed', '']],
+  ]) {
+    test(`(review 5608265301) ${layout}: the session section takes the write and the frontmatter syncs it`, () => {
+      fs.writeFileSync(statePath(), ['# S', '', 'prose', outside, ...lines].join('\n'));
+      const { json } = recordSession('--stopped-at', 'NEWVAL');
+      assert.strictEqual(json.recorded, true, JSON.stringify(json));
+      assert.ok(json.updated.includes('Stopped At'), JSON.stringify(json));
+      const after = readState();
+      assert.ok(after.includes(`\nprose\n${outside}\n`), 'the line outside the section is left as is');
+      assert.match(after, /^stopped_at: NEWVAL$/m, after);
+      const sessionBody = after.slice(after.indexOf('\n## Session\n'));
+      assert.match(sessionBody, /Stopped at(:\*\*|\s*\|) NEWVAL/, sessionBody);
+    });
+  }
+  test('(review 5608265301) a bold-label line above an empty ## Session: state-snapshot reads the value written', () => {
+    fs.writeFileSync(statePath(), ['# S', '', 'prose', '**Stopped at**: old', '## Session', '## Session Continuity', ''].join('\n'));
+    recordSession('--stopped-at', 'NEWVAL');
+    const snap = runTool('state-snapshot');
+    assert.strictEqual(snap.exitCode, 0, snap.stderr);
+    assert.strictEqual(JSON.parse(snap.stdout).session.stopped_at, 'NEWVAL', snap.stdout);
+  });
+
+  test('(review Major 2) record-session below fenced examples reports the live fields it wrote and what it displaced', () => {
+    seed([], ['```md', 'Last session: example date', 'Resume file: example.md', '```', '', 'Last session: old date', 'Resume file: old.md'], '## Session');
+    const { json } = recordSession('--resume-file', 'next.md');
+    assert.strictEqual(json.recorded, true, JSON.stringify(json));
+    assert.deepStrictEqual(json.updated, ['Last session', 'Resume File']);
+    assert.deepStrictEqual(json.replacedRecord, { 'Resume File': 'old.md' });
+    assert.ok(session().includes('```md\nLast session: example date\nResume file: example.md\n```'), session());
+  });
+
+  test('(review Major 2) a same-value `state update` of a session field reports it updated, not "not found"', () => {
+    seed([], ['Last session: 2026-01-01', 'Stopped at: real', 'Resume file: plan.md'], '## Session');
+    // A first write normalizes the frontmatter, so the measured call changes no byte (#4488).
+    assert.strictEqual(runTool('state', 'update', 'Resume File', 'first.md').exitCode, 0);
+    const before = readState();
+    const rec = runTool('state', 'update', 'Resume File', 'first.md');
+    assert.strictEqual(rec.exitCode, 0, rec.stderr);
+    assert.strictEqual(JSON.parse(rec.stdout).updated, true, rec.stdout);
+    assert.strictEqual(readState(), before);
+  });
+
+  test('(review Major 2) `state update "Resume File"` writes the session line, not an archive section\'s copy above it', () => {
+    fs.writeFileSync(statePath(), ['---', 'gsd_state_version: 1.0', 'status: executing', '---', '', '# Project State', '',
+      '## Session Continuity Archive', '', 'Resume file: archived.md', '', '## Session', '', 'Resume file: plan.md', ''].join('\n'));
+    const rec = runTool('state', 'update', 'Resume File', 'next.md');
+    assert.strictEqual(rec.exitCode, 0, rec.stderr);
+    assert.strictEqual(JSON.parse(rec.stdout).updated, true, rec.stdout);
+    assert.ok(readState().includes('## Session Continuity Archive\n\nResume file: archived.md\n'), readState());
+    assert.match(session(), /\nResume file: next\.md\n/);
+  });
+
+  // trek-e review 5593733001 (Minors 2-3, Nit 4): the behavior change the
+  // session-scoped write makes. Before it, `state update` / `state patch` of
+  // these three labels replaced the first match anywhere in the document; now a
+  // document with no session section reports the field not found and keeps it.
+  const SESSION_BODY_LABELS = [['Resume File', 'Resume file'], ['Last session', 'Last session'], ['Last Date', 'Last Date']];
+  for (const [label, line] of SESSION_BODY_LABELS) {
+    test(`(review 5593733001) no session section: \`state update\` and \`state patch\` of ${label} report it not found and leave the line`, () => {
+      seed([], [`${line}: old`], '## Notes');
+      const before = readState();
+      const upd = runTool('state', 'update', label, 'new');
+      assert.strictEqual(upd.exitCode, 0, upd.stderr);
+      assert.deepStrictEqual(JSON.parse(upd.stdout), { updated: false, reason: `Field "${label}" not found in STATE.md`, preserved: [] });
+      const pat = runTool('state', 'patch', `--${label}`, 'new');
+      assert.strictEqual(pat.exitCode, 0, pat.stderr);
+      assert.deepStrictEqual(JSON.parse(pat.stdout), { updated: [], failed: [label] });
+      assert.strictEqual(readState(), before);
+    });
+  }
+
+  for (const verb of ['update', 'patch']) {
+    test(`(review 5593733001) \`state ${verb}\` writes the three session labels under \`## Session Continuity\` in their bold form`, () => {
+      seed([], ['**Last session:** old', '**Last Date:** old', '**Resume file:** old.md']);
+      for (const [label] of SESSION_BODY_LABELS) {
+        const rec = runTool('state', ...(verb === 'update' ? ['update', label, 'v'] : ['patch', `--${label}`, 'v']));
+        assert.strictEqual(rec.exitCode, 0, rec.stderr);
+        const reported = JSON.parse(rec.stdout).updated;
+        assert.ok(verb === 'update' ? reported === true : reported.includes(label), rec.stdout);
+      }
+      assert.strictEqual(session(), ['## Session Continuity', '', '**Last session:** v', '**Last Date:** v', '**Resume file:** v', ''].join('\n'));
+    });
+  }
+
+  test('(review 5593733001) with both headings, `## Session` is written and `## Session Continuity` keeps its copy', () => {
+    fs.writeFileSync(statePath(), ['---', 'gsd_state_version: 1.0', 'status: executing', '---', '', '# Project State', '',
+      '## Session Continuity', '', 'Resume file: continuity.md', '', '## Session', '', 'Resume file: plan.md', ''].join('\n'));
+    const rec = runTool('state', 'patch', '--Resume File', 'next.md');
+    assert.strictEqual(rec.exitCode, 0, rec.stderr);
+    assert.deepStrictEqual(JSON.parse(rec.stdout).updated, ['Resume File']);
+    assert.ok(readState().includes('## Session Continuity\n\nResume file: continuity.md\n'), readState());
+    assert.ok(readState().endsWith('## Session\n\nResume file: next.md\n'), readState());
+  });
+
+  test('(review 5593733001) a CRLF STATE.md: each session label is found and written', () => {
+    fs.writeFileSync(statePath(), ['---', 'gsd_state_version: 1.0', 'status: executing', '---', '', '# Project State', '',
+      '## Session Continuity', '', '**Resume file:** old.md', 'Last session: old', 'Last Date: old', ''].join('\r\n'));
+    const upd = runTool('state', 'update', 'Resume File', 'new.md');
+    assert.strictEqual(JSON.parse(upd.stdout).updated, true, upd.stdout);
+    const pat = runTool('state', 'patch', '--Last session', 's', '--Last Date', 'd');
+    assert.deepStrictEqual(JSON.parse(pat.stdout), { updated: ['Last session', 'Last Date'], failed: [] });
+    // The state writer stores LF, as on next; the values are what this row pins.
+    assert.match(session(), /\*\*Resume file:\*\* new\.md\r?\nLast session: s\r?\nLast Date: d\r?\n/);
+  });
+
+  test('(review 5593733001) a same-value `state patch` of a session field reports it updated and changes no byte', () => {
+    seed([], ['Last session: 2026-01-01', 'Stopped at: real', 'Resume file: plan.md'], '## Session');
+    // A first write normalizes the frontmatter, so the measured call changes no byte (#4488).
+    assert.strictEqual(runTool('state', 'patch', '--Resume File', 'first.md').exitCode, 0);
+    const before = readState();
+    const rec = runTool('state', 'patch', '--Resume File', 'first.md');
+    assert.strictEqual(rec.exitCode, 0, rec.stderr);
+    assert.deepStrictEqual(JSON.parse(rec.stdout), { updated: ['Resume File'], failed: [] });
+    assert.strictEqual(readState(), before);
+  });
+
+  test('(review 5593733001) a `state patch` that changes one field reports a same-value session field beside it updated too', () => {
+    seed([], ['Last session: 2026-01-01', 'Stopped at: real', 'Resume file: plan.md'], '## Session');
+    const rec = runTool('state', 'patch', '--Last session', '2026-02-02', '--Resume File', 'plan.md');
+    assert.strictEqual(rec.exitCode, 0, rec.stderr);
+    assert.deepStrictEqual(JSON.parse(rec.stdout), { updated: ['Last session', 'Resume File'], failed: [] });
+    assert.match(session(), /\nLast session: 2026-02-02\nStopped at: real\nResume file: plan\.md\n/);
+  });
+
+  // Nit 4: the writer and the session-section reader (`state-snapshot`) agree
+  // on every layout — the write lands exactly where the snapshot reads, and with
+  // no session section neither side takes a line from elsewhere.
+  for (const [layout, heading] of [['## Session', '## Session'], ['## Session Continuity', '## Session Continuity'], ['no session section', '## Notes']]) {
+    test(`(review 5593733001) writer/reader parity for Resume File: ${layout}`, () => {
+      seed([], ['Resume file: old.md'], heading);
+      const rec = runTool('state', 'update', 'Resume File', 'new.md');
+      const landed = JSON.parse(rec.stdout).updated;
+      const snap = JSON.parse(runTool('state-snapshot').stdout);
+      assert.strictEqual(landed, heading !== '## Notes', rec.stdout);
+      assert.strictEqual(snap.session.resume_file, landed ? 'new.md' : null, JSON.stringify(snap.session));
+    });
+  }
+
+  test('(Codex r2) no session heading: a `**Label**:` Resume file is carried; Last session takes the new timestamp', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '',
+      '**Last session**: started', 'continued here', '**Resume file**: plan.md', ''].join('\n'));
+    const { json } = recordSession('--stopped-at', 'X');
+    assert.strictEqual(json.skipped, undefined, JSON.stringify(json));
+    assert.ok(readState().includes('**Last session**: started\ncontinued here\n'), 'the body line is untouched');
+    assert.match(session(), /\*\*Last session:\*\* \d{4}-\S+\n\*\*Stopped at:\*\* X\n\*\*Resume file:\*\* plan\.md\n/);
+  });
+
+  test('(Codex r2) no session heading and an unclosed fence: nothing is appended into it, and the call says why', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '', '```md', 'Stopped at: example', ''].join('\n'));
+    const before = readState();
+    const { json, stderr } = recordSession('--stopped-at', 'new');
+    assert.strictEqual(json.recorded, false, JSON.stringify(json));
+    assert.ok(json.skipped.every((s) => s.reason === 'unclosed_fence'), JSON.stringify(json));
+    assert.match(stderr, /unclosed code fence/);
+    assert.strictEqual(readState(), before);
+  });
+
+  test('(Codex, review round 5593733001) a field written in place before an unclosed fence is updated, not also skipped', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '',
+      'Stopped at: old', '', 'Some notes', '', '```md', 'example', ''].join('\n'));
+    const { json, stderr } = recordSession('--stopped-at', 'new');
+    assert.ok(json.updated.includes('Stopped At'), JSON.stringify(json));
+    // trek-e review 5608265301 (Minor 3): Resume file was not passed, so it is not named.
+    assert.deepStrictEqual(json.skipped, [{ field: 'Last session', reason: 'unclosed_fence' }]);
+    assert.doesNotMatch(stderr, /did not write (Stopped at|Resume file)/);
+    assert.match(readState(), /\nStopped at: new\n/);
+  });
+
+  // Codex review of this round: a Stopped at that already holds the value needs
+  // no write, so the fence blocks nothing for it.
+  test('(review 5608265301) before an unclosed fence, a Stopped at already holding the value is not named', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '',
+      'Stopped at: same', '', '```md', 'example', ''].join('\n'));
+    const { json, stderr } = recordSession('--stopped-at', 'same');
+    assert.deepStrictEqual(json.skipped, [{ field: 'Last session', reason: 'unclosed_fence' }], JSON.stringify(json));
+    assert.doesNotMatch(stderr, /did not write Stopped at/);
+  });
+
+  // trek-e review 5608265301 (Minor 3): a field already skipped as wrapped is
+  // not named a second time as unclosed_fence; a passed --resume-file is.
+  test('(review 5608265301) before an unclosed fence, a wrapped field is skipped once and only fields passed are named', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '',
+      'Stopped at: old', 'its continuation', '', '```md', 'example', ''].join('\n'));
+    const before = readState();
+    const { json } = recordSession('--stopped-at', 'new', '--resume-file', 'next.md');
+    assert.deepStrictEqual(json.skipped, [
+      { field: 'Stopped At', reason: 'wrapped_value', continuation: 'its continuation' },
+      { field: 'Last session', reason: 'unclosed_fence' },
+      { field: 'Resume file', reason: 'unclosed_fence' },
+    ]);
+    assert.strictEqual(readState(), before);
+  });
+
+  // Review 2026-10-14 Minor 3: the guard scans the whole document, but refuses
+  // only when the TAIL is fenced — closed fences earlier on do not block.
+  test('no session heading and only closed fences: the session section is appended after them', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '',
+      '```md', 'Stopped at: example', '```', '', '~~~', 'more', '~~~', ''].join('\n'));
+    const { json } = recordSession('--stopped-at', 'new');
+    assert.notStrictEqual(json.recorded, false, JSON.stringify(json));
+    assert.ok(!(json.skipped || []).some((s) => s.reason === 'unclosed_fence'), JSON.stringify(json));
+    const out = readState();
+    assert.ok(out.indexOf('## Session') > out.lastIndexOf('~~~'), out);
+    assert.match(session(), /\*\*Stopped at:\*\* new\n/);
+  });
+
+  // #4998 Codex review: a ``` line inside a frontmatter block scalar is YAML
+  // data, not a fence. Scanned as Markdown it opened a fence that shifted every
+  // boundary after it: the write hit the fenced example and missed the live
+  // line, and with no session heading the scaffold was refused as unclosed.
+  const YAML_BACKTICKS = ['notes: |', '  ```', '  YAML data'];
+  test('a ``` inside a frontmatter block scalar does not shift the session fences: the live line is written', () => {
+    // Codex's layout: a bare ``` example, so the YAML ``` pairs with its opener.
+    seed(YAML_BACKTICKS, ['```', 'Stopped at: example', '```', '', 'Last session: 2026-01-01', 'Stopped at: live', 'Resume file: None'], '## Session');
+    const { json } = recordSession('--stopped-at', 'new handoff');
+    assert.notStrictEqual(json.recorded, false, JSON.stringify(json));
+    assert.ok(session().includes('```\nStopped at: example\n```'), session());
+    assert.match(session(), /\nStopped at: new handoff\n/);
+    assert.strictEqual(session().match(/^## Session/gm).length, 1, 'no second session section');
+  });
+
+  test('a ``` inside a frontmatter block scalar does not make a headingless document end inside a fence', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', ...YAML_BACKTICKS, '---', '', '# Project State', ''].join('\n'));
+    const { json } = recordSession('--stopped-at', 'new');
+    assert.ok(!(json.skipped || []).some((s) => s.reason === 'unclosed_fence'), JSON.stringify(json));
+    assert.match(session(), /\*\*Stopped at:\*\* new\n/);
+  });
+
+  // #4998 Codex review round 2: the section lookup (collectSection) and the
+  // field writers' parser (parsePlanningDoc) also read the YAML ``` as a
+  // fence, so the live section was not found: a missing field was never
+  // inserted, a bold field read as absent, or a fenced `## Session` example
+  // took the insert.
+  test('a ``` inside a frontmatter block scalar: a missing Stopped at is inserted into the live section', () => {
+    seed(YAML_BACKTICKS, ['Last session: 2026-01-01', 'Resume file: old.md'], '## Session');
+    const { json } = recordSession('--stopped-at', 'new handoff');
+    assert.notStrictEqual(json.recorded, false, JSON.stringify(json));
+    assert.match(session(), /\nStopped at: new handoff\n/);
+    assert.match(session(), /\nResume file: old\.md\n/);
+  });
+
+  test('a ``` inside a frontmatter block scalar: bold session fields are found and written', () => {
+    seed(YAML_BACKTICKS, ['**Last session:** 2026-01-01', '**Stopped at:** old', '**Resume file:** old.md'], '## Session');
+    const { json } = recordSession('--stopped-at', 'new handoff');
+    assert.notStrictEqual(json.recorded, false, JSON.stringify(json));
+    assert.match(session(), /\*\*Stopped at:\*\* new handoff\n/);
+    assert.ok(!session().includes('**Stopped at:** old'), session());
+  });
+
+  test('a ``` inside a frontmatter block scalar: a fenced ## Session example never takes the insert', () => {
+    seed(YAML_BACKTICKS, ['```', '## Session', 'Stopped at: example', '```', '', '## Session', '', 'Stopped at: live'], '## Notes');
+    const { json } = recordSession('--stopped-at', 'new handoff');
+    assert.notStrictEqual(json.recorded, false, JSON.stringify(json));
+    const state = readState();
+    // The example region (`## Notes` up to the live heading) gains nothing.
+    // (The platform write normalizer may add a blank line before its fenced
+    // heading; that is unrelated and pre-existing.)
+    const example = state.slice(state.indexOf('## Notes'), state.lastIndexOf('## Session'));
+    assert.ok(example.includes('Stopped at: example'), state);
+    assert.ok(!/Last session|new handoff/.test(example), state);
+    const live = state.slice(state.lastIndexOf('## Session'));
+    assert.match(live, /\nStopped at: new handoff\n/);
+    assert.match(live, /\nLast session: /);
+  });
+
+  // #4998 Codex review round 3 (user-approved final round), each reproduced first.
+  // (1) Frontmatter is data in a whole document, never Markdown: an indented
+  // `## Session` inside a YAML block scalar took record-session's insert.
+  test('a ## Session line inside a frontmatter block scalar never takes the insert', () => {
+    fs.writeFileSync(statePath(), ['---', 'status: executing', 'stopped_at: previous handoff', 'notes: |',
+      '  ## Session', '  Last session: sample', '  Resume file: sample.md', '---', '', '# Project State', '',
+      '## Session', '', 'Last session: 2026-01-01', 'Resume file: live.md', ''].join('\n'));
+    const { json } = recordSession('--stopped-at', 'new handoff');
+    assert.notStrictEqual(json.recorded, false, JSON.stringify(json));
+    const state = readState();
+    const frontmatter = state.slice(0, state.indexOf('# Project State'));
+    assert.ok(frontmatter.includes('sample.md'), `frontmatter data lost:\n${state}`);
+    assert.ok(!frontmatter.includes('new handoff\n  ') && !/^Stopped at:/m.test(frontmatter), state);
+    assert.match(session(), /\nStopped at: new handoff\n/);
+  });
+
+  // (2) Frontmatter exists only at the top of a DOCUMENT: a section body that
+  // opens with `---` horizontal rules is Markdown, and a fence between them is
+  // still a fence for every session reader and writer.
+  const RULES_SESSION = ['---', 'status: executing', 'stopped_at: live', '---', '', '# State', '', '## Session', '---',
+    '```md', 'Stopped at: example', '```', '---', 'Last session: 2026-01-01', 'Stopped at: live', 'Resume file: live.md', ''];
+  for (const [label, args] of [
+    ['record-session', ['state', 'record-session', '--stopped-at', 'new handoff']],
+    ['update', ['state', 'update', 'Stopped At', 'new handoff']],
+    ['patch', ['state', 'patch', '--Stopped At', 'new handoff']],
+  ]) {
+    test(`a session section opening with --- rules: ${label} writes the live line, not the fenced example`, () => {
+      fs.writeFileSync(statePath(), RULES_SESSION.join('\n'));
+      const rec = runTool(...args);
+      assert.strictEqual(rec.exitCode, 0, rec.stderr);
+      const state = readState();
+      assert.ok(state.includes('```md\nStopped at: example\n```'), state);
+      assert.match(state, /\nStopped at: new handoff\n/);
+      assert.match(state, /^stopped_at: "?new handoff"?$/m, 'frontmatter follows the live line');
+    });
+  }
+
+  // ...and the live fields BETWEEN such rules stay visible: read as YAML they
+  // were masked away, and the write missed the live line.
+  for (const [label, args] of [
+    ['update', ['state', 'update', 'Stopped At', 'new handoff']],
+    ['patch', ['state', 'patch', '--Stopped At', 'new handoff']],
+  ]) {
+    test(`a session section whose live fields sit between --- rules: ${label} writes them`, () => {
+      fs.writeFileSync(statePath(), ['---', 'status: executing', 'stopped_at: live', '---', '', '# State', '', '## Session',
+        '---', 'Last session: 2026-01-01', 'Stopped at: live', '---', 'Resume file: live.md', ''].join('\n'));
+      const rec = runTool(...args);
+      assert.strictEqual(rec.exitCode, 0, rec.stderr);
+      const state = readState();
+      assert.match(state, /\n---\nLast session: 2026-01-01\nStopped at: new handoff\n---\n/, state);
+    });
+  }
+
+  // (3) A value already wrapped by a U+2028 is a wrapped value like an LF one:
+  // left whole and listed, not truncated at the separator.
+  test('a session field already wrapped by U+2028 is left whole and listed under skipped', () => {
+    const ls = String.fromCharCode(0x2028);
+    seed([], [`**Stopped at:** finished Phase 2${ls}waiting for approval`, 'Resume file: plan.md'], '## Session');
+    const { json } = recordSession('--stopped-at', 'new handoff');
+    assert.ok((json.skipped || []).some((x) => x.field === 'Stopped At' && x.reason === 'wrapped_value'), JSON.stringify(json));
+    assert.ok(readState().includes(`finished Phase 2${ls}waiting for approval`), readState());
+  });
+
+  // Minor 4: `None` is the template placeholder, not a displaced record.
+  for (const [where, fm, lines] of [
+    ['frontmatter', ['stopped_at: None'], ['Last session: 2026-01-01']],
+    ['body', [], ['Last session: 2026-01-01', 'Stopped at: None']],
+  ]) {
+    test(`(Minor 4) a ${where} Stopped At of None is not reported in replacedRecord`, () => {
+      seed(fm, lines);
+      const { json } = recordSession('--stopped-at', 'Z');
+      assert.strictEqual(json.replacedRecord, undefined, JSON.stringify(json));
+    });
+  }
+
+  // ── trek-e review 5638530738 ──
+
+  // Major 1: the section detector shares the tokenizer the writers and readers
+  // use, so a heading they accept is never answered with a second section.
+  for (const heading of ['##  Session', '##\tSession', '## Session ##', ' ## Session']) {
+    test(`(Major 1) "${heading.replaceAll('\t', '\\t')}" is the session section: no second one is appended`, () => {
+      fs.writeFileSync(statePath(), ['---', 'status: planning', '---', '', '# S', '', heading, '',
+        'Last session: 2026-01-01', 'Resume file: None', ''].join('\n'));
+      const { json } = recordSession('--stopped-at', 'z');
+      assert.strictEqual(json.recorded, true, JSON.stringify(json));
+      assert.strictEqual(json.created, undefined, 'nothing was created (Nit 6)');
+      assert.deepStrictEqual(json.updated.filter((f) => f !== 'gsd_state_version'), ['Last session', 'Stopped At']);
+      assert.strictEqual((readState().match(/^ ?##\s+Session\b/gm) || []).length, 1, readState());
+      assert.strictEqual(JSON.parse(runTool('state-snapshot').stdout).session.stopped_at, 'z');
+    });
+  }
+
+  // Nit 6: `created` means a section was added, as for record-metric.
+  test('(Nit 6) a field inserted into an existing section is not reported as created; an appended section is', () => {
+    seed([], ['Last session: 2026-01-01'], '## Session');
+    assert.strictEqual(recordSession('--stopped-at', 'a').json.created, undefined);
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', ''].join('\n'));
+    assert.strictEqual(recordSession('--stopped-at', 'b').json.created, true);
+  });
+
+  // Minor 2: a prose tail shaped `words: text` may be a wrapped value, so the
+  // writer leaves the field whole; a label STATE.md defines, or a bold one, is
+  // a sibling.
+  test('(Minor 2) a wrapped tail shaped like a label is a continuation: the field is left whole', () => {
+    seed([], ['Stopped at: finished the migration of the old', 'records and verified: all good', 'Resume file: None'], '## Session');
+    const { json } = recordSession('--stopped-at', 'new');
+    assert.deepStrictEqual(json.skipped, [{ field: 'Stopped At', reason: 'wrapped_value', continuation: 'records and verified: all good' }]);
+    assert.ok(session().includes('Stopped at: finished the migration of the old\nrecords and verified: all good\n'), session());
+    assert.strictEqual(json.replacedRecord, undefined, JSON.stringify(json));
+  });
+  for (const sibling of ['Resume file: None', 'Status: Executing', '**Phase 3.1 status:** ok']) {
+    test(`(Minor 2) "${sibling}" directly below Stopped at is a sibling: the field is written`, () => {
+      seed([], ['Last session: 2026-01-01', 'Stopped at: old', sibling], '## Session');
+      const { json } = recordSession('--stopped-at', 'new');
+      assert.strictEqual(json.skipped, undefined, JSON.stringify(json));
+      assert.ok(session().includes(`Stopped at: new\n${sibling}\n`), session());
+    });
+  }
+
+  // Minor 3: with no session section, all three writers agree — Resume file and
+  // Last session are written only where state-snapshot reads them.
+  test('(Minor 3) no session section: update and patch refuse Resume File; record-session writes it into a new section the snapshot reads', () => {
+    const doc = ['---', 'status: executing', '---', '', '# Project State', '', 'Resume file: old.md', ''].join('\n');
+    fs.writeFileSync(statePath(), doc);
+    const upd = JSON.parse(runTool('state', 'update', 'Resume File', 'new.md').stdout);
+    assert.strictEqual(upd.updated, false, JSON.stringify(upd));
+    const patch = JSON.parse(runTool('state', 'patch', '--Resume File', 'new.md').stdout);
+    assert.ok(!(patch.updated || []).includes('Resume File'), JSON.stringify(patch));
+    assert.strictEqual(readState(), doc, 'neither wrote');
+    const { json } = recordSession('--stopped-at', 'X', '--resume-file', 'new.md');
+    assert.ok(json.updated.includes('Resume File'), JSON.stringify(json));
+    assert.strictEqual(json.created, true);
+    assert.ok(readState().includes('\nResume file: old.md\n'), 'the body line outside any section is left alone');
+    assert.strictEqual(JSON.parse(runTool('state-snapshot').stdout).session.resume_file, 'new.md');
+  });
+
+  // Codex whole-PR review (this round): a section opening with a horizontal
+  // rule is not frontmatter to the writer, and an inserted field never splits
+  // an ambiguous wrapped tail.
+  test('(Codex) a session section that opens with a `---` rule: the live bold field is replaced, not duplicated', () => {
+    // The rule directly under the heading: the section body then starts with `---`.
+    fs.writeFileSync(statePath(), ['---', 'status: executing', '---', '', '# Project State', '', '## Session', '---',
+      '**Stopped at:** old handoff', '---', '**Last session:** 2026-01-01', '**Resume file:** None', ''].join('\n'));
+    const { json } = recordSession('--stopped-at', 'new handoff');
+    assert.ok(json.updated.includes('Stopped At'), JSON.stringify(json));
+    assert.strictEqual((session().match(/\*\*Stopped at:\*\*/g) || []).length, 1, session());
+    assert.strictEqual(frontmatterStoppedAt(), 'new handoff', readState());
+    const upd = JSON.parse(runTool('state', 'update', 'Resume File', 'x.md').stdout);
+    assert.strictEqual(upd.updated, true, JSON.stringify(upd));
+    assert.match(session(), /\*\*Resume file:\*\* x\.md/);
+  });
+  test('(Codex) a field inserted after one with an ambiguous tail goes below the tail, not inside it', () => {
+    seed([], ['Last session: 2026-01-01', 'Stopped at: finished migrating the old', 'records and verified: all good'], '## Session');
+    recordSession('--resume-file', 'plan.md');
+    assert.ok(session().includes('Stopped at: finished migrating the old\nrecords and verified: all good\nResume file: plan.md\n'), session());
+  });
+
+  // Nit 7: the shipped template's `[...]` placeholders are not a displaced record.
+  test('(Nit 7) the template placeholders are not reported in replacedRecord', () => {
+    seed([], ['Last session: [YYYY-MM-DD HH:MM]', 'Stopped at: [Description of last completed action]',
+      'Resume file: [Path to .continue-here*.md if exists, otherwise "None"]'], '## Session');
+    const { json } = recordSession('--stopped-at', 'Z', '--resume-file', 'x.md');
+    assert.ok(json.updated.includes('Stopped At') && json.updated.includes('Resume File'), JSON.stringify(json));
+    assert.strictEqual(json.replacedRecord, undefined, JSON.stringify(json));
+  });
+  test('(Nit 7) a real value that only starts with a bracket is still a displaced record', () => {
+    seed([], ['Last session: 2026-01-01', 'Stopped at: [WIP] plan 2 half done', 'Resume file: None'], '## Session');
+    assert.deepStrictEqual(recordSession('--stopped-at', 'Z').json.replacedRecord, { 'Stopped At': '[WIP] plan 2 half done' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C2 of epic #4629 (#4866) — ADR-4629 §8.2 (verified post-state) + §8.3
+// (bounded mutation): the verifying executor. Positive controls: each failure
+// arm is driven red by a seeded intent, and each is paired with the passing
+// twin that differs by exactly the defect, so a verifier that failed on
+// everything could not pass this block. Documents are the SHIPPED template
+// (`gsd-core/templates/state.md`), never a hand fixture (#4564/#4316).
+describe('C2 (ADR-4629 §8.2/§8.3): StateWriteIntent verifying executor', () => {
+  const { createStateWriteIntent, openStateTransaction, rebuildStateTransaction } = stateTransitionMod;
+  const { _verifyStateWriteIntent: verify, applyStateWriteIntent, STATE_WRITE_INTENT_FAILURE } = stateLib;
+  const STATE_PATH = '/virtual/.planning/STATE.md';
+  const PRE = readShippedStateTemplateBody([]);
+  const STATUS_LINE = 'Status: [Ready to plan / Planning / Ready to execute / In progress / Phase complete]';
+  const BLOCKERS_LINE = '[Issues that affect future work]';
+  const LAST_ACTIVITY_LINE = 'Last activity: [YYYY-MM-DD] — [What happened]';
+  const setStatus = (content) => content.replace(STATUS_LINE, 'Status: In progress');
+  const narrowStatus = (extra = {}) => createStateWriteIntent(openStateTransaction({ snapshot: {} }), {
+    assertions: [{ field: 'Status', requirement: 'required', ...extra }],
+    scope: 'narrow',
+  });
+
+  test('§8.3 positive control: a narrow write that also edits an undeclared section fails loud', () => {
+    const post = setStatus(PRE).replace(BLOCKERS_LINE, 'Blocked on vendor API');
+    const result = verify(narrowStatus(), PRE, post, STATE_PATH);
+    assert.strictEqual(result.ok, false);
+    assert.deepStrictEqual(result.reasons, [STATE_WRITE_INTENT_FAILURE.OUT_OF_SCOPE]);
+    assert.deepStrictEqual(result.outOfScope, [{ region: 'section', name: 'Blockers/Concerns' }]);
+    // Twin: the same write without the stray edit passes.
+    const clean = verify(narrowStatus(), PRE, setStatus(PRE), STATE_PATH);
+    assert.strictEqual(clean.ok, true, JSON.stringify(clean));
+  });
+
+  test('§8.3: a second, undeclared edit inside the SAME section as a declared field is still caught', () => {
+    const post = setStatus(PRE).replace(LAST_ACTIVITY_LINE, 'Last activity: 2026-09-22 — something else');
+    const result = verify(narrowStatus(), PRE, post, STATE_PATH);
+    assert.deepStrictEqual(result.outOfScope, [{ region: 'section', name: 'Current Position' }]);
+  });
+
+  test('§8.3: a frontmatter leaf the narrow intent never named is out of scope (the #4629 progress.percent shape)', () => {
+    const post = PRE.replace('  percent: 0', '  percent: 50');
+    const result = verify(narrowStatus({ requirement: 'best-effort' }), PRE, post, STATE_PATH);
+    assert.deepStrictEqual(result.outOfScope, [{ region: 'frontmatter', name: 'progress.percent' }]);
+    const named = createStateWriteIntent(openStateTransaction({ snapshot: {} }), {
+      assertions: [{ field: 'progress.percent', requirement: 'required' }],
+    });
+    assert.strictEqual(verify(named, PRE, post, STATE_PATH).ok, true);
+  });
+
+  test('§8.3: broad scope admits the whole frontmatter but keeps the body bounded (audited, not exempted)', () => {
+    const broad = createStateWriteIntent(openStateTransaction({ snapshot: {} }), { scope: 'broad' });
+    const fmOnly = PRE.replace('status: planning', 'status: executing').replace('  percent: 0', '  percent: 40');
+    assert.strictEqual(verify(broad, PRE, fmOnly, STATE_PATH).ok, true);
+    const withBody = fmOnly.replace(BLOCKERS_LINE, 'Blocked on vendor API');
+    assert.deepStrictEqual(verify(broad, PRE, withBody, STATE_PATH).outOfScope, [{ region: 'section', name: 'Blockers/Concerns' }]);
+  });
+
+  test('§8.3: a rebuild intent is unbounded by contract, but §8.2 still applies to it', () => {
+    const rebuild = createStateWriteIntent(rebuildStateTransaction({ snapshot: {} }), {
+      assertions: [{ field: 'Status', requirement: 'required', value: 'In progress' }],
+    });
+    const post = setStatus(PRE).replace(BLOCKERS_LINE, 'x').replace('  percent: 0', '  percent: 9');
+    assert.strictEqual(verify(rebuild, PRE, post, STATE_PATH).ok, true);
+    const missed = verify(rebuild, PRE, PRE.replace(BLOCKERS_LINE, 'x'), STATE_PATH);
+    assert.deepStrictEqual(missed.missedRequired, ['Status']);
+    assert.deepStrictEqual(missed.outOfScope, []);
+  });
+
+  test('§8.2 positive control: a required assertion that did not land fails loud', () => {
+    const wrong = verify(narrowStatus({ value: 'Complete' }), PRE, setStatus(PRE), STATE_PATH);
+    assert.deepStrictEqual(wrong.reasons, [STATE_WRITE_INTENT_FAILURE.REQUIRED_ASSERTION_MISSED]);
+    assert.deepStrictEqual(wrong.missedRequired, ['Status']);
+    assert.strictEqual(verify(narrowStatus({ value: 'In progress' }), PRE, setStatus(PRE), STATE_PATH).ok, true);
+    // No declared value: "landed" means measurably changed, so an untouched target is missed.
+    assert.deepStrictEqual(verify(narrowStatus(), PRE, PRE, STATE_PATH).missedRequired, ['Status']);
+    // A best-effort assertion is not judged by §8.2 (its bucket is §8.4, decided in Phase 3).
+    assert.strictEqual(verify(narrowStatus({ requirement: 'best-effort' }), PRE, PRE, STATE_PATH).ok, true);
+  });
+
+  test('§8.2/§8.3: a declared section assertion covers edits inside that section and its landing is verified', () => {
+    const sectionIntent = createStateWriteIntent(openStateTransaction({ snapshot: {} }), {
+      assertions: [{ field: 'Blockers/Concerns', target: 'section', requirement: 'required' }],
+    });
+    const post = PRE.replace(BLOCKERS_LINE, 'Blocked on vendor API');
+    assert.strictEqual(verify(sectionIntent, PRE, post, STATE_PATH).ok, true);
+    assert.deepStrictEqual(verify(sectionIntent, PRE, PRE, STATE_PATH).missedRequired, ['Blockers/Concerns']);
+    // Declaring the parent covers the child through its heading lineage.
+    const parent = createStateWriteIntent(openStateTransaction({ snapshot: {} }), {
+      assertions: [{ field: 'Accumulated Context', target: 'section', requirement: 'best-effort' }],
+    });
+    assert.strictEqual(verify(parent, PRE, post, STATE_PATH).ok, true);
+  });
+
+  // Adversarial-review regressions (each was a live false negative/positive in the first cut).
+  test('§8.2: a required target that was DELETED has not landed', () => {
+    const cp = createStateWriteIntent(openStateTransaction({ snapshot: {} }), {
+      assertions: [{ field: 'Status', requirement: 'required' }, { field: 'Current Position', requirement: 'best-effort' }],
+    });
+    const deleted = verify(cp, PRE, PRE.replace(STATUS_LINE + '\n', ''), STATE_PATH);
+    assert.deepStrictEqual(deleted.missedRequired, ['Status']);
+    assert.deepStrictEqual(deleted.outOfScope, [], 'Current Position is read as a whole section in §8.3 too');
+  });
+
+  test('§8.3: a declared field covers only the line the seam reads, not the same label in another section', () => {
+    const pre = PRE.replace(BLOCKERS_LINE, 'Status: blocked');
+    const post = setStatus(pre).replace('Status: blocked', 'Status: unblocked');
+    assert.deepStrictEqual(verify(narrowStatus(), pre, post, STATE_PATH).outOfScope, [{ region: 'section', name: 'Blockers/Concerns' }]);
+  });
+
+  test('§8.3: reordering sections is out of scope even when every section body is unchanged', () => {
+    const cut = PRE.indexOf('## Deferred Items');
+    const tail = PRE.indexOf('## Session Continuity');
+    const post = PRE.slice(0, cut) + PRE.slice(tail) + '\n' + PRE.slice(cut, tail);
+    assert.ok(verify(narrowStatus({ requirement: 'best-effort' }), PRE, post, STATE_PATH).outOfScope.some((o) => o.region === 'order'));
+  });
+
+  test('the seam normalization (CRLF, blank-line runs) is not counted as the write delta', () => {
+    const crlf = PRE.split('\n').join('\r\n');
+    assert.strictEqual(verify(narrowStatus(), crlf, setStatus(PRE), STATE_PATH).ok, true);
+  });
+
+  // #4935 review: a declared section resolves to its FIRST occurrence (the one
+  // `readStateTarget` reads) plus that occurrence's positional descendants, the
+  // section analogue of `stateFieldOwnerUnit`. A repeated heading's other
+  // occurrence, and its children, stay out of scope.
+  test('§8.3: a declared section covers only its first occurrence, not a repeated heading of the same name', () => {
+    const pre = PRE.trimEnd() + '\n\n## Notes\n\nfirst\n\n### Detail\n\na\n\n## Notes\n\nsecond\n\n### Detail\n\nb\n';
+    const notes = createStateWriteIntent(openStateTransaction({ snapshot: {} }), {
+      assertions: [{ field: 'Notes', target: 'section', requirement: 'best-effort' }],
+    });
+    const second = verify(notes, pre, pre.replace('second', 'stray'), STATE_PATH);
+    assert.deepStrictEqual(second.outOfScope, [{ region: 'section', name: 'Notes' }]);
+    const secondChild = verify(notes, pre, pre.replace('\nb\n', '\nstray\n'), STATE_PATH);
+    assert.deepStrictEqual(secondChild.outOfScope, [{ region: 'section', name: 'Detail' }]);
+    // Twins: the first occurrence and its child are in scope.
+    assert.strictEqual(verify(notes, pre, pre.replace('first', 'edited'), STATE_PATH).ok, true);
+    assert.strictEqual(verify(notes, pre, pre.replace('\na\n', '\nedited\n'), STATE_PATH).ok, true);
+  });
+
+  test('createStateWriteIntent rejects an unknown assertion target', () => {
+    assert.throws(
+      () => createStateWriteIntent(openStateTransaction({ snapshot: {} }), { assertions: [{ field: 'X', requirement: 'required', target: 'sections' }] }),
+      { code: 'STATE_WRITE_INTENT_TARGET_INVALID' },
+    );
+  });
+
+  // #4935 review: a bare parent declaration covers only the schema-declared leaves
+  // of that parent (`declaredLeavesOf`), and a declared leaf never covers a sibling.
+  test('§8.3: declaring `progress` covers its schema-declared leaves; a declared leaf does not cover a sibling leaf', () => {
+    const post = PRE.replace('  percent: 0', '  percent: 50').replace('  total_plans: 0', '  total_plans: 4');
+    const intentFor = (field) => createStateWriteIntent(openStateTransaction({ snapshot: {} }), {
+      assertions: [{ field, requirement: 'best-effort' }],
+      scope: 'narrow',
+    });
+    assert.strictEqual(verify(intentFor('progress'), PRE, post, STATE_PATH).ok, true);
+    assert.deepStrictEqual(
+      verify(intentFor('progress.percent'), PRE, post, STATE_PATH).outOfScope,
+      [{ region: 'frontmatter', name: 'progress.total_plans' }],
+    );
+    // A prefix that is not a declared parent key covers nothing.
+    assert.deepStrictEqual(
+      verify(intentFor('prog'), PRE, post, STATE_PATH).outOfScope,
+      [{ region: 'frontmatter', name: 'progress.total_plans' }, { region: 'frontmatter', name: 'progress.percent' }],
+    );
+    // A top-level key that merely CONTAINS a dot is not a schema leaf of its prefix:
+    // declaring `foo` does not cover `foo.bar` (the old `split('.')[0]` rule did).
+    const dottedPre = PRE.replace('status: planning', 'status: planning\nfoo.bar: 1');
+    const dottedPost = dottedPre.replace('foo.bar: 1', 'foo.bar: 2');
+    assert.deepStrictEqual(
+      verify(intentFor('foo'), dottedPre, dottedPost, STATE_PATH).outOfScope,
+      [{ region: 'frontmatter', name: 'foo.bar' }],
+    );
+    assert.strictEqual(verify(intentFor('foo.bar'), dottedPre, dottedPost, STATE_PATH).ok, true);
+  });
+
+  // #4935 review: fast-check properties for the §8.3 diff/replay contract. Each
+  // generated case edits a random subset of the template's body fields to random
+  // values, and the intent declares exactly that subset. Inputs are built with a
+  // plain line setter (`setField`), NOT the seam's `stateReplaceField` that the
+  // verifier replays with, so a writer defect cannot hide inside its own oracle
+  // (CONTRIBUTING, #2371). Edits touch the BODY only.
+  describe('§8.3 properties (fast-check)', () => {
+    const FC_OPTS = { seed: 4866, numRuns: 200 };
+    const BODY_FIELDS = [
+      ['Phase', 'Current Position'], ['Plan', 'Current Position'], ['Status', 'Current Position'],
+      ['Last activity', 'Current Position'], ['Core value', 'Project Reference'], ['Current focus', 'Project Reference'],
+      ['Last session', 'Session Continuity'], ['Stopped at', 'Session Continuity'], ['Resume file', 'Session Continuity'],
+    ];
+    // One line from each template section that owns no declarable field.
+    const STRAY_LINES = [
+      [BLOCKERS_LINE, 'Blockers/Concerns'],
+      ['- [Phase X]: [Decision summary]', 'Decisions'],
+      ['[From .planning/todos/pending/ — ideas captured during sessions]', 'Pending Todos'],
+      ['*Updated after each plan completion*', 'Performance Metrics'],
+      ['Items acknowledged and deferred at milestone close, most recent first:', 'Deferred Items'],
+    ];
+    // Values include `$` and `&` so a string-replacement special pattern would surface.
+    const fieldValue = fc.stringMatching(/^[A-Za-z0-9][A-Za-z0-9 .,:()/$&*|'[\]-]{0,24}[A-Za-z0-9)]$/);
+    const fieldEdits = fc
+      .uniqueArray(fc.tuple(fc.constantFrom(...BODY_FIELDS), fieldValue), {
+        minLength: 1, maxLength: BODY_FIELDS.length, selector: ([[field]]) => field,
+      })
+      .filter((edits) => edits.every(([[field], value]) => stateExtractField(PRE, field).trim() !== value));
+    const bodyStart = PRE.indexOf('\n---\n', 4) + 5;
+    const onBody = (content, fn) => content.slice(0, bodyStart) + fn(content.slice(bodyStart));
+    // Rewrite the first body line labelled `Field:` or `**Field:**`, the line the seam reads.
+    const setField = (body, field, value) => {
+      const lines = body.split('\n');
+      const i = lines.findIndex((l) => l.startsWith(`${field}: `) || l.startsWith(`**${field}:** `));
+      assert.ok(i >= 0, `the template body must carry a ${field} line`);
+      lines[i] = `${lines[i].startsWith('**') ? `**${field}:**` : `${field}:`} ${value}`;
+      return lines.join('\n');
+    };
+    const editBody = (content, edits) =>
+      onBody(content, (body) => edits.reduce((acc, [[field], value]) => setField(acc, field, value), body));
+    const applyEdits = (edits) => editBody(PRE, edits);
+    const intentFor = (edits) => createStateWriteIntent(openStateTransaction({ snapshot: {} }), {
+      assertions: edits.map(([[field], value]) => ({ field, requirement: 'required', value })),
+      scope: 'narrow',
+    });
+
+    test('property: editing exactly the declared fields verifies clean (no false out-of-scope, every required lands)', () => {
+      let checked = 0;
+      fc.assert(fc.property(fieldEdits, (edits) => {
+        const result = verify(intentFor(edits), PRE, applyEdits(edits), STATE_PATH);
+        assert.deepStrictEqual(
+          { ok: result.ok, outOfScope: result.outOfScope, missedRequired: result.missedRequired },
+          { ok: true, outOfScope: [], missedRequired: [] },
+        );
+        checked++;
+      }), FC_OPTS);
+      assert.strictEqual(checked, FC_OPTS.numRuns, 'every generated case must reach the assertion');
+    });
+
+    test('property: one stray edit in a field-free section is reported as exactly that section', () => {
+      let checked = 0;
+      fc.assert(fc.property(fieldEdits, fc.constantFrom(...STRAY_LINES), fieldValue, (edits, [line, section], stray) => {
+        const post = applyEdits(edits).replace(line, () => stray);
+        const result = verify(intentFor(edits), PRE, post, STATE_PATH);
+        assert.deepStrictEqual(result.reasons, [STATE_WRITE_INTENT_FAILURE.OUT_OF_SCOPE]);
+        assert.deepStrictEqual(result.outOfScope, [{ region: 'section', name: section }]);
+        checked++;
+      }), FC_OPTS);
+      assert.strictEqual(checked, FC_OPTS.numRuns, 'every generated case must reach the assertion');
+    });
+
+    test('property: an undeclared field edited beside a declared one in the same section is caught', () => {
+      let checked = 0;
+      fc.assert(fc.property(fieldEdits, fieldValue, fc.nat(), (edits, value, pick) => {
+        const declaredFields = new Set(edits.map(([[field]]) => field));
+        const siblings = BODY_FIELDS.filter(([field, section]) =>
+          !declaredFields.has(field) && edits.some(([[, s]]) => s === section));
+        fc.pre(siblings.length > 0);
+        const sibling = siblings[pick % siblings.length];
+        fc.pre(stateExtractField(PRE, sibling[0]).trim() !== value);
+        const post = editBody(applyEdits(edits), [[sibling, value]]);
+        const result = verify(intentFor(edits), PRE, post, STATE_PATH);
+        assert.strictEqual(result.ok, false);
+        assert.ok(result.outOfScope.some((o) => o.region === 'section' && o.name === sibling[1]), JSON.stringify(result));
+        checked++;
+      }), FC_OPTS);
+      assert.strictEqual(checked, FC_OPTS.numRuns, 'every generated case must reach the assertion');
+    });
+
+    test('property: a declared label repeated in another section covers only the line the seam reads', () => {
+      let checked = 0;
+      fc.assert(fc.property(fieldEdits, fc.constantFrom(...STRAY_LINES), fieldValue, (edits, [line, section], value) => {
+        // The seeded copy must sit AFTER the field's owning section: the seam reads the
+        // first match, so a copy placed earlier would itself be the declared line.
+        const early = edits.find(([[, s]]) => s === 'Current Position' || s === 'Project Reference');
+        fc.pre(early !== undefined && value !== 'seeded');
+        const [[field]] = early;
+        const pre = PRE.replace(line, () => `${field}: seeded`);
+        const post = editBody(pre, edits)
+          .replace(`${field}: seeded`, () => `${field}: ${value}`);
+        const result = verify(intentFor(edits), pre, post, STATE_PATH);
+        assert.deepStrictEqual(result.outOfScope, [{ region: 'section', name: section }]);
+        checked++;
+      }), FC_OPTS);
+      assert.strictEqual(checked, FC_OPTS.numRuns, 'every generated case must reach the assertion');
+    });
+
+    test('property: the verdict is invariant under CRLF line endings on either side', () => {
+      const crlf = (s) => s.split('\n').join('\r\n');
+      let checked = 0;
+      fc.assert(fc.property(fieldEdits, fc.option(fc.constantFrom(...STRAY_LINES)), (edits, stray) => {
+        const post = stray === null ? applyEdits(edits) : applyEdits(edits).replace(stray[0], () => 'x');
+        const lf = verify(intentFor(edits), PRE, post, STATE_PATH);
+        // Mixed endings: a side the verifier failed to normalize would read as every section changed.
+        assert.deepStrictEqual(verify(intentFor(edits), crlf(PRE), post, STATE_PATH), lf);
+        assert.deepStrictEqual(verify(intentFor(edits), PRE, crlf(post), STATE_PATH), lf);
+        checked++;
+      }), FC_OPTS);
+      assert.strictEqual(checked, FC_OPTS.numRuns, 'every generated case must reach the assertion');
+    });
+  });
+
+  describe('applyStateWriteIntent (disk)', () => {
+    let tmpDir;
+    let statePath;
+    beforeEach(() => {
+      tmpDir = createTempProject('gsd-4866-');
+      statePath = path.join(tmpDir, '.planning', 'STATE.md');
+      fs.writeFileSync(statePath, PRE);
+    });
+    afterEach(() => cleanup(tmpDir));
+
+    test('an out-of-scope transform is refused before the write: ok=false, written=false, bytes unchanged', () => {
+      const result = applyStateWriteIntent(statePath, narrowStatus(), (c) => setStatus(c).replace(BLOCKERS_LINE, 'x'), tmpDir);
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual(result.written, false);
+      assert.ok(result.outOfScope.some((o) => o.region === 'section' && o.name === 'Blockers/Concerns'), JSON.stringify(result));
+      assert.strictEqual(fs.readFileSync(statePath, 'utf-8'), PRE);
+    });
+
+    test('an in-scope transform is written and reports the measured delta', () => {
+      // The realistic C3 shape: narrow scope, default resync (sync + preservation both run).
+      const intent = createStateWriteIntent(openStateTransaction({ snapshot: {}, resync: true }), {
+        assertions: [{ field: 'Status', requirement: 'required', value: 'In progress' }],
+        scope: 'narrow',
+      });
+      const result = applyStateWriteIntent(statePath, intent, setStatus, tmpDir);
+      assert.strictEqual(result.ok, true, JSON.stringify(result));
+      assert.strictEqual(result.written, true);
+      assert.ok(result.updated.includes('Status'), JSON.stringify(result.updated));
+      assert.ok(fs.readFileSync(statePath, 'utf-8').includes('Status: In progress'));
+    });
+
+    test('a no-op transform writes nothing and a required change-assertion reports as missed', () => {
+      const result = applyStateWriteIntent(statePath, narrowStatus(), (c) => c, tmpDir);
+      assert.strictEqual(result.written, false);
+      assert.deepStrictEqual(result.missedRequired, ['Status']);
+      assert.strictEqual(fs.readFileSync(statePath, 'utf-8'), PRE);
+    });
+
+    // #4935 review: the one failure found AFTER the write. The re-read is forced
+    // to differ from the verified content (a writer outside the lock); the result
+    // must say written=true and ok=false, with no restore attempted.
+    test('a re-read that differs from the verified content is reread_mismatch: ok=false, written=true, not restored', () => {
+      const intent = createStateWriteIntent(openStateTransaction({ snapshot: {}, resync: true }), {
+        assertions: [{ field: 'Status', requirement: 'required', value: 'In progress' }],
+      });
+      const realRead = fs.readFileSync;
+      let reads = 0;
+      fs.readFileSync = function patched(file, ...rest) {
+        const out = realRead.call(this, file, ...rest);
+        if (file === statePath && ++reads === 2) return out + '\ntampered\n';
+        return out;
+      };
+      let result;
+      try {
+        result = applyStateWriteIntent(statePath, intent, setStatus, tmpDir);
+      } finally {
+        fs.readFileSync = realRead;
+      }
+      assert.strictEqual(reads >= 2, true, 'the executor re-read the file after writing');
+      assert.deepStrictEqual(result.reasons, [STATE_WRITE_INTENT_FAILURE.REREAD_MISMATCH]);
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual(result.written, true);
+      assert.deepStrictEqual([...result.outOfScope, ...result.missedRequired], []);
+      assert.deepStrictEqual(result.updated, []);
+      // The verified content reached disk and was not rolled back.
+      assert.ok(fs.readFileSync(statePath, 'utf-8').includes('Status: In progress'));
+    });
+
+    test('a rebuild intent is a construction error on this path (rebuild writers stay on writeStateMd)', () => {
+      const rebuild = createStateWriteIntent(rebuildStateTransaction({ snapshot: {} }), {});
+      assert.throws(() => applyStateWriteIntent(statePath, rebuild, setStatus, tmpDir), { code: 'STATE_TRANSACTION_KIND_INVALID' });
+      assert.throws(() => applyStateWriteIntent(statePath, null, setStatus, tmpDir), { code: 'STATE_WRITE_INTENT_REQUIRED' });
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #4945 — begin-phase on a gap-closure re-entry starts at the first plan still to run
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('#4945 begin-phase on a gap-closure re-entry', () => {
+  let tmp;
+  beforeEach(() => {
+    tmp = createFixture();
+  });
+  afterEach(() => cleanup(tmp));
+
+  const writePhase = ({ plans, summarized, status }) => {
+    const dir = path.join(tmp, '.planning', 'phases', '48-survivable');
+    fs.mkdirSync(dir, { recursive: true });
+    for (let n = 1; n <= plans; n++) {
+      const id = String(n).padStart(2, '0');
+      fs.writeFileSync(path.join(dir, `48-${id}-PLAN.md`), `---\nphase: 48\nplan: ${n}\ntype: execute\n---\n# plan ${n}\n`);
+      if (n <= summarized) fs.writeFileSync(path.join(dir, `48-${id}-SUMMARY.md`), `# summary ${n}\n`);
+    }
+    fs.writeFileSync(path.join(tmp, '.planning', 'STATE.md'), `# Project State
+
+**Current Phase:** 48
+**Current Phase Name:** survivable
+**Total Phases:** 60
+**Current Plan:** ${summarized}
+**Total Plans in Phase:** ${summarized}
+**Status:** ${status}
+**Last Activity:** 2026-10-01
+
+## Current Position
+Phase: 48 (survivable) — ${status.toUpperCase()}
+Plan: ${summarized} of ${summarized} in current phase
+Status: ${status}
+Last activity: 2026-10-01 -- done
+`);
+  };
+
+  const read = () => fs.readFileSync(path.join(tmp, '.planning', 'STATE.md'), 'utf-8');
+  const run = (plans) => runGsdTools(['state', 'begin-phase', '--phase', '48', '--name', 'survivable', '--plans', String(plans)], tmp);
+
+  test('17 of 19 plans summarized: Current Plan and Plan: N of M start at the first plan still to run', () => {
+    writePhase({ plans: 19, summarized: 17, status: 'Verifying' });
+    const r = run(19);
+    assert.ok(r.success, r.error);
+    const out = read();
+    assert.match(out, /^\*\*Current Plan:\*\* 18$/m);
+    assert.match(out, /^\*\*Total Plans in Phase:\*\* 19$/m);
+    assert.match(out, /^Plan: 18 of 19/m);
+    assert.doesNotMatch(out, /^\*\*Current Plan:\*\* 1$/m);
+  });
+
+  test('the first incomplete plan is used even when the summarized plans are not a prefix', () => {
+    writePhase({ plans: 5, summarized: 0, status: 'Ready to plan' });
+    const dir = path.join(tmp, '.planning', 'phases', '48-survivable');
+    fs.writeFileSync(path.join(dir, '48-03-SUMMARY.md'), '# s\n');
+    fs.writeFileSync(path.join(dir, '48-04-SUMMARY.md'), '# s\n');
+    const r = run(5);
+    assert.ok(r.success, r.error);
+    assert.match(read(), /^\*\*Current Plan:\*\* 1$/m);
+  });
+
+  test('CONTROL: a phase with no summarized plan starts at plan 1, as before', () => {
+    writePhase({ plans: 4, summarized: 0, status: 'Ready to plan' });
+    const r = run(4);
+    assert.ok(r.success, r.error);
+    const out = read();
+    assert.match(out, /^\*\*Current Plan:\*\* 1$/m);
+    assert.match(out, /^Plan: 1 of 4/m);
+  });
+
+  test('CONTROL: a phase directory that cannot be found starts at plan 1, as before', () => {
+    fs.writeFileSync(path.join(tmp, '.planning', 'STATE.md'), '# Project State\n\n**Status:** Ready\n**Current Plan:** 0\n**Total Plans in Phase:** 0\n');
+    const r = runGsdTools(['state', 'begin-phase', '--phase', '77', '--name', 'ghost', '--plans', '3'], tmp);
+    assert.ok(r.success, r.error);
+    assert.match(read(), /^\*\*Current Plan:\*\* 1$/m);
+  });
+
+  test('CONTROL: a resume (Status already Executing Phase 48) still preserves mid-flight progress', () => {
+    writePhase({ plans: 19, summarized: 17, status: 'Executing Phase 48' });
+    fs.writeFileSync(
+      path.join(tmp, '.planning', 'STATE.md'),
+      read().replace('**Current Plan:** 17', '**Current Plan:** 9'),
+    );
+    const r = run(19);
+    assert.ok(r.success, r.error);
+    assert.match(read(), /^\*\*Current Plan:\*\* 9$/m);
+  });
+});
+
+// #5369: `state planned-phase` without --name must never write its own status
+// text ("READY TO EXECUTE") into the phase-name position.
+describe('planned-phase without --name keeps the status out of the phase name (#5369)', () => {
+  const POSITION = [
+    '# Project State', '', '## Current Position', '',
+    'Phase: 18 — Curated Name', 'Plan: 0 TBD in current phase', 'Status: Ready to plan', 'Last activity: 2026-10-01', '',
+  ].join('\n');
+  let tmpDir;
+  beforeEach(() => { tmpDir = createTempProject(); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  const plan = (stateText, args = '--phase 19 --plans 3') => {
+    const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+    fs.writeFileSync(statePath, stateText);
+    const r = runGsdTools(`query state.planned-phase ${args}`, tmpDir);
+    assert.strictEqual(r.success, true, r.error);
+    const after = fs.readFileSync(statePath, 'utf-8');
+    const lines = splitLines(after);
+    const end = lines.indexOf('---', 1);
+    const nameLine = lines.slice(1, end > 0 ? end : 1).find((l) => l.startsWith('current_phase_name:'));
+    return { after, name: nameLine ? nameLine.slice('current_phase_name:'.length).trim().replace(/^["']|["']$/g, '') : null };
+  };
+
+  test('no frontmatter: current_phase_name is not the status fragment', () => {
+    const { name } = plan(POSITION);
+    assert.strictEqual(name, null, 'no curated name and no --name: the name stays unset');
+  });
+
+  test('frontmatter without current_phase_name: not the status fragment', () => {
+    const { name } = plan(`---\ncurrent_phase: 18\n---\n${POSITION}`);
+    assert.strictEqual(name, null, 'no curated name and no --name: the name stays unset');
+  });
+
+  test('a curated name is kept in the frontmatter and the body Phase line carries it too', () => {
+    const { after, name } = plan(`---\ncurrent_phase_name: Real\n---\n${POSITION}`);
+    assert.strictEqual(name, 'Real');
+    assert.match(after, /^Phase: 19 \(Real\) — READY TO EXECUTE$/m);
+  });
+
+  test('an already-polluted frontmatter name is not reasserted or copied into the body label', () => {
+    const { after, name } = plan(`---\ncurrent_phase_name: READY TO EXECUTE\n---\n${POSITION}`);
+    assert.notStrictEqual(name, 'READY TO EXECUTE', 'the polluted frontmatter name is not reasserted');
+    assert.ok(!/\(READY TO EXECUTE\)/.test(after), `the status phrase must not be copied into the label:\n${after}`);
+  });
+
+  test('--name still sets the name', () => {
+    const { after, name } = plan(POSITION, '--phase 19 --name Foo --plans 3');
+    assert.strictEqual(name, 'Foo');
+    assert.match(after, /^Phase: 19 \(Foo\) — READY TO EXECUTE$/m);
+  });
+
+  test('the Status line still becomes Ready to execute', () => {
+    const { after } = plan(POSITION);
+    assert.match(after, /^Status: Ready to execute$/m);
+  });
+});
+
+// #5460: begin-phase writes the LIVE lines, not a fenced example above them, and a U+2028 inside a
+// wrapped focus does not swallow the next field. The readers treat both as line structure; the
+// writer's regex fast paths used to ignore it.
+describe('begin-phase respects fences and U+2028 line breaks (#5460)', () => {
+  const FENCE = '```';
+  let tmpDir;
+  beforeEach(() => { tmpDir = createTempProject(); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  const run = (stateText, args = '--phase 2 --name Two --plans 3') => {
+    const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+    fs.writeFileSync(statePath, stateText);
+    const r = runGsdTools(`query state.begin-phase ${args}`, tmpDir);
+    assert.strictEqual(r.success, true, r.error);
+    return fs.readFileSync(statePath, 'utf-8');
+  };
+
+  test('the live Current focus is written, not the fenced example above it', () => {
+    const after = run([
+      '# Project State', '',
+      'Example of the field:', '', FENCE, '**Current focus:** Example focus', FENCE, '',
+      '**Current focus:** Phase 1 — Old', '',
+      '## Current Position', '', 'Phase: 1 — OLD', 'Plan: 1 of 2', 'Status: Ready to plan', 'Last activity: 2026-10-01', '',
+    ].join('\n'));
+    assert.ok(after.includes(`${FENCE}\n**Current focus:** Example focus\n${FENCE}`), `fenced example changed:\n${after}`);
+    assert.match(after, /^\*\*Current focus:\*\* Phase 2 — Two$/m);
+    assert.ok(!after.includes('Phase 1 — Old'), 'the live focus line must have been rewritten');
+  });
+
+  test('the live Current Position lines are written, not a fenced template above them', () => {
+    const template = ['Phase: N (template)', 'Plan: X of Y', 'Status: template status', 'Last activity: template date'];
+    const after = run([
+      '# Project State', '', '## Current Position', '',
+      FENCE, ...template, FENCE, '',
+      'Phase: 1 — OLD', 'Plan: 1 of 2', 'Status: Ready to plan', 'Last activity: 2026-10-01', '',
+    ].join('\n'));
+    assert.ok(after.includes(`${FENCE}\n${template.join('\n')}\n${FENCE}`), `fenced template changed:\n${after}`);
+    assert.match(after, /^Phase: 2 \(Two\) — EXECUTING$/m);
+    assert.match(after, /^Plan: 1 of 3$/m);
+    assert.match(after, /^Status: Executing Phase 2$/m);
+  });
+
+  test('a U+2028 inside a wrapped focus does not delete the next field', () => {
+    const after = run([
+      '# Project State', '',
+      '**Current focus:** Phase 1 — Old', 'wrapped tail\u2028Stopped at: keep me', '',
+      '## Current Position', '', 'Phase: 1 — OLD', 'Plan: 1 of 2', 'Status: Ready to plan', 'Last activity: 2026-10-01', '',
+    ].join('\n'));
+    assert.ok(after.includes('Stopped at: keep me'), `the field after the U+2028 was deleted:\n${after}`);
+    assert.match(after, /^\*\*Current focus:\*\* Phase 2 — Two/m);
+  });
+
+  test('U+2028 as the first terminator and U+2029 later: only the wrapped tail goes, the sibling field stays', () => {
+    const after = run([
+      '# Project State', '',
+      '**Current focus:** Phase 1 — Old\u2028tail one\u2029Stopped at: keep me', '',
+      '## Current Position', '', 'Phase: 1 — OLD', 'Plan: 1 of 2', 'Status: Ready to plan', 'Last activity: 2026-10-01', '',
+    ].join('\n'));
+    assert.ok(after.includes('Stopped at: keep me'), `sibling field lost:\n${after}`);
+    assert.ok(!after.includes('tail one'), `the wrapped tail must be replaced with the value:\n${after}`);
+  });
+
+  test('a fence opener inside a frontmatter block scalar does not stop begin-phase from writing', () => {
+    const after = run([
+      '---', 'gsd_state_version: "1.0"', 'stopped_at: |', '  ```', '  not closed', '---', '',
+      '# Project State', '', '**Current focus:** Phase 1 — Old', '',
+      '## Current Position', '', 'Phase: 1 — OLD', 'Plan: 1 of 2', 'Status: Ready to plan', 'Last activity: 2026-10-01', '',
+    ].join('\n'));
+    assert.match(after, /^Phase: 2 \(Two\) — EXECUTING$/m);
+  });
+
+  test('resume: the live Last activity is rewritten, a fenced example above it is not', () => {
+    const after = run([
+      '# Project State', '',
+      '## Current Position', '', FENCE, 'Last activity: example date', FENCE, '',
+      'Phase: 2 (Two) — EXECUTING', 'Plan: 1 of 3', 'Status: Executing Phase 2', 'Last activity: 2026-10-01 — Phase 2 execution started', '',
+    ].join('\n'));
+    assert.ok(after.includes(`${FENCE}\nLast activity: example date\n${FENCE}`), `fenced example changed:\n${after}`);
+    assert.match(after, /^Last activity: .* — Phase 2 execution resumed \(wave continue\)$/m);
+  });
+
+  test('planned-phase: a fenced Total Plans in Phase example is left alone, the live field is written', () => {
+    const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+    fs.writeFileSync(statePath, [
+      '# Project State', '', FENCE, 'Total Plans in Phase: 9', FENCE, '',
+      'Total Plans in Phase: 0', '',
+      '## Current Position', '', 'Phase: 1 — OLD', 'Plan: 0 of 0', 'Status: Ready to plan', 'Last activity: 2026-10-01', '',
+    ].join('\n'));
+    const r = runGsdTools('query state.planned-phase --phase 2 --name Two --plans 3', tmpDir);
+    assert.strictEqual(r.success, true, r.error);
+    const after = fs.readFileSync(statePath, 'utf-8');
+    assert.ok(after.includes(`${FENCE}\nTotal Plans in Phase: 9\n${FENCE}`), `fenced example changed:\n${after}`);
+    assert.match(after, /^Total Plans in Phase: 3$/m);
+  });
+
+  test('a layout with no fences and no U+2028 is written as before', () => {
+    const after = run([
+      '# Project State', '', '**Current focus:** Phase 1 — Old', '',
+      '## Current Position', '', 'Phase: 1 — OLD', 'Plan: 1 of 2', 'Status: Ready to plan', 'Last activity: 2026-10-01', '',
+    ].join('\n'));
+    assert.match(after, /^\*\*Current focus:\*\* Phase 2 — Two$/m);
+    assert.match(after, /^Phase: 2 \(Two\) — EXECUTING$/m);
+  });
+});
+
+describe('#4998 record-session: an indented heading below a session field is the next construct, not its continuation', () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = createTempProject(); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  for (const indent of [0, 1, 3]) {
+    test(`a heading indented ${indent} does not make record-session skip the field above it`, () => {
+      const pad = ' '.repeat(indent);
+      const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+      fs.writeFileSync(statePath, [
+        '# Project State', '', '## Session', '',
+        'Stopped at: before', `${pad}## Notes`, 'Resume file: None', '',
+      ].join('\n'));
+      const r = runGsdTools(['state', 'record-session', '--stopped-at', 'after'], tmpDir);
+      assert.strictEqual(r.success, true, r.error);
+      const out = JSON.parse(r.output);
+      assert.ok(out.updated.includes('Stopped At'), `Stopped At must be written; got ${r.output}`);
+      assert.strictEqual(out.skipped, undefined, `nothing may be skipped; got ${r.output}`);
+      const after = fs.readFileSync(statePath, 'utf-8');
+      assert.match(after, /^Stopped at: after$/m);
+      assert.ok(after.includes(`\n${pad}## Notes\n`), 'the heading is left in place');
+    });
+  }
+});
+
+// #5880 — `countRoadmapPhaseHeadings` (legacy convention) counted any `##`-`####`
+// + `Phase N:` substring in the milestone's ROADMAP text, so a heading quoted in a
+// code span, a fenced block, or a sentence inflated `progress.total_phases` (and
+// deflated `percent`) in every STATE.md write that rebuilds frontmatter. Only real
+// ATX headings of levels 2-4 count, as in the bracket branch and the roadmap
+// readers. Every assertion is an exact number: the over-count is the bug. The
+// shipped CLI is driven (`state record-session`) and the persisted frontmatter read back.
+describe('legacy phase-heading counting reads real headings only (#5880)', () => {
+  const HEAD = '# Roadmap\n\n## Milestone v1.0: Test\n\n';
+  const REAL = '### Phase 1: Foo\n\nGoal.\n\n### Phase 2: Bar\n\nGoal.\n';
+
+  /** Persisted `progress.total_phases` after a `state record-session` over `roadmap`. */
+  function totalPhasesFor(t, roadmap) {
+    const dir = fs.realpathSync(createTempGitProject());
+    t.after(() => cleanup(dir));
+    const planning = path.join(dir, '.planning');
+    fs.mkdirSync(path.join(planning, 'phases', '01-foo'), { recursive: true });
+    fs.writeFileSync(path.join(planning, 'config.json'), '{}');
+    fs.writeFileSync(path.join(planning, 'ROADMAP.md'), roadmap);
+    fs.writeFileSync(path.join(planning, 'STATE.md'), [
+      '---', 'gsd_state_version: 1.0', 'milestone: v1.0', 'status: executing', '---', '',
+      '# Project State', '', '**Phase:** 01', '', '**Progress:** [░░░░░░░░░░] 0%', '',
+    ].join('\n'));
+    const result = runGsdTools(['state', 'record-session', '--stopped-at', 'x'], dir);
+    assert.ok(result.success, `state record-session failed: ${result.error}`);
+    const match = /total_phases:\s*(\d+)/.exec(fs.readFileSync(path.join(planning, 'STATE.md'), 'utf8'));
+    assert.ok(match, 'record-session wrote progress.total_phases');
+    return Number(match[1]);
+  }
+
+  test('control: two real headings count as two', (t) => {
+    assert.strictEqual(totalPhasesFor(t, HEAD + REAL), 2);
+  });
+
+  test('#5880: a phase heading quoted in a blockquote code span is not counted', (t) => {
+    const quoted = '> Note: the heading `### Phase 1: Foo` is how a phase is written.\n\n';
+    assert.strictEqual(totalPhasesFor(t, HEAD + quoted + REAL), 2);
+  });
+
+  test('#5880: a phase heading mentioned mid-sentence is not counted', (t) => {
+    assert.strictEqual(totalPhasesFor(t, `${HEAD}See ### Phase 9: Mid sentence for details.\n\n${REAL}`), 2);
+  });
+
+  test('#5880: a phase heading inside a fenced block is not counted', (t) => {
+    assert.strictEqual(totalPhasesFor(t, `${HEAD}\`\`\`\n### Phase 8: Fenced\n\`\`\`\n\n${REAL}`), 2);
+  });
+
+  test('#5880: a heading without a space after the hashes is not counted', (t) => {
+    assert.strictEqual(totalPhasesFor(t, `${HEAD}###Phase 7: Nospace\n\n${REAL}`), 2);
+  });
+
+  test('#5880: a level-5 heading is not counted (its inner hashes are not a level-4 heading)', (t) => {
+    assert.strictEqual(totalPhasesFor(t, `${HEAD}${REAL}\n##### Phase 5: Five\n`), 2);
+  });
+
+  test('levels 2 and 4 are counted', (t) => {
+    assert.strictEqual(totalPhasesFor(t, `${HEAD}## Phase 1: A\n\n#### Phase 2: B\n`), 2);
+  });
+
+  test('#5880: an indented code line (four spaces) is not a heading', (t) => {
+    assert.strictEqual(totalPhasesFor(t, `${HEAD}${REAL}\n    ### Phase 6: Indented code\n`), 2);
+  });
+
+  test('sentinel phases 0 and 999.1 stay excluded', (t) => {
+    assert.strictEqual(totalPhasesFor(t, `${HEAD}${REAL}\n### Phase 0: Sentinel\n\n### Phase 999.1: Icebox\n`), 2);
+  });
+});
+
+// ─── #6271: an unscoped update-progress decline names its cause and its fix ──────────────────────────────────
+
+describe('state update-progress: an unscoped decline names the cause and the fix (#6271)', () => {
+  const { isolateWorkstreamEnv, restoreWorkstreamEnv } = require('./helpers.cjs');
+  let proj;
+
+  beforeEach(() => {
+    // The host suite forces GSD_WORKSTREAM, which runGsdTools propagates and which redirects the project lookup.
+    isolateWorkstreamEnv();
+    proj = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(proj);
+    restoreWorkstreamEnv();
+  });
+
+  const FLAT_ROADMAP = '# Roadmap\n\n## Phases\n\n- [ ] Phase 1: Alpha\n\n## Phase Details\n\n### Phase 1: Alpha\n**Goal:** x\n';
+  const OTHER_MILESTONE_ROADMAP = '# Roadmap\n\n## v0.2.0 Next\n\n### Phase 1: Alpha\n**Goal:** x\n';
+  const PHASE_TITLE_ROADMAP = '# Roadmap\n\n## Phases\n\n### Phase 1: Migrate to v2.0 API\n**Goal:** x\n';
+
+  function seed(milestoneLine, roadmap) {
+    const phaseDir = path.join(proj, '.planning', 'phases', '01-alpha');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    for (const f of ['01-01-PLAN.md', '01-01-SUMMARY.md', '01-02-PLAN.md']) fs.writeFileSync(path.join(phaseDir, f), '# x\n');
+    if (roadmap !== null) fs.writeFileSync(path.join(proj, '.planning', 'ROADMAP.md'), roadmap);
+    fs.writeFileSync(path.join(proj, '.planning', 'STATE.md'), [
+      '---', "gsd_state_version: '1.0'", milestoneLine, 'status: executing', 'progress:', '  total_plans: 9', '---', '',
+      '# Project State', '', '## Current Position', '', 'Phase: 1 (Alpha) — EXECUTING', 'Plan: 1 of 2', 'Status: Executing',
+      'Progress: [░░░░░░░░░░] 0%', '',
+    ].join('\n'));
+  }
+
+  const run = (args = 'state update-progress') => {
+    const r = runGsdTools(args, proj);
+    assert.ok(r.success, r.error);
+    return JSON.parse(r.output);
+  };
+
+  test('row 5, a flat ROADMAP: the decline names the version and offers milestone: null, the reason unchanged', () => {
+    seed('milestone: v0.1.0', FLAT_ROADMAP);
+    const out = run();
+    assert.strictEqual(out.updated, false);
+    assert.strictEqual(out.reason, 'phase scope is unscoped, not complete');
+    assert.match(out.hint, /STATE\.md names milestone "v0\.1\.0", but ROADMAP\.md has no milestone headings at all/);
+    assert.match(out.hint, /set the milestone field in STATE\.md to null/);
+    assert.match(out.hint, /add a heading for "v0\.1\.0" above its phases/);
+  });
+
+  test('the named fix works: milestone: null on the same roadmap refreshes the counters, on every run', () => {
+    seed('milestone: null', FLAT_ROADMAP);
+    for (let i = 0; i < 2; i += 1) {
+      const out = run();
+      assert.strictEqual(out.updated, true);
+      assert.strictEqual(out.completed, 1);
+      assert.strictEqual(out.total, 2);
+      assert.ok(!('hint' in out));
+    }
+  });
+
+  test('row 5, a ROADMAP with other milestone headings: the version, and the heading goes above its phases', () => {
+    seed('milestone: v0.1.0', OTHER_MILESTONE_ROADMAP);
+    const out = run();
+    assert.strictEqual(out.updated, false);
+    assert.strictEqual(out.reason, 'phase scope is unscoped, not complete');
+    assert.match(out.hint, /STATE\.md names milestone "v0\.1\.0", but ROADMAP\.md has no milestone heading for it/);
+    assert.match(out.hint, /add a heading for "v0\.1\.0" above its phases/);
+    assert.doesNotMatch(out.hint, /to null/, 'milestone: null is not the fix for a ROADMAP that has milestone headings');
+  });
+
+  test('row 4, STATE names no milestone and the ROADMAP has milestone headings: name one in STATE', () => {
+    seed('milestone: null', OTHER_MILESTONE_ROADMAP);
+    const out = run();
+    assert.strictEqual(out.updated, false);
+    assert.match(out.hint, /STATE\.md names no milestone, but ROADMAP\.md has milestone headings/);
+    assert.match(out.hint, /set the milestone field in STATE\.md to one of them/);
+  });
+
+  test('row 4 on a Phase title that contains a version: the title is the cause, and milestone: null is not offered', () => {
+    seed('milestone: null', PHASE_TITLE_ROADMAP);
+    const out = run();
+    assert.strictEqual(out.updated, false);
+    assert.match(out.hint, /a Phase title contains a version \(vX\.Y\), which reads as one/);
+    assert.match(out.hint, /reword that Phase title/);
+    assert.doesNotMatch(out.hint, /to null/);
+  });
+
+  test('state sync names the same cause where it skips Progress on an unscoped scope', () => {
+    seed('milestone: null', PHASE_TITLE_ROADMAP);
+    const out = run('state sync');
+    const skipped = out.changes.find((c) => c.startsWith('Progress: skipped'));
+    assert.ok(skipped, `a skipped Progress change expected; got: ${JSON.stringify(out.changes)}`);
+    assert.match(skipped, /phase scope is "unscoped", not COMPLETE \(#3217\)\. Cause: ROADMAP\.md has no milestone heading, but a Phase title contains a version/);
+  });
+
+  test('STATE.md text echoed in the hint is escaped: a control character in the milestone cannot reach the terminal', () => {
+    seed('milestone: "v0.1.0\\u001b[31mX"', FLAT_ROADMAP);
+    const out = run();
+    assert.ok(!out.hint.includes('\u001b'), 'no raw escape character');
+    assert.match(out.hint, /v0\.1\.0\\u001b\[31mX/);
+  });
+
+  test('a decline for another scope (no ROADMAP.md: unreadable) carries no unscoped hint', () => {
+    seed('milestone: v0.1.0', null);
+    const out = run();
+    assert.strictEqual(out.updated, false);
+    assert.strictEqual(out.reason, `phase scope is ${SCOPE.UNREADABLE}, not complete`);
+    assert.ok(!('hint' in out));
+  });
 });

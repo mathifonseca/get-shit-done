@@ -15,6 +15,7 @@
  *   - #1974 — one-time critical-session breadcrumb
  *   - #3709 — PreCompact clears the warn sentinel AND the metrics bridge
  *   - #4285 — WARNING/CRITICAL fire-points resolve from .planning/config.json
+ *   - #6360 — a subagent's input (agent_id) is silent and touches no session file
  * Extend this list when folding in the next one.
  */
 
@@ -694,10 +695,12 @@ describe('#4905: the CRITICAL breadcrumb stamps the local day through the clock 
  * But CC's native /context shows raw used = 100 - remaining = 65%.
  * The 13-point gap is exactly the buffer normalization overhead.
  *
- * Fix: the bridge must write used_pct as the raw value (Math.round(100 -
- * remaining)), not the buffer-normalized value. The statusline progress bar
- * continues to use the normalized value for its own display; only the bridge
- * value that feeds the context monitor needs to be raw/CC-consistent.
+ * #2451 fixed this by keeping the bridge's used_pct raw. #4985 moved the
+ * bridge onto the auto-compact threshold scale, because the monitor gates on
+ * remaining_percentage and can only warn before compaction if that counts
+ * down to the threshold. The /context agreement #2451 protected is now
+ * carried by the bridge's used_tokens / threshold_tokens, which the monitor
+ * quotes in its message.
  */
 
 'use strict';
@@ -724,11 +727,16 @@ function runStatuslineHook(remainingPct, totalTokens = 1_000_000, acwEnv = null)
     session_id: sessionId,
     context_window: {
       remaining_percentage: remainingPct,
-      total_tokens: totalTokens,
+      context_window_size: totalTokens,
     },
   });
 
-  const env = { ...process.env };
+  // Pin CLAUDE_CONFIG_DIR to an empty scratch dir and clear the compaction env
+  // vars, so the developer's real settings (autoCompactWindow, autoCompactEnabled)
+  // cannot move the threshold these expectations are computed against.
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2451-cfg-'));
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: configDir };
+  for (const key of ['DISABLE_AUTO_COMPACT', 'DISABLE_COMPACT', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE']) delete env[key];
   if (acwEnv != null) {
     env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(acwEnv);
   } else {
@@ -742,6 +750,7 @@ function runStatuslineHook(remainingPct, totalTokens = 1_000_000, acwEnv = null)
       timeout: CONTEXT_MONITOR_QUICK_PROBE_TIMEOUT_MS,
     });
   } catch { /* non-zero exit is fine; we only need the bridge file */ }
+  cleanup(configDir);
 
   const bridgePath = path.join(os.tmpdir(), `claude-ctx-${sessionId}.json`);
   const bridge = JSON.parse(fs.readFileSync(bridgePath, 'utf-8'));
@@ -753,13 +762,14 @@ function runStatuslineHook(remainingPct, totalTokens = 1_000_000, acwEnv = null)
  * Run the context monitor hook with a pre-written bridge file and return
  * the parsed additionalContext string from its stdout.
  */
-function runMonitorHook(remainingPct, usedPct) {
+function runMonitorHook(remainingPct, usedPct, extraBridge = {}) {
   const sessionId = `test-2451-mon-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const bridgePath = path.join(os.tmpdir(), `claude-ctx-${sessionId}.json`);
   fs.writeFileSync(bridgePath, JSON.stringify({
     session_id: sessionId,
     remaining_percentage: remainingPct,
     used_pct: usedPct,
+    ...extraBridge,
     timestamp: Math.floor(Date.now() / 1000),
   }));
 
@@ -788,45 +798,61 @@ function runMonitorHook(remainingPct, usedPct) {
 
 // ─── Bridge file used_pct accuracy ──────────────────────────────────────────
 
-describe('bug #2451: bridge used_pct matches CC native reporting', () => {
-  test('used_pct is raw (100 - remaining), not buffer-normalized', () => {
-    // CC reports remaining_percentage=35 → CC native "used" = 100-35 = 65%
-    // Buffer-normalized would give: (100 - (35-16.5)/(100-16.5)*100) ≈ 78%
-    // The bridge used_pct must be 65 (raw), not 78 (normalized).
+describe('bug #2451, #4985: bridge counts down to compaction and carries the /context tokens', () => {
+  // No window configured on a 1M model: threshold = 1,000,000 − 20,000 − 13,000
+  // = 967,000. These payloads carry no current_usage, so the hook recovers the
+  // used tokens from CC's own percentage: used = (100 − remaining)% of 1M.
+  function expected(remaining) {
+    const usedTokens = (100 - remaining) * 10_000;
+    const usedPct = Math.round((usedTokens / 967_000) * 100);
+    return { used_pct: usedPct, remaining_percentage: 100 - usedPct, used_tokens: usedTokens, threshold_tokens: 967_000 };
+  }
+  function pick(bridge) {
+    const { used_pct, remaining_percentage, used_tokens, threshold_tokens } = bridge;
+    return { used_pct, remaining_percentage, used_tokens, threshold_tokens };
+  }
+
+  test('used_pct is the share of the auto-compact threshold, not of the model window', () => {
+    // CC reports remaining=35 → 650,000 used → 650,000 / 967,000 = 67%.
+    // The pre-#2451 16.5% normalization would give 78; the raw window share is 65.
     const bridge = runStatuslineHook(35);
-    assert.strictEqual(
-      bridge.used_pct,
-      65,
-      `used_pct should be 65 (raw: 100 - 35) but got ${bridge.used_pct}. ` +
-      'Buffer normalization must NOT be applied to the bridge used_pct, ' +
-      'otherwise context monitor messages over-report usage by ~13 points ' +
-      'compared to CC native /context (root cause of #2451).'
-    );
+    assert.deepStrictEqual(pick(bridge), expected(35));
+    assert.strictEqual(bridge.used_pct, 67);
   });
 
-  test('used_pct is raw for high remaining (low usage scenario)', () => {
-    // remaining=80 → raw used = 20
-    const bridge = runStatuslineHook(80);
-    assert.strictEqual(bridge.used_pct, 20,
-      `used_pct should be 20 (raw: 100-80) but got ${bridge.used_pct}`);
+  test('low usage: remaining=80 → 200,000 used → 21%', () => {
+    assert.deepStrictEqual(pick(runStatuslineHook(80)), expected(80));
   });
 
-  test('used_pct is raw for near-critical remaining', () => {
-    // remaining=20 → raw used = 80
-    const bridge = runStatuslineHook(20);
-    assert.strictEqual(bridge.used_pct, 80,
-      `used_pct should be 80 (raw: 100-20) but got ${bridge.used_pct}`);
+  test('near-critical: remaining=20 → 800,000 used → 83%', () => {
+    assert.deepStrictEqual(pick(runStatuslineHook(20)), expected(20));
   });
 
-  test('remaining_percentage in bridge matches raw CC value', () => {
-    // The bridge remaining_percentage should be the exact raw value from CC
+  test('remaining_percentage and used_pct are one scale (they sum to 100)', () => {
     const bridge = runStatuslineHook(42);
-    assert.strictEqual(bridge.remaining_percentage, 42,
-      'bridge remaining_percentage must be the raw CC value (no normalization)');
+    assert.strictEqual(bridge.used_pct + bridge.remaining_percentage, 100);
+    assert.deepStrictEqual(pick(bridge), expected(42));
   });
 });
 
 // ─── Context monitor message accuracy ───────────────────────────────────────
+
+describe('#4985: context monitor quotes the /context token counts when the bridge carries them', () => {
+  test('WARNING message names used and usable tokens next to the threshold-scale percentage', () => {
+    const msg = runMonitorHook(35, 65, { used_tokens: 401_050, threshold_tokens: 617_000 });
+    assert.match(msg, /^CONTEXT WARNING: Usage at 65% \(401k of 617k usable tokens\)\. Remaining: 35%\. /);
+  });
+
+  test('CRITICAL message names the tokens too', () => {
+    const msg = runMonitorHook(1, 99, { used_tokens: 616_927, threshold_tokens: 617_000 });
+    assert.match(msg, /^CONTEXT CRITICAL: Usage at 99% \(617k of 617k usable tokens\)\. Remaining: 1%\. /);
+  });
+
+  test('a bridge without token counts keeps the percentage-only message', () => {
+    const msg = runMonitorHook(30, 70, { used_tokens: 'garbage' });
+    assert.match(msg, /^CONTEXT WARNING: Usage at 70%\. Remaining: 30%\. /);
+  });
+});
 
 describe('bug #2451: context monitor warning messages show CC-consistent percentages', () => {
   test('WARNING message shows raw used_pct consistent with CC reporting', () => {
@@ -852,18 +878,13 @@ describe('bug #2451: context monitor warning messages show CC-consistent percent
     );
   });
 
-  test('gap between hook used_pct and raw CC value is at most 1 (rounding)', () => {
-    // With the fix, the only acceptable deviation is ±1 due to Math.round
+  test('the bridge\'s used_tokens is exactly what /context reports as used', () => {
+    // #2451's /context agreement now lives in the token count: CC's remaining=35
+    // on a 1M window is 650,000 used, and the bridge must carry exactly that —
+    // a buffer-normalized or re-rounded figure here is #2451's over-report again.
     const rawRemaining = 35;
     const bridge = runStatuslineHook(rawRemaining);
-    const ccNativeUsed = 100 - rawRemaining; // 65
-    const gap = Math.abs(bridge.used_pct - ccNativeUsed);
-    assert.ok(
-      gap <= 1,
-      `Gap between hook used_pct (${bridge.used_pct}) and CC native used (${ccNativeUsed}) ` +
-      `is ${gap} points — must be ≤1 (rounding). Larger gaps indicate buffer normalization ` +
-      'is still being applied to bridge used_pct (root cause of #2451).'
-    );
+    assert.strictEqual(bridge.used_tokens, (100 - rawRemaining) * 10_000);
   });
 });
   });
@@ -1386,6 +1407,12 @@ describe('#3709 context-monitor: PreCompact resets the warn sentinel', () => {
       // `runMonitor` helper in this file has taken an explicit env for exactly
       // this reason all along. A key set to `undefined` is UNSET in the child,
       // which is what pinning an ambient variable requires.
+      //
+      // `fields` adds keys to the hook input (the #6360 rows send `agent_id`).
+      // `timeoutMs` is for a call that reaches the detached record-session
+      // writer: those take CONTEXT_MONITOR_CRITICAL_RECORD_TIMEOUT_MS.
+      // `spawnLog` names a file the preload appends each child_process.spawn
+      // argv to (one JSON line per spawn), so a row can assert the spawn itself.
       call(event, remaining, {
         metrics = true,
         failUnlinkMatching = null,
@@ -1395,6 +1422,9 @@ describe('#3709 context-monitor: PreCompact resets the warn sentinel', () => {
         nowMs = null,
         bridgeTimestamp = null,
         env: envOverrides = null,
+        fields = null,
+        timeoutMs = CONTEXT_MONITOR_PRELOAD_HOOK_TIMEOUT_MS,
+        spawnLog = null,
       } = {}) {
         if (metrics === 'keep') {
           // leave the bridge exactly as the previous call left it
@@ -1427,7 +1457,7 @@ describe('#3709 context-monitor: PreCompact resets the warn sentinel', () => {
         }
         let stdout = '';
         let exitCode = 0;
-        const usePreload = failUnlinkMatching || lstatClaimsFileMatching || shrinkAfterLstatMatching || shortWriteMarker;
+        const usePreload = failUnlinkMatching || lstatClaimsFileMatching || shrinkAfterLstatMatching || shortWriteMarker || spawnLog;
         const preloads = [];
         if (usePreload) preloads.push('--require', UNLINK_EPERM_PRELOAD);
         if (nowMs != null) preloads.push('--require', NOW_PRELOAD);
@@ -1439,14 +1469,15 @@ describe('#3709 context-monitor: PreCompact resets the warn sentinel', () => {
           ...(shrinkAfterLstatMatching ? { GSD_TEST_SHRINK_AFTER_LSTAT_MATCH: shrinkAfterLstatMatching } : {}),
           ...(shortWriteMarker ? { GSD_TEST_SHORT_WRITE_MATCH: shortWriteMarker } : {}),
           ...(nowMs != null ? { GSD_TEST_NOW_MS: String(nowMs) } : {}),
+          ...(spawnLog ? { GSD_TEST_SPAWN_LOG: spawnLog } : {}),
           ...(envOverrides || {}),
         };
         for (const k of Object.keys(env)) { if (env[k] === undefined) delete env[k]; }
         try {
           stdout = execFileSync(process.execPath, argv, {
-            input: JSON.stringify({ session_id: id, cwd, hook_event_name: event }),
+            input: JSON.stringify({ session_id: id, cwd, hook_event_name: event, ...(fields || {}) }),
             encoding: 'utf8',
-            timeout: CONTEXT_MONITOR_PRELOAD_HOOK_TIMEOUT_MS,
+            timeout: timeoutMs,
             env,
           });
         } catch (e) { stdout = e.stdout || ''; exitCode = e.status ?? 1; }
@@ -2351,6 +2382,137 @@ describe('#3709 context-monitor: PreCompact resets the warn sentinel', () => {
     }
   });
 
+  /**
+   * #6360 — a subagent's hook input is silent and leaves the parent's files alone.
+   *
+   * Inside a subagent (or in-process teammate) Claude Code sends the PARENT's
+   * session_id plus agent_id / agent_type. The hook built every path from
+   * session_id alone, so it read the parent's bridge and reported the parent's
+   * usage as the subagent's own, advanced the parent's debounce sentinel, at
+   * CRITICAL in a GSD project started the parent's record-session write, and
+   * on PreCompact cleared the parent's bridge. A top-level `claude --agent`
+   * session sets agent_type WITHOUT agent_id, so agent_type alone is still
+   * monitored. These rows reuse this block's driver because they too assert on
+   * the files one session id carries across calls.
+   */
+  describe('#6360 context-monitor: subagent inputs (agent_id) are silent and touch no session file', () => {
+    const SUBAGENT = { agent_id: 'a4653ce68d3a4418c', agent_type: 'general-purpose' };
+    const WARNING_70 = /^CONTEXT WARNING: Usage at 70%/;
+
+    test('a subagent input at CRITICAL in a GSD project emits nothing and never reaches the record-session spawn', (t) => {
+      const s = makeSession(t, { gsdActive: true });
+      const spawnDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fix-6360-spawns-'));
+      const spawnLog = path.join(spawnDir, 'spawns.log');
+      t.after(() => cleanup(spawnDir));
+      const recordSessionSpawns = () => {
+        let raw = '';
+        try { raw = fs.readFileSync(spawnLog, 'utf8'); } catch { /* no spawn recorded */ }
+        return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l))
+          .filter((argv) => argv.includes('state') && argv.includes('record-session'));
+      };
+      const sub = s.call('PostToolUse', 20, { fields: SUBAGENT, spawnLog, timeoutMs: CONTEXT_MONITOR_CRITICAL_RECORD_TIMEOUT_MS });
+      assert.strictEqual(sub.exitCode, 0);
+      assert.strictEqual(sub.stdout, '', 'the parent\'s usage must not be reported to a subagent');
+      assert.deepStrictEqual(recordSessionSpawns(), [], 'a subagent must not spawn the parent\'s record-session write');
+      assert.strictEqual(s.warnRaw(), null, 'a subagent must not create the parent\'s debounce sentinel');
+      // Control on the same fixture and the same recorder: the top-level call
+      // spawns exactly one record-session writer and stamps criticalRecorded.
+      // So the fixture and the recorder are live, and the subagent's empty
+      // log above is the guard, not a missing precondition.
+      const top = s.call('PostToolUse', 20, { spawnLog, timeoutMs: CONTEXT_MONITOR_CRITICAL_RECORD_TIMEOUT_MS });
+      assert.strictEqual(top.exitCode, 0);
+      assert.strictEqual(recordSessionSpawns().length, 1,
+        'the top-level control must spawn the record-session writer once on this fixture');
+      assert.strictEqual(s.warn() && s.warn().criticalRecorded, true,
+        'the top-level control must reach the record-session spawn on this fixture');
+    });
+
+    test('a subagent input leaves the parent\'s debounce sentinel byte-identical (no escalation spent)', (t) => {
+      const s = makeSession(t);
+      s.seed({ callsSinceWarn: 2, lastLevel: 'warning' });
+      const before = s.warnRaw();
+      const { exitCode, stdout } = s.call('PostToolUse', 20, { fields: SUBAGENT });
+      assert.strictEqual(exitCode, 0);
+      assert.strictEqual(stdout, '');
+      assert.strictEqual(s.warnRaw(), before,
+        'the WARNING->CRITICAL escalation must stay for the parent\'s own next tool call');
+    });
+
+    test('a subagent PreCompact leaves the parent\'s bridge and sentinel in place and writes no watermark', (t) => {
+      const s = makeSession(t);
+      s.writeBridge({ remaining_percentage: 30, used_pct: 70, timestamp: Math.floor(Date.now() / 1000) });
+      s.seed({ callsSinceWarn: 1, lastLevel: 'warning' });
+      const bridge = s.metricsRaw();
+      const sentinel = s.warnRaw();
+      const { exitCode, stdout } = s.call('PreCompact', 30, { metrics: 'keep', fields: SUBAGENT });
+      assert.strictEqual(exitCode, 0);
+      assert.strictEqual(stdout, '');
+      assert.strictEqual(s.metricsRaw(), bridge, 'parent bridge kept');
+      assert.strictEqual(s.warnRaw(), sentinel, 'parent sentinel kept');
+      assert.strictEqual(s.watermark(), null, 'no compaction watermark for the parent');
+    });
+
+    // On every event: before #6360 the silent events still wrote the sentinel
+    // for a subagent input (the #2289 bookkeeping) and AfterTool (Antigravity's
+    // tool-completion event) warned; now they touch nothing. PostToolUse and
+    // PreCompact have their own rows above.
+    for (const event of ['AfterTool', 'Stop', 'SubagentStop', 'SubagentStart', undefined]) {
+      test(`a subagent input on ${event ?? 'an event-less input'} writes no sentinel`, (t) => {
+        const s = makeSession(t);
+        const { exitCode, stdout } = s.call(event, 30, { fields: SUBAGENT });
+        assert.strictEqual(exitCode, 0);
+        assert.strictEqual(stdout, '');
+        assert.strictEqual(s.warnRaw(), null);
+      });
+    }
+
+    // The rule is "agent_id is a non-empty string", taken as the host sends
+    // it: Claude Code's ids are opaque strings, so "0" and whitespace are not
+    // parsed or trimmed into "no subagent" -- any non-empty string is one.
+    for (const agentId of ['a4653ce68d3a4418c', '0', ' ']) {
+      test(`agent_id ${JSON.stringify(agentId)} (a non-empty string) is a subagent: silent, no sentinel`, (t) => {
+        const s = makeSession(t);
+        const { exitCode, stdout } = s.call('PostToolUse', 30, { fields: { agent_id: agentId, agent_type: 'general-purpose' } });
+        assert.strictEqual(exitCode, 0);
+        assert.strictEqual(stdout, '');
+        assert.strictEqual(s.warnRaw(), null);
+      });
+    }
+
+    // agent_id alone decides: a subagent input without agent_type is still one.
+    test('agent_id without agent_type is a subagent: silent, no sentinel', (t) => {
+      const s = makeSession(t);
+      const { exitCode, stdout } = s.call('PostToolUse', 30, { fields: { agent_id: 'a4653ce68d3a4418c' } });
+      assert.strictEqual(exitCode, 0);
+      assert.strictEqual(stdout, '');
+      assert.strictEqual(s.warnRaw(), null);
+    });
+
+    // Anything else is not the host's subagent marker and is monitored as a
+    // top-level session. Pins both halves of the guard: a truthiness test
+    // fails the truthy non-strings, a bare typeof-string test fails ''.
+    const NOT_A_SUBAGENT = [
+      ['absent', {}],
+      ['absent, agent_type only (top-level --agent)', { agent_type: 'general-purpose' }],
+      ['""', { agent_id: '', agent_type: 'general-purpose' }],
+      ['null', { agent_id: null }],
+      ['0', { agent_id: 0 }],
+      ['123', { agent_id: 123 }],
+      ['true', { agent_id: true }],
+      ['[]', { agent_id: [] }],
+      ['["x"]', { agent_id: ['x'] }],
+      ['{}', { agent_id: {} }],
+    ];
+    for (const [label, fields] of NOT_A_SUBAGENT) {
+      test(`agent_id ${label} is not a subagent: still warns and writes the sentinel`, (t) => {
+        const s = makeSession(t);
+        const { exitCode, stdout } = s.call('PostToolUse', 30, { fields });
+        assert.strictEqual(exitCode, 0);
+        assert.match(JSON.parse(stdout).hookSpecificOutput.additionalContext, WARNING_70);
+        assert.ok(s.warnRaw() !== null, 'top-level debounce bookkeeping still runs');
+      });
+    }
+  });
 });
 
 // ─── #3709 round 3 (Major 2): the thresholds this fix turns on, at their limits ───
