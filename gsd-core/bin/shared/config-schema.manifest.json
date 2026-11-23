@@ -56,6 +56,7 @@
     "git.phase_branch_template",
     "git.milestone_branch_template",
     "git.quick_branch_template",
+    "git.branch_pattern",
     "planning.commit_docs",
     "planning.pr_strict",
     "planning.search_gitignored",

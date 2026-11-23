@@ -17,9 +17,12 @@ module.exports = {
       .has('DISCUSS-CHECKPOINT.json', 'workflow should reference checkpoint JSON file')
       .has(/Incremental checkpoint|incremental checkpoint/, 'workflow should describe incremental checkpoint saves')
       .has('areas_completed', 'checkpoint should track completed areas')
-      .has('areas_remaining', 'checkpoint should track remaining areas')
       .has('"decisions"', 'checkpoint should include decisions object')
       .has('Resume', 'check_existing should detect checkpoint and offer resume');
+
+    // Fork: discuss-phase.md stays monolithic and carries its own copy of the checkpoint JSON, so
+    // `areas_remaining` is asserted on the template alone (the union would hide a template regression).
+    ctx.doc(CHECKPOINT_TEMPLATE).has('areas_remaining', 'checkpoint should track remaining areas');
 
     const workflow = ctx.doc(WORKFLOW)
       .has('rm -f', 'checkpoint file should be deleted after successful write_context')

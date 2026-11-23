@@ -167,6 +167,9 @@ const GSD_ROLE_NAMES = Object.freeze(new Set([
   'gsd-mempalace-curator',
   'gsd-security-auditor',
   'gsd-user-profiler',
+  // Fork agents (multilens retro / plan-lens-review); they are MODEL_PROFILES roles, not custom executors.
+  'gsd-lens',
+  'gsd-lens-synthesizer',
 ]));
 
 /**

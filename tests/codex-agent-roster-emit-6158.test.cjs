@@ -223,8 +223,10 @@ describe('#6158: Codex emit writes one .toml per role from the canonical source'
   }
 
   test('parity: the Codex emit roster is the shared agent-roster helper\'s roster, sorted', () => {
+    // Fork: gsd-lens / gsd-lens-synthesizer order differently by filename ('-' < '.') than by stem,
+    // so compare the same roster under the helper's stem order.
     assert.deepEqual(
-      codexAgentSourceFiles(AGENTS_DIR).map(f => f.replace(/\.md$/, '')),
+      codexAgentSourceFiles(AGENTS_DIR).map(f => f.replace(/\.md$/, '')).sort(),
       listAgentFiles(),
     );
     const { src } = makeDirs('parity');

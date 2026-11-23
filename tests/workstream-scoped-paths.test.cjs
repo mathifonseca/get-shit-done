@@ -420,6 +420,7 @@ describe('shell fences name no root .planning/ artifact literal (#5861)', () => 
   );
 
   /** `{file, match, why}`: `match` is tested against the offending fence line of `file`. */
+  const FORK_ROOT_ONLY = 'fork workflow that is not workstream-aware yet: it reads the root .planning/ layout (fork-only, see FORK.md)';
   const SHARED = 'a shared root artifact: no code resolves a per-scope copy, so every scope uses the one root file (moving it is a placement decision, not a fence fix)';
   const ALLOWLIST = [
     { file: 'gsd-core/workflows/complete-milestone.md', match: /\.planning\/RETROSPECTIVE\.md/, why: `RETROSPECTIVE.md is ${SHARED}` },
@@ -433,6 +434,12 @@ describe('shell fences name no root .planning/ artifact literal (#5861)', () => 
     { file: 'gsd-core/workflows/resume-project.md', match: /\.planning\/HANDOFF\.json/, why: `HANDOFF.json is ${SHARED}` },
     { file: 'gsd-core/workflows/next.md', match: /\.planning\/HANDOFF\.json/, why: `HANDOFF.json is ${SHARED}` },
     { file: 'gsd-core/workflows/progress/steps/forensic-audit.md', match: /\.planning\/HANDOFF\.json/, why: `HANDOFF.json is ${SHARED}` },
+    // Fork workflows (retro, parallel-phases, complete-milestone's retro data) predate #5861 and are
+    // not workstream-aware yet: they read the root layout. Converting them to init *_path fields is a
+    // behaviour change tracked in FORK.md "Pending fork additions", not a fence fix.
+    { file: 'gsd-core/workflows/complete-milestone.md', match: /\.planning\/phases\/\*/, why: FORK_ROOT_ONLY },
+    { file: 'gsd-core/workflows/parallel-phases.md', match: /\.planning\/ROADMAP\.md/, why: FORK_ROOT_ONLY },
+    { file: 'gsd-core/workflows/retro.md', match: /\.planning\//, why: FORK_ROOT_ONLY },
     {
       file: 'gsd-core/workflows/pr-branch.md',
       match: /^\s*#|STRUCTURAL_RE=|MILESTONE_PHASES_RE=|MILESTONE_PHASE_DIRS=/,
@@ -616,6 +623,13 @@ describe('shell fences name no root .planning/ artifact literal (#5861)', () => 
     { file: 'gsd-core/workflows/help/modes/full.compact.md', match: /Result: Creates `\.planning\/phases\/01-foundation/, why: 'example command output for the flat project' },
     { file: 'agents/gsd-roadmapper.md', match: /\.planning\/ROADMAP\.md/, why: 'write targets of the roadmapper are owned by #5859, which names the flat fallback explicitly' },
     { file: 'agents/gsd-roadmapper.compact.md', match: /\.planning\/ROADMAP\.md/, why: 'write targets of the roadmapper are owned by #5859, which names the flat fallback explicitly' },
+    // Fork workflows/commands: root-layout mentions, not workstream-aware yet (see FORK_ROOT_ONLY above).
+    { file: 'gsd-core/workflows/discuss-phase.md', match: /research_before_questions/, why: 'fork discuss-phase is monolithic; the mention is an unscoped read of the same toggle' },
+    { file: 'gsd-core/workflows/parallel-phases.md', match: /\.planning\//, why: FORK_ROOT_ONLY },
+    { file: 'gsd-core/workflows/plan-lens-review.md', match: /\.planning\/phases\//, why: 'example value of PHASE_DIR, which the caller passes in already resolved' },
+    { file: 'gsd-core/workflows/retro.md', match: /\.planning\//, why: FORK_ROOT_ONLY },
+    { file: 'gsd-core/workflows/sdlc-audit.md', match: /\.planning\/config\.json/, why: 'audits the project root layout by design (SDLC checklist)' },
+    { file: 'commands/gsd/parallel-phases.md', match: /\.planning\//, why: FORK_ROOT_ONLY },
   ];
 
   function proseRootLiteralLines() {

@@ -70,10 +70,12 @@ Before executing, discover project context:
 
 **CLAUDE.md enforcement:** If `./CLAUDE.md` exists, treat its directives as hard constraints during execution. Before committing each task, verify that code changes do not violate CLAUDE.md rules (forbidden patterns, required conventions, mandated tools). If a task action would contradict a CLAUDE.md directive, apply the CLAUDE.md rule — it takes precedence over plan instructions. Document any CLAUDE.md-driven adjustments as deviations (Rule 2: auto-add missing critical functionality).
 
-<makefile_preference>
-Before running build/test/lint/quality commands, prefer existing Makefile targets over raw tool commands (plan `<verify>` commands and `project.ci_commands` take precedence). Rules:
-@~/.claude/gsd-core/references/executor-makefile-preference.md
-</makefile_preference>
+<fork_rules>
+- **Makefile:** prefer `make` targets. @~/.claude/gsd-core/references/executor-makefile-preference.md
+- **Test contracts** (`workflow.test_contracts`): tests READ-ONLY. @~/.claude/gsd-core/references/executor-test-contracts.md
+- **Rationalization guard:** shortcut urge? STOP. @~/.claude/gsd-core/references/executor-rationalization-guard.md
+- **Verification discipline** (`workflow.verification_discipline`): no "done" without evidence. @~/.claude/gsd-core/references/executor-verification-discipline.md
+</fork_rules>
 </project_context>
 
 <execution_flow>
@@ -180,11 +182,6 @@ For each task:
 
 </execution_flow>
 
-<test_contracts>
-Unless `workflow.test_contracts` is `false` (default `true`): existing test files are READ-ONLY — fix the implementation, never the test; a genuinely wrong test is a Rule 4 stop. Full rules:
-@~/.claude/gsd-core/references/executor-test-contracts.md
-</test_contracts>
-
 <deviation_rules>
 **While executing, you WILL discover work not in the plan.** Apply these rules automatically. Track all deviations for Summary.
 
@@ -200,7 +197,7 @@ No user permission needed for Rules 1-3.
 
 **Examples:** Wrong queries, logic errors, type errors, null pointer exceptions, broken validation, security vulnerabilities, race conditions, memory leaks
 
-- **Test contract constraint:** When `TEST_CONTRACTS` is true, auto-fixes MUST NOT modify test files. Fix the source code, not the tests. If the bug is actually in the test, escalate to Rule 4 (STOP).
+- **Test contracts:** with `TEST_CONTRACTS` true, never auto-fix test files.
 
 ---
 
@@ -298,11 +295,6 @@ STOP. State in one sentence why you haven't written anything yet. Then either:
 
 Do NOT continue reading. Analysis without action is a stuck signal.
 </analysis_paralysis_guard>
-
-<rationalization_guard>
-**Violating the letter of these rules is violating the spirit.** When tempted to rationalize a shortcut, STOP and return to deviation rules, test contracts, or task scope. Red flags and the excuse/reality table:
-@~/.claude/gsd-core/references/executor-rationalization-guard.md
-</rationalization_guard>
 
 <authentication_gates>
 **Auth errors during `type="auto"` execution are gates, not failures.**
@@ -783,11 +775,6 @@ git merge-base --is-ancestor "{hash}" HEAD 2>/dev/null && echo "FOUND: {hash}" |
 
 Do NOT skip. Do NOT proceed to state updates if self-check fails.
 </self_check>
-
-<verification_discipline>
-Unless `workflow.verification_discipline` is `false` (default `true`): no completion claim without fresh verification evidence from the current task. Read the gate, red flags and excuse table:
-@~/.claude/gsd-core/references/executor-verification-discipline.md
-</verification_discipline>
 
 <state_updates>
 After SUMMARY.md, update ROADMAP.md progress FIRST, then STATE.md. The ROADMAP write is the step that can decline (`missing_phase_details`), and a decline stops the plan before any STATE.md write, so STATE.md never advances past a plan the ROADMAP did not record:

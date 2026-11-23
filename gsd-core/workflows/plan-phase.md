@@ -365,7 +365,7 @@ If `section_manifest` is `null` or `"research-only-modifiers"` is in its `includ
 
 **If no explicit flag (`--research` or `--skip-research`) and not `--auto`:**
 
-Use `research_enabled` from the step-1 init JSON (the `research` capability owns `workflow.research`; never read it inline). **If true (default):** skip the question, auto-select "Research first" and display `Research enabled (workflow.research=true) — researching before planning.` **If false:** ask the user whether to research, with a contextual recommendation based on the phase:
+Use `research_enabled` from the step-1 init JSON (the `research` capability owns `workflow.research`; never read it inline). **If true (default):** skip the question, auto-select "Research first" and display `Research enabled — researching before planning.` **If false:** ask the user whether to research, with a contextual recommendation based on the phase:
 
 If `TEXT_MODE` is true, present as a plain-text numbered list:
 ```
@@ -475,9 +475,7 @@ test -f "${PHASE_DIR}/${PADDED_PHASE}-VALIDATION.md" && echo "VALIDATION_CREATED
 
 **If not found:** Warn and continue — plans may fail Dimension 8.
 
-## 5.54. Dependent-Repo Freshness Gate (fork)
-
-Read and execute `gsd-core/workflows/plan-phase/steps/dependent-repo-freshness-gate.md` (self-skips without dependent-repo entries).
+**5.54 Dependent-repo freshness gate:** run `gsd-core/workflows/plan-phase/steps/dependent-repo-freshness-gate.md`.
 
 ## 5.55. Security Threat Model Gate
 
@@ -491,7 +489,7 @@ PLAN_PRE_HOOKS_JSON=$(gsd_run loop render-hooks plan:pre --raw)
 
 Resolve active contribution hooks from `PLAN_PRE_HOOKS_JSON` where `kind == "contribution"` and `capId == "security"`.
 
-**Threat-ID uniqueness (#4683 — applies whether or not the security hook is active):** if `threat_id_duplicate_count` is non-zero, pass the init payload's `threat_id_duplicates` to the step-8 planner spawn prompt as already-claimed IDs. Whenever this phase already has PLAN files, also state the numbering rule in that prompt: threat IDs are unique within a phase and new registers continue after the highest in-use `T-{phase}-NN` (the reserved `T-{phase}-SC` row is never listed). execute-phase hard-stops on a non-empty list regardless. Exact wording: `gsd-core/workflows/plan-phase/detail/elaboration.md` § 5.55 threat IDs.
+**Threat-ID uniqueness (#4683 — applies whether or not the security hook is active):** if `threat_id_duplicate_count` is non-zero, pass the init payload's `threat_id_duplicates` to the step-8 planner spawn prompt as already-claimed IDs. When PLAN files exist, also state the numbering rule (new IDs continue after the highest in-use `T-{phase}-NN`). execute-phase hard-stops on a non-empty list regardless. Exact wording: `gsd-core/workflows/plan-phase/detail/elaboration.md` § 5.55 threat IDs.
 
 **If no active security contribution hook exists:** Skip to step 5.6.
 
@@ -575,7 +573,7 @@ UI_SPEC_PATH="${UI_SPEC_FILE}"
 
 Continue to step 5.65.
 
-**Branch 6a (fork) — `AUTO_CHAIN` is `false` (manual) AND `UI_PHASE_CFG` is `true` (fork default):** Read and execute `gsd-core/workflows/plan-phase/steps/ui-contract-manual-autogen.md` (fires the UI step hooks as Branch 5 does, re-reads `UI_SPEC_PATH`), then step 5.65.
+**Branch 6a — `AUTO_CHAIN` false AND `UI_PHASE_CFG` true (default):** run `gsd-core/workflows/plan-phase/steps/ui-contract-manual-autogen.md`, then step 5.65.
 
 **Branch 6 — `AUTO_CHAIN` is `false` (manual): UI gate handling.** For each entry in `activeHooks` where `kind == "gate"`, `capId == "ui"` and `blocking` is `true`: if `block:true` (from `GATE`), output the block below and **EXIT the plan-phase workflow**. If no active blocking gate (e.g. `workflow.ui_safety_gate` is off), continue to step 5.65 — no block.
 
@@ -1306,13 +1304,7 @@ Offer: 1) Force proceed, 2) Provide guidance and retry, 3) Abandon
 
 For each `*-PLAN.md`: back it up to `*-PLAN.pre-bounce.md`, run `${BOUNCE_SCRIPT}` with the plan and `workflow.plan_bounce_passes` (default 2), validate its YAML frontmatter, and restore the original from backup on broken frontmatter or non-zero exit. Then re-run the plan checker (step 10) on the modified plans (restore any that fail), commit survivors (`refactor(${padded_phase}): bounce plans through external refinement`), display `{survived}/{total}`, and remove all backups. Exact text and commands: `gsd-core/workflows/plan-phase/detail/elaboration.md` § 12.5.
 
-## 12.6. Devil's Advocate Review
-
-<step name="devils_advocate">
-
-Read and execute `gsd-core/workflows/plan-devils-advocate.md`. Self-guarded on `workflow.adversarial_validation` (#WR-02).
-
-</step>
+**12.6 Devil's Advocate:** run `gsd-core/workflows/plan-devils-advocate.md` (self-guarded on `workflow.adversarial_validation`).
 
 ## 13. Requirements Coverage Gate
 
@@ -1458,9 +1450,7 @@ gsd_run query roadmap.annotate-dependencies ${GSD_WS:+--ws=${GSD_WS##* }} "${PHA
 
 Skip this step if `plan_count` is 0. Re-running regenerates the annotation from current PLAN frontmatter; an unchanged result writes nothing, and an unrecognised checklist row leaves ROADMAP.md untouched and reports `skipped: "unrecognised_checklist_row"`. The `**Cross-cutting constraints:**` header line ends in an HTML-comment marker; that block is machine-owned and the bullets directly under it are regenerated. Put hand-written bullets after a blank line. Bullets kept from a block written before the marker existed are reported as `stale_legacy_constraints`.
 
-## 13c.5. Plan-Lens Review (optional, knob-gated)
-
-Read and execute `gsd-core/workflows/plan-lens-review.md` (pass `PADDED_PHASE`, `PHASE_DIR`, PLAN list, `commit_docs`). Self-guarded on `workflow.plan_lens_review` (#WR-02); advisory only.
+**13c.5 Plan-lens review:** run `gsd-core/workflows/plan-lens-review.md` (self-guarded on `workflow.plan_lens_review`; advisory).
 
 ## 13d. Commit Plans if commit_docs is true
 
@@ -1470,7 +1460,7 @@ If `commit_docs` is true (from the init JSON parsed in step 1), commit the gener
 gsd_run query commit "docs(${PADDED_PHASE}): create phase plan" --files "${PHASE_DIR}"/*-PLAN.md "${PHASE_DIR}"/*-PLAN-RATIONALE.md "${PHASE_DIR}"/*-KILL-CRITERIA.md "${PHASE_DIR}/../../STATE.md" "${PHASE_DIR}/../../ROADMAP.md"
 ```
 
-This commits all PLAN.md files for the phase plus the updated STATE.md and ROADMAP.md to version-control the planning artifacts. The RATIONALE/KILL-CRITERIA globs expand to nothing when the knob is off. Skip this step if `commit_docs` is false.
+This commits all PLAN.md files for the phase plus the updated STATE.md and ROADMAP.md to version-control the planning artifacts. Unmatched globs expand to nothing. Skip this step if `commit_docs` is false.
 
 ## 13e. Post-Planning Gap Analysis (plan:post capability gate dispatch)
 

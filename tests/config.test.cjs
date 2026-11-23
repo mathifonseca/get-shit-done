@@ -1241,6 +1241,11 @@ describe('config-new-project — refuses what config-set refuses (#5268)', () =>
     ['"quality|balanced|budget|adaptive|inherit"', '"balanced"'],
     ['[false if granularity=coarse, true otherwise]', 'true'],
     ['true|false', 'true'],
+    // Fork: new-project's Round 3 integration answers (project.issue_tracker, issue_prefix,
+    // pr_title_template, ci_commands and git.branch_pattern) are placeholders in the same template.
+    ['"github|linear|jira|null"', '"github"'],
+    ['"[selected or null]"', '"AXN"'],
+    ['"[user input]"', '"make check"'],
   ];
 
   for (const workflow of ['gsd-core/workflows/new-project.md', 'gsd-core/workflows/new-project/steps/auto-mode-config.md']) {

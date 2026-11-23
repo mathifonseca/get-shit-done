@@ -496,28 +496,12 @@ Merge new settings into existing config.json:
     "research_before_questions": true/false,
     "discuss_mode": "discuss" | "assumptions",
     "skip_discuss": true/false,
-    "questions_per_area": "all" | 4 | 5 | 8 (number of questions per area before prompting to continue),
-    "test_contracts": true/false (treat tests as read-only during execution — agent fixes implementation, not tests),
-    "adversarial_validation": true/false (multi-agent verification: finder + critic + referee),
-    "dead_code_scan": true/false (scan for dead code, commented blocks, orphaned files during verification),
-    "playwright_verification": true/false (use Playwright tests + screenshots as verification evidence),
-    "definition_of_done": true/false (enforce DoD checklist at phase completion),
-    "preflight_on_verify": true/false (run preflight checks as part of verification),
-    "spec_outcome_enforcement": true/false (planner favors outcome specs over step-by-step instructions),
-    "scaffold_makefile": true/false (scaffold Makefile with standard targets during new-project),
-    "scaffold_precommit": true/false (scaffold pre-commit hook config during new-project),
-    "update_claude_md_on_complete": true/false (remind to update CLAUDE.md at phase completion),
+    // Fork workflow keys (questions_per_area, test_contracts, adversarial_validation, dead_code_scan, ...): kept via ...existing_config; see docs/CONFIGURATION.md.
     "use_worktrees": true/false,  // never written as true when the runtime's dispatch.isolation is none; omitted entirely when the user chose "Leave unchanged" (#2486)
     "compact_content": true/false,
     "agent_hint_routing": true/false
   },
-  "project": {
-    "issue_tracker": null | "github" | "linear" | "jira" (where issues are tracked),
-    "issue_prefix": <string|null> (e.g., "AXN", "PROJ" — prefix for issue/branch naming),
-    "pr_title_template": <string|null> (e.g., "{PREFIX}-{ID}: {description}"),
-    "pr_body_requires_issue": true/false (require Closes PREFIX-NN in PR body),
-    "ci_commands": <string[]|null> (CI commands to suggest before PR, e.g., ["make check", "make check-frontend"])
-  },
+  // "project": {issue_tracker, issue_prefix, pr_title_template, pr_body_requires_issue, ci_commands}: fork keys, kept via ...existing_config
   "plan_review": {
     "source_grounding": true/false
   },
@@ -530,7 +514,6 @@ Merge new settings into existing config.json:
   },
   "git": {
     "branching_strategy": "none" | "phase" | "milestone",
-    "branch_pattern": <string|null> (regex for branch naming validation, e.g., "^[a-z]+-\\d+/"),
     "quick_branch_template": <string|null>,
     "create_tag": true/false
   },

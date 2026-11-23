@@ -207,7 +207,9 @@ Every task has four required fields:
 
 **<precondition>** (optional, one prose line): a runnable/checkable fact the task assumes that plan ordering does not guarantee — external setup (`user_setup`), a prior-phase artifact, or an env var. The executor asserts it before running the task and halts on unmet. Emission rules + the contract triad (precondition ↔ `<verify>`/`<done>` ↔ `must_haves.truths`): @__GSD_PI_ENGINE_ROOT__/gsd-core/references/planner-preconditions.md.
 
-**Outcome-focused `<action>`** (fork; when `workflow.spec_outcome_enforcement` is enabled, the default): describe WHAT the task accomplishes, not step-by-step HOW — specificity belongs in `<done>`/`<verify>`. Rules + examples: @__GSD_PI_ENGINE_ROOT__/gsd-core/references/planner-outcome-specs.md
+**Outcome-focused `<action>`** (fork, `workflow.spec_outcome_enforcement`, default on): say WHAT, not HOW; specifics go in `<done>`/`<verify>`. @__GSD_PI_ENGINE_ROOT__/gsd-core/references/planner-outcome-specs.md
+
+**Fork planning rules** (one-sentence objective, observable success criteria, tracer-bullet slice order, DESIGN.md as frozen intent): @__GSD_PI_ENGINE_ROOT__/gsd-core/references/planner-fork-rules.md
 
 **<reversibility>** (optional): `rating="reversible|costly|one-way"` + one-line rationale for a decision this task implements. A newly surfaced `one-way` decision inserts a `checkpoint:decision` before this task; one the human already settled (CONTEXT.md except `### Decided autonomously`, an ingested ADR, an answered checkpoint) keeps its rating and gets no new checkpoint; `costly` is flagged only; unsure means `reversible`. Rules: @__GSD_PI_ENGINE_ROOT__/gsd-core/references/planner-reversibility.md
 
@@ -338,8 +340,6 @@ Purpose: [Why this matters]
 Output: [Artifacts created]
 </objective>
 
-**One-sentence objective rule:** Every plan MUST have an objective that can be stated in one sentence. If you can't state the goal in one sentence, you don't understand the problem well enough. The objective should be outcome-shaped ("Working chat interface with real-time message display") not task-shaped ("Build chat components and wire up API").
-
 <execution_context>
 @__GSD_PI_ENGINE_ROOT__/gsd-core/workflows/execute-plan.md
 @__GSD_PI_ENGINE_ROOT__/gsd-core/templates/summary.md
@@ -391,11 +391,6 @@ Threat IDs are unique within a phase. Before numbering, read the `<threat_model>
 <success_criteria>
 [Measurable completion]
 
-**Success criteria must be observable outcomes, not process steps.**
-- Good: "Users can log in with email/password and receive a session cookie"
-- Bad: "bcrypt is installed and auth middleware is created"
-- Good: "Coverage ≥ 80% on auth module"
-- Bad: "Tests are written for auth module"
 </success_criteria>
 
 <output>
@@ -716,8 +711,7 @@ Use `phase_dir` from init context (already loaded in load_project_state).
 ```bash
 _CTX=( "$phase_dir"/*-CONTEXT.md )
 if [ -e "${_CTX[0]}" ]; then cat "${_CTX[@]}"; fi   # From /gsd:discuss-phase
-_DESIGN=( "$phase_dir"/*-DESIGN.md )
-if [ -e "${_DESIGN[0]}" ]; then cat "${_DESIGN[@]}"; fi   # From /gsd:discuss-phase (fork: frozen design spec, workflow.design_spec)
+_DESIGN=( "$phase_dir"/*-DESIGN.md ); [ -e "${_DESIGN[0]}" ] && cat "${_DESIGN[@]}"
 _RESEARCH=( "$phase_dir"/*-RESEARCH.md )
 if [ -e "${_RESEARCH[0]}" ]; then cat "${_RESEARCH[@]}"; fi   # Research output
 _DISCOVERY=( "$phase_dir"/*-DISCOVERY.md )
@@ -725,8 +719,6 @@ if [ -e "${_DISCOVERY[0]}" ]; then cat "${_DISCOVERY[@]}"; fi  # From mandatory 
 ```
 
 **If CONTEXT.md exists (has_context=true from init):** Honor user's vision, prioritize essential features, respect boundaries. Locked decisions — do not revisit.
-
-**If DESIGN.md exists:** Treat as frozen architectural intent. The module structure, key contracts, and NFRs are constraints on task breakdown. Plans must implement the designed architecture — do not deviate from it. If a task requires deviating from DESIGN.md, document it as a Rule 4 deviation (architectural change requiring user approval).
 
 **If RESEARCH.md exists (has_research=true from init):** Use standard_stack, architecture_patterns, dont_hand_roll, common_pitfalls.
 
@@ -754,7 +746,7 @@ Map dependencies explicitly before grouping into plans. Record needs/creates/has
 
 Identify parallelization: No deps = Wave 1, depends only on Wave 1 = Wave 2, shared file conflict = sequential.
 
-Prefer vertical slices over horizontal layers. Within the resulting slice set, order by unknown-unknowns first (tracer-bullet ordering): the riskiest unfamiliar integration or unproven assumption ships first as a thin end-to-end slice, before easy-but-safe work.
+Prefer vertical slices over horizontal layers.
 </step>
 
 <step name="assign_waves">

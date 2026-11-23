@@ -437,6 +437,16 @@ Resume file: None
 
 </step>
 
+<step name="propagate_execution_decisions">
+Fork. Read and execute `gsd-core/workflows/transition/steps/propagate-execution-decisions.md`.
+Self-guards on `workflow.update_claude_md_on_complete`; silent no-op when off.
+</step>
+
+<step name="pr_workflow">
+Fork. Read and execute `gsd-core/workflows/transition/steps/pr-workflow.md`.
+Self-guards on `workflow.preflight_on_verify`; silent no-op when off.
+</step>
+
 <step name="offer_next_phase">
 
 **MANDATORY: Verify milestone status before presenting next steps.**

@@ -120,7 +120,9 @@ describe('install and render of a verifier-targeted contribution (#5984)', () =>
     const home = tmpDir('ver-contrib-home-');
     const r = await install(writeCap('verifier-wave', { point: 'execute:wave:post', into: 'verifier', fragment: { inline: FRAGMENT } }), cwd, home);
     assert.equal(r.success, true, `install failed: ${r.error || r.output}`);
-    assert.deepEqual(verifierFragments(await renderHooks('execute:wave:post', cwd, home)), [FRAGMENT]);
+    // Fork: the shipped fork capabilities (definition-of-done, playwright, adversarial-validation)
+    // also contribute into:verifier at execute:wave:post, so assert on the probe's own fragment.
+    assert.deepEqual(verifierFragments(await renderHooks('execute:wave:post', cwd, home)).filter((x) => x === FRAGMENT), [FRAGMENT]);
     assert.deepEqual(verifierFragments(await renderHooks('execute:post', cwd, home)), [], 'the delivery point does not see it');
   });
 
@@ -343,6 +345,8 @@ describe('the shipped mempalace verifier contribution is delivered (#5984)', () 
     for (const [point, entry] of Object.entries(REGISTRY.byLoopPoint)) {
       for (const c of entry.contributions) if (c.into === 'verifier') own.push([point, c.capId]);
     }
-    assert.deepEqual(own, [['execute:post', 'mempalace']]);
+    // Fork: definition-of-done, playwright and adversarial-validation add into:verifier contributions at
+    // execute:wave:post (orchestrator-injected there); execute:post must still deliver only mempalace's.
+    assert.deepEqual(own.filter(([point]) => point === 'execute:post'), [['execute:post', 'mempalace']]);
   });
 });

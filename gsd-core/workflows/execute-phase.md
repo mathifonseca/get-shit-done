@@ -80,7 +80,6 @@ Parse `$ARGUMENTS` before loading any context:
 
 If `--wave` is absent, preserve the current behavior of executing all incomplete waves in the phase.
 
-**Text mode (`workflow.text_mode: true` in config or `--text` flag):** Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `text_mode` from init JSON is `true`. When TEXT_MODE is active, replace every `AskUserQuestion` call in this workflow with a plain-text numbered list and ask the user to type their choice number. This is required for non-Claude runtimes (OpenAI Codex, Antigravity, etc.) where `AskUserQuestion` is not available.
 </step>
 
 <step name="initialize" priority="first">
@@ -1407,20 +1406,7 @@ transition in **post-completion mode**: SKIP its `verify_completion` and
 `update_roadmap_and_state` (re-running `phase.complete` would double-write state) and
 BEGIN at `evolve_project`, running the full set through `offer_next_phase`.
 
-Fork: run the `propagate_execution_decisions` and `pr_workflow` steps below after
-transition's `evolve_project` and before its `offer_next_phase`.
-
 @~/.claude/gsd-core/workflows/transition.md
-</step>
-
-<step name="propagate_execution_decisions">
-Read and execute `gsd-core/workflows/execute-phase/steps/propagate-execution-decisions.md`.
-Self-guards on `workflow.update_claude_md_on_complete`; silent no-op when off.
-</step>
-
-<step name="pr_workflow">
-Read and execute `gsd-core/workflows/execute-phase/steps/pr-workflow.md`.
-Self-guards on `workflow.preflight_on_verify`; silent no-op when off.
 </step>
 
 </process>
