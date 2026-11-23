@@ -4,9 +4,9 @@ Operational handbook for maintaining this fork against `open-gsd/gsd-core`.
 Companion to [FORK.md](FORK.md) — that file records *what* the fork changes and
 the full sync history; this one records *how we work on it* and what is open.
 
-**Status as of 2026-10-02** — synced to upstream **v1.15.0** (merge `b6dbb7677`),
-level with `upstream/main`, suite green except 2 machine-environmental tests
-(39,637 passing), `lint:ci` exit 0, global install refreshed. §2's #3613 and #3660 are
+**Status as of 2026-11-23** — synced to upstream **v1.23.0** (merge `2807b88e2`),
+level with `upstream/main`, `lint:ci` exit 0, suite red only on the machine-environmental
+tests listed in the FORK.md sync row; not yet pushed or reinstalled. §2's #3613 and #3660 are
 RESOLVED upstream (#3627, #4615) and adopted — the notes below are history.
 
 Full inventory of every fork modification, with per-item "still needed?" verdicts:
