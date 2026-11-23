@@ -360,6 +360,7 @@ Full roster at `gsd-core/references/*.md`. References are shared knowledge docum
 | `model-profiles.md` | Per-agent model tier assignments. |
 | `model-profile-resolution.md` | Model resolution algorithm documentation. |
 | `planner-outcome-specs.md` | Fork (SDLC): `workflow.spec_outcome_enforcement` — outcome-focused task specs over step-by-step instructions. |
+| `planner-fork-rules.md` | Fork (SDLC): one-sentence objective, observable success criteria, tracer-bullet slice order and DESIGN.md as frozen intent — kept out of `gsd-planner.md` for its size cap. |
 | `planner-scope-fidelity.md` | Fork (SDLC): planner scope-fidelity red flags and excuse/reality table — split phases, never reduce decision fidelity. |
 | `verification-patterns.md` | How to verify different artifact types. |
 | `verification-overrides.md` | Per-artifact verification override rules. |
